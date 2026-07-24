@@ -38,6 +38,9 @@ packages/
   shared/           pptx-viewer-shared   – Framework-agnostic viewer logic (INTERNAL, bundled into each binding, never published)
   locales/          pptx-viewer-locales  – Internal French, Spanish, and German demo dictionaries
   react/            pptx-viewer          – React viewer/editor component
+  react-compat/     (private, no build)  - React 18 peer set used to rerun the
+                                          React suite and declaration checks
+                                          (`bun run test:react18`)
   vue/              pptx-vue-viewer      – Vue 3 viewer/editor component
   angular/          pptx-angular-viewer  – Angular viewer/editor component
   vanilla/          pptx-vanilla-viewer  – Zero-framework (VanillaJS) viewer
@@ -54,6 +57,37 @@ demos/
 ```
 
 Dependency graph: `react → core → emf-converter`. Packages use `workspace:*` protocol. Bun workspaces defined at root.
+
+## How the Demos Resolve Packages
+
+The five demo apps are the runtime surface for binding work. Their Vite aliases
+do not all resolve packages the same way:
+
+| Specifier                 | React  | Vue    | Angular  | Vanilla | Svelte |
+| ------------------------- | ------ | ------ | -------- | ------- | ------ |
+| binding (`pptx-*-viewer`) | source | source | `dist`   | source  | source |
+| `pptx-viewer-core`        | source | source | source   | source  | source |
+| `pptx-viewer-shared`      | `dist` | source | vendored | source  | source |
+| `pptx-viewer-locales`     | source | source | `dist`   | source  | source |
+| `pptx-viewer-mcp`         | `dist` | `dist` | `dist`   | `dist`  | `dist` |
+
+Anything marked `dist` needs a rebuild before the demo sees source changes:
+
+- Build `packages/angular` after Angular or shared changes. Angular vendors
+  shared source into `src/internal/shared-src` at build time.
+- Build `packages/shared` after adding a new shared export used by React.
+- Build `packages/tools` after tools changes. A stale tools build can break all
+  five demos with a browser compatibility error involving Node's `path` module.
+
+Other demo gotchas:
+
+- A stale Vite server can keep serving old code after a refactor. Confirm the
+  process on ports 4173-4177 and restart only the affected server.
+- A stale demo `node_modules/.vite` cache can cause framework-internal errors.
+  Clear that cache and restart before treating such a stack trace as a source
+  regression.
+- Demos serve `e2e/fixtures` as their public directory. The landing page can
+  also create an editable presentation without a fixture.
 
 ## Architecture
 
@@ -113,6 +147,12 @@ Binary EMF/WMF → GDI record replay onto Canvas 2D → PNG data URL. Supports 3
   asserts the character (e.g. a `'—'` "no value" marker, a placeholder
   option label). The pre-commit tooling does not catch em-dashes, so keeping
   them out is on you.
+- **The pre-commit lint hook skips `.vue` files.** Lint Vue changes explicitly
+  before committing because the hook covers only JavaScript and TypeScript
+  extensions.
+- **Adding an English i18n key requires de/es/fr too.** New entries in
+  `packages/shared/src/i18n/translations-en.ts` need matching entries under
+  `packages/locales/src/<locale>/`. The locales test enforces full coverage.
 
 ## Branching & Git Workflow
 

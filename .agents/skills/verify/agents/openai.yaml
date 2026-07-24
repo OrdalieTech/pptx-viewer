@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Verify pptx-viewer'
+  short_description: 'Validate changes in all five demos'
+  default_prompt: 'Use $verify to validate viewer changes across the relevant demo apps.'
