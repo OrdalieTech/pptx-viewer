@@ -12,6 +12,7 @@ import {
 import { TranslatePipe } from '@ngx-translate/core';
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 
+import { presenterPaneAdvancesOnClick } from '../internal/shared';
 import type { CanvasSize } from '../internal/shared';
 import type { StyleMap } from './element-style';
 import { PresenterControlsComponent } from './presenter-controls.component';
@@ -77,8 +78,8 @@ const CLOCK_TICK_MS = 1000;
 			z-index: 50;
 			display: flex;
 			flex-direction: column;
-			background: #0b0b0c;
-			color: #f5f5f5;
+			background: var(--pptx-card, #0b0b0c);
+			color: var(--pptx-foreground, #f5f5f5);
 			font-family: system-ui, sans-serif;
 		}
 
@@ -86,6 +87,10 @@ const CLOCK_TICK_MS = 1000;
 			display: flex;
 			flex: 1 1 auto;
 			min-height: 0;
+		}
+
+		.pptx-ng-presenter-current--advances {
+			cursor: pointer;
 		}
 
 		.pptx-ng-presenter-current {
@@ -118,8 +123,8 @@ const CLOCK_TICK_MS = 1000;
 			flex: 3 1 0;
 			display: flex;
 			flex-direction: column;
-			background: #18181b;
-			border-left: 1px solid rgba(255, 255, 255, 0.12);
+			background: var(--pptx-background, #18181b);
+			border-left: 1px solid var(--pptx-border, rgba(255, 255, 255, 0.12));
 			min-width: 260px;
 			max-width: 440px;
 		}
@@ -128,7 +133,7 @@ const CLOCK_TICK_MS = 1000;
 		.pptx-ng-presenter-nav,
 		.pptx-ng-presenter-next {
 			padding: 0.5rem 1rem;
-			border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+			border-bottom: 1px solid var(--pptx-border, rgba(255, 255, 255, 0.12));
 		}
 
 		.pptx-ng-presenter-header {
@@ -142,7 +147,7 @@ const CLOCK_TICK_MS = 1000;
 			font-size: 0.625rem;
 			text-transform: uppercase;
 			letter-spacing: 0.06em;
-			color: rgba(255, 255, 255, 0.55);
+			color: var(--pptx-muted-foreground, rgba(255, 255, 255, 0.55));
 		}
 
 		.pptx-ng-presenter-clock {
@@ -152,7 +157,7 @@ const CLOCK_TICK_MS = 1000;
 		}
 
 		.pptx-ng-presenter-elapsed {
-			color: #6ea8fe;
+			color: var(--pptx-primary, #6ea8fe);
 		}
 
 		.pptx-ng-presenter-iconbtn {
@@ -164,14 +169,14 @@ const CLOCK_TICK_MS = 1000;
 			border: none;
 			border-radius: 6px;
 			background: transparent;
-			color: rgba(255, 255, 255, 0.7);
+			color: var(--pptx-foreground, rgba(255, 255, 255, 0.7));
 			cursor: pointer;
 			font-size: 1rem;
 			line-height: 1;
 		}
 
 		.pptx-ng-presenter-iconbtn:hover {
-			background: rgba(255, 255, 255, 0.1);
+			background: var(--pptx-secondary, rgba(255, 255, 255, 0.1));
 			color: #fff;
 		}
 
@@ -193,8 +198,8 @@ const CLOCK_TICK_MS = 1000;
 			padding: 0.375rem 0.75rem;
 			border: none;
 			border-radius: 6px;
-			background: rgba(255, 255, 255, 0.08);
-			color: #f5f5f5;
+			background: var(--pptx-secondary, rgba(255, 255, 255, 0.08));
+			color: var(--pptx-foreground, #f5f5f5);
 			cursor: pointer;
 			font-size: 0.75rem;
 		}
@@ -219,9 +224,9 @@ const CLOCK_TICK_MS = 1000;
 			align-items: center;
 			justify-content: center;
 			height: 4rem;
-			border: 1px solid rgba(255, 255, 255, 0.15);
+			border: 1px solid var(--pptx-border, rgba(255, 255, 255, 0.12));
 			border-radius: 6px;
-			background: rgba(255, 255, 255, 0.04);
+			background: var(--pptx-muted, rgba(255, 255, 255, 0.04));
 			font-size: 0.75rem;
 			font-style: italic;
 			color: rgba(255, 255, 255, 0.5);
@@ -254,16 +259,16 @@ const CLOCK_TICK_MS = 1000;
 			font-family: ui-monospace, monospace;
 			font-variant-numeric: tabular-nums;
 			font-size: 0.625rem;
-			color: rgba(255, 255, 255, 0.55);
+			color: var(--pptx-muted-foreground, rgba(255, 255, 255, 0.55));
 			user-select: none;
 		}
 
 		.pptx-ng-presenter-notes-body {
 			flex: 1 1 auto;
 			overflow-y: auto;
-			border: 1px solid rgba(255, 255, 255, 0.15);
+			border: 1px solid var(--pptx-border, rgba(255, 255, 255, 0.12));
 			border-radius: 6px;
-			background: rgba(255, 255, 255, 0.04);
+			background: var(--pptx-muted, rgba(255, 255, 255, 0.04));
 			padding: 0.5rem 0.75rem;
 			white-space: pre-wrap;
 			line-height: 1.5;
@@ -312,7 +317,13 @@ const CLOCK_TICK_MS = 1000;
 			/>
 			<div class="pptx-ng-presenter-body">
 				<!-- Current slide (≈70%) -->
-				<div class="pptx-ng-presenter-current">
+				<div
+					class="pptx-ng-presenter-current"
+					[class.pptx-ng-presenter-current--advances]="paneAdvancesOnClick()"
+					role="presentation"
+					data-pptx-presenter-slide
+					(click)="onSlidePaneClick()"
+				>
 					<div class="pptx-ng-presenter-preview-stage">
 						<pptx-slide-canvas
 							[slide]="currentPreviewSlide()"
@@ -572,6 +583,23 @@ export class PresenterViewComponent {
 	protected readonly slideBadge = computed<string>(() =>
 		slideLabel(this.currentSlideIndex(), this.slides().length),
 	);
+
+	/**
+	 * Clicking the current-slide pane advances the show, the way PowerPoint's
+	 * presenter console does: it is how presenters actually drive a deck, with
+	 * the Next button and the keyboard as fallbacks. A drawing tool owns the
+	 * pointer instead, so clicking then annotates rather than jumping the deck
+	 * out from under the stroke.
+	 */
+	protected readonly paneAdvancesOnClick = computed<boolean>(() =>
+		presenterPaneAdvancesOnClick(this.presenterWindow.snapshot().pointer?.tool),
+	);
+
+	protected onSlidePaneClick(): void {
+		if (this.paneAdvancesOnClick()) {
+			this.movePresentationSlide.emit(1);
+		}
+	}
 
 	protected readonly counterLabel = computed<string>(() =>
 		slideCounter(this.currentSlideIndex(), this.slides().length),

@@ -49,14 +49,28 @@
 		w: { fx: 0, fy: 0.5 },
 	};
 
+	// `border-width:${scale}px` scales the outline with the zoom so it tracks
+	// React's border/ring (which live inside React's scaled stage). Without it
+	// the unscaled overlay draws a constant 1px screen border that looks far too
+	// thick when zoomed out on mobile, where React's has shrunk below 1px.
 	const boxStyle = $derived(
 		box
-			? `left:${box.x * scale}px;top:${box.y * scale}px;width:${box.width * scale}px;height:${box.height * scale}px;${box.rotation ? `transform:rotate(${box.rotation}deg);` : ''}`
+			? `left:${box.x * scale}px;top:${box.y * scale}px;width:${box.width * scale}px;height:${box.height * scale}px;border-width:${scale}px;${box.rotation ? `transform:rotate(${box.rotation}deg);` : ''}`
 			: '',
 	);
 </script>
 
-<div class="pptx-svelte-editor-overlay" class:is-editing={editing}>
+<!--
+	`data-pptx-selection-overlay` marks the selection chrome for hit-testing:
+	on a coarse pointer the handles are finger-sized and can sit over a small
+	shape's body, so the editor has to recognise a double-tap that landed on
+	them (see `editor-controller`.`onStageDblClick`).
+-->
+<div
+	class="pptx-svelte-editor-overlay"
+	class:is-editing={editing}
+	data-pptx-selection-overlay
+>
 	{#if box && !editing}
 		<div class="pptx-svelte-sel-box" style={boxStyle}>
 			{#if selectionCount === 1}<div

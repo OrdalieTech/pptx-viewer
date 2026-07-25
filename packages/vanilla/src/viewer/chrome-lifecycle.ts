@@ -30,6 +30,8 @@ export interface ChromeLifecycle {
 	presentation: PresentationController;
 	detachKeyboard: () => void;
 	detachTouchGestures: () => void;
+	/** Remove the presenting click-to-advance listener. */
+	detachPresentationClick: () => void;
 	resizeObserver: ResizeObserver | null;
 	appliedThemeVars: string[];
 }
@@ -136,6 +138,89 @@ export function mountChrome(deps: MountChromeDeps): ChromeLifecycle {
 		},
 		onPrevious: () => deps.prev(),
 	});
+
+	/**
+	 * Mouse click-to-advance while presenting. Touch already advances on tap
+	 * (above); a mouse click did nothing, so a show driven from the presenter
+	 * console could only be moved with the keyboard or the console's buttons.
+	 * Gated exactly like the tap path (`advanceOnClick` + pending builds) and
+	 * only for clicks that land on the slide itself, so the console strip,
+	 * toolbars and dialogs keep owning their own clicks.
+	 */
+	/**
+	 * The black "End of slide show" screen. Kept as a single node toggled by the
+	 * store rather than re-rendered with the stage, so it survives the stage
+	 * rebuild that every navigation performs.
+	 */
+	const endScreen = doc.createElement('button');
+	endScreen.type = 'button';
+	endScreen.setAttribute('data-pptx-end-of-show', '');
+	endScreen.className = 'pptxv-presentation-end';
+	Object.assign(endScreen.style, {
+		position: 'absolute',
+		inset: '0',
+		zIndex: '90',
+		display: 'flex',
+		alignItems: 'flex-start',
+		border: '0',
+		padding: '0',
+		background: '#000',
+		textAlign: 'left',
+		cursor: 'default',
+	});
+	const endLabel = doc.createElement('span');
+	Object.assign(endLabel.style, {
+		padding: '12px 16px',
+		color: 'rgba(255,255,255,0.7)',
+		fontSize: '12px',
+	});
+	endLabel.textContent = t('pptx.presentation.endOfSlideShow');
+	endScreen.appendChild(endLabel);
+	// A click on the end screen ends the show, like PowerPoint's "click to exit".
+	endScreen.addEventListener('click', (event: MouseEvent) => {
+		event.stopPropagation();
+		deps.next();
+	});
+	const syncEndScreen = (): void => {
+		const state = store.get();
+		const shouldShow = state.presenting && state.endOfShow;
+		if (shouldShow && endScreen.parentElement !== chrome.root) {
+			chrome.root.appendChild(endScreen);
+		} else if (!shouldShow && endScreen.parentElement) {
+			endScreen.remove();
+		}
+	};
+	const detachEndScreen = store.subscribe(syncEndScreen);
+	syncEndScreen();
+
+	const onPresentationClick = (event: MouseEvent): void => {
+		const state = store.get();
+		if (!state.presenting || !(event.target instanceof Element)) {
+			return;
+		}
+		if (event.target.closest('button, a, input, select, textarea, [role="dialog"]')) {
+			return;
+		}
+		if (!event.target.closest('.pptxv-stage')) {
+			return;
+		}
+		if (
+			isSwipeAdvanceBlocked({
+				presenting: state.presenting,
+				animationBuildsComplete: renderer.presentationPlayback.isComplete(),
+				currentSlide: state.slides[state.currentSlide],
+			})
+		) {
+			return;
+		}
+		deps.next();
+	};
+	chrome.root.addEventListener('click', onPresentationClick);
+	const detachPresentationClick = (): void => {
+		chrome.root.removeEventListener('click', onPresentationClick);
+		detachEndScreen();
+		endScreen.remove();
+	};
 	const presentation = createPresentationController(chrome.root, (presenting) => {
 		store.set({ presenting });
 	});
@@ -155,6 +240,7 @@ export function mountChrome(deps: MountChromeDeps): ChromeLifecycle {
 		presentation,
 		detachKeyboard,
 		detachTouchGestures,
+		detachPresentationClick,
 		resizeObserver,
 		appliedThemeVars,
 	};
@@ -173,6 +259,7 @@ function buildTitleBarCommands(deps: MountChromeDeps): readonly CommandSearchCom
 export function unmountChrome(lifecycle: ChromeLifecycle, detachEditorChrome: () => void): void {
 	detachEditorChrome();
 	lifecycle.detachKeyboard();
+	lifecycle.detachPresentationClick();
 	lifecycle.detachTouchGestures();
 	lifecycle.resizeObserver?.disconnect();
 	lifecycle.presentation.dispose();

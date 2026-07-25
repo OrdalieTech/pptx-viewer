@@ -47,3 +47,17 @@ export function usePresentationElementState(elementId: string): ElementAnimation
 	);
 	return getStates ? getStates().get(elementId) : undefined;
 }
+
+/**
+ * The raw states GETTER, for consumers that need sub-element ids rather than one
+ * element's own state - notably a staged text build, whose pieces are keyed
+ * `<elementId>::c0-3`.
+ *
+ * `getContext` only resolves during component initialisation, so this must be
+ * called at init and the returned getter invoked inside a `$derived` to keep the
+ * read reactive. Returns `undefined` outside a running presentation, so editor
+ * rendering skips the split entirely.
+ */
+export function getPresentationElementStatesGetter(): PresentationElementStatesGetter | undefined {
+	return getContext<PresentationElementStatesGetter | undefined>(PresentationElementStatesKey);
+}
