@@ -10,6 +10,10 @@ dated sections beneath it are generated from
 
 ## 2026-07-25
 
+_Releases: pptx-angular-viewer@2.3.3, pptx-vanilla-viewer@1.4.3, pptx-svelte-viewer@2.3.3, pptx-viewer-mcp@2.0.3, @christophervr/pptx-viewer@1.5.10_
+
+## 2026-07-25
+
 _Releases: pptx-vue-viewer@2.3.2, pptx-angular-viewer@2.3.2, pptx-vanilla-viewer@1.4.2, pptx-svelte-viewer@2.3.2, pptx-viewer-mcp@2.0.2, @christophervr/pptx-viewer@1.5.9_
 
 ## 2026-07-25
