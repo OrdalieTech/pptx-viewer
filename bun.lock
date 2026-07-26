@@ -243,7 +243,7 @@
     },
     "packages/cli": {
       "name": "@christophervr/pptx-viewer",
-      "version": "1.5.12",
+      "version": "1.5.13",
       "bin": {
         "pptx-viewer": "./dist/index.mjs",
       },
@@ -452,7 +452,7 @@
     },
     "packages/tools": {
       "name": "pptx-viewer-mcp",
-      "version": "2.0.5",
+      "version": "2.0.6",
       "bin": {
         "pptx-tools": "./dist/mcp/index.mjs",
       },
