@@ -8,6 +8,10 @@ dated sections beneath it are generated from
 [git-cliff](https://git-cliff.org). The exact version number and date for
 `2.0.0` are finalized when the release is tagged.
 
+## 2026-07-26
+
+_Releases: pptx-vanilla-viewer@1.5.1, pptx-svelte-viewer@2.4.1, pptx-viewer-mcp@2.0.4, @christophervr/pptx-viewer@1.5.11_
+
 ## 2026-07-25
 
 _Releases: pptx-angular-viewer@2.3.3, pptx-vanilla-viewer@1.4.3, pptx-svelte-viewer@2.3.3, pptx-viewer-mcp@2.0.3, @christophervr/pptx-viewer@1.5.10_

@@ -243,7 +243,7 @@
     },
     "packages/cli": {
       "name": "@christophervr/pptx-viewer",
-      "version": "1.5.10",
+      "version": "1.5.11",
       "bin": {
         "pptx-viewer": "./dist/index.mjs",
       },
@@ -405,7 +405,7 @@
     },
     "packages/svelte": {
       "name": "pptx-svelte-viewer",
-      "version": "2.3.3",
+      "version": "2.4.1",
       "dependencies": {
         "@lucide/svelte": "^1.26.0",
         "fast-xml-parser": "^5.10.1",
@@ -452,7 +452,7 @@
     },
     "packages/tools": {
       "name": "pptx-viewer-mcp",
-      "version": "2.0.3",
+      "version": "2.0.4",
       "bin": {
         "pptx-tools": "./dist/mcp/index.mjs",
       },
@@ -479,7 +479,7 @@
     },
     "packages/vanilla": {
       "name": "pptx-vanilla-viewer",
-      "version": "1.4.3",
+      "version": "1.5.1",
       "dependencies": {
         "dompurify": "^3.4.12",
         "fast-xml-parser": "^5.10.1",
