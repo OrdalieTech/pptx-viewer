@@ -18,7 +18,7 @@
 	import ReviewCommentsPanel from './ribbon/review/ReviewCommentsPanel.svelte';
 	import ThumbnailRail from './ThumbnailRail.svelte';
 
-	const { active, onactivechange, editor, handler, presentationTheme, onthemechange, slides, canvasSize, mediaDataUrls, current, onselect, onzoomin, onzoomout, onzoomfit }: {
+	const { active, onactivechange, editor, handler, presentationTheme, onthemechange, slides, canvasSize, mediaDataUrls, current, onselect, onzoomin, onzoomout, onzoomfit, showInspector = true }: {
 		active: MobileSheetKey;
 		onactivechange: (active: MobileSheetKey) => void;
 		editor: EditorState;
@@ -33,6 +33,7 @@
 		onzoomin: () => void;
 		onzoomout: () => void;
 		onzoomfit: () => void;
+		showInspector?: boolean;
 	} = $props();
 	const t = useTranslator();
 	const open = (key: Exclude<MobileSheetKey, null>) => {
@@ -56,12 +57,14 @@
 		notes: StickyNote,
 	} satisfies Record<string, Component>;
 	const actions = $derived.by(() =>
-		buildBarActions({ slideCount: slides.length }).map((action) => ({
-			...action,
-			key: action.key as Exclude<MobileSheetKey, null>,
-			label: actionLabels[action.key as keyof typeof actionLabels],
-			icon: actionIcons[action.key as keyof typeof actionIcons],
-		})),
+		buildBarActions({ slideCount: slides.length })
+			.filter((action) => showInspector || (action.key !== 'inspector' && action.key !== 'comments'))
+			.map((action) => ({
+				...action,
+				key: action.key as Exclude<MobileSheetKey, null>,
+				label: actionLabels[action.key as keyof typeof actionLabels],
+				icon: actionIcons[action.key as keyof typeof actionIcons],
+			})),
 	);
 </script>
 
@@ -72,9 +75,9 @@
 		</MobileSheet>
 	{:else if active === 'insert'}
 		<MobileSheet title={t('pptx.mobileBar.insert')} onclose={close}><InsertMenu {editor} /></MobileSheet>
-	{:else if active === 'inspector'}
+	{:else if showInspector && active === 'inspector'}
 		<MobileSheet title={t('pptx.field.format')} onclose={close}><InspectorPanel {editor} {handler} {presentationTheme} {onthemechange} {mediaDataUrls} /></MobileSheet>
-	{:else if active === 'comments'}
+	{:else if showInspector && active === 'comments'}
 		<MobileSheet title={t('pptx.toolbar.comments')} onclose={close}><ReviewCommentsPanel {editor} /></MobileSheet>
 	{:else if active === 'menu'}
 		<MobileSheet title={t('pptx.mobileToolbar.menu')} onclose={close}>

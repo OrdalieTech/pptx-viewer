@@ -84,6 +84,20 @@ import 'pptx-svelte-viewer/styles';
 </div>
 ```
 
+For a fully custom application shell that keeps the built-in editing engine
+but removes the native chrome:
+
+```svelte
+<PowerPointViewer
+	{source}
+	editable
+	showToolbar={false}
+	showThumbnails={false}
+	showInspector={false}
+	showNotes={false}
+/>
+```
+
 ## Props
 
 | Prop                 | Type                                 | Default | Description                                                                                                            |
@@ -95,6 +109,7 @@ import 'pptx-svelte-viewer/styles';
 | `initialSlide`       | `number`                             | `0`     | Slide shown after load (0-based).                                                                                      |
 | `showThumbnails`     | `boolean`                            | `true`  | Thumbnail sidebar.                                                                                                     |
 | `showToolbar`        | `boolean`                            | `true`  | Navigation/zoom/fullscreen toolbar.                                                                                    |
+| `showInspector`      | `boolean`                            | `true`  | Editing inspector. Also removes its Comments tab and the corresponding mobile actions.                                 |
 | `showNotes`          | `boolean`                            | `true`  | Speaker-notes panel and its toolbar toggle.                                                                            |
 | `hiddenActions`      | `ToolbarActionId[]`                  | -       | Toolbar buttons/ribbon tabs to hide individually (e.g. `['share', 'broadcast']`), instead of hiding the whole toolbar. |
 | `editable`           | `boolean`                            | `false` | Ribbon editing, insertion, arrange, and save.                                                                          |
@@ -176,18 +191,19 @@ the complete props/events contract, theming, and localization guides.
 
 `<PowerPointViewer>` bundles the slide canvas, ribbon, thumbnail rail,
 inspector, and every dialog into one component. If you only want a subset,
-for example your own chrome around just the ribbon and the slide canvas,
+for example your own chrome around the thumbnail rail and slide canvas,
 import the pieces independently from the `pptx-svelte-viewer/viewer`
 sub-path instead: `Ribbon` / `ViewerToolbar` (the full editing ribbon and the
-compact read-only toolbar), `SlideCanvas` (the slide stage-holder), and
+compact read-only toolbar), `SlideCanvas` (the slide stage-holder),
+`ThumbnailRail` (the real slide previews), and
 `createViewerState`, a factory that builds the same reactive controllers
 (`ViewerState`, `EditorState`, `EditorController`, `CollaborationController`,
-etc.) `PowerPointViewer.svelte` itself constructs, so wiring `Ribbon` /
-`ViewerToolbar` to its return value mirrors the bundled component exactly.
+etc.) `PowerPointViewer.svelte` itself constructs.
 
 ```svelte
 <script lang="ts">
-	import { createViewerState, Ribbon, SlideCanvas } from 'pptx-svelte-viewer/viewer';
+	import { onDestroy } from 'svelte';
+	import { createViewerState, SlideCanvas, ThumbnailRail } from 'pptx-svelte-viewer/viewer';
 
 	let source: ArrayBuffer | undefined = $state();
 	let rootEl: HTMLDivElement | undefined;
@@ -198,8 +214,8 @@ etc.) `PowerPointViewer.svelte` itself constructs, so wiring `Ribbon` /
 	// Must be called synchronously here, in your own shell component's
 	// script (not inside a callback or after an `await`): it registers
 	// `onMount`/`onDestroy` and Svelte context (the translator context
-	// `Ribbon`'s tabs and `ViewerToolbar` read via `useTranslator()`,
-	// among others) that only work during component initialisation.
+		// `ThumbnailRail` reads via `useTranslator()`, among others) that
+		// only work during component initialisation.
 	const state = createViewerState({
 		getSource: () => source,
 		getAutosave: () => false,
@@ -214,48 +230,80 @@ etc.) `PowerPointViewer.svelte` itself constructs, so wiring `Ribbon` /
 		getViewportHeight: () => viewportHeight,
 		getMasterScale: () => 1,
 	});
+
+	onDestroy(state.destroy);
+
+	function addSlide() {
+		const index = state.editor.slidesOps.insertSlideAfterCurrent();
+		if (index !== null) state.viewer.goTo(index);
+	}
+
+	function duplicateSlide() {
+		const index = state.editor.slidesOps.duplicateCurrentSlide();
+		if (index !== null) state.viewer.goTo(index);
+	}
+
+	function deleteSlide() {
+		const index = state.editor.slidesOps.deleteCurrentSlide();
+		if (index !== null) state.viewer.goTo(index);
+	}
 </script>
 
 <div bind:this={rootEl} class="my-custom-shell">
-	<Ribbon
-		editor={state.editor}
-		findReplace={state.findReplace}
-		canvasSize={state.loader.canvasSize}
-		current={state.viewer.current}
-		total={state.viewer.slideCount}
-		onprev={() => state.viewer.prev()}
-		onnext={() => state.viewer.next()}
-		onnavigateslide={(index) => state.viewer.goTo(index)}
-	/>
-	<!-- ...plus whichever other `RibbonProps` fields your shell needs. -->
-	<div bind:clientWidth={viewportWidth} bind:clientHeight={viewportHeight}>
-		<SlideCanvas
-			slide={state.activeSlide}
+	<div class="my-toolbar">
+		<button onclick={addSlide}>Add slide</button>
+		<button onclick={duplicateSlide}>Duplicate slide</button>
+		<button onclick={deleteSlide}>Delete slide</button>
+		<button onclick={() => state.editingApi.undo()}>Undo</button>
+		<button onclick={() => state.editingApi.redo()}>Redo</button>
+		<button onclick={() => state.editingApi.downloadPptx('presentation.pptx')}>
+			Download PPTX
+		</button>
+	</div>
+	<div class="my-workspace">
+		<ThumbnailRail
+			slides={state.displaySlides}
 			canvasSize={state.loader.canvasSize}
 			mediaDataUrls={state.loader.mediaDataUrls}
-			scale={state.scale}
-			editingActive={state.editingActive}
-			onstageholder={(el) => (stageHolderEl = el ?? undefined)}
-			onstagepointerdown={state.controller.onStagePointerDown}
-			onstagepointermove={state.controller.onStagePointerMove}
+			current={state.viewer.current}
+			onselect={(index) => state.viewer.goTo(index)}
 		/>
+		<div bind:clientWidth={viewportWidth} bind:clientHeight={viewportHeight}>
+			<SlideCanvas
+				slide={state.activeSlide}
+				canvasSize={state.loader.canvasSize}
+				mediaDataUrls={state.loader.mediaDataUrls}
+				scale={state.scale}
+				editingActive={state.editingActive}
+				onstageholder={(el) => (stageHolderEl = el ?? undefined)}
+				onstagepointerdown={state.controller.onStagePointerDown}
+				onstagepointermove={state.controller.onStagePointerMove}
+			/>
+		</div>
 	</div>
 </div>
 ```
 
 `Ribbon`'s full prop contract is the `RibbonProps` type; `ViewerToolbar`'s is
-`ViewerToolbarProps`; `SlideCanvas`'s is `SlideCanvasProps` (flat/typed
-props, no live state-class instances - the editing/annotation/collaboration
-overlays that stack on top of the stage are passed in as `SlideCanvas`
-children instead, since only the host knows which of them it needs).
+`ViewerToolbarProps`; `SlideCanvas`'s is `SlideCanvasProps`; and
+`ThumbnailRail`'s is `ThumbnailRailProps`. The rail renders the real
+`SlideStage`, follows changes to `state.displaySlides`, scrolls vertically,
+and inherits the package's `--pptx-*` CSS variables. Its
+`pptx-svelte-thumbs` and `pptx-svelte-thumb*` classes are also available to a
+host global stylesheet.
+
+The shell owns its layout, controls, viewport measurements, lifecycle cleanup,
+and whichever editing, annotation, and collaboration overlays it places as
+`SlideCanvas` children. The package continues to own PPTX loading, history,
+slide mutations, rendering, saving, and export.
 `createViewerState`'s options and return value are `CreateViewerStateOptions`
 and `ViewerStateBag`.
 
 Two caveats if you go this route:
 
-- There is no standalone "canvas-only" component that also owns the
-  thumbnail rail, notes panel, and inspector pane the way the bundled
-  viewer's `ViewerBody` does - those stay your shell's responsibility to
+- There is no standalone "canvas-only" component that also owns notes and the
+  inspector pane the way the bundled viewer's `ViewerBody` does. Those stay
+  your shell's responsibility to
   assemble (or reuse `ViewerBody` itself, which is not exported, since it
   takes live state-class instances rather than flat props).
 - `createViewerState` is a newer, lower-level extraction than the rest of

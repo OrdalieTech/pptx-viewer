@@ -41,6 +41,7 @@
 		onthemechange,
 		chromeVisible,
 		showThumbnails,
+		showInspector,
 		showNotes,
 		displaySlides,
 		canvasSize,
@@ -88,6 +89,7 @@
 		onthemechange?: (theme: PptxTheme) => void;
 		chromeVisible: boolean;
 		showThumbnails: boolean;
+		showInspector: boolean;
 		showNotes: boolean;
 		displaySlides: PptxSlide[];
 		canvasSize: CanvasSize;
@@ -305,7 +307,7 @@
 			/>
 		{/if}
 	</div>
-	{#if editingActive && chromeVisible && displaySlides.length > 0 && chromeUi?.inspectorOpen !== false}
+	{#if showInspector && editingActive && chromeVisible && displaySlides.length > 0 && chromeUi?.inspectorOpen !== false}
 		<InspectorPanel {editor} {handler} {presentationTheme} {onthemechange} {mediaDataUrls} ui={chromeUi} {canvasSize} />
 	{/if}
 </div>

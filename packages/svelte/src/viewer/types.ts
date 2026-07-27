@@ -113,6 +113,11 @@ export interface PowerPointViewerProps {
 	/** Show the navigation/zoom toolbar. Default true. */
 	showToolbar?: boolean;
 	/**
+	 * Show the editing inspector. Default true. Comments are one of the
+	 * inspector tabs, so disabling the inspector also removes Comments chrome.
+	 */
+	showInspector?: boolean;
+	/**
 	 * Toolbar buttons and/or ribbon tabs to hide, e.g. `['share', 'broadcast']`
 	 * to remove the collaboration entry points from a read-only embed, or
 	 * `['record']` to drop both the quick-access Record button and the Record

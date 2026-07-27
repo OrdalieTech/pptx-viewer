@@ -5,7 +5,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import PowerPointViewer from './PowerPointViewer.svelte';
-import type { PowerPointViewerProps } from './types';
+import type { PowerPointViewerApi, PowerPointViewerProps } from './types';
 
 /**
  * End-to-end component tests: mount the full viewer against a real `.pptx`
@@ -27,6 +27,7 @@ async function mountViewer(props: Partial<PowerPointViewerProps> = {}): Promise<
 	target: HTMLElement;
 	onload: ReturnType<typeof vi.fn>;
 	onslidechange: ReturnType<typeof vi.fn>;
+	api: PowerPointViewerApi;
 }> {
 	const target = document.createElement('div');
 	document.body.appendChild(target);
@@ -48,7 +49,7 @@ async function mountViewer(props: Partial<PowerPointViewerProps> = {}): Promise<
 	};
 	await vi.waitFor(() => expect(onload).toHaveBeenCalledOnce(), { timeout: 15000 });
 	flushSync();
-	return { target, onload, onslidechange };
+	return { target, onload, onslidechange, api: instance as PowerPointViewerApi };
 }
 
 describe('powerPointViewer', () => {
@@ -132,11 +133,43 @@ describe('powerPointViewer', () => {
 		expect(onslidechange).toHaveBeenLastCalledWith(thumbs.length - 1);
 	});
 
-	it('hides chrome when showToolbar/showThumbnails are off', async () => {
-		const { target } = await mountViewer({ showToolbar: false, showThumbnails: false });
-		expect(target.querySelector('.pptx-svelte-toolbar')).toBeNull();
-		expect(target.querySelector('.pptx-svelte-thumbs')).toBeNull();
+	it('renders the inspector by default while editing', async () => {
+		const { target } = await mountViewer({ editable: true });
+		expect(target.querySelector('.pptx-svelte-inspector')).not.toBeNull();
+	});
+
+	it('keeps toolbar, thumbnails, notes, and canvas when the inspector is disabled', async () => {
+		const { target } = await mountViewer({ editable: true, showInspector: false });
+		expect(target.querySelector('.pptx-svelte-inspector')).toBeNull();
+		expect(target.querySelector('.pptx-svelte-ribbon')).not.toBeNull();
+		expect(target.querySelector('.pptx-svelte-thumbs')).not.toBeNull();
+		expect(target.querySelector('.pptx-svelte-notes-panel')).not.toBeNull();
 		expect(target.querySelector('.pptx-svelte-stage')).not.toBeNull();
+	});
+
+	it('keeps the inspector and canvas when the other chrome is disabled', async () => {
+		const { target } = await mountViewer({
+			editable: true,
+			showToolbar: false,
+			showThumbnails: false,
+			showNotes: false,
+		});
+		expect(target.querySelector('.pptx-svelte-toolbar')).toBeNull();
+		expect(target.querySelector('.pptx-svelte-ribbon')).toBeNull();
+		expect(target.querySelector('.pptx-svelte-thumbs')).toBeNull();
+		expect(target.querySelector('.pptx-svelte-notes-panel')).toBeNull();
+		expect(target.querySelector('.pptx-svelte-inspector')).not.toBeNull();
+		expect(target.querySelector('.pptx-svelte-stage')).not.toBeNull();
+	});
+
+	it('updates the thumbnail rail after a slide is added', async () => {
+		const oncontentchange = vi.fn();
+		const { target, api } = await mountViewer({ editable: true, oncontentchange });
+		const before = target.querySelectorAll('.pptx-svelte-thumb').length;
+		api.addSlide();
+		flushSync();
+		expect(target.querySelectorAll('.pptx-svelte-thumb')).toHaveLength(before + 1);
+		await vi.waitFor(() => expect(oncontentchange).toHaveBeenCalledOnce(), { timeout: 15000 });
 	});
 
 	it('applies theme overrides as CSS custom properties on the root', async () => {

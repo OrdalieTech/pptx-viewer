@@ -92,6 +92,7 @@
 		initialSlide = 0,
 		showThumbnails = true,
 		showToolbar = true,
+		showInspector = true,
 		showNotes = true,
 		hiddenActions,
 		smartArt3D = false,
@@ -927,6 +928,7 @@
 		<MasterViewBody
 			{editor}
 			{controller}
+			{showInspector}
 			canvasSize={loader.canvasSize}
 			notesCanvasSize={loader.notesCanvasSize}
 			mediaDataUrls={loader.mediaDataUrls}
@@ -942,6 +944,7 @@
 		onthemechange={(next) => { loader.presentationTheme = next; loader.colorScheme = next.colorScheme; }}
 		{chromeVisible}
 		{showThumbnails}
+		{showInspector}
 		{showNotes}
 		{displaySlides}
 		canvasSize={loader.canvasSize}
@@ -1026,6 +1029,7 @@
 	{/if}
 	{#if editingActive && displaySlides.length > 0}
 		<MobileActionSheets
+			{showInspector}
 			active={activeMobileSheet}
 			onactivechange={setActiveMobileSheet}
 			{editor}
