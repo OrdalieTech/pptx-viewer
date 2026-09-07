@@ -19,26 +19,26 @@ it('keeps cell identity and style across row/cell insertion and reorder, includi
 		factories,
 		'table',
 	);
-	const table = element.get('tableData') as Y.Map<any>;
-	const rows = table.get('rows') as Y.Array<Y.Map<any>>;
+	const table = element.get('tableData') as Y.Map<unknown>;
+	const rows = table.get('rows') as Y.Array<Y.Map<unknown>>;
 	const originalRow = rows.get(0);
-	const originalCell = originalRow.get('cells').get(0);
+	const originalCell = (originalRow.get('cells') as Y.Array<Y.Map<unknown>>).get(0);
 	const originalText = originalCell.get('textBody');
 	const peer = new Y.Doc();
 	Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
-	const peerText = (peer.getMap('element').get('tableData') as Y.Map<any>)
-		.get('rows')
+	const peerRows = (peer.getMap('element').get('tableData') as Y.Map<unknown>).get(
+		'rows',
+	) as Y.Array<Y.Map<unknown>>;
+	const peerText = (peerRows.get(0).get('cells') as Y.Array<Y.Map<unknown>>)
 		.get(0)
-		.get('cells')
-		.get(0)
-		.get('textBody');
+		.get('textBody') as Y.Text;
 	peerText.insert(8, '!');
 	const data = readTableData(element)!;
 	data.rows.unshift({ cells: [{ text: 'new' }] });
 	data.rows[1].cells.unshift({ text: 'new column' });
 	reconcileTableData(data, element, factories, 'table');
 	expect(orderedYMaps(rows)[1]).toBe(originalRow);
-	expect(orderedYMaps(originalRow.get('cells'))[1]).toBe(originalCell);
+	expect(orderedYMaps(originalRow.get('cells') as Y.Array<Y.Map<unknown>>)[1]).toBe(originalCell);
 	expect(originalCell.get('textBody')).toBe(originalText);
 	Y.applyUpdate(doc, Y.encodeStateAsUpdate(peer));
 	Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));

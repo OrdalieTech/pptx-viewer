@@ -88,8 +88,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 		// Comment authors
 		const usedCommentAuthors = saveSession.hasUsedCommentAuthors();
-		const hasCommentAuthors =
-			usedCommentAuthors || Boolean(this.zip.file('ppt/commentAuthors.xml'));
+		// ponytail: post-save truth — an orphan part present in the source zip is
+		// removed below, so it must not keep its content-type Override alive.
+		const hasCommentAuthors = usedCommentAuthors;
 		if (usedCommentAuthors) {
 			this.zip.file(
 				'ppt/commentAuthors.xml',
@@ -100,7 +101,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					}),
 				),
 			);
-		} else if (!hasCommentAuthors) {
+		} else {
+			// ponytail: restore orphan removal dropped by the collaboration edit.
+			this.zip.remove('ppt/commentAuthors.xml');
 			// Strip the matching Relationship from presentation.xml.rels; otherwise
 			// the dangling reference causes PowerPoint to flag the file as corrupted
 			// and prompt the user to repair it on open.

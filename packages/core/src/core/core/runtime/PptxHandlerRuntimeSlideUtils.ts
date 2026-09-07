@@ -319,15 +319,21 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const parsedShapes: PptxElement[] = [];
 		shapes.forEach((shape, shapeIndex) => {
 			const txBody = shape?.['p:txBody'] as XmlObject | undefined;
-			const text = this.extractTextFromTxBody(txBody);
-			if (text.length > 0) {
-				notesChunks.push(text);
-				const segs = this.extractTextSegmentsFromTxBodyForRewrite(txBody, undefined);
-				if (allSegments.length > 0 && segs.length > 0) {
-					// Insert paragraph break between shapes
-					allSegments.push({ text: '\n', isParagraphBreak: true, style: {} });
+			const placeholder = (
+				(shape?.['p:nvSpPr'] as XmlObject | undefined)?.['p:nvPr'] as XmlObject | undefined
+			)?.['p:ph'] as XmlObject | undefined;
+			const isNotesBody = String(placeholder?.['@_type'] ?? '').toLowerCase() === 'body';
+			if (isNotesBody) {
+				const text = this.extractTextFromTxBody(txBody);
+				if (text.length > 0) {
+					notesChunks.push(text);
+					const segs = this.extractTextSegmentsFromTxBodyForRewrite(txBody, undefined);
+					if (allSegments.length > 0 && segs.length > 0) {
+						// Insert paragraph break between body placeholders.
+						allSegments.push({ text: '\n', isParagraphBreak: true, style: {} });
+					}
+					allSegments.push(...segs);
 				}
-				allSegments.push(...segs);
 			}
 			// Parse the full shape so the notes-page shape tree can be
 			// inspected and edited (not just the body placeholder text).

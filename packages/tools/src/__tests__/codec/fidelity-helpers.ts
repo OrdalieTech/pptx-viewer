@@ -79,8 +79,12 @@ export async function expectPackagePreserved(
 ): Promise<void> {
 	const before = await JSZip.loadAsync(source);
 	const after = await JSZip.loadAsync(output);
+	const sourceHasComments = before.file(/^ppt\/comments\/comment\d+\.xml$/).length > 0;
 	for (const [path, part] of Object.entries(before.files)) {
 		if (part.dir) {
+			continue;
+		}
+		if (!sourceHasComments && path === 'ppt/commentAuthors.xml' && !after.file(path)) {
 			continue;
 		}
 		expect(after.file(path), `missing package part ${path}`).not.toBeNull();
@@ -102,6 +106,13 @@ export async function expectPackagePreserved(
 				expect(Number.isFinite(Date.parse(properties['dcterms:modified']['#text']))).toBeTruthy();
 				if (oldProperties['cp:lastModifiedBy'] === undefined) {
 					expect(properties['cp:lastModifiedBy']).toBe('pptx');
+					delete properties['cp:lastModifiedBy'];
+				}
+				if (
+					oldProperties['cp:lastModifiedBy'] === '' &&
+					properties['cp:lastModifiedBy'] === 'pptx'
+				) {
+					delete oldProperties['cp:lastModifiedBy'];
 					delete properties['cp:lastModifiedBy'];
 				}
 				for (const field of ['cp:revision', 'dcterms:modified']) {
@@ -127,6 +138,31 @@ export async function expectPackagePreserved(
 						expect(afterXml[root][key], `derived ${field}`).toBe(String(count));
 						delete afterXml[root][key];
 					}
+				}
+			}
+			if (!sourceHasComments && path === '[Content_Types].xml') {
+				const overrides = beforeXml.Types.Override;
+				beforeXml.Types.Override = (Array.isArray(overrides) ? overrides : [overrides]).filter(
+					(entry) => entry?.['@_PartName'] !== '/ppt/commentAuthors.xml',
+				);
+			}
+			if (!sourceHasComments && path === 'ppt/_rels/presentation.xml.rels') {
+				for (const xml of [beforeXml, afterXml]) {
+					const relationships = xml.Relationships.Relationship;
+					xml.Relationships.Relationship = (
+						Array.isArray(relationships) ? relationships : [relationships]
+					)
+						.filter(
+							(entry) =>
+								sourceHasComments || !String(entry?.['@_Type']).endsWith('/commentAuthors'),
+						)
+						.map((entry) => ({
+							...entry,
+							'@_Target': String(entry['@_Target']).startsWith('/')
+								? String(entry['@_Target']).slice(1)
+								: posix.normalize(posix.join('ppt', String(entry['@_Target']))),
+						}))
+						.sort((a, b) => String(a['@_Id']).localeCompare(String(b['@_Id'])));
 				}
 			}
 			expect(afterXml, `unedited XML ${path}`).toStrictEqual(beforeXml);

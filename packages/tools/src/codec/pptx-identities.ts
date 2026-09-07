@@ -93,9 +93,11 @@ export function restorePptxIdentities(slides: PptxSlide[]): void {
 				if (restored) element.id = restored;
 				const rows = mapping.tables.get(String(element.shapeId));
 				if (rows) {
+					if (element.type !== 'table') {
+						throw new Error('PPTX native table identity targets a non-table element');
+					}
 					const data = element.tableData;
 					if (
-						element.type !== 'table' ||
 						!data ||
 						rows.length !== data.rows.length ||
 						rows.some((row, i) => row.cells.length !== data.rows[i].cells.length)
