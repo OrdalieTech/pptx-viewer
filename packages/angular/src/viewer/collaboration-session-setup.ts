@@ -34,6 +34,7 @@ import type { TemplateElementsBySlideId } from './template-mode';
 
 /** Options a host passes to `connect`, held for reconnection. */
 export interface ConnectOptions {
+	getSourceSlides?: () => readonly PptxSlide[];
 	onRemoteSlides?: (slides: PptxSlide[]) => void;
 	canvasWidth?: number;
 	canvasHeight?: number;
@@ -62,6 +63,7 @@ export interface ActiveSession {
 
 /** Everything `activateSession` reads from / calls back into the service. */
 export interface ActivateSessionDeps {
+	onError?: (error: unknown) => void;
 	slideSync: SlideSyncEngine;
 	livePatcher: CollaborationLivePatcher;
 	onRemoteSlides: ((slides: PptxSlide[]) => void) | null;
@@ -89,6 +91,7 @@ export function activateSession(
 ): ActiveSession {
 	deps.livePatcher.configure(bundle.doc, bundle.factories);
 	deps.slideSync.bind({
+		onError: deps.onError,
 		ydoc: bundle.doc,
 		factories: bundle.factories,
 		onRemoteSlides: deps.onRemoteSlides,
@@ -114,11 +117,13 @@ export function activateSession(
 		isActive: deps.isActive,
 		reArmGate: () => {
 			deps.slideSync.gate.reset();
-			deps.slideSync.gate.arm();
+			if (transport === 'webrtc') {
+				deps.slideSync.gate.arm();
+			}
 		},
 		onConnectTimeout: deps.failConnection,
 	});
-	deps.slideSync.wireSynced(bundle.provider);
+	deps.slideSync.wireSynced(bundle.provider, transport === 'webrtc');
 
 	const unobserve = observeYDocSlides(bundle.doc, (_events, transaction) =>
 		deps.slideSync.onRemoteChange(transaction),

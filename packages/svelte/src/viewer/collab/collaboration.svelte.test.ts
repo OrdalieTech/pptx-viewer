@@ -5,7 +5,11 @@ import type {
 	YDocLike,
 	YjsFactories,
 } from 'pptx-viewer-shared';
-import { readSlidesFromYDoc, reconcileSlidesInYDoc } from 'pptx-viewer-shared';
+import {
+	readSlidesFromYDoc,
+	reconcileSlidesInYDoc,
+	registerCollaborationSource,
+} from 'pptx-viewer-shared';
 import { flushSync } from 'svelte';
 import { describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
@@ -137,6 +141,103 @@ function inRoot(body: () => Promise<void>): Promise<void> {
 }
 
 describe('collaborationController', () => {
+	it('rejects incompatible remote state and reports an error instead of leaving the session editable', async () => {
+		const doc = new Y.Doc();
+		const onstatus = vi.fn();
+		const config = { ...CONFIG, onstatus };
+		await inRoot(async () => {
+			const editor = makeEditor([slide('s1', [shape('e1')])]);
+			const collab = new CollaborationController({
+				getSlides: () => editor.slides,
+				applyRemoteSlides: (s) => editor.applyRemoteSlides(s),
+				getConfig: () => config,
+				createSession: fakeSessionFactory(doc, true),
+			});
+			await collab.start(config);
+			doc.getMap('pptx:meta').set('schemaVersion', 999);
+			expect(() => doc.getArray('pptx:slides').push([new Y.Map()])).not.toThrow();
+			expect(collab.status).toBe('error');
+			expect(collab.active).toBeFalsy();
+			expect(onstatus).toHaveBeenLastCalledWith(
+				'error',
+				expect.objectContaining({ message: expect.stringContaining('schema') }),
+			);
+		});
+		doc.destroy();
+	});
+
+	it('registers local assets before adopting a room already synced and refreshes them after a late source load', async () => {
+		const source = [
+			slide('s1', [
+				{
+					...shape('image'),
+					type: 'image',
+					imageData: 'data:image/png;base64,c291cmNl',
+				} as PptxElement,
+			]),
+		];
+		const server = new Y.Doc();
+		registerCollaborationSource(server as unknown as YDocLike, source);
+		reconcileSlidesInYDoc(source, server as unknown as YDocLike, realFactories());
+		const doc = new Y.Doc();
+		Y.applyUpdate(doc, Y.encodeStateAsUpdate(server));
+		await inRoot(async () => {
+			const editor = makeEditor(source);
+			const collab = new CollaborationController({
+				getSlides: () => editor.slides,
+				applyRemoteSlides: (s) => editor.applyRemoteSlides(s),
+				getConfig: () => CONFIG,
+				createSession: fakeSessionFactory(doc, true),
+			});
+			await collab.start(CONFIG);
+			await Promise.resolve();
+			expect((editor.slides[0].elements[0] as { imageData?: string }).imageData).toBe(
+				'data:image/png;base64,c291cmNl',
+			);
+			editor.setSlides(source);
+			collab.adoptDocAfterLoad();
+			expect((editor.slides[0].elements[0] as { imageData?: string }).imageData).toBe(
+				'data:image/png;base64,c291cmNl',
+			);
+			collab.stop();
+		});
+		server.destroy();
+		doc.destroy();
+	});
+
+	it('never opens the websocket write gate on a timer or socket open alone', async () => {
+		vi.useFakeTimers();
+		const doc = new Y.Doc();
+		const { factory, emitStatus, emitSynced } = statusDrivenSessionFactory(doc, false);
+		const config: CollaborationConfig = {
+			...CONFIG,
+			transport: 'websocket',
+			serverUrl: 'wss://example.test',
+		};
+		try {
+			await inRoot(async () => {
+				const editor = makeEditor([slide('s1', [shape('e1')])]);
+				const collab = new CollaborationController({
+					getSlides: () => editor.slides,
+					applyRemoteSlides: (s) => editor.applyRemoteSlides(s),
+					getConfig: () => config,
+					createSession: factory,
+				});
+				await collab.start(config);
+				emitStatus(true);
+				vi.advanceTimersByTime(10000);
+				flushSync();
+				expect(doc.getArray('pptx:slides')).toHaveLength(0);
+				emitSynced();
+				expect(doc.getArray('pptx:slides')).toHaveLength(1);
+				collab.stop();
+			});
+		} finally {
+			vi.useRealTimers();
+			doc.destroy();
+		}
+	});
+
 	it('publishes the local slides into the doc once the sync gate opens', async () => {
 		const doc = new Y.Doc();
 		await inRoot(async () => {

@@ -1,6 +1,9 @@
 import { PptxHandler } from 'pptx-viewer-core';
 import { describe, it, expect, vi } from 'vitest';
+import { Doc, Array as YArray, Map as YMap } from 'yjs';
 
+import { PptxCodec, readSlidesFromYDoc } from '../codec/index.js';
+import type { YDocLike } from '../codec/index.js';
 import { loadPresentation, savePresentation, executeToolWithContext } from '../execution.js';
 import type { ExecutionContext, FileSystemProvider, ToolContext, ToolResult } from '../types.js';
 import { createTestPptxBytes } from './helpers/create-test-pptx.js';
@@ -90,6 +93,63 @@ describe('savePresentation', () => {
 });
 
 describe('executeToolWithContext', () => {
+	it('merges an asynchronous tool delta without overwriting human edits or saving a binary', async () => {
+		const { fs } = await makeInMemoryFs();
+		const doc = new Doc();
+		const codec = new PptxCodec();
+		await codec.hydrate(doc, await fs.readFile('/test.pptx'));
+		const writeFile = vi.spyOn(fs, 'writeFile');
+		const replaceContent = vi.fn();
+		const ctx: ExecutionContext = {
+			filesystem: fs,
+			collaboration: {
+				getRoom: () => ({ ydoc: doc }),
+				getCodec: () => codec,
+				agentOrigin: () => 'assistant',
+			},
+			viewer: { replaceContent, openFile: vi.fn() },
+		};
+		await executeToolWithContext('/test.pptx', ctx, async ({ pptxData }) => {
+			const human = (
+				doc.getArray<YMap<unknown>>('pptx:slides').get(1).get('elements') as YArray<YMap<unknown>>
+			).get(0);
+			human.set('x', 321);
+			await Promise.resolve();
+			pptxData.slides[0].elements[0].x = 123;
+			return { pptxData, dirty: true, result: {} };
+		});
+		const slides = readSlidesFromYDoc(doc as unknown as YDocLike);
+		expect(slides[0].elements[0].x).toBe(123);
+		expect(slides[1].elements[0].x).toBe(321);
+		expect(writeFile).not.toHaveBeenCalled();
+		expect(replaceContent).not.toHaveBeenCalled();
+		doc.destroy();
+	}, 30_000);
+
+	it('refuses local save when a loaded collaboration room disappears', async () => {
+		const { fs } = await makeInMemoryFs();
+		const codec = new PptxCodec();
+		const doc = new Doc();
+		await codec.hydrate(doc, await fs.readFile('/test.pptx'));
+		let active = true;
+		const writeFile = vi.spyOn(fs, 'writeFile');
+		const ctx: ExecutionContext = {
+			filesystem: fs,
+			collaboration: {
+				getRoom: () => (active ? { ydoc: doc } : null),
+				getCodec: () => codec,
+				agentOrigin: () => 'assistant',
+			},
+		};
+		const { pptxData, rawBytes } = await loadPresentation('/test.pptx', ctx);
+		active = false;
+		await expect(savePresentation('/test.pptx', pptxData, rawBytes, ctx)).rejects.toThrow(
+			'refusing a local binary save',
+		);
+		expect(writeFile).not.toHaveBeenCalled();
+		doc.destroy();
+	}, 30_000);
+
 	it('executes a read-only tool (dirty=false) without saving', async () => {
 		const { fs, files } = await makeInMemoryFs();
 		const ctx: ExecutionContext = { filesystem: fs };

@@ -87,8 +87,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		// Comment authors
-		const hasCommentAuthors = saveSession.hasUsedCommentAuthors();
-		if (hasCommentAuthors) {
+		const usedCommentAuthors = saveSession.hasUsedCommentAuthors();
+		const hasCommentAuthors =
+			usedCommentAuthors || Boolean(this.zip.file('ppt/commentAuthors.xml'));
+		if (usedCommentAuthors) {
 			this.zip.file(
 				'ppt/commentAuthors.xml',
 				this.builder.build(
@@ -98,8 +100,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					}),
 				),
 			);
-		} else {
-			this.zip.remove('ppt/commentAuthors.xml');
+		} else if (!hasCommentAuthors) {
 			// Strip the matching Relationship from presentation.xml.rels; otherwise
 			// the dangling reference causes PowerPoint to flag the file as corrupted
 			// and prompt the user to repair it on open.
@@ -145,10 +146,18 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 		// Persist template/master updates
 		for (const [layoutPath, layoutXmlObj] of this.layoutXmlMap.entries()) {
-			this.zip.file(layoutPath, this.builder.build(layoutXmlObj));
+			const source = await this.zip.file(layoutPath)?.async('string');
+			const rebuilt = this.builder.build(layoutXmlObj);
+			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
+				this.zip.file(layoutPath, rebuilt);
+			}
 		}
 		for (const [masterPath, masterXmlObj] of this.masterXmlMap.entries()) {
-			this.zip.file(masterPath, this.builder.build(masterXmlObj));
+			const source = await this.zip.file(masterPath)?.async('string');
+			const rebuilt = this.builder.build(masterXmlObj);
+			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
+				this.zip.file(masterPath, rebuilt);
+			}
 		}
 
 		// Theme parts. Re-emit dirty themes from in-memory state; clean themes

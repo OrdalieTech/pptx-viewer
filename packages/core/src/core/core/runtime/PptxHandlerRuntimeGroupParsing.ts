@@ -1,5 +1,6 @@
 import { XmlObject, PptxElement, hasShapeProperties, hasTextProperties } from '../../types';
 import type { GroupPptxElement } from '../../types';
+import { rememberLoadedGroup } from './group-shape-writer';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSpTreeParsing';
 
 /**
@@ -323,6 +324,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			groupFill: hasGroupFill ? grpFillStyle : undefined,
 		};
 
+		rememberLoadedGroup(groupElement);
 		return groupElement;
 	}
 

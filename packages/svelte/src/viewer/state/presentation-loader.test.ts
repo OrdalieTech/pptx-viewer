@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import type { PptxHandler, PptxSlide } from 'pptx-viewer-core';
 import { describe, expect, it } from 'vitest';
 
+import { resolveLazyImages } from './loader-helpers';
 import { PresentationLoader } from './presentation-loader.svelte';
 
 /**
@@ -20,6 +22,26 @@ function readFixture(): Uint8Array {
 }
 
 describe('presentationLoader', () => {
+	it('indexes lazy picture URLs for collaborative slides that only retain imagePath', async () => {
+		const imagePath = 'ppt/media/image1.png';
+		const imageData = 'data:image/png;base64,AAAA';
+		const slides = [
+			{
+				id: 'ppt/slides/slide1.xml',
+				elements: [{ id: 'picture-1', type: 'picture', imagePath }],
+			},
+		] as unknown as PptxSlide[];
+		const resolvedUrls = new Map<string, string>();
+		const handler = {
+			getImageData: async () => imageData,
+		} as unknown as PptxHandler;
+
+		const resolved = await resolveLazyImages(handler, slides, resolvedUrls);
+
+		expect(resolved[0].elements[0]).toMatchObject({ imagePath, imageData });
+		expect(resolvedUrls.get(imagePath)).toBe(imageData);
+	});
+
 	it('loads a real presentation into reactive state', async () => {
 		const loader = new PresentationLoader();
 		expect(loader.loadCount).toBe(0);

@@ -13,7 +13,7 @@
  */
 import type { PptxSlide } from 'pptx-viewer-core';
 import type { YDocLike } from 'pptx-viewer-shared';
-import { readSlidesFromYDoc } from 'pptx-viewer-shared';
+import { readSlidesFromYDoc, registerCollaborationSource } from 'pptx-viewer-shared';
 import { watch } from 'vue';
 import type { Ref, WatchStopHandle } from 'vue';
 
@@ -22,6 +22,8 @@ export interface LoadAdoptionContext {
 	loadVersion: Ref<number>;
 	/** The session's live Y.Doc, or null once the session stopped. */
 	getYDoc: () => YDocLike | null;
+	getSourceSlides?: () => readonly PptxSlide[];
+	onError?: (error: unknown) => void;
 	/** Whether the session currently reports a connection. */
 	isConnected: () => boolean;
 	/** Apply the doc's slides locally (sets the applying-remote guard + dedupe). */
@@ -41,10 +43,22 @@ export function watchLoadAdoption(ctx: LoadAdoptionContext): WatchStopHandle {
 		ctx.loadVersion,
 		() => {
 			const doc = ctx.getYDoc();
+			if (doc && ctx.getSourceSlides) {
+				registerCollaborationSource(doc, ctx.getSourceSlides());
+			}
 			if (!doc || !ctx.isConnected()) {
 				return;
 			}
-			const docSlides = readSlidesFromYDoc(doc);
+			let docSlides: PptxSlide[];
+			try {
+				docSlides = readSlidesFromYDoc(doc);
+			} catch (error) {
+				if (!ctx.onError) {
+					throw error;
+				}
+				ctx.onError(error);
+				return;
+			}
 			if (docSlides.length === 0) {
 				return;
 			}

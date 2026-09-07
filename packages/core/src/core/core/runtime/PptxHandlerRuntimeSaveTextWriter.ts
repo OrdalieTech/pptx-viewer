@@ -136,13 +136,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// Resolve text value and segments
 		const textValueForSave = this.getTextValueForSave(el.text, el.textSegments);
 		let textSegmentsForSave = el.textSegments;
-		if (typeof el.text === 'string' && this.areTextSegmentsUniform(el.textSegments)) {
+		const existingTextSegments = this.extractTextSegmentsFromTxBodyForRewrite(
+			txBody,
+			el.textStyle,
+			getSlideRelationshipMap(),
+		);
+		if (
+			typeof el.text === 'string' &&
+			this.areTextSegmentsUniform(el.textSegments) &&
+			el.text !== el.textSegments?.map((segment) => segment.text).join('')
+		) {
 			textSegmentsForSave = undefined;
-			const existingTextSegments = this.extractTextSegmentsFromTxBodyForRewrite(
-				txBody,
-				el.textStyle,
-				getSlideRelationshipMap(),
-			);
 			if (existingTextSegments.length > 1 && this.hasMixedTextStyles(existingTextSegments)) {
 				textSegmentsForSave = this.remapEditedTextToExistingStyles(
 					existingTextSegments,
@@ -158,6 +162,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			el.textStyle,
 			textSegmentsForSave,
 			resolveHyperlinkRelationshipId,
+			existingTextSegments,
 		);
 	}
 

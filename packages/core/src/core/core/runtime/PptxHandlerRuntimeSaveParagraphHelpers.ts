@@ -300,6 +300,7 @@ export function assembleParagraphXml(
 export function computeUniformSegmentOverrides(
 	textStyle: TextStyle | undefined,
 	textSegments: TextSegment[],
+	originalSegments?: TextSegment[],
 ): Partial<TextStyle> {
 	const uniformSegmentOverrides: Partial<TextStyle> = {};
 	const styleKeys: Array<keyof TextStyle> = [
@@ -320,6 +321,13 @@ export function computeUniformSegmentOverrides(
 			return;
 		}
 		const firstValue = textSegments[0]?.style?.[styleKey];
+		// An explicit run edit wins over an unchanged shape-level default.
+		if (
+			originalSegments?.length &&
+			originalSegments.some((segment) => segment.style?.[styleKey] !== firstValue)
+		) {
+			return;
+		}
 		const isUniform = textSegments.every((segment) => segment.style?.[styleKey] === firstValue);
 		if (isUniform) {
 			if (styleKey === 'fontFamily' && typeof nextValue === 'string') {

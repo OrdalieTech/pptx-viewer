@@ -7,6 +7,7 @@ export default defineConfig((options) => ({
 	splitting: false,
 	sourcemap: false,
 	clean: !options.watch,
+	noExternal: [/^pptx-viewer-shared(?:\/.*)?$/u],
 	external: [
 		'pptx-viewer-core',
 		'pptx-viewer-core/converter',

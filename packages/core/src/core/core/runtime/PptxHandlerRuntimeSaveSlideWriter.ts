@@ -94,7 +94,18 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 		slideNode['p:clrMapOvr'] = buildClrMapOverrideXml(slide.clrMapOverride);
 
-		if (slide.transition !== undefined) {
+		const sourceTransition = this.slideTransitionService.parseSlideTransition(xmlObj);
+		// A dirty element does not imply an edited transition. Keep native
+		// timing-only transitions and extension envelopes byte-semantically intact.
+		if (
+			slide.transition !== undefined &&
+			JSON.stringify(slide.transition, (key, value) =>
+				['soundRId', 'soundPath', 'soundFileName'].includes(key) ? undefined : value,
+			) !==
+				JSON.stringify(sourceTransition, (key, value) =>
+					['soundRId', 'soundPath', 'soundFileName'].includes(key) ? undefined : value,
+				)
+		) {
 			const transitionNode = this.buildSlideTransitionXml(slide.transition);
 			if (transitionNode) {
 				slideNode['p:transition'] = transitionNode;

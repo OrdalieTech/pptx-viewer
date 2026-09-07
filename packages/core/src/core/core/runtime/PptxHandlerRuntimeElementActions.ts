@@ -45,6 +45,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	}
 
 	protected getTreeBucketKeyForElementType(type: PptxElement['type']): string {
+		if (type === 'group') return 'p:grpSp';
 		if (type === 'picture' || type === 'image') {
 			return 'p:pic';
 		}
@@ -64,6 +65,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	}
 
 	protected getCnvPrNode(shape: XmlObject, key: string): XmlObject | undefined {
+		if (key === 'p:grpSp') return xmlPath(shape, 'p:nvGrpSpPr', 'p:cNvPr');
 		if (key === 'p:pic') {
 			return xmlPath(shape, 'p:nvPicPr', 'p:cNvPr');
 		}

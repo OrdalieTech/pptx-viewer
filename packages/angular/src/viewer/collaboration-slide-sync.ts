@@ -23,6 +23,7 @@ import type { DestroyableYDoc, ProviderLike } from './collaboration-providers';
 
 /** Live-session references the engine writes into, set on connect. */
 export interface SlideSyncBinding {
+	onError?: (error: unknown) => void;
 	ydoc: DestroyableYDoc;
 	factories: YjsFactories;
 	/** Apply remotely-authored slides to viewer state. */
@@ -44,6 +45,20 @@ export class SlideSyncEngine {
 	#lastSynced = '';
 	#applyingRemote = false;
 	#pending: readonly PptxSlide[] | null = null;
+	#didSync = false;
+
+	#readSlides(b: SlideSyncBinding): PptxSlide[] {
+		try {
+			return readSlidesFromYDoc(b.ydoc);
+		} catch (error) {
+			this.gate.reset();
+			if (!b.onError) {
+				throw error;
+			}
+			b.onError(error);
+			return [];
+		}
+	}
 
 	/** Attach the engine to a freshly connected session's doc. */
 	bind(binding: SlideSyncBinding): void {
@@ -52,6 +67,7 @@ export class SlideSyncEngine {
 
 	/** Clear all per-session state (call on disconnect). */
 	reset(): void {
+		this.#didSync = false;
 		this.gate.reset();
 		this.#binding = null;
 		this.#pending = null;
@@ -75,7 +91,7 @@ export class SlideSyncEngine {
 	 * object carrying a `synced` flag (and only once a peer syncs, hence the
 	 * grace timer). Listen to both; opening is idempotent.
 	 */
-	wireSynced(provider: ProviderLike): void {
+	wireSynced(provider: ProviderLike, allowGrace = false): void {
 		const handle = (payload: unknown): void => {
 			const flag = payload as boolean | { synced?: boolean } | undefined;
 			const isSynced = typeof flag === 'boolean' ? flag : flag?.synced !== false;
@@ -87,7 +103,7 @@ export class SlideSyncEngine {
 		provider.on('synced', handle);
 		if (provider.synced === true) {
 			this.gate.open();
-		} else {
+		} else if (allowGrace) {
 			this.gate.arm();
 		}
 	}
@@ -122,7 +138,7 @@ export class SlideSyncEngine {
 		if (transaction?.origin === LOCAL_SYNC_ORIGIN || this.#applyingRemote || !b) {
 			return;
 		}
-		const remote = readSlidesFromYDoc(b.ydoc);
+		const remote = this.#readSlides(b);
 		if (remote.length === 0) {
 			return;
 		}
@@ -151,7 +167,7 @@ export class SlideSyncEngine {
 		if (!b) {
 			return false;
 		}
-		const docSlides = readSlidesFromYDoc(b.ydoc);
+		const docSlides = this.#readSlides(b);
 		if (docSlides.length === 0) {
 			return false;
 		}
@@ -169,10 +185,24 @@ export class SlideSyncEngine {
 	 * pending deck matches the applied baseline and the write is a no-op.
 	 */
 	#flushPending(): void {
+		const firstSync = !this.#didSync;
+		this.#didSync = true;
 		const b = this.#binding;
 		const pending = this.#pending;
 		this.#pending = null;
-		if (!pending || !b) {
+		if (!b) {
+			return;
+		}
+		const remote = this.#readSlides(b);
+		if (!this.#binding) {
+			return;
+		}
+		if (firstSync && remote.length) {
+			this.#lastSynced = JSON.stringify(remote);
+			b.onRemoteSlides?.(remote);
+			return;
+		}
+		if (!pending) {
 			return;
 		}
 		if (b.ydoc.getArray(YDOC_SLIDES_KEY).length === 0) {

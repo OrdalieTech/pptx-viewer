@@ -4,10 +4,8 @@
  * `collaboration-sync.ts` and `pptx-viewer-mcp`'s `pptx-codec.ts`) to keep
  * their field allowlists complete.
  *
- * Both codecs use different wire-format key prefixes (short `_ts` vs long
- * `_textStyle`) and are NOT interchangeable on the same Y.Doc, but they must
- * cover the same set of fields or one silently drops data the other
- * preserves. `ELEMENT_FIELD_KIND`/`SLIDE_FIELD_KIND` are typed as
+ * Both codecs share the same versioned wire format and field coverage.
+ * `ELEMENT_FIELD_KIND`/`SLIDE_FIELD_KIND` are typed as
  * `Record<AllKeys, CollabFieldKind>`, so TypeScript forces this file to be
  * updated whenever a field is added to any `PptxElement` variant or
  * `PptxSlide` - each codec's own test suite then asserts its allowlists
@@ -85,9 +83,9 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	customGeometryConnectionSites: 'complex',
 	customGeometryTextRect: 'complex',
 	// PptxImageProperties
-	imageData: 'scalar',
+	imageData: 'asset',
 	imagePath: 'scalar',
-	svgData: 'scalar',
+	svgData: 'asset',
 	svgPath: 'scalar',
 	altText: 'scalar',
 	cropLeft: 'scalar',
@@ -103,7 +101,7 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	imageEffects: 'complex',
 	cropShape: 'complex',
 	// TablePptxElement / ChartPptxElement / SmartArtPptxElement
-	tableData: 'complex',
+	tableData: 'nested',
 	chartData: 'complex',
 	smartArtData: 'complex',
 	extensionXml: 'complex',
@@ -117,7 +115,7 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	fileName: 'scalar',
 	isLinked: 'scalar',
 	externalPath: 'scalar',
-	previewImage: 'scalar',
+	previewImage: 'asset',
 	previewImageData: 'asset',
 	oleShowAsIcon: 'scalar',
 	oleImgW: 'scalar',
@@ -155,7 +153,7 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	captionTracks: 'complex',
 	mediaMissing: 'scalar',
 	// GroupPptxElement
-	children: 'complex',
+	children: 'nested',
 	groupFill: 'complex',
 	// InkPptxElement
 	inkPaths: 'scalar',
@@ -178,7 +176,7 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	modelPath: 'scalar',
 	modelData: 'asset',
 	modelMimeType: 'scalar',
-	posterImage: 'scalar',
+	posterImage: 'asset',
 };
 
 export const SLIDE_FIELD_KIND: Record<keyof PptxSlide, CollabFieldKind> = {

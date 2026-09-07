@@ -12,6 +12,7 @@ import {
 	LOCAL_SYNC_ORIGIN,
 	observeYDocSlides,
 	registerCollaborationTeardown,
+	registerCollaborationSource,
 	resolveTransportForServerUrl,
 	validateRoomId,
 } from 'pptx-viewer-shared';
@@ -81,7 +82,15 @@ export function createCollaborationController(
 		getHandler: deps.getHandler,
 	});
 
-	const slidesSync: SlidesSync = createSlidesSync(store, (config) => writeBack.schedule(config));
+	const slidesSync: SlidesSync = createSlidesSync(
+		store,
+		(config) => writeBack.schedule(config),
+		(error) => {
+			stop();
+			setStatus('error');
+			lastConfig?.onstatus?.('error', error instanceof Error ? error : new Error(String(error)));
+		},
+	);
 
 	function flushLocal(): void {
 		slidesSync.flushLocalSlides(currentYDoc, yFactories, lastConfig, publishSuppressed);
@@ -91,26 +100,41 @@ export function createCollaborationController(
 	// grace period elapses for a lone webrtc peer), local slides must not seed
 	// the doc, or a late joiner's bootstrap deck would merge into the room's real
 	// content. Opening the gate performs the deferred first write.
-	const syncGate = createSyncGate(flushLocal);
+	let didSync = false;
+	const syncGate = createSyncGate(() => {
+		const firstSync = !didSync;
+		didSync = true;
+		if (firstSync && lastConfig && slidesSync.applyRemoteSlides(currentYDoc, lastConfig)) {
+			return;
+		}
+		flushLocal();
+	});
 
+	let connectionGeneration = 0;
 	async function start(config: CollaborationConfig): Promise<void> {
 		stop();
+		const generation = connectionGeneration;
 		lastConfig = config;
 		try {
 			validateRoomId(config.roomId);
 		} catch {
 			setStatus('error');
+			config.onstatus?.('error', new Error('Invalid collaboration room'));
 			return;
 		}
 		const transport = config.transport ?? resolveTransportForServerUrl(config.serverUrl);
 		// Mixed-content only affects a ws:// socket from an https page.
 		if (transport === 'websocket' && isMixedContentBlocked(config.serverUrl)) {
 			setStatus('error');
+			config.onstatus?.('error', new Error('Insecure collaboration connection'));
 			return;
 		}
 		setStatus('connecting');
 		try {
 			const Y = await import('yjs');
+			if (generation !== connectionGeneration) {
+				return;
+			}
 			const doc = new Y.Doc();
 			ydoc = doc;
 			yFactories = {
@@ -119,9 +143,16 @@ export function createCollaborationController(
 				createText: () => new Y.Text(),
 			};
 			currentYDoc = doc as unknown as YDocLike;
+			registerCollaborationSource(currentYDoc, store.get().slides);
 			livePatcher.configure(currentYDoc, yFactories);
 
-			provider = await createCollabProvider(transport, config, doc);
+			const nextProvider = await createCollabProvider(transport, config, doc);
+			if (generation !== connectionGeneration) {
+				nextProvider.destroy();
+				doc.destroy();
+				return;
+			}
+			provider = nextProvider;
 
 			presence = createPresenceController(
 				store,
@@ -132,7 +163,10 @@ export function createCollaborationController(
 					userAvatar: config.userAvatar,
 					role: config.role,
 				},
-				() => ({ width: store.get().canvasSize.width, height: store.get().canvasSize.height }),
+				() => ({
+					width: store.get().canvasSize.width,
+					height: store.get().canvasSize.height,
+				}),
 			);
 
 			// Read-only viewer role: disable editing and never publish local edits.
@@ -148,7 +182,7 @@ export function createCollaborationController(
 			provider.onSynced(() => syncGate.open());
 			if (provider.syncedNow) {
 				syncGate.open();
-			} else {
+			} else if (transport === 'webrtc') {
 				syncGate.arm();
 			}
 
@@ -161,12 +195,14 @@ export function createCollaborationController(
 				isActive: () => active,
 				reArmGate: () => {
 					syncGate.reset();
-					syncGate.arm();
+					if (transport === 'webrtc') {
+						syncGate.arm();
+					}
 				},
 				onConnectTimeout: () => {
 					if (status !== 'connected') {
-						stop();
 						setStatus('error');
+						config.onstatus?.('error', new Error('Collaboration unavailable'));
 					}
 				},
 			});
@@ -190,9 +226,16 @@ export function createCollaborationController(
 			});
 
 			active = true;
-		} catch {
+		} catch (error) {
+			if (generation !== connectionGeneration) {
+				return;
+			}
 			stop();
 			setStatus('error');
+			config.onstatus?.(
+				'error',
+				error instanceof Error ? error : new Error('Collaboration unavailable'),
+			);
 		}
 	}
 
@@ -210,6 +253,9 @@ export function createCollaborationController(
 	}
 
 	function notifyContentLoaded(): void {
+		if (currentYDoc) {
+			registerCollaborationSource(currentYDoc, store.get().slides);
+		}
 		const suppressed = loadApplying;
 		loadApplying = false;
 		if (!active || !currentYDoc || !lastConfig) {
@@ -224,6 +270,8 @@ export function createCollaborationController(
 	}
 
 	function stop(): void {
+		didSync = false;
+		connectionGeneration++;
 		connection?.cancelConnectTimer();
 		connection = null;
 		loadApplying = false;

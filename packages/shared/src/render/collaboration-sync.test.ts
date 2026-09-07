@@ -418,7 +418,11 @@ describe('collaboration-sync: slide field coverage', () => {
 
 describe('collaboration-sync: field-schema completeness guard', () => {
 	it('scalar + complex + asset element keys + textSegments cover every PptxElement field', () => {
-		const coveredKind: Record<string, string> = { textSegments: 'text' };
+		const coveredKind: Record<string, string> = {
+			textSegments: 'text',
+			children: 'nested',
+			tableData: 'nested',
+		};
 		for (const key of SCALAR_ELEMENT_KEYS) {
 			coveredKind[key] = 'scalar';
 		}

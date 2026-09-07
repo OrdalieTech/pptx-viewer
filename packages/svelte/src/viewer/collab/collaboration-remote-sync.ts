@@ -14,6 +14,7 @@ import {
 } from 'pptx-viewer-shared';
 
 export interface ObserveRemoteDeps {
+	onError?: (error: unknown) => void;
 	isApplyingRemote: () => boolean;
 	setApplyingRemote: (value: boolean) => void;
 	setLastSynced: (value: string) => void;
@@ -24,8 +25,20 @@ export interface ObserveRemoteDeps {
 /** The subset of {@link ObserveRemoteDeps} needed by {@link adoptDocSlidesAfterLoad}. */
 export type AdoptDocSlidesDeps = Pick<
 	ObserveRemoteDeps,
-	'setApplyingRemote' | 'setLastSynced' | 'applyRemoteSlides'
+	'setApplyingRemote' | 'setLastSynced' | 'applyRemoteSlides' | 'onError'
 >;
+
+function readRemoteSlides(ydoc: YDocLike, deps: AdoptDocSlidesDeps): PptxSlide[] {
+	try {
+		return readSlidesFromYDoc(ydoc);
+	} catch (error) {
+		if (!deps.onError) {
+			throw error;
+		}
+		deps.onError(error);
+		return [];
+	}
+}
 
 /**
  * Re-adopt the shared doc's slides after a local content load. The load
@@ -38,7 +51,7 @@ export type AdoptDocSlidesDeps = Pick<
  * stands (written into the doc by the normal gated publish path).
  */
 export function adoptDocSlidesAfterLoad(ydoc: YDocLike, deps: AdoptDocSlidesDeps): void {
-	const docSlides = readSlidesFromYDoc(ydoc);
+	const docSlides = readRemoteSlides(ydoc, deps);
 	if (docSlides.length === 0) {
 		return;
 	}
@@ -62,7 +75,7 @@ export function observeRemoteSlides(
 		if (transaction?.origin === LOCAL_SYNC_ORIGIN || deps.isApplyingRemote()) {
 			return;
 		}
-		const remote = readSlidesFromYDoc(ydoc);
+		const remote = readRemoteSlides(ydoc, deps);
 		if (remote.length === 0) {
 			return;
 		}

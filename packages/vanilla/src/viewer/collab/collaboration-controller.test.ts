@@ -35,6 +35,10 @@ vi.mock(
 		// touches under these mocks; cast past `Partial<typeof import('yjs')>`.
 		({
 			Doc: class {
+				private assets = new Map();
+				getMap() {
+					return this.assets;
+				}
 				destroy(): void {}
 			},
 			Map: class {},

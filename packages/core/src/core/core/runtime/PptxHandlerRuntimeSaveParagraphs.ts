@@ -29,6 +29,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		textStyle: TextStyle | undefined,
 		textSegments: TextSegment[] | undefined,
 		resolveHyperlinkRelationshipId?: (target: string) => string | undefined,
+		originalSegments?: TextSegment[],
 	): XmlObject[] {
 		// #69: Each paragraph's own pPr geometry (align / spacing / margins /
 		// indent / tabs / rtl), carried on the first segment as
@@ -171,7 +172,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		};
 
 		if (textSegments && textSegments.length > 0) {
-			const uniformSegmentOverrides = computeUniformSegmentOverrides(textStyle, textSegments);
+			const uniformSegmentOverrides = computeUniformSegmentOverrides(
+				textStyle,
+				textSegments,
+				originalSegments,
+			);
 
 			textSegments.forEach((segment) => {
 				const segmentStyle = {

@@ -22,6 +22,8 @@ import {
 	registerCollaborationTeardown,
 	resolveTransportForServerUrl,
 	validateRoomId,
+	collaborationWebsocketOptions,
+	startCollaborationWebsocket,
 } from 'pptx-viewer-shared';
 import type { DepartureChannel, SyncGate } from 'pptx-viewer-shared';
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -101,6 +103,7 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 	const [doc, setDoc] = useState<YDoc | null>(null);
 	const [clientId, setClientId] = useState<number | null>(null);
 	const [synced, setSynced] = useState(false);
+	const generationRef = useRef(0);
 
 	// Keep a ref to cleanup functions so we can teardown on unmount or config change
 	const cleanupRef = useRef<(() => void) | null>(null);
@@ -121,6 +124,7 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 	}
 
 	const teardown = useCallback(() => {
+		generationRef.current++;
 		if (timeoutRef.current) {
 			clearTimeout(timeoutRef.current);
 			timeoutRef.current = null;
@@ -161,10 +165,14 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 			return;
 		}
 		setStatus('connecting');
+		const generation = generationRef.current;
 		try {
 			// Dynamic imports: zero bundle cost when unused.
 			const [Y, { WebrtcProvider }] = await Promise.all([import('yjs'), import('y-webrtc')]);
 
+			if (generation !== generationRef.current) {
+				return;
+			}
 			const yDoc: YDoc = new Y.Doc();
 			// Only pass options that are actually set; y-webrtc applies its own
 			// defaults (public signaling list, no password) when a key is absent.
@@ -177,6 +185,15 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 			}
 			const roomId = validateRoomId(config.roomId);
 			const provider = new WebrtcProvider(roomId, yDoc, opts);
+			config.onstatus?.('connected');
+			provider.on('status', (event) =>
+				config.onstatus?.(event.connected ? 'connected' : 'disconnected'),
+			);
+			provider.on('synced', (event: { synced?: boolean }) => {
+				if (event.synced !== false) {
+					config.onstatus?.('synced');
+				}
+			});
 			departureRef.current = createDepartureChannel(roomId, provider.awareness);
 
 			setDoc(yDoc);
@@ -225,6 +242,7 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 				err instanceof Error ? err.message : err,
 			);
 			setStatus('error');
+			config?.onstatus?.('error', new Error('Collaboration unavailable'));
 		}
 		// The bare `config` is read only as a presence guard (bail when inactive);
 		// reconnection is intentionally keyed on the transport-affecting fields
@@ -267,19 +285,28 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 				`[pptx-viewer] Refusing to connect: insecure ws:// server "${config.serverUrl}" is blocked from a secure (https) page. Use a wss:// URL.`,
 			);
 			setStatus('error');
+			config?.onstatus?.('error', new Error('Collaboration unavailable'));
 			return;
 		}
 
 		setStatus('connecting');
+		const generation = generationRef.current;
 
 		try {
 			// Dynamic imports: zero bundle cost when unused
 			const [Y, { WebsocketProvider }] = await Promise.all([import('yjs'), import('y-websocket')]);
 
+			if (generation !== generationRef.current) {
+				return;
+			}
 			const yDoc: YDoc = new Y.Doc();
-			const provider: WebsocketProvider = new WebsocketProvider(config.serverUrl, roomId, yDoc, {
-				params: config.authToken ? { token: config.authToken } : undefined,
-			});
+			const provider: WebsocketProvider = new WebsocketProvider(
+				config.serverUrl,
+				roomId,
+				yDoc,
+				collaborationWebsocketOptions(config),
+			);
+			startCollaborationWebsocket(provider, config, yDoc);
 			departureRef.current = createDepartureChannel(roomId, provider.awareness);
 
 			let connected = false;
@@ -293,9 +320,6 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 						timeoutRef.current = null;
 					}
 					setStatus('connected');
-					// Defensive: if the server never sends the initial sync
-					// confirmation, lift the first-write gate after the grace period.
-					gateRef.current?.arm();
 				} else if (event.status === 'disconnected') {
 					setStatus('disconnected');
 					// Re-arm on (re)connect: without this, a peer that drops and
@@ -303,7 +327,6 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 					// connection and can clobber the room with a stale local doc.
 					gateRef.current?.reset();
 					setSynced(false);
-					gateRef.current?.arm();
 				}
 			};
 
@@ -320,7 +343,6 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 			if (provider.wsconnected) {
 				connected = true;
 				setStatus('connected');
-				gateRef.current?.arm();
 			}
 			if (provider.synced) {
 				gateRef.current?.open();
@@ -332,17 +354,8 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 				timeoutRef.current = setTimeout(() => {
 					timeoutRef.current = null;
 					if (!connected) {
-						provider.off('status', handleStatus);
-						provider.off('sync', handleSynced);
-						announceDeparture();
-						clearLocalAwareness(provider.awareness);
-						provider.destroy();
-						yDoc.destroy();
-						setDoc(null);
-						setAwareness(null);
-						setClientId(null);
-						cleanupRef.current = null;
 						setStatus('error');
+						config?.onstatus?.('error', new Error('Collaboration unavailable'));
 					}
 				}, CONNECTION_TIMEOUT_MS);
 			}
@@ -371,6 +384,10 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 				err instanceof Error ? err.message : err,
 			);
 			setStatus('error');
+			config?.onstatus?.(
+				'error',
+				err instanceof Error ? err : new Error('Collaboration unavailable'),
+			);
 		}
 		// See initWebrtc: the bare `config` is only a presence guard; the transport
 		// is (re)opened solely on the connection-affecting fields listed below.
@@ -379,6 +396,8 @@ export function useYjsProvider({ config }: UseYjsProviderInput): UseYjsProviderR
 		config?.roomId,
 		config?.serverUrl,
 		config?.authToken,
+		config?.websocketProtocols,
+		config?.getWebsocketProtocols,
 		config?.transport,
 		announceDeparture,
 		initWebrtc,

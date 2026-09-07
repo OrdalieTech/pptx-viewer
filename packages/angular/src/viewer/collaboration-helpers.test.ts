@@ -430,6 +430,7 @@ function makeMockAwareness(): {
 
 vi.mock(import('y-websocket'), () => ({
 	WebsocketProvider: class {
+		connect() {}
 		awareness = makeMockAwareness();
 		constructor() {
 			hoisted.createdProviders.push('websocket');
@@ -713,7 +714,7 @@ describe('collaborationService', () => {
 		destroy();
 	});
 
-	it('times out to error when the websocket never connects', async () => {
+	it('reports a timeout and keeps the session available for authenticated reconnect', async () => {
 		reset();
 		vi.useFakeTimers();
 		try {
@@ -722,7 +723,9 @@ describe('collaborationService', () => {
 			expect(svc.status()).toBe('connecting');
 			vi.advanceTimersByTime(CONNECTION_TIMEOUT_MS + 1);
 			expect(svc.status()).toBe('error');
-			expect(svc.active()).toBeFalsy();
+			expect(svc.active()).toBeTruthy();
+			hoisted.statusCb?.({ status: 'connected' });
+			expect(svc.status()).toBe('connected');
 			destroy();
 		} finally {
 			vi.useRealTimers();

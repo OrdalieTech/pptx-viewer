@@ -41,6 +41,7 @@ export interface SlidesSync {
 export function createSlidesSync(
 	store: Store<ViewerState>,
 	scheduleWriteBack: (config: CollaborationConfig) => void,
+	onError?: (error: unknown) => void,
 ): SlidesSync {
 	let lastSynced = '';
 	let applyingRemote = false;
@@ -70,7 +71,16 @@ export function createSlidesSync(
 		if (!ydoc) {
 			return false;
 		}
-		const remote: PptxSlide[] = readSlidesFromYDoc(ydoc);
+		let remote: PptxSlide[];
+		try {
+			remote = readSlidesFromYDoc(ydoc);
+		} catch (error) {
+			if (!onError) {
+				throw error;
+			}
+			onError(error);
+			return true;
+		}
 		if (remote.length === 0) {
 			return false;
 		}

@@ -16,6 +16,8 @@ import {
 	reconcileSlidesInYDoc,
 	LOCAL_SYNC_ORIGIN,
 	readSlidesFromYDoc,
+	registerCollaborationSource,
+	failCollaborationSession,
 	observeYDocSlides,
 } from 'pptx-viewer-shared';
 import { useCallback, useEffect, useRef } from 'react';
@@ -44,7 +46,7 @@ export interface UseYjsDocumentSyncInput {
 	 */
 	isSynced?: boolean;
 	/** Collaboration config (for role and write-back). */
-	config?: Pick<CollaborationConfig, 'role' | 'onWriteBack' | 'writeBackDebounceMs'>;
+	config?: Pick<CollaborationConfig, 'role' | 'onWriteBack' | 'writeBackDebounceMs' | 'onstatus'>;
 	/**
 	 * Return the source PPTX bytes for write-back serialization. Only called
 	 * when role === 'owner' and onWriteBack is set.
@@ -77,8 +79,37 @@ export function useYjsDocumentSync({
 	const writeBackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const factoriesRef = useRef<YjsFactories | null>(null);
 	const lastLoadVersionRef = useRef(loadVersion);
+	const failedRef = useRef(false);
+	useEffect(() => {
+		failedRef.current = false;
+	}, [doc]);
+	const readRemoteSlides = useCallback(
+		(input: Parameters<typeof readSlidesFromYDoc>[0]) => {
+			try {
+				return readSlidesFromYDoc(input);
+			} catch (cause) {
+				failedRef.current = true;
+				const error = cause instanceof Error ? cause : new Error(String(cause));
+				failCollaborationSession(input, error);
+				config?.onstatus?.('error', error);
+				return [];
+			}
+		},
+		[config],
+	);
+	const sourceSlidesRef = useRef(slides);
+	if (lastLoadVersionRef.current !== loadVersion) {
+		sourceSlidesRef.current = slides;
+	}
+	useEffect(() => {
+		if (doc) {
+			registerCollaborationSource(
+				doc as unknown as Parameters<typeof registerCollaborationSource>[0],
+				sourceSlidesRef.current,
+			);
+		}
+	}, [doc, loadVersion]);
 
-	// Lazily build the factories once we have a live Yjs import.
 	const getFactories = useCallback(async (): Promise<YjsFactories> => {
 		if (factoriesRef.current) {
 			return factoriesRef.current;
@@ -93,7 +124,6 @@ export function useYjsDocumentSync({
 		return factories;
 	}, []);
 
-	// Schedule a debounced write-back for the elected writer (role === 'owner').
 	const scheduleWriteBack = useCallback(() => {
 		if (!config?.onWriteBack || config.role !== 'owner' || !doc) {
 			return;
@@ -114,11 +144,12 @@ export function useYjsDocumentSync({
 			try {
 				const handler = new PptxHandler();
 				await handler.load(sourceBytes.buffer as ArrayBuffer);
-				const currentSlides = readSlidesFromYDoc(
+				const currentSlides = readRemoteSlides(
 					doc as unknown as Parameters<typeof readSlidesFromYDoc>[0],
 				);
-				// Merge the separated template (master/layout) elements back so any
-				// edit-template-mode changes persist into the write-back snapshot.
+				if (failedRef.current) {
+					return;
+				}
 				const slidesToSave = buildSaveSlides(currentSlides, templateElementsBySlideId);
 				const bytes = await handler.save(slidesToSave);
 				config.onWriteBack(bytes);
@@ -126,15 +157,8 @@ export function useYjsDocumentSync({
 				/* write-back failures are non-fatal */
 			}
 		}, debounceMs);
-	}, [doc, config, getSourceBytes, templateElementsBySlideId]);
+	}, [doc, config, getSourceBytes, templateElementsBySlideId, readRemoteSlides]);
 
-	// Re-adopt the shared doc after a local content load. The load pipeline
-	// applies its parsed slides unconditionally, so when a load finishes AFTER
-	// the room's slides were already applied (a late joiner's bootstrap deck
-	// parses slower than the doc sync), the synced state would be silently
-	// clobbered and, with the doc unchanged, never re-applied. On each load
-	// bump: if the room already has slides, they win; an empty room means this
-	// client is the seeder and the loaded deck stands.
 	useEffect(() => {
 		if (loadVersion === lastLoadVersionRef.current) {
 			return;
@@ -143,36 +167,40 @@ export function useYjsDocumentSync({
 		if (!doc || !isConnected) {
 			return;
 		}
-		const docSlides = readSlidesFromYDoc(
-			doc as unknown as Parameters<typeof readSlidesFromYDoc>[0],
-		);
+		const docSlides = readRemoteSlides(doc as unknown as Parameters<typeof readSlidesFromYDoc>[0]);
 		if (docSlides.length === 0) {
 			return;
 		}
-		// Unconditional re-apply: the freshly loaded slides differ from the doc
-		// even when the doc matches what we last synced, so the usual JSON dedupe
-		// must not skip this application.
 		lastSyncedRef.current = JSON.stringify(docSlides);
 		isApplyingRemoteRef.current = true;
 		setSlides(docSlides);
-		// Clear synchronously (matching Vue). A frame-gated
-		// `requestAnimationFrame` clear never runs in a backgrounded tab, so the
-		// flag would stay true and the local -> doc write effect would stall all
-		// outbound edits until refocus. The `lastSyncedRef` JSON dedupe already
-		// suppresses the echo, so no deferral is needed.
 		isApplyingRemoteRef.current = false;
-	}, [loadVersion, doc, isConnected, setSlides]);
+	}, [loadVersion, doc, isConnected, setSlides, readRemoteSlides]);
 
-	// Sync local slide changes -> Y.Doc. Gated on isSynced: until the provider
-	// confirms its initial sync (or the grace period lifts the gate), local
-	// state must not seed the doc, or a late joiner's bootstrap deck would
-	// merge into the room's real content. When the gate opens this effect
-	// re-runs and performs the (possibly first) write.
 	useEffect(() => {
-		if (!isConnected || !isSynced || !doc || isApplyingRemoteRef.current || slides.length === 0) {
+		if (
+			!isConnected ||
+			!isSynced ||
+			!doc ||
+			failedRef.current ||
+			config?.role === 'viewer' ||
+			isApplyingRemoteRef.current ||
+			slides.length === 0
+		) {
 			return;
 		}
 
+		if (!hasInitializedRef.current) {
+			const remote = readRemoteSlides(doc as unknown as Parameters<typeof readSlidesFromYDoc>[0]);
+			if (failedRef.current) {
+				return;
+			}
+			if (remote.length) {
+				lastSyncedRef.current = JSON.stringify(remote);
+				setSlides(remote);
+				return;
+			}
+		}
 		const serialized = JSON.stringify(slides);
 		if (serialized === lastSyncedRef.current) {
 			return;
@@ -181,8 +209,9 @@ export function useYjsDocumentSync({
 
 		void (async () => {
 			const factories = await getFactories();
-			// Granular reconcile: mutate only what changed, tagged with
-			// LOCAL_SYNC_ORIGIN so our own remote-observer skips the echo.
+			if (failedRef.current) {
+				return;
+			}
 			reconcileSlidesInYDoc(
 				slides,
 				doc as unknown as Parameters<typeof reconcileSlidesInYDoc>[1],
@@ -191,36 +220,33 @@ export function useYjsDocumentSync({
 			);
 			scheduleWriteBack();
 		})();
-	}, [doc, slides, isConnected, isSynced, getFactories, scheduleWriteBack]);
+	}, [
+		doc,
+		slides,
+		isConnected,
+		isSynced,
+		getFactories,
+		scheduleWriteBack,
+		readRemoteSlides,
+		config?.role,
+		setSlides,
+	]);
 
-	// Reset per-session sync state whenever the Y.Doc identity changes (a
-	// stop/restart or provider re-init hands us a new doc). Without this the
-	// long-lived sync component keeps `hasInitializedRef`/`lastSyncedRef` from
-	// the previous deck, so the late-joiner catch-up read never re-runs and the
-	// dedupe could wrongly skip applying the new room's slides. Keyed on `doc`
-	// (not the observer effect's cleanup) so unrelated config churn does not
-	// clear the dedupe. Vue resets its `lastSynced` in stop() for the same
-	// reason.
 	useEffect(() => {
 		hasInitializedRef.current = false;
 		lastSyncedRef.current = '';
 	}, [doc]);
 
-	// Sync remote Y.Doc changes -> local state
 	useEffect(() => {
 		if (!isConnected || !doc) {
 			return;
 		}
 
 		const handleChange = (_events?: unknown, transaction?: YTransactionLike) => {
-			// Skip our own local-sync writes: the reconcile pass tags its
-			// transaction with LOCAL_SYNC_ORIGIN, so echoing it back into React
-			// state would be redundant (the JSON dedupe below is a secondary
-			// guard for any untagged writes).
 			if (transaction?.origin === LOCAL_SYNC_ORIGIN) {
 				return;
 			}
-			const remoteSlides = readSlidesFromYDoc(
+			const remoteSlides = readRemoteSlides(
 				doc as unknown as Parameters<typeof readSlidesFromYDoc>[0],
 			);
 			if (remoteSlides.length === 0) {
@@ -235,10 +261,6 @@ export function useYjsDocumentSync({
 
 			isApplyingRemoteRef.current = true;
 			setSlides(remoteSlides);
-			// Clear synchronously (matching Vue): a `requestAnimationFrame` clear
-			// is frozen in a backgrounded tab, leaving the flag stuck true so no
-			// local edit reaches the doc until refocus. The `lastSyncedRef` JSON
-			// dedupe already prevents the write effect from echoing this apply.
 			isApplyingRemoteRef.current = false;
 			scheduleWriteBack();
 		};
@@ -248,7 +270,6 @@ export function useYjsDocumentSync({
 			handleChange,
 		);
 
-		// Late-joiner: if the Y.Doc already has slides, load them immediately.
 		if (!hasInitializedRef.current) {
 			hasInitializedRef.current = true;
 			const arr = (doc as unknown as { getArray: (k: string) => { length: number } }).getArray(
@@ -266,5 +287,5 @@ export function useYjsDocumentSync({
 				writeBackTimerRef.current = null;
 			}
 		};
-	}, [doc, isConnected, setSlides, scheduleWriteBack]);
+	}, [doc, isConnected, setSlides, scheduleWriteBack, readRemoteSlides]);
 }

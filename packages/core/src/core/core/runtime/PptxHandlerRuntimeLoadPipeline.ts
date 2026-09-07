@@ -16,6 +16,7 @@ import { resolveLayoutDisplayName } from '../../utils/layout-display-name';
 import { stripParentDirSegments } from '../../utils/strip-parent-dir-segments';
 import { PptxLoadDataBuilder } from '../builders';
 import type { PptxHandlerLoadOptions } from '../types';
+import { rememberLoadedShapes } from './group-shape-writer';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeLoadSession';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
@@ -272,6 +273,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const slides = await this.loadSlidesForPresentation(presentationState.sectionBySlideId);
 		const slidesWithWarnings = this.attachSlideWarnings(slides);
 		this.resetElementIdCounter(slides);
+		rememberLoadedShapes(
+			this,
+			slides.flatMap((slide) => slide.elements),
+		);
 		return this.buildLoadData(presentationState, slidesWithWarnings, slideMasters);
 	}
 

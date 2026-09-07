@@ -682,3 +682,4 @@ export * from './toolbar-actions';
 // File > Options parity: schema, store, persistence, and behavior helpers
 // behind the PowerPoint-style Options dialog in every binding.
 export * from './options';
+export * from './collaboration-websocket';
