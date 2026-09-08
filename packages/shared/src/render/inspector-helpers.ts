@@ -6,13 +6,21 @@
  * for the binding's element-update path. Shared across React, Vue, and Angular.
  */
 
-import type { PptxElement } from 'pptx-viewer-core';
+import type { PlaceholderDefaults, PptxElement, PptxThemeColorRef } from 'pptx-viewer-core';
 import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
+
+import { textFontSizePxToPt } from './text-format-presets';
 
 const DEFAULT_FILL = '#ffffff';
 const DEFAULT_STROKE = '#000000';
 const DEFAULT_TEXT_COLOR = '#000000';
-const DEFAULT_FONT_SIZE = 12;
+/**
+ * PowerPoint's own presentation-level default text style (`p:defaultTextStyle
+ * /a:lvl1pPr/a:defRPr@sz`) is 1800 (18pt), so a shape with no explicit font
+ * size renders at 18pt in real PowerPoint, not 12pt. Kept as the last-resort
+ * fallback below the deck's actual default when {@link fontSizeOf} is given one.
+ */
+export const DEFAULT_FONT_SIZE = 18;
 
 /**
  * Returns the fill colour of the element's shapeStyle, or a white default.
@@ -48,14 +56,19 @@ export function textColorOf(el: PptxElement): string {
 }
 
 /**
- * Returns the font size (in points) from the element's textStyle,
- * or DEFAULT_FONT_SIZE when absent.
+ * Returns the font size (in points) from the element's textStyle.
+ *
+ * Falls back, in order, to: the deck's presentation-level default text style
+ * (`p:defaultTextStyle`, passed as `presentationDefault` when the caller has
+ * one), then `DEFAULT_FONT_SIZE` (18pt, matching PowerPoint's own
+ * `a:lvl1pPr/a:defRPr@sz="1800"` when neither is available).
  */
-export function fontSizeOf(el: PptxElement): number {
-	if (hasTextProperties(el)) {
-		return el.textStyle?.fontSize ?? DEFAULT_FONT_SIZE;
+export function fontSizeOf(el: PptxElement, presentationDefault?: PlaceholderDefaults): number {
+	if (hasTextProperties(el) && el.textStyle?.fontSize !== undefined) {
+		return textFontSizePxToPt(el.textStyle.fontSize);
 	}
-	return DEFAULT_FONT_SIZE;
+	const deckDefault = presentationDefault?.levelStyles?.[0]?.fontSize;
+	return deckDefault === undefined ? DEFAULT_FONT_SIZE : textFontSizePxToPt(deckDefault);
 }
 
 /** Returns whether the element's text is bold (false when absent). */
@@ -88,7 +101,15 @@ export function isUnderline(el: PptxElement): boolean {
  */
 export interface ShapeStyleChanges {
 	fillColor?: string;
+	/**
+	 * Set alongside `fillColor` when the colour came from a theme swatch (wins
+	 * on save); pass `undefined` explicitly when clearing a previously-stored
+	 * ref (a custom hex or recent-colour pick has no theme identity).
+	 */
+	fillColorRef?: PptxThemeColorRef;
 	strokeColor?: string;
+	/** Same contract as {@link fillColorRef}, for the stroke colour. */
+	strokeColorRef?: PptxThemeColorRef;
 }
 
 /**
@@ -111,6 +132,8 @@ export function shapeStylePatch(el: PptxElement, changes: ShapeStyleChanges): Pa
  */
 export interface TextStyleChanges {
 	color?: string;
+	/** Same contract as {@link ShapeStyleChanges.fillColorRef}, for the text colour. */
+	colorRef?: PptxThemeColorRef;
 	fontSize?: number;
 	bold?: boolean;
 	italic?: boolean;
@@ -128,5 +151,20 @@ export function textStylePatch(el: PptxElement, changes: TextStyleChanges): Part
 			...base,
 			...changes,
 		},
+	} as Partial<PptxElement>;
+}
+
+/** Apply an ordinary-text model pixel size to the element and all of its runs. */
+export function textFontSizePatch(el: PptxElement, fontSize: number): Partial<PptxElement> {
+	const patch = textStylePatch(el, { fontSize });
+	if (!hasTextProperties(el) || !el.textSegments) {
+		return patch;
+	}
+	return {
+		...patch,
+		textSegments: el.textSegments.map((segment) => ({
+			...segment,
+			style: { ...segment.style, fontSize },
+		})),
 	} as Partial<PptxElement>;
 }

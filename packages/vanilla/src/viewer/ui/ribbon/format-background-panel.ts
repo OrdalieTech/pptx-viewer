@@ -1,4 +1,5 @@
 import type { SlideBackgroundActions } from '../../editor/editor-background-actions';
+import type { EditActions } from '../../editor/editor-edit-ops';
 import type { Translator } from '../../i18n';
 import { createEl } from '../../render';
 import { makeButton, makeColorControl } from '../controls';
@@ -22,7 +23,11 @@ export interface FormatBackgroundPanel {
 export function createFormatBackgroundPanel(
 	doc: Document,
 	t: Translator,
-	actions: Pick<SlideBackgroundActions, 'setSlideBackgroundColor' | 'clearSlideBackground'>,
+	actions: Pick<
+		SlideBackgroundActions,
+		'setSlideBackgroundColor' | 'clearSlideBackground' | 'setHideBackgroundGraphics'
+	> &
+		Partial<Pick<EditActions, 'pushRecentColor'>>,
 ): FormatBackgroundPanel {
 	const el = createEl(doc, 'div', 'pptxv-format-background-panel');
 	el.hidden = true;
@@ -34,6 +39,9 @@ export function createFormatBackgroundPanel(
 		{
 			label: t('pptx.slideBackground.colourAriaLabel'),
 			onInput: (hex) => actions.setSlideBackgroundColor(hex),
+			// The committed pick (native `change`, not the drag stream) joins the
+			// deck's "Recent colours" list like every other colour picker.
+			onCommit: (hex) => actions.pushRecentColor?.(hex),
 		},
 		'#ffffff',
 	);
@@ -54,6 +62,18 @@ export function createFormatBackgroundPanel(
 	label.textContent = t('pptx.slideBackground.colour');
 	row.append(label, colorControl.el, clearBtn.btn, closeBtn.btn);
 	el.appendChild(row);
+
+	const hideRow = createEl(doc, 'label', 'pptxv-format-background-hide-row');
+	const hideCheckbox = doc.createElement('input');
+	hideCheckbox.type = 'checkbox';
+	hideCheckbox.addEventListener('change', () => {
+		actions.setHideBackgroundGraphics(hideCheckbox.checked);
+	});
+	hideRow.append(
+		hideCheckbox,
+		doc.createTextNode(t('pptx.slideBackground.hideBackgroundGraphics')),
+	);
+	el.appendChild(hideRow);
 
 	let open = false;
 	const setOpen = (next: boolean): void => {

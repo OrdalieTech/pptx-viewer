@@ -23,6 +23,18 @@ export const translations = {
 	'pptx.options.general.userName': 'Benutzername',
 	'pptx.options.general.userInitials': 'Initialen',
 	'pptx.options.general.appearance': 'Viewer-Design',
+	'pptx.options.general.fonts': 'Schriftarten',
+	'pptx.options.general.fontsDescription':
+		'Präsentationen verwenden mitunter Schriftarten, die auf Ihrem Gerät nicht installiert sind; der Viewer ersetzt sie dann durch die nächstgelegene verfügbare Schrift. Wenn Sie die Schriftdatei hinzufügen, wird die Präsentation mit ihrer Originalschrift dargestellt.',
+	'pptx.options.general.enableCustomFonts': 'Schriftdateien in dieser Sitzung hinzufügen dürfen',
+	'pptx.options.general.enableCustomFontsInfo':
+		'Hinzugefügte Schriftarten werden für die Darstellung verwendet und erscheinen in der Schriftartenliste der Registerkarte Start. Sie werden nur im Arbeitsspeicher gehalten, niemals hochgeladen oder in der Präsentation gespeichert und beim Neuladen der Seite verworfen.',
+	'pptx.options.general.addFontFile': 'Schriftdatei hinzufügen',
+	'pptx.options.general.customFontsAdded': 'In dieser Sitzung hinzugefügte Schriftarten',
+	'pptx.options.general.customFontsEmpty': 'Noch keine Schriftarten hinzugefügt.',
+	'pptx.options.general.customFontsDisabled':
+		'Aktivieren Sie die obige Einstellung, um eine Schriftdatei hinzuzufügen.',
+	'pptx.options.general.customFontError': 'Diese Datei konnte nicht als Schriftart gelesen werden.',
 	'pptx.options.general.startup': 'Startoptionen',
 	'pptx.options.general.showStartScreen': 'Startbildschirm beim Start dieser Anwendung anzeigen',
 	'pptx.options.proofing.label': 'Dokumentprüfung',
@@ -59,12 +71,6 @@ export const translations = {
 	'pptx.options.save.minutes': 'Minuten',
 	'pptx.options.save.keepLastAutoRecovered':
 		'Beim Schließen ohne Speichern die letzte automatisch wiederhergestellte Version beibehalten',
-	'pptx.options.save.fidelity': 'Genauigkeit beim Freigeben dieser Präsentation beibehalten',
-	'pptx.options.save.embedFonts': 'Schriftarten in der Datei einbetten',
-	'pptx.options.save.embedFontsInfo':
-		'Das Einbetten von Schriftarten vergrößert die Datei, hält den Text aber auf anderen Geräten identisch.',
-	'pptx.options.save.embedAllCharacters':
-		'Alle Zeichen einbetten (am besten für die Bearbeitung durch andere Personen)',
 	'pptx.options.save.cache': 'Cacheeinstellungen',
 	'pptx.options.save.cacheRetentionDays':
 		'Anzahl der Tage, die Dateien im lokalen Dokumentcache aufbewahrt werden',
@@ -113,6 +119,9 @@ export const translations = {
 	'pptx.options.advanced.display': 'Anzeige',
 	'pptx.options.advanced.recentCount': 'Diese Anzahl zuletzt verwendeter Präsentationen anzeigen',
 	'pptx.options.advanced.disableHardwareAcceleration': 'Hardwaregrafikbeschleunigung deaktivieren',
+	'pptx.options.advanced.disable3DRendering': '3D-Rendering deaktivieren (für die Leistung)',
+	'pptx.options.advanced.disable3DRenderingInfo':
+		'Erzwingt bei jeder 3D-Diagramm- und SmartArt-Szene die flache 2D-Darstellung, selbst wenn eine Präsentation 3D aktiviert. Aktivieren Sie dies, wenn 3D-Szenen auf diesem Gerät langsam laufen.',
 	'pptx.options.advanced.openDocumentsView': 'Alle Dokumente in dieser Ansicht öffnen',
 	'pptx.options.openView.savedView': 'Die in der Datei gespeicherte Ansicht',
 	'pptx.options.openView.normal': 'Normal',

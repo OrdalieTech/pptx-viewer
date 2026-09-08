@@ -1,26 +1,46 @@
 <script setup lang="ts">
-import type { PptxTableCellStyle, PptxTableData } from 'pptx-viewer-core';
-import { TABLE_STYLE_PRESETS } from 'pptx-viewer-shared';
+import type { ParsedTableStyleMap, PptxTableData } from 'pptx-viewer-core';
+import type { TableInspectorChanges } from 'pptx-viewer-shared';
+import {
+	applyTableStylePreset,
+	TABLE_STYLE_PRESETS,
+	tableStyleAssignmentUpdate,
+} from 'pptx-viewer-shared';
+import { ref } from 'vue';
 import { useI18n } from 'vue-i18n';
+
+import TableStyleEditor from './TableStyleEditor.vue';
 
 /**
  * TableStyleOptions: Vue port of the structure/style toggles + quick-style
  * preset grid from React's inspector `TablePropertiesPanel.tsx`. Emits a
  * `Partial<PptxTableData>` patch (banding flags, band cycle counts, or a full
  * re-styled `rows` array) that the parent merges into the element's tableData.
+ *
+ * `tableStyleMap` is optional/absent when the host has not yet wired the
+ * table-style-DEFINITION-editor feature through (see `TableStyleEditor.vue`'s
+ * docblock); the "Edit style..." button then simply does not render.
  */
 const props = defineProps<{
 	tableData: PptxTableData;
 	canEdit: boolean;
+	tableStyleMap?: ParsedTableStyleMap;
 }>();
 
 const emit = defineEmits<{
 	update: [patch: Partial<PptxTableData>];
+	tableStyleMapChange: [nextMap: ParsedTableStyleMap];
+	deleteTableStyle: [styleId: string];
 }>();
+
+const showStyleEditor = ref(false);
 
 const { t } = useI18n();
 
-const TOGGLES: Array<[keyof PptxTableData, string]> = [
+// Keyed to `TableInspectorChanges` (shared `table-inspector.ts`): the
+// authoritative set of table-level style flags the inspector may toggle, so an
+// addition/removal there is a type error here instead of a silent drift.
+const TOGGLES: Array<[keyof TableInspectorChanges, string]> = [
 	['bandedRows', 'pptx.table.bandedRows'],
 	['firstRowHeader', 'pptx.table.headerRow'],
 	['bandedColumns', 'pptx.table.bandedColumns'],
@@ -29,7 +49,7 @@ const TOGGLES: Array<[keyof PptxTableData, string]> = [
 	['lastRow', 'pptx.table.lastRow'],
 ];
 
-function toggle(key: keyof PptxTableData, event: Event): void {
+function toggle(key: keyof TableInspectorChanges, event: Event): void {
 	emit('update', { [key]: (event.target as HTMLInputElement).checked });
 }
 
@@ -39,29 +59,12 @@ function setCycle(key: 'bandRowCycle' | 'bandColCycle', event: Event): void {
 }
 
 function applyPreset(preset: (typeof TABLE_STYLE_PRESETS)[number]): void {
-	const td = props.tableData;
-	const headerRow = Boolean(td.firstRowHeader);
-	const banded = Boolean(td.bandedRows);
-	const rows = td.rows.map((row, ri) => ({
-		...row,
-		cells: row.cells.map((cell) => {
-			const isHeader = ri === 0 && headerRow;
-			const bodyOffset = ri - (headerRow ? 1 : 0);
-			const style: PptxTableCellStyle = {
-				...cell.style,
-				backgroundColor: isHeader
-					? preset.headerBg
-					: banded && bodyOffset % 2 === 0
-						? preset.bandBg
-						: undefined,
-				color: isHeader ? preset.headerFg : cell.style?.color,
-				bold: isHeader ? true : cell.style?.bold,
-				borderColor: preset.borderColor,
-			};
-			return { ...cell, style };
-		}),
-	}));
-	emit('update', { rows });
+	emit('update', { rows: applyTableStylePreset(props.tableData, preset) });
+}
+
+/** A newly-created style (from "Edit style...") becomes this table's style. */
+function assignStyle(styleId: string): void {
+	emit('update', tableStyleAssignmentUpdate(styleId));
 }
 </script>
 
@@ -127,6 +130,26 @@ function applyPreset(preset: (typeof TABLE_STYLE_PRESETS)[number]): void {
 					</div>
 				</button>
 			</div>
+			<button
+				v-if="tableStyleMap !== undefined"
+				type="button"
+				class="mt-1.5 self-start rounded bg-muted hover:bg-accent px-2 py-1 text-[11px] transition-colors"
+				:disabled="!canEdit"
+				@click="showStyleEditor = !showStyleEditor"
+			>
+				{{ t('pptx.tableStyleEditor.editButton') }}
+			</button>
 		</div>
+
+		<TableStyleEditor
+			v-if="showStyleEditor && tableStyleMap !== undefined"
+			:style-map="tableStyleMap"
+			:style-id="tableData.tableStyleId"
+			:can-edit="canEdit"
+			@style-map-change="(m) => emit('tableStyleMapChange', m)"
+			@delete-style="(id) => emit('deleteTableStyle', id)"
+			@assign-style="assignStyle"
+			@close="showStyleEditor = false"
+		/>
 	</div>
 </template>

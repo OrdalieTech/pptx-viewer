@@ -1,12 +1,19 @@
 <script lang="ts">
 	/**
 	 * FillStrokeSection: flat fill/stroke colour (as before), plus fill/stroke
-	 * opacity sliders and a gradient-fill toggle. When the gradient toggle is on,
-	 * {@link GradientPanel} renders the linear/radial + angle + stop editor built
-	 * on the shared `gradient-picker.ts`, matching the vanilla binding's scope.
-	 * Shown only for elements that pass `hasShapeProperties`.
+	 * opacity sliders, a gradient-fill toggle, and a pattern-fill toggle
+	 * (mutually exclusive with gradient, both mutually exclusive with solid).
+	 * When the gradient toggle is on, {@link GradientPanel} renders the
+	 * linear/radial + angle + stop editor built on the shared
+	 * `gradient-picker.ts`; when the pattern toggle is on,
+	 * {@link PatternFillPanel} renders the 56-preset swatch grid built on
+	 * shared `fill-pattern-label-keys.ts` / `fill-style.ts`, matching the
+	 * vanilla binding's scope. Shown only for elements that pass
+	 * `hasShapeProperties`.
 	 */
 	import type { PptxElement } from 'pptx-viewer-core';
+	import { hasShapeProperties } from 'pptx-viewer-core';
+	import type { ThemeColorPickerCommit } from 'pptx-viewer-shared';
 	import {
 		fillColorOf,
 		gradientStateOf,
@@ -26,6 +33,9 @@
 		strokeOpacityOf,
 	} from '../../editor';
 	import GradientPanel from './GradientPanel.svelte';
+	import PatternFillPanel from './PatternFillPanel.svelte';
+	import RecentColorsRow from './RecentColorsRow.svelte';
+	import ThemeColorSwatchGrid from './ThemeColorSwatchGrid.svelte';
 
 	const { editor, el }: { editor: EditorState; el: PptxElement } = $props();
 	const t = useTranslator();
@@ -35,6 +45,9 @@
 	const fillOpacity = $derived(fillOpacityOf(el));
 	const strokeOpacity = $derived(strokeOpacityOf(el));
 	const gradientOn = $derived(hasGradientFill(el));
+	const patternOn = $derived(
+		hasShapeProperties(el) ? el.shapeStyle?.fillMode === 'pattern' : false,
+	);
 
 	function pct(value: number): string {
 		return `${Math.round(value * 100)}%`;
@@ -47,6 +60,48 @@
 			editor.patchSelected(setSolidFillPatch(el, fill));
 		}
 	}
+
+	function commitFill(hex: string): void {
+		editor.patchSelected(setSolidFillPatch(el, hex, undefined));
+		editor.recordRecentColor(hex);
+	}
+
+	function commitFillTheme(commit: ThemeColorPickerCommit): void {
+		editor.patchSelected(setSolidFillPatch(el, commit.hex, commit.ref));
+		editor.recordRecentColor(commit.hex);
+	}
+
+	function commitStroke(hex: string): void {
+		editor.patchSelected(setStrokeColorPatch(el, hex, undefined));
+		editor.recordRecentColor(hex);
+	}
+
+	function commitStrokeTheme(commit: ThemeColorPickerCommit): void {
+		editor.patchSelected(setStrokeColorPatch(el, commit.hex, commit.ref));
+		editor.recordRecentColor(commit.hex);
+	}
+
+	const fillColorRef = $derived(hasShapeProperties(el) ? el.shapeStyle?.fillColorRef : undefined);
+	const strokeColorRef = $derived(
+		hasShapeProperties(el) ? el.shapeStyle?.strokeColorRef : undefined,
+	);
+
+	function togglePattern(checked: boolean): void {
+		if (checked) {
+			const style = hasShapeProperties(el) ? el.shapeStyle : undefined;
+			editor.patchSelected({
+				shapeStyle: {
+					...style,
+					fillMode: 'pattern',
+					fillPatternPreset: style?.fillPatternPreset ?? 'pct20',
+					fillColor: fill,
+					fillPatternBackgroundColor: style?.fillPatternBackgroundColor ?? '#ffffff',
+				},
+			} as Partial<PptxElement>);
+		} else {
+			editor.patchSelected(setSolidFillPatch(el, fill));
+		}
+	}
 </script>
 
 <div class="pptx-svelte-inspector-color-row">
@@ -55,16 +110,30 @@
 		<input
 			type="color"
 			value={/^#/.test(fill) ? fill : '#ffffff'}
-			onchange={(e) => editor.patchSelected(setSolidFillPatch(el, e.currentTarget.value))}
+			onchange={(e) => commitFill(e.currentTarget.value)}
 		/>
+		<ThemeColorSwatchGrid
+			themeColorMap={editor.themeColorMap}
+			selectedRef={fillColorRef}
+			selectedHex={fill}
+			onpick={commitFillTheme}
+		/>
+		<RecentColorsRow colors={editor.mruColors} onselect={commitFill} />
 	</label>
 	<label class="pptx-svelte-inspector-color">
 		<span>{t('pptx.inspector.line')}</span>
 		<input
 			type="color"
 			value={/^#/.test(stroke) ? stroke : '#000000'}
-			onchange={(e) => editor.patchSelected(setStrokeColorPatch(el, e.currentTarget.value))}
+			onchange={(e) => commitStroke(e.currentTarget.value)}
 		/>
+		<ThemeColorSwatchGrid
+			themeColorMap={editor.themeColorMap}
+			selectedRef={strokeColorRef}
+			selectedHex={stroke}
+			onpick={commitStrokeTheme}
+		/>
+		<RecentColorsRow colors={editor.mruColors} onselect={commitStroke} />
 	</label>
 </div>
 
@@ -106,6 +175,19 @@
 
 {#if gradientOn}
 	<GradientPanel {editor} {el} />
+{/if}
+
+<label class="pptx-svelte-field-checkbox">
+	<input
+		type="checkbox"
+		checked={patternOn}
+		onchange={(e) => togglePattern(e.currentTarget.checked)}
+	/>
+	<span>{t('pptx.table.patternPreset')}</span>
+</label>
+
+{#if patternOn}
+	<PatternFillPanel {editor} {el} />
 {/if}
 
 <style>

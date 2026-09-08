@@ -49,7 +49,6 @@ export interface RibbonProps {
 	ondownload: () => void;
 	ondownloadppsx: () => void;
 	ondownloadpptm: () => void;
-	onpackage: () => void;
 	onversionhistory: () => void;
 	hasMacros: boolean;
 	embeddedFontNames: string[];
@@ -78,6 +77,11 @@ export interface RibbonProps {
 	onfromcurrent: () => void;
 	onpresenter: () => void;
 	onsetupslideshow: () => void;
+	/**
+	 * PowerPoint's Hide Slide: mark the ACTIVE slide to be skipped during the
+	 * show while it stays in the deck, the thumbnail rail and the sorter.
+	 */
+	onhideslide: () => void;
 	onheaderfooter: () => void;
 	oncompare: () => void;
 	onshortcuts: () => void;
@@ -90,6 +94,12 @@ export interface RibbonProps {
 	oncustomshows: () => void;
 	onselectionpane: () => void;
 	onslidesorter: () => void;
+	/** View tab > Outline View: the deck as one editable indented text document. */
+	onoutlineview?: () => void;
+	/** View tab > Reading View: the deck at full window size, chrome reduced to a nav bar. */
+	onreadingview?: () => void;
+	/** View tab > Normal: leave slide sorter / slide show for the editing view. */
+	onnormal?: () => void;
 	preferences: ViewerPreferences;
 	onpreferenceschange: (preferences: ViewerPreferences) => void;
 	showGuides: boolean;

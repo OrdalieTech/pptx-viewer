@@ -1,5 +1,12 @@
 import { hasTextProperties } from 'pptx-viewer-core';
 import type { PptxElement, TextStyle } from 'pptx-viewer-core';
+import {
+	beginShapeAdjustment,
+	canInteractWithElement,
+	filterInteractableIds,
+	resolveInlineEditAutoFitHeight,
+	resolveInlineEditNormAutofitShrink,
+} from 'pptx-viewer-shared';
 /** useCanvasInteractions: Canvas interaction handlers for the PowerPoint editor. */
 import { useRef } from 'react';
 
@@ -9,6 +16,7 @@ import type {
 	MarqueeSelectionState,
 	ResizeState,
 	ShapeAdjustmentDragState,
+	ShapeAdjustmentHandleDescriptor,
 	ElementContextMenuState,
 } from '../types';
 import type { ViewerMode } from '../types-core';
@@ -38,6 +46,13 @@ export interface UseCanvasInteractionsInput {
 	resizeStateRef: React.MutableRefObject<ResizeState | null>;
 	shapeAdjustmentDragStateRef: React.MutableRefObject<ShapeAdjustmentDragState | null>;
 	marqueeStateRef: React.MutableRefObject<MarqueeSelectionState | null>;
+	/**
+	 * Set by `processPointerUp` when a drag/resize/adjustment gesture just moved
+	 * the element; consumed here to tell that gesture's trailing click apart from
+	 * a genuine second click on an already-selected element. See
+	 * `ViewerCoreState.justInteractedRef`.
+	 */
+	justInteractedRef: React.MutableRefObject<boolean>;
 	setInlineEditingElementId: React.Dispatch<React.SetStateAction<string | null>>;
 	setInlineEditingText: React.Dispatch<React.SetStateAction<string>>;
 	setContextMenuState: React.Dispatch<React.SetStateAction<ElementContextMenuState | null>>;
@@ -57,6 +72,23 @@ export interface UseCanvasInteractionsInput {
 	 * never to programmatic segment remaps.
 	 */
 	transformCommittedText?: (text: string) => string;
+}
+
+/**
+ * True when a mousedown on an element should replace the selection and arm a
+ * drag.
+ *
+ * A modifier-click must not: it is a selection *toggle*, and the click handler
+ * that follows owns it. While mousedown replaced the selection unconditionally,
+ * the click's toggle then saw the just-clicked element as already selected and
+ * removed it again, so Shift+click could never build a multi-selection and
+ * Ctrl+G had nothing to group.
+ */
+export function mouseDownStartsSelectionDrag(event: {
+	shiftKey: boolean;
+	metaKey: boolean;
+}): boolean {
+	return !event.shiftKey && !event.metaKey;
 }
 
 export function useCanvasInteractions(
@@ -79,6 +111,7 @@ export function useCanvasInteractions(
 		resizeStateRef,
 		shapeAdjustmentDragStateRef,
 		marqueeStateRef,
+		justInteractedRef,
 		setInlineEditingElementId,
 		setInlineEditingText,
 		setContextMenuState,
@@ -111,9 +144,33 @@ export function useCanvasInteractions(
 				? transformCommittedText(inlineEditingText)
 				: inlineEditingText;
 			const newSegments = remapTextToSegments(committedText, el.textSegments, el.textStyle);
+			// `a:spAutoFit` ("Resize shape to fit text"): grow/shrink the shape to
+			// the text's natural content height, the way PowerPoint does. The
+			// editor's DOM node is still mounted here (the state update below is
+			// what unmounts it, and that only takes effect on the next render), so
+			// this measures the live, still-focused element rather than a stale
+			// snapshot.
+			const editorEl = document.querySelector<HTMLElement>('[data-inline-editor]');
+			const newHeight = resolveInlineEditAutoFitHeight(el.textStyle, el.height, editorEl);
+			// `a:normAutofit` ("Shrink text on overflow"): recompute the font
+			// scale/line-spacing reduction so the (possibly now longer or
+			// shorter) text still fits the shape, the way PowerPoint does.
+			// Mutually exclusive with the `spAutoFit` resize above (both read
+			// `autoFitMode`, only one of the two modes is ever set).
+			const shrink = resolveInlineEditNormAutofitShrink(el.textStyle, el.height, editorEl);
 			ops.updateElementById(editId, {
 				text: committedText,
 				textSegments: newSegments,
+				...(newHeight !== undefined ? { height: newHeight } : {}),
+				...(shrink !== 'unchanged'
+					? {
+							textStyle: {
+								...el.textStyle,
+								autoFitFontScale: shrink.fontScale,
+								autoFitLineSpacingReduction: shrink.lnSpcReduction,
+							},
+						}
+					: {}),
 			} as Partial<PptxElement>);
 			history.markDirty();
 		}
@@ -165,11 +222,22 @@ export function useCanvasInteractions(
 			// this mouseDown+click sequence. If justSelectedRef is true, this click
 			// was the initial selection click - skip inline editing so resize handles
 			// remain visible.
-			if (justSelectedRef.current) {
+			//
+			// justInteractedRef guards a second case: a drag/resize/adjustment
+			// gesture that just moved this element ends with the pointer back over
+			// the same DOM node it went down on (a dragged shape keeps the same
+			// point under the cursor; an SE handle tracks the pointer 1:1), so the
+			// browser still fires this `click` even though nothing was "clicked" by
+			// the user's intent. Without this guard that click reads as "clicked an
+			// already-selected element again" and opens the inline editor, whose
+			// blur then rebuilds textSegments from plain text and drops OOXML
+			// round-trip-only fields - and pushes a spurious extra undo entry.
+			if (justSelectedRef.current || justInteractedRef.current) {
 				justSelectedRef.current = false;
+				justInteractedRef.current = false;
 			} else {
 				const el = elementLookup.get(elementId);
-				if (el && hasTextProperties(el) && !el.locks?.noTextEdit) {
+				if (el && hasTextProperties(el) && canInteractWithElement(el, 'textEdit')) {
 					// Equations open the equation editor (same as double-click);
 					// letting them into inline text editing destroys the OMML.
 					if (!openEquationEditorForElement(el)) {
@@ -191,7 +259,7 @@ export function useCanvasInteractions(
 		if (openEquationEditorForElement(el)) {
 			return;
 		}
-		if (hasTextProperties(el)) {
+		if (hasTextProperties(el) && canInteractWithElement(el, 'textEdit')) {
 			setInlineEditingElementId(elementId);
 			setInlineEditingText(el.text ?? '');
 		}
@@ -206,6 +274,9 @@ export function useCanvasInteractions(
 		// run), so commit deterministically rather than relying on blur ordering.
 		if (inlineEditingElementId && inlineEditingElementId !== elementId) {
 			handleInlineEditCommit();
+		}
+		if (!mouseDownStartsSelectionDrag(e)) {
+			return;
 		}
 		const wasSelected = selectedElementIdSet.has(elementId);
 		if (!wasSelected) {
@@ -223,9 +294,18 @@ export function useCanvasInteractions(
 			: effectiveSelectedIds.length
 				? effectiveSelectedIds
 				: [elementId];
+		// `a:spLocks/@noMove` pins a shape: it may still be selected (so the
+		// inspector can unlock it) but it must not travel with the drag, and a
+		// multi-selection drags only its movable members - exactly as PowerPoint
+		// does. Arming an empty drag would move nothing and still swallow the
+		// trailing click, so bail out entirely when nothing is movable.
+		const movableIds = filterInteractableIds(ids, (id) => elementLookup.get(id), 'move');
+		if (movableIds.length === 0) {
+			return;
+		}
 		const startPositions: Record<string, { x: number; y: number }> = {};
 		const domEls = new Map<string, HTMLElement>();
-		for (const id of ids) {
+		for (const id of movableIds) {
 			const el = elementLookup.get(id);
 			if (el) {
 				startPositions[id] = { x: el.x, y: el.y };
@@ -297,7 +377,7 @@ export function useCanvasInteractions(
 	const handleResizePointerDown = (elementId: string, e: React.MouseEvent, handle: string) => {
 		e.stopPropagation();
 		const el = elementLookup.get(elementId);
-		if (!el) {
+		if (!el || !canInteractWithElement(el, 'resize')) {
 			return;
 		}
 		resizeStateRef.current = {
@@ -320,7 +400,7 @@ export function useCanvasInteractions(
 
 	const handleRotate = (elementId: string, rotationDeg: number) => {
 		const el = elementLookup.get(elementId);
-		if (!el || el.locks?.noRotation) {
+		if (!el || !canInteractWithElement(el, 'rotate')) {
 			return;
 		}
 		ops.updateElementById(elementId, { rotation: rotationDeg } as Partial<PptxElement>);
@@ -350,30 +430,29 @@ export function useCanvasInteractions(
 		ops.updateSelectedTextStyle(updates);
 	};
 
-	const handleAdjustmentPointerDown = (elementId: string, e: React.MouseEvent) => {
+	const handleAdjustmentPointerDown = (
+		elementId: string,
+		e: React.MouseEvent,
+		descriptor: ShapeAdjustmentHandleDescriptor,
+	) => {
 		e.stopPropagation();
 		const el = elementLookup.get(elementId);
-		if (!el || !('shapeType' in el) || !('shapeAdjustments' in el)) {
+		if (!el || !canInteractWithElement(el, 'adjustHandle')) {
 			return;
 		}
-		const adjEntries = Object.entries(
-			(el as { shapeAdjustments?: Record<string, number> }).shapeAdjustments ?? {},
+		// The gesture starts from the DESCRIPTOR the user actually grabbed, not
+		// from the element's first authored adjustment. The old code read
+		// `Object.entries(shapeAdjustments)[0]` and bailed when the map was empty,
+		// so a preset sitting on its `a:avLst` defaults (the common case for a
+		// shape inserted from the picker) had a handle that could not be dragged
+		// at all, and a multi-adjust preset always dragged its first guide
+		// whichever diamond was grabbed.
+		shapeAdjustmentDragStateRef.current = beginShapeAdjustment(
+			el,
+			descriptor,
+			e.clientX,
+			e.clientY,
 		);
-		if (!adjEntries.length) {
-			return;
-		}
-		const [key, value] = adjEntries[0];
-		shapeAdjustmentDragStateRef.current = {
-			elementId,
-			key,
-			shapeType: (el as { shapeType?: string }).shapeType ?? 'rect',
-			startClientX: e.clientX,
-			startClientY: e.clientY,
-			startAdjustment: value,
-			startWidth: el.width,
-			startHeight: el.height,
-			moved: false,
-		};
 	};
 
 	return {

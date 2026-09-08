@@ -1,5 +1,6 @@
+import { updateSlide } from 'pptx-viewer-shared';
+
 import type { Store, ViewerState } from '../state';
-import { updateSlide } from './editor-mutations';
 import type { EditorOps } from './editor-operations';
 
 /**
@@ -12,6 +13,8 @@ import type { EditorOps } from './editor-operations';
 export interface SlideBackgroundActions {
 	setSlideBackgroundColor(color: string): void;
 	clearSlideBackground(): void;
+	/** Toggle PowerPoint's "Hide Background Graphics" (`p:sld/@showMasterSp`). */
+	setHideBackgroundGraphics(hide: boolean): void;
 }
 
 export interface SlideBackgroundActionsDeps {
@@ -99,6 +102,18 @@ export function createSlideBackgroundActions(
 					backgroundGradient: undefined,
 					backgroundPattern: undefined,
 				}),
+			});
+			ops.commitChange();
+		},
+
+		setHideBackgroundGraphics(hide) {
+			const state = store.get();
+			if (!state.editable || state.masterViewTarget || !state.slides[state.currentSlide]) {
+				return;
+			}
+			ops.pushHistory();
+			store.set({
+				slides: updateSlide(state.slides, state.currentSlide, { showMasterShapes: !hide }),
 			});
 			ops.commitChange();
 		},

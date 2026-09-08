@@ -23,6 +23,18 @@ export type {
 // ── Shared API types ──
 export type { ViewerMode, PowerPointViewerAPI } from 'pptx-viewer-shared';
 
+// ── Slide template gallery (New Slide starter slides) ──
+export { SlideTemplateGalleryDialog } from './viewer/components/SlideTemplateGalleryDialog';
+export type { SlideTemplateGalleryDialogProps } from './viewer/components/SlideTemplateGalleryDialog';
+export { SlideTemplatePreview } from './viewer/components/SlideTemplatePreview';
+export type { SlideTemplatePreviewProps } from './viewer/components/SlideTemplatePreview';
+export {
+	SLIDE_TEMPLATES,
+	buildSlideTemplateContent,
+	buildSlideTemplateSlide,
+} from 'pptx-viewer-shared';
+export type { SlideTemplateId, SlideTemplateSpec } from 'pptx-viewer-shared';
+
 // ── AI assistant (optional; requires the `ai` + `@ai-sdk/react` peers) ──
 export type {
 	PptxAiBridge,
@@ -80,3 +92,20 @@ export type {
 	AccountAuthConfig,
 	LocalStorageUsageSummary,
 } from 'pptx-viewer-shared';
+
+// ── Openable-file allow list ───────────────────────────────────────────
+// The one answer to "can the viewer open this file?", so a host's drop target
+// and its `<input accept>` cannot disagree with the loader. Hand-rolled lists
+// drift: every demo in this repo shipped `.pptx,.ppt,.json`, which refused a
+// `.pptm` on drop that File > Open inside the viewer accepted without
+// complaint. Re-exported here so a host never has to reach into
+// `pptx-viewer-shared` (an internal, unpublished package) to get them.
+export {
+	PPTX_OPEN_ACCEPT,
+	PRESENTATION_OPEN_EXTENSIONS,
+	isSupportedPresentationFile,
+	isLegacyBinaryPresentation,
+	presentationBaseName,
+	savedPresentationFileName,
+} from 'pptx-viewer-shared';
+export type { SavedPresentationFormat } from 'pptx-viewer-shared';

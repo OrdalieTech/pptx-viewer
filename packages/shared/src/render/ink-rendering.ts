@@ -4,7 +4,10 @@
  * Pressure sensitivity is approximated by splitting an SVG path into short
  * sub-segments, each rendered as a filled circle at that point's coordinates.
  * The radius of each circle varies according to the corresponding entry in the
- * `inkWidths` array.
+ * `inkWidths` array. `C`/`Q` curve segments are sampled at multiple points
+ * along the actual curve (De Casteljau evaluation at several `t` steps), not
+ * just at their control points and endpoint, so pressure circles track a
+ * tightly curved stroke instead of trailing it.
  *
  * Replay animation uses SVG `stroke-dasharray` / `stroke-dashoffset` to
  * progressively reveal each stroke with a sequential delay.
@@ -16,6 +19,8 @@
  */
 
 import type { InkPptxElement, ContentPartInkStroke } from 'pptx-viewer-core';
+
+import { sampleCubicSegment, sampleQuadSegment } from './ink-curve-sampling';
 
 // ==========================================================================
 // SVG path point extraction
@@ -29,26 +34,94 @@ export interface PathPoint {
 	y: number;
 }
 
+/** Numeric argument count each supported path command consumes. */
+const PATH_COMMAND_ARITY: Record<string, number> = { M: 2, L: 2, C: 6, Q: 4, Z: 0 };
+
+/** One command letter plus every numeric argument that follows it (before the next letter). */
+interface RawPathToken {
+	cmd: string;
+	nums: number[];
+}
+
 /**
- * Parse an SVG path `d` string and extract coordinate points.
+ * Split a `d` string into command letters with their following numeric args.
+ * Case is folded to uppercase; relative (lowercase) commands are treated as
+ * absolute, matching this module's pre-existing (documented) limitation for
+ * non-absolute paths.
+ */
+function tokenizeSvgPath(d: string): RawPathToken[] {
+	const tokens: RawPathToken[] = [];
+	const partRegex = /([MLCQZmlcqz])|(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/giu;
+	let cmd: string | null = null;
+	let nums: number[] = [];
+	let match: RegExpExecArray | null;
+	const flush = () => {
+		if (cmd) {
+			tokens.push({ cmd: cmd.toUpperCase(), nums });
+		}
+	};
+	while ((match = partRegex.exec(d)) !== null) {
+		if (match[1]) {
+			flush();
+			cmd = match[1];
+			nums = [];
+		} else if (match[2] !== undefined && cmd) {
+			nums.push(parseFloat(match[2]));
+		}
+	}
+	flush();
+	return tokens;
+}
+
+/**
+ * Parse an SVG path `d` string and extract points that lie ON the path.
  *
- * Supports M/m, L/l, C/c, Q/q, Z/z commands. Curves are sampled
- * at their control points and endpoints (not interpolated) for
- * lightweight processing. This is sufficient for pressure-width
- * rendering where each extracted point gets a circle overlay.
+ * Supports M/m, L/l, C/c, Q/q, Z/z commands. Straight `M`/`L` segments
+ * contribute their single endpoint, same as before. Curved `C`/`Q` segments
+ * are evaluated at several parametric `t` steps via De Casteljau's algorithm
+ * (not just their control points and endpoint), with the sample count scaled
+ * to the segment's control-polygon length, so a heavily curved stroke gets a
+ * run of points that actually sit on the curve instead of cutting the corner
+ * through its (off-curve) control points.
  */
 export function extractPathPoints(d: string): PathPoint[] {
 	const points: PathPoint[] = [];
-	// Match all numeric pairs following SVG path commands
-	const numberRegex = /-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/giu;
-	const numbers: number[] = [];
-	let match: RegExpExecArray | null;
-	while ((match = numberRegex.exec(d)) !== null) {
-		numbers.push(parseFloat(match[0]));
-	}
+	let current: PathPoint | undefined;
 
-	for (let i = 0; i < numbers.length - 1; i += 2) {
-		points.push({ x: numbers[i], y: numbers[i + 1] });
+	for (const { cmd, nums } of tokenizeSvgPath(d)) {
+		const arity = PATH_COMMAND_ARITY[cmd];
+		if (cmd === 'Z' || arity === undefined) {
+			continue;
+		}
+		for (let offset = 0; offset + arity <= nums.length; offset += arity) {
+			const chunk = nums.slice(offset, offset + arity);
+			// Coordinate pairs after the first under an `M` command are
+			// implicit linetos per the SVG spec.
+			const effective = cmd === 'M' && offset > 0 ? 'L' : cmd;
+			if (effective === 'M' || effective === 'L') {
+				const pt = { x: chunk[0], y: chunk[1] };
+				points.push(pt);
+				current = pt;
+			} else if (effective === 'C') {
+				current = sampleCubicSegment(
+					points,
+					current,
+					{ x: chunk[0], y: chunk[1] },
+					{ x: chunk[2], y: chunk[3] },
+					{ x: chunk[4], y: chunk[5] },
+				);
+			} else if (effective === 'Q') {
+				current = sampleQuadSegment(
+					points,
+					current,
+					{ x: chunk[0], y: chunk[1] },
+					{
+						x: chunk[2],
+						y: chunk[3],
+					},
+				);
+			}
+		}
 	}
 
 	return points;

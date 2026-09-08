@@ -1,13 +1,22 @@
 <script setup lang="ts">
 import { X } from 'lucide-vue-next';
 import type { ChartPptxElement, PptxChartData, PptxChartType, PptxElement } from 'pptx-viewer-core';
-import { GROUPING_OPTIONS, GROUPING_SUPPORTED_TYPES, CHART_TYPE_OPTIONS } from 'pptx-viewer-shared';
-import { computed } from 'vue';
+import type { ChartTypeSelectValue } from 'pptx-viewer-shared';
+import {
+	collapseChartTitleRunsForEdit,
+	GROUPING_OPTIONS,
+	GROUPING_SUPPORTED_TYPES,
+	CHART_TYPE_OPTIONS,
+	resolveDisplayedChartType,
+} from 'pptx-viewer-shared';
+import { computed, inject } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { injectChartCanvasEdit } from '../../composables/chart-part-selection';
+import { injectRecentColors } from '../../composables/recent-colors-context';
 import { useChartEditing } from '../../composables/useChartEditing';
 import { useDebouncedCallback } from '../../composables/useDebouncedCallback';
+import { ViewerOptionsKey } from '../../composables/useViewerOptionsStore';
 import ChartAxisOptions from './ChartAxisOptions.vue';
 import ChartAxisStyleOptions from './ChartAxisStyleOptions.vue';
 import ChartComboTypeOptions from './ChartComboTypeOptions.vue';
@@ -18,7 +27,9 @@ import ChartDataPointOptions from './ChartDataPointOptions.vue';
 import ChartDisplayOptions from './ChartDisplayOptions.vue';
 import ChartErrorBarOptions from './ChartErrorBarOptions.vue';
 import ChartMarkerOptions from './ChartMarkerOptions.vue';
+import ChartSubtypeOptions from './ChartSubtypeOptions.vue';
 import ChartTrendlineOptions from './ChartTrendlineOptions.vue';
+import ChartUserShapeOptions from './ChartUserShapeOptions.vue';
 
 /**
  * ChartPanel: inspector panel for chart elements, at full parity with the React
@@ -42,6 +53,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const recentColors = injectRecentColors();
 
 const DEFAULT_SERIES_COLOR = '#4472c4';
 
@@ -55,7 +67,14 @@ const chartData = computed<PptxChartData | null>(() => chartElement.value?.chart
 
 const series = computed(() => chartData.value?.series ?? []);
 const categories = computed(() => chartData.value?.categories ?? []);
-const currentType = computed<PptxChartType | ''>(() => chartData.value?.chartType ?? '');
+// "Pareto" has no `PptxChartType` of its own (docs/guide/limitations.md's
+// ChartEx row): it is `chartType: 'histogram'` plus a `paretoLine`-layout
+// series, so the select must resolve it via `resolveDisplayedChartType`
+// rather than reading `chartData.chartType` raw, or a re-opened Pareto chart
+// reads back showing "Histogram" as selected.
+const currentType = computed<ChartTypeSelectValue | ''>(() =>
+	chartData.value ? resolveDisplayedChartType(chartData.value) : '',
+);
 const currentTitle = computed<string>(() => chartData.value?.title ?? '');
 const currentGrouping = computed<string>(() => chartData.value?.grouping ?? 'clustered');
 
@@ -78,7 +97,16 @@ function emitChartData(next: PptxChartData): void {
 	emit('update', { chartData: next } as Partial<PptxElement>);
 }
 
-const editing = useChartEditing(chartElement, chartData, emitChartData);
+// File > Options > Advanced > "Properties follow chart data point for
+// current workbook": whether per-point manual formatting re-indexes with the
+// underlying data (default) or stays pinned to its old position. Undefined
+// (no provider, e.g. a standalone unit test) falls back to PowerPoint's own
+// default of `true`.
+const viewerOptions = inject(ViewerOptionsKey, undefined);
+const getFollowDataPoint = (): boolean =>
+	viewerOptions?.value.advanced.chartPropertiesFollowDataPoint ?? true;
+
+const editing = useChartEditing(chartElement, chartData, emitChartData, getFollowDataPoint);
 
 // Series colour commits are debounced (~180ms) so dragging through the native
 // colour picker collapses into one history-friendly update, matching React.
@@ -92,7 +120,15 @@ function onTypeChange(event: Event): void {
 }
 
 function onTitleInput(event: Event): void {
-	editing.patchChartData({ title: (event.target as HTMLInputElement).value });
+	// A multi-run title collapses to one run in its dominant style so an edit
+	// does not leave another, now-stale run's text trailing the new title;
+	// see `collapseChartTitleRunsForEdit`'s doc.
+	editing.patchChartData(
+		collapseChartTitleRunsForEdit(
+			chartData.value ?? undefined,
+			(event.target as HTMLInputElement).value,
+		),
+	);
 }
 
 function onGroupingChange(event: Event): void {
@@ -103,6 +139,10 @@ function onGroupingChange(event: Event): void {
 
 function onSeriesColorInput(event: Event, index: number): void {
 	commitSeriesColor(index, (event.target as HTMLInputElement).value);
+}
+
+function onSeriesColorCommit(event: Event): void {
+	recentColors?.push((event.target as HTMLInputElement).value);
 }
 
 function onClearSeriesColor(index: number): void {
@@ -130,6 +170,7 @@ const CONTROL =
 			<label :class="FIELD">
 				<span :class="LABEL">{{ t('pptx.chart.type') }}</span>
 				<select
+					:aria-label="t('pptx.chart.type')"
 					:class="['pptx-vue-chart-select', CONTROL]"
 					data-testid="chart-type"
 					:value="currentType"
@@ -156,6 +197,7 @@ const CONTROL =
 			<label v-if="showGrouping" :class="FIELD">
 				<span :class="LABEL">{{ t('pptx.chart.grouping') }}</span>
 				<select
+					:aria-label="t('pptx.chart.grouping')"
 					:class="['pptx-vue-chart-select', CONTROL]"
 					data-testid="chart-grouping"
 					:value="currentGrouping"
@@ -167,7 +209,13 @@ const CONTROL =
 				</select>
 			</label>
 
-			<ChartDisplayOptions :style="chartData.style" @update="editing.updateStyle" />
+			<ChartDisplayOptions
+				:chart-data="chartData"
+				@update="editing.updateStyle"
+				@update-chart-data="editing.patchChartData"
+			/>
+
+			<ChartSubtypeOptions :chart-data="chartData" @update-chart-data="editing.patchChartData" />
 
 			<ChartDataLabelOptions :style="chartData.style" @update="editing.updateStyle" />
 
@@ -235,6 +283,7 @@ const CONTROL =
 						:value="s.color || DEFAULT_SERIES_COLOR"
 						:aria-label="t('pptx.chart.seriesColor', { name: s.name })"
 						@input="onSeriesColorInput($event, si)"
+						@change="onSeriesColorCommit"
 					/>
 					<button
 						v-if="s.color"
@@ -247,6 +296,8 @@ const CONTROL =
 					</button>
 				</div>
 			</div>
+
+			<ChartUserShapeOptions :chart-data="chartData" @update-chart-data="editing.patchChartData" />
 
 			<ChartDataGrid
 				:series="series"

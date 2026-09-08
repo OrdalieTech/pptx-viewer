@@ -11,6 +11,7 @@
 // Text types: TextStyle, BulletInfo, TextSegment
 // ==========================================================================
 
+import type { PptxThemeColorRef } from './color-ref';
 import type { UnderlineStyle, XmlObject } from './common';
 import type { EffectDagContainer } from './effect-dag';
 import type { Pptx3DScene, PptxTextWarpPreset, Text3DStyle } from './three-d';
@@ -49,17 +50,79 @@ import type { Pptx3DScene, PptxTextWarpPreset, Text3DStyle } from './three-d';
  * // => both satisfy the TextStyle interface
  * ```
  */
+/** 2D linear transform matrix `[a, b, c, d]` for inherited group orientation. */
+export type TextOrientationMatrix = [number, number, number, number];
+
 export interface TextStyle {
+	/**
+	 * Combined rotation/flip matrix inherited from ancestor groups.
+	 * Used only to keep descendant text readable after nested group mirrors.
+	 */
+	ancestorGroupTransform?: TextOrientationMatrix;
 	/** Original `a:rPr` XML retained by projections that share the shape-text model. */
 	runPropertiesXml?: XmlObject;
+	/**
+	 * The properties this run's OWN `a:rPr` authored, and nothing else.
+	 *
+	 * A run style is assembled as
+	 * `{...inheritedRunStyle, ...authoredRunStyle}`, so the flat style is a
+	 * fully RESOLVED view: it cannot say whether `fontSize: 60` came from the
+	 * run, from the shape's `a:lstStyle`, from the layout placeholder, from the
+	 * master `p:txStyles` or from the theme. Omission is meaningful in OOXML
+	 * (§21.1.2.3), so a writer that re-emits the resolved view converts every
+	 * inherited value into an authored one and the deck stops being
+	 * theme-driven after one save.
+	 *
+	 * This is the run-scope twin of {@link TextSegment.paragraphProperties},
+	 * which is parsed strictly from the paragraph's own `a:pPr` for the same
+	 * reason. Present only for runs that came from a parsed deck; absent for
+	 * SDK-built text, where the flat style IS the only description and must be
+	 * written out in full.
+	 */
+	authoredRunStyle?: TextStyle;
+	/**
+	 * The resolved inheritance baseline {@link authoredRunStyle} was layered
+	 * on top of (shape `a:lstStyle` -> placeholder -> layout -> master
+	 * `p:txStyles` -> theme -> `p:defaultTextStyle`).
+	 *
+	 * Kept alongside the authored half because the two answer different
+	 * questions. The authored half says "the source pinned this"; the baseline
+	 * says "this value is what inheritance already produces", which is how an
+	 * EDIT is told apart from an inherited value: an editor mutates the flat
+	 * style without knowing about either field, so a property that now differs
+	 * from the baseline was either authored or edited and must be written,
+	 * while one that still matches can be left to inherit.
+	 *
+	 * Holds a reference to the per-paragraph baseline object rather than a
+	 * copy, so carrying it costs one pointer per run.
+	 */
+	inheritedRunStyle?: TextStyle;
+	/**
+	 * Snapshot of the ELEMENT-scope paragraph geometry (alignment, margins,
+	 * indent, line and paragraph spacing, tab stops, rtl, line-break flags) as
+	 * the load pipeline resolved it.
+	 *
+	 * Present only on an `element.textStyle` that came from a parsed deck, and
+	 * populated only with the geometry keys. It exists so the save path can
+	 * answer one question it otherwise cannot: has the user CHANGED the body's
+	 * alignment or indent, or is the value simply what the shape's
+	 * `a:lstStyle`, its layout placeholder and the master already produce?
+	 * Element-level text panels (`textAdvancedPatch`, `alignPatch` and friends
+	 * in `pptx-viewer-shared`) write `element.textStyle` and never touch
+	 * `segment.paragraphProperties`, so a diff against this snapshot is the
+	 * only way to tell an edit from an inheritance artefact.
+	 *
+	 * @see element-paragraph-geometry.ts
+	 */
+	resolvedParagraphGeometry?: TextStyle;
 	fontFamily?: string;
 	fontSize?: number; // in points
-	/** When true, renderer should shrink text to fit the shape bounds. */
+	/** When true, some form of autofit is in effect; see {@link autoFitMode} for which. */
 	autoFit?: boolean;
 	/** Explicit autofit mode from OOXML body properties.
-	 * - 'shrink': `a:spAutoFit` — shrink text on overflow
-	 * - 'normal': `a:normAutofit` — normal auto-fit (with optional fontScale)
-	 * - 'none': `a:noAutofit` — explicitly no auto-fit (text overflows)
+	 * - 'shrink': `a:spAutoFit` - resize the SHAPE to fit the text (never the font)
+	 * - 'normal': `a:normAutofit` - shrink the TEXT to fit the shape (via `fontScale`/`lnSpcReduction`)
+	 * - 'none': `a:noAutofit` - explicitly no auto-fit (text overflows)
 	 * - undefined: no autofit element present (inherit from layout/master)
 	 */
 	autoFitMode?: 'shrink' | 'normal' | 'none';
@@ -165,8 +228,25 @@ export interface TextStyle {
 	 * verbatim when the resolved {@link color} still matches this node.
 	 */
 	colorXml?: XmlObject;
+	/**
+	 * Typed theme colour reference for the run's text colour, set when
+	 * {@link colorXml} is a plain `a:schemeClr` (see
+	 * `themeColorRefFromColorChoice`). When present it WINS on save: the
+	 * writer emits `<a:schemeClr>` from this ref instead of the resolved
+	 * {@link color}, so the text keeps following the theme palette after a
+	 * later theme change.
+	 */
+	colorRef?: PptxThemeColorRef;
 	align?: 'left' | 'center' | 'right' | 'justify' | 'justLow' | 'dist' | 'thaiDist';
-	vAlign?: 'top' | 'middle' | 'bottom';
+	/**
+	 * Vertical text-box anchor (`a:bodyPr/@anchor`, `ST_TextAnchoringType`).
+	 * `distributed`/`justified` (`dist`/`just`) stretch line spacing so the
+	 * paragraph block fills the box's full vertical extent, distinct from true
+	 * centering (`middle`/`ctr`); both approximate to a middle-anchored render
+	 * (see `text-body-layout.ts`) since CSS has no native vertical-justify
+	 * primitive, but round-trip losslessly through parse/save.
+	 */
+	vAlign?: 'top' | 'middle' | 'bottom' | 'distributed' | 'justified';
 	/** Right-to-left paragraph/run direction (`a:pPr/@rtl`, `a:rPr/@rtl`). */
 	rtl?: boolean;
 	/** Body text direction (`a:bodyPr/@vert`).
@@ -481,6 +561,32 @@ export interface TextStyle {
 	textReflectionEndOpacity?: number;
 	/** Text reflection offset distance in px. */
 	textReflectionOffset?: number;
+	/**
+	 * Text reflection fade direction (`a:rPr/a:effectLst/a:reflection/@fadeDir`)
+	 * in degrees. Mirrors `ShapeStyle.reflectionFadeDirection`.
+	 */
+	textReflectionFadeDirection?: number;
+	/**
+	 * Text reflection horizontal scaling (`@sx`), same units as
+	 * `ShapeStyle.reflectionScaleX` (1000ths of a percent, e.g. 100000 = 100%).
+	 */
+	textReflectionScaleX?: number;
+	/** Text reflection vertical scaling (`@sy`). See `ShapeStyle.reflectionScaleY`. */
+	textReflectionScaleY?: number;
+	/**
+	 * Text reflection horizontal skew (`@kx`) in 60000ths of a degree. See
+	 * `ShapeStyle.reflectionSkewX`.
+	 */
+	textReflectionSkewX?: number;
+	/** Text reflection vertical skew (`@ky`). See `ShapeStyle.reflectionSkewY`. */
+	textReflectionSkewY?: number;
+	/**
+	 * Text reflection independent rotation (`@rot`) in degrees. See
+	 * `ShapeStyle.reflectionRotation`.
+	 */
+	textReflectionRotation?: number;
+	/** Text reflection anchor (`@algn`). See `ShapeStyle.reflectionAlignment`. */
+	textReflectionAlignment?: 'tl' | 't' | 'tr' | 'l' | 'ctr' | 'r' | 'bl' | 'b' | 'br';
 
 	// ── 3D Text (from `a:bodyPr/a:sp3d` and `a:bodyPr/a:scene3d`) ──
 
@@ -490,6 +596,18 @@ export interface TextStyle {
 	textBodyScene3d?: Pptx3DScene;
 	/** Raw `a:scene3d` subtree used to preserve extensions and unmodelled children. */
 	textBodyScene3dXml?: XmlObject;
+	/**
+	 * `a:bodyPr/a:flatTx` - an explicit "render this text flat" marker. `sp3d`
+	 * and `flatTx` are a mutually exclusive OOXML choice (`EG_Text3D`), so a
+	 * shape/run that overrides an inherited 3D text body with `<a:flatTx/>`
+	 * carries no `text3d` of its own; without this explicit flag a later
+	 * inheritance merge has no signal to stop `text3d`/`textBodyScene3d` from
+	 * an ancestor (layout/master) leaking back in, the way `noFill` stops an
+	 * inherited fill. A renderer must short-circuit 3D-text application
+	 * whenever this is `true`, regardless of what `text3d`/`textBodyScene3d`
+	 * otherwise hold.
+	 */
+	flatText?: boolean;
 
 	// ── Opaque XML preservation (extLst extension lists) ──
 
@@ -552,7 +670,28 @@ export interface BulletInfo {
 	autoNumType?: string;
 	/** Auto-numbering start value. */
 	autoNumStartAt?: number;
-	/** Zero-based paragraph index within the text body (for auto-numbering). */
+	/**
+	 * Auto-numbering ORDINAL OFFSET: the zero-based distance of this paragraph
+	 * within its own numbered list, such that
+	 * `autoNumStartAt + paragraphIndex` is the ordinal to render. Despite the
+	 * name it is NOT the paragraph's position in the text body; the two agree
+	 * only for a list that starts at the first paragraph and is never
+	 * interrupted.
+	 *
+	 * It has to be the offset rather than the raw position because every
+	 * consumer that re-derives a marker from `BulletInfo` alone (the renderer's
+	 * `resolveParagraphBullet`, the Markdown converter's `resolveListMarker`)
+	 * computes `autoNumStartAt + paragraphIndex`. The load path resolves the
+	 * real sequence itself, restarting the count after any paragraph that
+	 * interrupts the list, and publishes the offset here so those consumers
+	 * land on the same number. With the raw position they did not, and BOTH
+	 * markers were painted ("3.1. Item"), because the paragraph builder drops
+	 * the parsed marker segment only when the two strings agree.
+	 *
+	 * Runtime-only: derived at parse time and never serialized. OOXML has no
+	 * counterpart (`a:buAutoNum` carries only `@type` and `@startAt`), so the
+	 * writer neither reads nor emits it.
+	 */
 	paragraphIndex?: number;
 	/** Bullet font family from `a:buFont`. */
 	fontFamily?: string;
@@ -568,6 +707,12 @@ export interface BulletInfo {
 	 * identity rather than being flattened to `<a:srgbClr/>` on save.
 	 */
 	colorXml?: XmlObject;
+	/**
+	 * Typed theme colour reference for the bullet colour, set when
+	 * {@link colorXml} is a plain `a:schemeClr`. Wins on save, same as
+	 * {@link TextStyle.colorRef}.
+	 */
+	colorRef?: PptxThemeColorRef;
 	/** True when `a:buNone` explicitly suppresses bullets. */
 	none?: boolean;
 	/** Picture bullet: relationship ID from `a:buBlip` → `a:blip[@r:embed]`. */

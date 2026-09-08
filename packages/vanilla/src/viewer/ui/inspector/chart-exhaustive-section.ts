@@ -6,19 +6,19 @@ import type {
 	PptxChartMarkerSymbol,
 	PptxChartType,
 } from 'pptx-viewer-core';
+import {
+	CHART_AXIS_TYPE_LABEL_KEYS,
+	isSeriesUsingSecondaryAxis,
+	resolveSecondaryAxisId,
+	schemaLabel,
+	upsertDataPoint,
+} from 'pptx-viewer-shared';
 
 import type { Translator } from '../../i18n';
-import {
-	checkbox,
-	color,
-	input,
-	number,
-	numbers,
-	select,
-	set,
-	setOptions,
-	value,
-} from './chart-exhaustive-controls';
+import { numbers, set, setOptions, value } from './chart-exhaustive-controls';
+import { createChartExhaustiveFields } from './chart-exhaustive-fields';
+import type { ChartPointIndexField } from './chart-point-index';
+import { createChartPointIndexField } from './chart-point-index';
 
 export interface ChartExhaustiveSection {
 	el: HTMLElement;
@@ -29,77 +29,21 @@ export function createChartExhaustiveSection(
 	doc: Document,
 	t: Translator,
 	onChange: (data: PptxChartData) => void,
+	/**
+	 * The point picker the per-point marker controls obey. The chart section
+	 * hands over the SAME instance the advanced section renders, so one box
+	 * drives every `c:dPt` control; when omitted this section renders its own,
+	 * which keeps it operable (and unit-testable) on its own.
+	 */
+	pointIndex?: ChartPointIndexField,
+	/** B6: pushes a committed colour into the deck's "Recent colours" MRU list. */
+	pushRecentColor?: (hex: string) => void,
 ): ChartExhaustiveSection {
 	const el = doc.createElement('div');
 	el.className = 'pptxv-chart-exhaustive';
-	const series = select(doc, t('pptx.chart.series'), []);
-	const comboType = select(doc, t('pptx.chart.seriesType'), [
-		'bar',
-		'line',
-		'area',
-		'scatter',
-		'bubble',
-		'radar',
-	]);
-	const secondaryAxis = checkbox(doc, t('pptx.chart.secondaryAxis'));
-	const labelPosition = select(doc, t('pptx.chart.dataLabelPosition'), [
-		'bestFit',
-		'b',
-		'ctr',
-		'inBase',
-		'inEnd',
-		'l',
-		'outEnd',
-		'r',
-		't',
-	]);
-	const showValue = checkbox(doc, t('pptx.chart.showValue'));
-	const showCategory = checkbox(doc, t('pptx.chart.showCategory'));
-	const showSeries = checkbox(doc, t('pptx.chart.showSeriesName'));
-	const showPercent = checkbox(doc, t('pptx.chart.showPercentage'));
-	const leaderLines = checkbox(doc, t('pptx.chart.showLeaderLines'));
-	const trendOrder = number(doc, t('pptx.chart.trendlineOrder'));
-	const trendPeriod = number(doc, t('pptx.chart.trendlinePeriod'));
-	const trendForward = number(doc, t('pptx.chart.forecastForward'));
-	const trendBackward = number(doc, t('pptx.chart.forecastBackward'));
-	const trendIntercept = number(doc, t('pptx.chart.trendlineIntercept'));
-	const trendColor = color(doc, t('pptx.chart.trendlineColor'));
-	const errorDirection = select(doc, t('pptx.chart.errorBarDirection'), ['x', 'y']);
-	const errorBarType = select(doc, t('pptx.chart.errorBarType'), ['both', 'minus', 'plus']);
-	const errorColor = color(doc, t('pptx.chart.errorBarColor'));
-	const noEndCap = checkbox(doc, t('pptx.chart.noEndCap'));
-	const customPlus = input(doc, t('pptx.chart.customPlus'));
-	const customMinus = input(doc, t('pptx.chart.customMinus'));
-	const markerFill = color(doc, t('pptx.chart.markerFill'));
-	const markerLine = color(doc, t('pptx.chart.markerOutline'));
-	const pointMarker = select(doc, t('pptx.chart.dataPointMarker'), [
-		'none',
-		'circle',
-		'diamond',
-		'square',
-		'star',
-		'triangle',
-		'x',
-		'plus',
-	]);
-	const pointMarkerSize = number(doc, t('pptx.chart.markerSize'));
-	const pointInvert = checkbox(doc, t('pptx.chart.invertIfNegative'));
-	const axis = select(doc, t('pptx.chart.axis'), []);
-	const axisTitle = input(doc, t('pptx.chart.axisTitle'));
-	const minorUnit = number(doc, t('pptx.chart.minorUnit'));
-	const minorGridlines = checkbox(doc, t('pptx.chart.minorGridlines'));
-	const numberFormat = input(doc, t('pptx.chart.numberFormat'));
-	const tickPosition = select(doc, t('pptx.chart.tickLabelPosition'), [
-		'nextTo',
-		'high',
-		'low',
-		'none',
-	]);
-	const axisColor = color(doc, t('pptx.chart.axisColor'));
-	const axisFontColor = color(doc, t('pptx.chart.axisFontColor'));
-	const axisFontSize = number(doc, t('pptx.chart.axisFontSize'));
-	const fields = [
+	const {
 		series,
+		axis,
 		comboType,
 		secondaryAxis,
 		labelPosition,
@@ -125,7 +69,6 @@ export function createChartExhaustiveSection(
 		pointMarker,
 		pointMarkerSize,
 		pointInvert,
-		axis,
 		axisTitle,
 		minorUnit,
 		minorGridlines,
@@ -134,8 +77,18 @@ export function createChartExhaustiveSection(
 		axisColor,
 		axisFontColor,
 		axisFontSize,
-	];
-	el.append(...fields.map(({ label }) => label));
+		seriesFields,
+		axisFields,
+	} = createChartExhaustiveFields(doc, t, pushRecentColor);
+	const ownsPointPicker = pointIndex === undefined;
+	const pointPicker = pointIndex ?? createChartPointIndexField(doc, t);
+	el.append(
+		series.label,
+		...(ownsPointPicker ? [pointPicker.label] : []),
+		...seriesFields.map(({ label }) => label),
+		axis.label,
+		...axisFields.map(({ label }) => label),
+	);
 	let current: PptxChartData | undefined;
 	const seriesIndex = () => Math.max(0, series.control.selectedIndex);
 	const axisIndex = () => Math.max(0, axis.control.selectedIndex);
@@ -147,13 +100,15 @@ export function createChartExhaustiveSection(
 		const next = [...current.series];
 		const trend = item.trendlines?.[0];
 		const error = item.errBars?.[0];
-		const point = item.dataPoints?.[0] ?? { idx: 0 };
+		// `c:dPt` entries are sparse and keyed by `c:idx`, so the override has to
+		// be looked up by the picked index; the old `dataPoints[0]` pinned every
+		// per-point edit to whichever override happened to be first.
+		const pointIdx = pointPicker.selected();
+		const point = item.dataPoints?.find(({ idx }) => idx === pointIdx);
 		next[seriesIndex()] = {
 			...item,
 			seriesChartType: comboType.control.value as PptxChartType,
-			axisId: secondaryAxis.control.checked
-				? current.axes?.find((candidate) => candidate.axPos === 'r')?.axisId
-				: current.axes?.find((candidate) => candidate.axPos === 'l')?.axisId,
+			axisId: resolveSecondaryAxisId(current, secondaryAxis.control.checked),
 			trendlines: trend
 				? [
 						{
@@ -184,17 +139,18 @@ export function createChartExhaustiveSection(
 				...(item.marker ?? { symbol: 'auto' }),
 				spPr: { fillColor: markerFill.control.value, strokeColor: markerLine.control.value },
 			},
-			dataPoints: [
-				{
-					...point,
-					invertIfNegative: pointInvert.control.checked,
-					marker: {
-						symbol: pointMarker.control.value as PptxChartMarkerSymbol,
-						size: value(pointMarkerSize.control),
-					},
+			dataPoints: upsertDataPoint(item.dataPoints, {
+				...(point ?? { idx: pointIdx }),
+				invertIfNegative: pointInvert.control.checked,
+				marker: {
+					// Keep any per-point marker fill the point already carries: the
+					// section offers no control for it, and dropping it here would
+					// undo an edit made in another binding.
+					...point?.marker,
+					symbol: pointMarker.control.value as PptxChartMarkerSymbol,
+					size: value(pointMarkerSize.control),
 				},
-				...(item.dataPoints?.slice(1) ?? []),
-			],
+			}),
 		};
 		onChange({
 			...current,
@@ -233,14 +189,17 @@ export function createChartExhaustiveSection(
 		};
 		onChange({ ...current, axes });
 	};
-	for (const field of fields.slice(1, 26)) {
+	for (const field of seriesFields) {
 		field.control.addEventListener('change', commitSeries);
 	}
-	for (const field of fields.slice(27)) {
+	for (const field of axisFields) {
 		field.control.addEventListener('change', commitAxis);
 	}
 	series.control.addEventListener('change', () => current && sync(current));
 	axis.control.addEventListener('change', () => current && sync(current));
+	// Picking a different point re-reads its override rather than committing, so
+	// the values still on screen for the previous point are not copied across.
+	pointPicker.subscribe(() => current && sync(current));
 	const sync = (data: PptxChartData): void => {
 		current = data;
 		setOptions(
@@ -251,15 +210,18 @@ export function createChartExhaustiveSection(
 		setOptions(
 			doc,
 			axis.control,
-			(data.axes ?? []).map((item, index) => [String(index), item.titleText ?? item.axisType]),
+			// As in the advanced section: an untitled axis captions itself with its
+			// element name, which must be spelled rather than shown as `catAx`.
+			(data.axes ?? []).map((item, index) => [
+				String(index),
+				item.titleText ?? schemaLabel(CHART_AXIS_TYPE_LABEL_KEYS, item.axisType, t),
+			]),
 		);
 		const item = data.series[seriesIndex()];
 		const trend = item?.trendlines?.[0];
 		const error = item?.errBars?.[0];
 		comboType.control.value = item?.seriesChartType ?? data.chartType;
-		secondaryAxis.control.checked = Boolean(
-			item?.axisId && data.axes?.find((a) => a.axisId === item.axisId)?.axPos === 'r',
-		);
+		secondaryAxis.control.checked = isSeriesUsingSecondaryAxis(data, seriesIndex());
 		const labels = data.style?.dataLabels;
 		labelPosition.control.value = labels?.position ?? 'bestFit';
 		showValue.control.checked = labels?.showValue ?? false;
@@ -281,9 +243,10 @@ export function createChartExhaustiveSection(
 		customMinus.control.value = error?.customMinus?.join(', ') ?? '';
 		markerFill.control.value = item?.marker?.spPr?.fillColor ?? '#4472c4';
 		markerLine.control.value = item?.marker?.spPr?.strokeColor ?? '#000000';
-		pointMarker.control.value = item?.dataPoints?.[0]?.marker?.symbol ?? 'none';
-		set(pointMarkerSize.control, item?.dataPoints?.[0]?.marker?.size);
-		pointInvert.control.checked = item?.dataPoints?.[0]?.invertIfNegative ?? false;
+		const selectedPoint = item?.dataPoints?.find(({ idx }) => idx === pointPicker.selected());
+		pointMarker.control.value = selectedPoint?.marker?.symbol ?? 'none';
+		set(pointMarkerSize.control, selectedPoint?.marker?.size);
+		pointInvert.control.checked = selectedPoint?.invertIfNegative ?? false;
 		const selectedAxis = data.axes?.[axisIndex()];
 		axisTitle.control.value = selectedAxis?.titleText ?? '';
 		set(minorUnit.control, selectedAxis?.minorUnit);

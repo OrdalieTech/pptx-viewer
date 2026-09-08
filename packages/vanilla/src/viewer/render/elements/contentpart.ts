@@ -1,17 +1,13 @@
-import type { ContentPartInkStroke } from 'pptx-viewer-core';
 import {
-	extractPathPoints,
-	generatePressureCircles,
+	buildContentPartStrokes,
 	getContentPartReplayStyles,
 	getContainerStyle,
-	hasPressureVariation,
 	INK_REPLAY_KEYFRAMES,
-	pressuresToWidths,
 } from 'pptx-viewer-shared';
-import type { InkStrokeAnimationStyle } from 'pptx-viewer-shared';
 
 import { createEl, createSvgEl } from '../dom';
 import type { ElementRenderer } from '../types';
+import { buildStrokeSvg } from './ink-stroke-svg';
 
 /**
  * Renderer for `contentPart` elements (embedded XML drawing parts wrapped in
@@ -24,6 +20,11 @@ import type { ElementRenderer } from '../types';
  *   varying per-point `pressures`: each sampled point becomes a `<circle>`
  *   whose radius follows the interpolated width (shared
  *   `generatePressureCircles` maths, same config as React).
+ * - Tilt-aware calligraphic nib strokes render when a stroke carries
+ *   `tiltAngles` (decoded from the source InkML's `OTx`/`OTy` or `AZIMUTH`
+ *   channel): each sampled point becomes an `<ellipse>` widened perpendicular
+ *   to the pen's lean direction (shared `generateNibMarks` maths), taking
+ *   priority over plain pressure circles.
  * - No strokes: a typed fallback box labelled "Content Part", matching the
  *   other bindings' fallback (Vue has no dedicated contentPart renderer and
  *   falls through to its fallback label too).
@@ -68,54 +69,11 @@ export const renderContentPartElement: ElementRenderer = (element, zIndex, conte
 		svg.appendChild(keyframes);
 	}
 
-	for (const [index, stroke] of strokes.entries()) {
-		svg.appendChild(buildStroke(doc, stroke, replayStyles[index]));
+	const views = buildContentPartStrokes(element);
+	for (const [index, view] of views.entries()) {
+		svg.appendChild(buildStrokeSvg(doc, view, replayStyles[index]));
 	}
 
 	el.appendChild(svg);
 	return el;
 };
-
-/**
- * Build one stroke: pressure circles when the stroke has usable (varying)
- * per-point pressure data, a plain constant-width path otherwise. Mirrors
- * React's `renderPressureStroke` config exactly.
- */
-function buildStroke(
-	doc: Document,
-	stroke: ContentPartInkStroke,
-	replay: InkStrokeAnimationStyle | undefined,
-): SVGElement {
-	const pressures = stroke.pressures;
-	if (pressures && pressures.length > 1 && hasPressureVariation(pressures)) {
-		const pointWidths = pressuresToWidths(pressures, stroke.width);
-		const circles = generatePressureCircles(extractPathPoints(stroke.path), pointWidths, {
-			baseWidth: stroke.width,
-			minRadius: 0.5,
-			maxRadius: stroke.width * 1.5,
-		});
-		const g = createSvgEl(doc, 'g', { opacity: stroke.opacity });
-		for (const c of circles) {
-			g.appendChild(createSvgEl(doc, 'circle', { cx: c.cx, cy: c.cy, r: c.r, fill: stroke.color }));
-		}
-		return g;
-	}
-
-	const path = createSvgEl(doc, 'path', {
-		d: stroke.path,
-		fill: 'none',
-		stroke: stroke.color,
-		'stroke-width': stroke.width,
-		'stroke-opacity': stroke.opacity,
-		'stroke-linecap': 'round',
-		'stroke-linejoin': 'round',
-		'vector-effect': 'non-scaling-stroke',
-		'stroke-dasharray': replay?.strokeDasharray,
-		'stroke-dashoffset': replay?.strokeDashoffset,
-	});
-	if (replay) {
-		path.style.animation = replay.animation;
-		path.style.setProperty('--ink-path-length', String(replay.pathLength));
-	}
-	return path;
-}

@@ -2,8 +2,20 @@ import { PptxSlide, XmlObject, TextStyle } from '../../types';
 import type { PptxElementAnimation, PptxSlideTransition } from '../../types';
 import { parseDataUrlToBytes, fetchUrlToBytes } from '../../utils/data-url-utils';
 import type { PptxSlideReferenceRemap } from '../../utils/presentation-collections';
-import type { PptxSaveState } from '../builders';
+import type { PptxSaveState, IPptxSlideRelationshipRegistry } from '../builders';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimePresentationProps';
+
+/** Context {@link PptxHandlerRuntime.embedTransitionSound} needs from the slide save writer. */
+export interface EmbedTransitionSoundContext {
+	saveSession: PptxSaveState;
+	slideRelationshipRegistry: IPptxSlideRelationshipRegistry;
+	/** Relationship type for an embedded (package-internal) media part; the
+	 * same generic type `processMediaEmbedding` uses for embedded audio/video,
+	 * per ECMA-376's convention that type-specific `audio`/`video` relationship
+	 * types are reserved for EXTERNALLY linked media. */
+	slideMediaRelationshipType: string;
+	slideId: string;
+}
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	protected createEmptySlideXml(): XmlObject {
@@ -57,45 +69,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			return requestedSourcePath;
 		}
 
-		for (const slidePath of this.slideMap.keys()) {
-			if (slidePath.startsWith('ppt/slides/slide')) {
-				return slidePath;
-			}
-		}
-
+		// No explicit source: this is a genuinely new (blank) slide, not a copy
+		// of an existing one. Falling back to an arbitrary slide here would
+		// silently clone that slide's content and relationships (media, charts,
+		// notes) onto a slide the caller never asked to copy.
 		return undefined;
 	}
 
 	protected async loadSlideRelationships(slidePath: string, relsPath: string): Promise<void> {
-		const relsXml = await this.zip.file(relsPath)?.async('string');
-		if (!relsXml) {
-			return;
-		}
-
-		const relsData = this.parser.parse(relsXml);
-		const relsMap = new Map<string, string>();
-		const externalIds = new Set<string>();
-
-		if (relsData?.Relationships?.Relationship) {
-			const rels = Array.isArray(relsData.Relationships.Relationship)
-				? relsData.Relationships.Relationship
-				: [relsData.Relationships.Relationship];
-
-			rels.forEach((r: XmlObject) => {
-				if (r['@_Id'] && r['@_Target']) {
-					const relId = String(r['@_Id']);
-					relsMap.set(relId, String(r['@_Target']));
-					if (String(r['@_TargetMode'] || '').toLowerCase() === 'external') {
-						externalIds.add(relId);
-					}
-				}
-			});
-		}
-
-		this.slideRelsMap.set(slidePath, relsMap);
-		if (externalIds.size > 0) {
-			this.externalRelsMap.set(slidePath, externalIds);
-		}
+		await this.loadPartRelationships(slidePath, relsPath);
 	}
 
 	protected async reconcilePresentationSlidesForSave(params: {
@@ -128,6 +110,52 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		return this.slideTransitionService.buildSlideTransitionXml(transition);
 	}
 
+	/**
+	 * Embed a transition sound picked in the UI (`transition.soundData`, a
+	 * `data:` URL set by the shared `applyTransitionSoundFile`) as a package
+	 * media part and slide relationship, mirroring `processImageEmbedding` /
+	 * `processMediaEmbedding` for picture and media elements. Mutates
+	 * `transition` in place and must run before {@link buildSlideTransitionXml}
+	 * so `buildTransitionSound` sees a real `soundRId`.
+	 *
+	 * On success, `soundRId`/`soundPath` are set and `soundData` is cleared so
+	 * a later save does not re-embed the same bytes (the same "cleared once
+	 * embedded" contract `imagePath`/`mediaPath` use). On failure, `soundData`
+	 * is cleared and a compatibility warning is reported so a broken payload
+	 * cannot loop forever.
+	 */
+	protected embedTransitionSound(
+		transition: PptxSlideTransition,
+		ctx: EmbedTransitionSoundContext,
+	): void {
+		if (typeof transition.soundData !== 'string' || transition.soundData.length === 0) {
+			return;
+		}
+		const parsedSound = this.parseDataUrlToBytes(transition.soundData);
+		if (!parsedSound) {
+			this.compatibilityService.reportWarning({
+				code: 'SAVE_TRANSITION_SOUND_PAYLOAD_UNSUPPORTED',
+				message:
+					'Transition sound payload could not be converted to an embedded media part and was dropped.',
+				scope: 'save',
+				slideId: ctx.slideId,
+			});
+			delete transition.soundData;
+			return;
+		}
+		const targetSoundPath = ctx.saveSession.nextMediaPath(parsedSound.extension, 'audio');
+		this.zip.file(targetSoundPath, parsedSound.bytes);
+		const relationshipId = ctx.slideRelationshipRegistry.nextRelationshipId();
+		ctx.slideRelationshipRegistry.upsertRelationship(
+			relationshipId,
+			ctx.slideMediaRelationshipType,
+			targetSoundPath.replace(/^ppt\//u, '../'),
+		);
+		transition.soundRId = relationshipId;
+		transition.soundPath = targetSoundPath;
+		delete transition.soundData;
+	}
+
 	protected applyEditorAnimations(slideNode: XmlObject, animations: PptxElementAnimation[]): void {
 		this.editorAnimationService.applyEditorAnimations(slideNode, animations);
 	}
@@ -136,18 +164,20 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		if (!xmlObj['p:sld']) {
 			xmlObj['p:sld'] = {};
 		}
+		// oxlint-disable-next-line eslint/one-var -- preceding `if` blocks merging
 		const pSld = xmlObj['p:sld'] as XmlObject;
 
 		if (!pSld['p:cSld']) {
 			pSld['p:cSld'] = {};
 		}
+		// oxlint-disable-next-line eslint/one-var -- preceding `if` blocks merging
 		const cSld = pSld['p:cSld'] as XmlObject;
 
 		if (!cSld['p:spTree']) {
-			const emptySlide = this.createEmptySlideXml();
-			const emptyTree = (
-				(emptySlide['p:sld'] as XmlObject | undefined)?.['p:cSld'] as XmlObject | undefined
-			)?.['p:spTree'] as XmlObject | undefined;
+			const emptySlide = this.createEmptySlideXml(),
+				emptyTree = (
+					(emptySlide['p:sld'] as XmlObject | undefined)?.['p:cSld'] as XmlObject | undefined
+				)?.['p:spTree'] as XmlObject | undefined;
 			if (emptyTree) {
 				cSld['p:spTree'] = emptyTree;
 			}

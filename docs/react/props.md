@@ -20,10 +20,12 @@ import type { PowerPointViewerProps } from 'pptx-react-viewer';
 
 ## Content
 
-| Prop       | Type         | Default    | Description                                                                                     |
-| ---------- | ------------ | ---------- | ----------------------------------------------------------------------------------------------- |
-| `content`  | `Uint8Array` | (required) | Raw `.pptx` file bytes. Wrap an `ArrayBuffer` with `new Uint8Array(buf)`.                       |
-| `filePath` | `string`     | -          | Original file path or name. Used as the key for autosave recovery and display in the title bar. |
+| Prop                 | Type         | Default                | Description                                                                                                 |
+| -------------------- | ------------ | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `content`            | `Uint8Array` | (required)             | Raw `.pptx` file bytes. Wrap an `ArrayBuffer` with `new Uint8Array(buf)`.                                   |
+| `filePath`           | `string`     | -                      | Original file path or name. Used as the key for autosave recovery and display in the title bar.             |
+| `autosave`           | `boolean`    | `true`                 | Recovery autosave. A policy ceiling over the title-bar toggle; see [Autosave & Recovery](#autosave-policy). |
+| `autosaveIntervalMs` | `number`     | File > Options cadence | Recovery cadence. An explicit value outranks the user's AutoRecover setting.                                |
 
 ::: warning `content` type
 The prop is a `Uint8Array`, not an `ArrayBuffer`. See [Getting Started](/react/getting-started) for
@@ -102,7 +104,15 @@ the full flow and the `CollaborationConfig` shape.
 `onStartCollaboration` to set the `collaboration` prop, and `onStopCollaboration` to clear it.
 :::
 
-## Full interface
+## Interface sketch
+
+::: info Abridged
+This block shows the commonly used members, not the whole type. `PowerPointViewerProps`
+also carries `ai`, `accountAuth`, `hiddenActions`, `fonts`, `fileName`, `availableThemes`,
+`defaultThemeKey`, `onThemeChange`, `availableLocales`, `defaultLocale`, `onLocaleChange`,
+`onModeChange`, `onSelectionChange`, `onSlideCountChange` and `onZoomChange`. Read the
+shipped `.d.ts` (or `packages/react/src/viewer/types-ui.ts`) for the authoritative list.
+:::
 
 ```ts
 interface PowerPointViewerProps {
@@ -190,6 +200,40 @@ if (snapshot) {
 await deleteAutosaveSnapshot('report.pptx');
 ```
 
+### Reopening the deck after a refresh {#session-restore}
+
+Recovery snapshots answer "the tab crashed, can I get my edits back?". A plain **refresh** is the
+more common case, and it has its own helpers. Every binding re-exports `rememberSessionDeck` /
+`restoreSessionDeck` (also available from `pptx-viewer-shared`), which remember the open deck **per
+browser tab** and hand it back on the next load:
+
+```ts
+import { rememberSessionDeck, restoreSessionDeck } from 'pptx-react-viewer';
+
+// After the host loads a deck:
+await rememberSessionDeck(file.name, bytes);
+
+// On mount, before falling back to your file picker:
+const deck = await restoreSessionDeck();
+if (deck) {
+	setContent(deck.data);
+	setFilePath(deck.fileName);
+}
+```
+
+- **Scope is one browser tab.** The record is keyed by an id held in `sessionStorage`, so a refresh
+  reopens the deck while a brand-new tab still starts empty, and two tabs holding different decks
+  never steal each other's content.
+- **Edits are not lost.** `restoreSessionDeck()` prefers a newer autosave snapshot of the same
+  `fileName`, so a refresh mid-edit comes back with the edited deck rather than the bytes it was
+  opened with.
+- **The viewer's own File ▸ Open is covered.** Opening a deck from the backstage (or from Recent)
+  swaps it inside the viewer without notifying the host, so those paths record it themselves.
+- `forgetSessionDeck()` drops the record. Every call is best-effort: a blocked IndexedDB or a
+  partitioned `sessionStorage` degrades to "nothing to restore", never to a thrown error.
+
+All five demo apps use exactly this flow, which is why a refresh keeps the presentation on screen.
+
 ### Example: recovery on page reload
 
 ```tsx
@@ -230,21 +274,53 @@ function App() {
 }
 ```
 
-### Disabling autosave
+### Who decides: the `autosave` prop or the AutoSave toggle? {#autosave-policy}
 
-The title bar includes an AutoSave toggle that the user can switch off at runtime. When toggled
-off, the periodic timer stops and no new snapshots are written. Existing snapshots are not deleted.
+Two things can speak about autosave, so one of them has to win. The rule is the same in **all five
+bindings** (react, vue, angular, svelte, vanilla) and lives in one shared decision function,
+`resolveAutosaveActivation`:
+
+> **The `autosave` prop is a policy ceiling. The title-bar AutoSave toggle is the user's preference
+> inside it.**
+
+| `autosave` prop | What runs                                                       | The toggle                    |
+| --------------- | --------------------------------------------------------------- | ----------------------------- |
+| omitted         | Autosave runs; the user's toggle decides, defaulting to **on**. | Works.                        |
+| `true`          | Same as omitted: the host permits it, the user decides.         | Works.                        |
+| `false`         | Autosave is off. No snapshots, and no recovery prompt on load.  | **Inert** (it must not move). |
+
+A host passing an explicit prop is stating what its application permits; a user flipping the switch
+is expressing a preference within that. A preference can never exceed a policy, which is why
+`autosave={false}` also takes the switch away: a control that silently does nothing is worse than
+no control. Two further gates are not negotiable by either party, because without them there is
+nothing to write or nowhere to write it: `canEdit` must be true, and `filePath` must be set.
+
+The same rule governs the cadence. An explicit `autosaveIntervalMs` is a host policy and is honoured
+as given; omit it and the viewer follows the user's **File > Options > Save > "Save AutoRecover
+information every N minutes"** (two minutes by default).
+
+The default is `true` because crash recovery that is off by default is crash recovery nobody has.
+Pass `autosave={false}` to opt out.
+
+### Recovering a snapshot
+
+When a deck finishes loading and a snapshot newer than 24 hours exists for the same `filePath`, the
+viewer raises a **"Recover unsaved changes?"** dialog offering Restore or Discard. Restore loads the
+snapshot's bytes; Discard deletes it. The prompt is deliberately not raised for a snapshot this tab
+has already taken delivery of (for example when the host itself restored it through
+`restoreSessionDeck`).
 
 ### Requirements and status feedback
 
 Autosave automatically disables itself and displays a reason in the title bar when requirements
 are not met:
 
-| Condition                 | Status shown                               | Reason                                                                                |
-| ------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------- |
-| `filePath` not provided   | "AutoSave disabled: no file path provided" | The viewer needs a stable key to store the snapshot under. Pass `filePath` to enable. |
-| User toggles AutoSave off | "AutoSave off"                             | The user explicitly disabled it via the title-bar toggle.                             |
-| `canEdit` is false        | Toggle hidden                              | Autosave is only relevant in edit mode; the toggle is not rendered in read-only mode. |
+| Condition                 | Status shown                                        | Reason                                                                                |
+| ------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `filePath` not provided   | "AutoSave disabled: no file path provided"          | The viewer needs a stable key to store the snapshot under. Pass `filePath` to enable. |
+| User toggles AutoSave off | "AutoSave off"                                      | The user explicitly disabled it via the title-bar toggle.                             |
+| `autosave={false}`        | "AutoSave turned off by this application"           | The host forbade it; the toggle is inert.                                             |
+| `canEdit` is false        | "AutoSave disabled: this presentation is read-only" | Autosave is only relevant in edit mode.                                               |
 
 When the missing requirement is resolved (e.g. `filePath` is set), the status automatically
 transitions back to `'idle'` and the timer begins.
@@ -260,5 +336,7 @@ type AutosaveStatus =
 	| { state: 'error'; message: string };
 ```
 
-The `reason` field is one of `'no_file_path'` or `'autosave_toggle_off'`, and maps to the i18n
-keys `pptx.autosave.disabledNoFilePath` and `pptx.autosave.disabledToggleOff` respectively.
+The `reason` field is one of `'autosave_host_off'`, `'autosave_toggle_off'`, `'no_file_path'` or
+`'read_only'`, and maps through the shared `autosaveDisabledReasonKey` to the i18n keys
+`pptx.autosave.disabledByHost`, `pptx.autosave.disabledToggleOff`, `pptx.autosave.disabledNoFilePath`
+and `pptx.autosave.disabledReadOnly` respectively.

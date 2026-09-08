@@ -1,5 +1,11 @@
-import type { PptxSaveFormat, TextSegment } from 'pptx-viewer-core';
-import type { ViewerTheme } from 'pptx-viewer-shared';
+import type {
+	ParsedTableStyleMap,
+	PptxPresentationProperties,
+	PptxSaveFormat,
+	PptxSlideTransition,
+	TextSegment,
+} from 'pptx-viewer-core';
+import type { RibbonTransitionDraft, ViewerTheme } from 'pptx-viewer-shared';
 
 import type { EditActions } from './editor/editor-edit-ops';
 import type { FindReplaceActions } from './editor/editor-find-replace-actions';
@@ -15,6 +21,8 @@ import type { ChromeOptions } from './ui';
 export interface ChromeCallbackDeps {
 	prev(): void;
 	next(): void;
+	/** Set an ABSOLUTE stage scale (the units the pinch gesture reports). */
+	setZoom(zoom: number): void;
 	zoomIn(): void;
 	zoomOut(): void;
 	zoomToFit(): void;
@@ -25,7 +33,6 @@ export interface ChromeCallbackDeps {
 	redo(): void;
 	save(): void;
 	downloadAs(format: PptxSaveFormat): Promise<void>;
-	packageForSharing(): Promise<void>;
 	toggleAutosave(): boolean;
 	startPresentationFromBeginning(): void;
 	startPresentationFromCurrent(): void;
@@ -38,10 +45,16 @@ export interface ChromeCallbackDeps {
 	openHeaderFooter(): void;
 	openCompare(): void;
 	openSetUpSlideShow(): void;
+	/** PowerPoint's Hide Slide: toggle the active slide's skip-in-show flag. */
+	toggleHideCurrentSlide(): void;
 	startRehearsal(): void;
 	toggleSubtitles(): void;
 	openSelectionPane(): void;
 	openSlideSorter(): void;
+	/** Open Reading View (windowed deck at full window size). */
+	openReadingView(): void;
+	/** Open Outline view (the deck as editable indented text). */
+	openOutlineView(): void;
 	openComments(): void;
 	openHyperlink(): void;
 	openCustomShows(): void;
@@ -56,6 +69,8 @@ export interface ChromeCallbackDeps {
 	toggleInspector(): void;
 	/** Select a single element by id (inspector Elements tab). */
 	selectElement(id: string): void;
+	/** Drop the current selection (Design > Slide Size opens the deck panel). */
+	clearSelection(): void;
 	goToSlide(index: number): void;
 	commitNotes(notes: string, notesSegments?: TextSegment[]): void;
 	exportSlidePng(): Promise<void>;
@@ -63,12 +78,35 @@ export interface ChromeCallbackDeps {
 	exportPdf(): Promise<void>;
 	exportGif(): Promise<void>;
 	exportVideo(): Promise<void>;
+	exportJson(): void;
 	print(): Promise<boolean>;
 	openFile(): void;
 	openRecentFile(key: string): void;
 	createPresentation(templateId: string): void;
 	/** Lazily resolve the editor's edit actions (editor is built after chrome). */
 	getEditActions(): EditActions;
+	/**
+	 * File > Options > Advanced > "Properties follow chart data point for
+	 * current workbook", read fresh on every chart category removal.
+	 */
+	getChartFollowDataPoint(): boolean;
+	/**
+	 * File > Options > Advanced > "Quickly access this number of Recent
+	 * Documents" (0-50), read fresh whenever the File backstage's Recent list
+	 * loads.
+	 */
+	getRecentPresentationsCount(): number;
+	/**
+	 * Store reads the ribbon needs WHILE IT IS BEING BUILT, which is before the
+	 * editor exists: the Transitions tab seeds its draft from the active slide
+	 * and the Slide Show tab's Options checkboxes from the deck's show settings.
+	 * Routing them through `getEditActions` would dereference an editor that is
+	 * not there yet.
+	 */
+	readTransitionDraft(): RibbonTransitionDraft;
+	/** The ACTIVE slide's raw transition, for fields the draft does not carry (the Sound picker). */
+	readTransition(): PptxSlideTransition | undefined;
+	presentationProperties(): PptxPresentationProperties;
 	/** Lazily resolve the editor's find/replace actions (same timing as edit actions). */
 	getFindReplaceActions(): FindReplaceActions;
 	/** Swap the viewer chrome's `ViewerTheme` (Design tab theme gallery). */
@@ -80,6 +118,14 @@ export interface ChromeCallbackDeps {
 	setDrawColor(color: string): void;
 	/** Set the pen/highlighter stroke width (Draw tab). */
 	setDrawWidth(width: number): void;
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, for the table properties
+	 * panel's "Edit style...". `undefined` means the deck has no table styles
+	 * part; the button then simply does not render.
+	 */
+	getTableStyleMap(): ParsedTableStyleMap | undefined;
+	/** The current theme colour map (scheme key -> hex), for resolving scheme-based table style colours. */
+	getThemeColorMap(): Record<string, string> | undefined;
 }
 
 /**
@@ -109,11 +155,14 @@ export function buildChromeCallbacks(
 			openCompare: () => deps.openCompare(),
 			openSelectionPane: () => deps.openSelectionPane(),
 			openSlideSorter: () => deps.openSlideSorter(),
+			openReadingView: () => deps.openReadingView(),
+			openOutlineView: () => deps.openOutlineView(),
 			openComments: () => deps.openComments(),
 			openHyperlink: () => deps.openHyperlink(),
 			toggleTemplateEditing: () => deps.toggleTemplateEditing(),
 			toggleMasterView: () => deps.toggleMasterNavigation(),
 			toggleInspector: () => deps.toggleInspector(),
+			clearSelection: () => deps.clearSelection(),
 			toggleViewOption: (option) => deps.getEditActions().toggleViewOption(option),
 			addGuide: (axis) => deps.getEditActions().addGuide(axis),
 			activateEyedropper: () => deps.getEditActions().activateEyedropper(),
@@ -135,15 +184,16 @@ export function buildChromeCallbacks(
 			openDigitalSignatures: () => deps.openDigitalSignatures(),
 			openPasswordProtection: () => deps.openPasswordProtection(),
 			openVersionHistory: () => deps.openVersionHistory(),
+			getRecentPresentationsCount: () => deps.getRecentPresentationsCount(),
 			save: () => deps.save(),
 			saveAsPpsx: () => void deps.downloadAs('ppsx'),
 			saveAsPptm: () => void deps.downloadAs('pptm'),
-			packageForSharing: () => void deps.packageForSharing(),
 			exportPng: () => void deps.exportSlidePng(),
 			copySlideAsImage: () => void deps.copySlideAsImage(),
 			exportPdf: () => void deps.exportPdf(),
 			exportGif: () => void deps.exportGif(),
 			exportVideo: () => void deps.exportVideo(),
+			exportJson: () => deps.exportJson(),
 			print: () => void deps.print(),
 		},
 		slideShow: {
@@ -152,10 +202,16 @@ export function buildChromeCallbacks(
 			openPresenterView: () => deps.openPresenterView(),
 			openBroadcast: () => deps.openBroadcast(),
 			openSetUp: () => deps.openSetUpSlideShow(),
+			toggleHideSlide: () => deps.toggleHideCurrentSlide(),
 			startRehearsal: () => deps.startRehearsal(),
 			openCustomShows: () => deps.openCustomShows(),
 			toggleSubtitles: () => deps.toggleSubtitles(),
 			openSubtitleSettings: () => deps.openSetUpSlideShow(),
+			// The Options cluster writes the deck's show settings through the same
+			// deck action the Set Up Show dialog and the inspector's PRESENTATION
+			// card use, so all three surfaces agree.
+			showOptions: () => deps.presentationProperties(),
+			updateShowOptions: (patch) => deps.getEditActions().updatePresentationSettings(patch),
 		},
 		// Every editing action delegates to the (lazily-resolved) editor edit
 		// actions, so a click after mount always hits the live editor instance.
@@ -176,6 +232,13 @@ export function buildChromeCallbacks(
 			setTheme: (theme) => deps.setTheme(theme),
 			applyPresentationTheme: (presetId) => deps.applyPresentationTheme(presetId),
 		},
+		transitions: {
+			readDraft: () => deps.readTransitionDraft(),
+			applyDraft: (draft, applyToAll) =>
+				deps.getEditActions().applyTransitionDraft(draft, applyToAll),
+			readTransition: () => deps.readTransition(),
+			applyChange: (changes) => deps.getEditActions().applyTransitionChange(changes),
+		},
 		draw: {
 			setTool: (tool) => deps.setDrawTool(tool),
 			setColor: (color) => deps.setDrawColor(color),
@@ -185,28 +248,46 @@ export function buildChromeCallbacks(
 	const inspectorHandlers: ChromeOptions['inspectorHandlers'] = {
 		selectElement: (id) => deps.selectElement(id),
 		openDocumentProperties: () => deps.openDocumentProperties(),
+		getChartFollowDataPoint: () => deps.getChartFollowDataPoint(),
 		updatePresentationSettings: (patch) => deps.getEditActions().updatePresentationSettings(patch),
 		applyThemeByPath: (themePath, allMasters) =>
 			deps.getEditActions().applyThemeByPath(themePath, allMasters),
+		applyThemeEdit: (payload) => deps.getEditActions().applyThemeEdit(payload),
+		updateTagCollections: (next) => deps.getEditActions().updateTagCollections(next),
 		updateActiveSlide: (patch) => deps.getEditActions().updateActiveSlide(patch),
+		getTableStyleMap: () => deps.getTableStyleMap(),
+		getThemeColorMap: () => deps.getThemeColorMap(),
+		updateTableStyleMap: (nextMap) => deps.getEditActions().updateTableStyleMap(nextMap),
+		deleteTableStyle: (styleId) => deps.getEditActions().deleteTableStyle(styleId),
+		setTemplateBackground: (path, backgroundColor) =>
+			deps.getEditActions().setTemplateBackground(path, backgroundColor),
+		getTemplateBackgroundColor: (path) => deps.getEditActions().getTemplateBackgroundColor(path),
 		updateCanvasSize: (size) => deps.getEditActions().updateCanvasSize(size),
-		addComment: (text) => void deps.getEditActions().comments.addComment(text),
-		addCommentReply: (parentId, text) =>
-			void deps.getEditActions().comments.addCommentReply(parentId, text),
+		updateSlideSize: (size) => deps.getEditActions().updateSlideSize(size),
+		applySlideSizeRescale: (size, mode) => deps.getEditActions().applySlideSizeRescale(size, mode),
+		addComment: (text, mentions) =>
+			void deps.getEditActions().comments.addComment(text, undefined, mentions),
+		addCommentReply: (parentId, text, mentions) =>
+			void deps.getEditActions().comments.addCommentReply(parentId, text, mentions),
 		editComment: (id, text) => deps.getEditActions().comments.editComment(id, text),
 		deleteComment: (id) => deps.getEditActions().comments.deleteComment(id),
 		toggleCommentResolved: (id) => deps.getEditActions().comments.toggleCommentResolved(id),
 		setAnimationEffect: (group, preset) => deps.getEditActions().setAnimationEffect(group, preset),
+		applyMotionPath: (presetId) => deps.getEditActions().applyMotionPath(presetId),
 		setAnimationTiming: (elementId, patch) =>
 			deps.getEditActions().setAnimationTiming(elementId, patch),
+		setAnimationSound: (elementId, pick) =>
+			deps.getEditActions().setAnimationSound(elementId, pick),
 		reorderAnimation: (elementId, direction) =>
 			deps.getEditActions().reorderAnimation(elementId, direction),
 		setGeometry: (patch) => deps.getEditActions().setGeometry(patch),
-		setShapeFill: (color) => deps.getEditActions().setShapeFill(color),
-		setShapeStroke: (color) => deps.getEditActions().setShapeStroke(color),
+		toggleElementLock: () => deps.getEditActions().toggleElementLock(),
+		setShapeFill: (color, ref) => deps.getEditActions().setShapeFill(color, ref),
+		setShapeStroke: (color, ref) => deps.getEditActions().setShapeStroke(color, ref),
 		setShapeStrokeWidth: (width) => deps.getEditActions().setShapeStrokeWidth(width),
 		setShapeStyle: (patch) => deps.getEditActions().setShapeStyle(patch),
 		setShapeType: (shapeType) => deps.getEditActions().setShapeType(shapeType),
+		pushRecentColor: (hex) => deps.getEditActions().pushRecentColor(hex),
 
 		setTextVerticalAlign: (vAlign) => deps.getEditActions().setTextVerticalAlign(vAlign),
 		setTextWrap: (wrap) => deps.getEditActions().setTextWrap(wrap),
@@ -230,6 +311,9 @@ export function buildChromeCallbacks(
 		replaceImage: () => void deps.getEditActions().replaceSelectedImage(),
 		resetImage: () => deps.getEditActions().resetSelectedImage(),
 		setElementAction: (trigger, action) => deps.getEditActions().setElementAction(trigger, action),
+		setAltText: (text) => deps.getEditActions().setAltText(text),
+		setTitle: (text) => deps.getEditActions().setTitle(text),
+		setOleName: (name) => deps.getEditActions().setOleName(name),
 		setChartData: (data) => deps.getEditActions().setChartData(data),
 		setMediaProperties: (patch) => deps.getEditActions().setMediaProperties(patch),
 
@@ -237,6 +321,7 @@ export function buildChromeCallbacks(
 		setTableBandedRows: (enabled) => deps.getEditActions().setTableBandedRows(enabled),
 		setTableCellPadding: (padding) => deps.getEditActions().setTableCellPadding(padding),
 		setTableOptions: (patch, cellStyle) => deps.getEditActions().setTableOptions(patch, cellStyle),
+		setTableData: (data, rawXml) => deps.getEditActions().setTableData(data, rawXml),
 		setTableCellStyle: (row, column, patch) =>
 			deps.getEditActions().setTableCellStyle(row, column, patch),
 		setTableCellStyles: (cells, patch) => deps.getEditActions().setTableCellStyles(cells, patch),
@@ -253,6 +338,7 @@ export function buildChromeCallbacks(
 			deps.getEditActions().setSmartArtNodeStyle(nodeId, patch),
 		mutateSmartArtNode: (nodeId, action) =>
 			deps.getEditActions().mutateSmartArtNode(nodeId, action),
+		replaceSmartArtData: (data) => deps.getEditActions().replaceSmartArtData(data),
 		setSmartArtLayout: (layout) => deps.getEditActions().setSmartArtLayout(layout),
 		setSmartArtColorScheme: (scheme) => deps.getEditActions().setSmartArtColorScheme(scheme),
 	};

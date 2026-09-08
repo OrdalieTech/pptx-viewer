@@ -7,9 +7,12 @@ import {
 	resizeSelection,
 	selectionBounds,
 } from 'pptx-viewer-shared';
-import type { InteractionBox, MarqueeRect, ResizeHandleId } from 'pptx-viewer-shared';
-
-import type { ElementBoxPatch } from './editor-mutations';
+import type {
+	ElementBoxPatch,
+	InteractionBox,
+	MarqueeRect,
+	ResizeHandleId,
+} from 'pptx-viewer-shared';
 
 export interface EditorMarqueeRect extends MarqueeRect {
 	additive: boolean;
@@ -20,9 +23,16 @@ export interface SelectionGestureDeps {
 	getStageRect(): DOMRect | undefined;
 	getElements(): readonly PptxElement[];
 	getSelectedIds(): readonly string[];
+	/**
+	 * The selected ids a collective `interaction` may actually act on, with the
+	 * locked members already dropped. Optional: without it the whole selection
+	 * transforms, which is the pre-lock behaviour.
+	 */
+	getTransformIds?(interaction: 'move' | 'resize'): readonly string[];
 	onStart(): void;
 	onPatch(id: string, patch: ElementBoxPatch): void;
-	onCommit(): void;
+	/** `movedIds` are the elements this gesture actually patched. */
+	onCommit(movedIds: readonly string[]): void;
 	onSelect(ids: readonly string[]): void;
 	onMarquee(rect: EditorMarqueeRect | null): void;
 }
@@ -117,7 +127,7 @@ export function createSelectionGestureController(deps: SelectionGestureDeps) {
 			deps.onSelect(done.rect.additive ? mergeAdditiveSelection(done.base, hit) : hit);
 			deps.onMarquee(null);
 		} else if (done.moved) {
-			deps.onCommit();
+			deps.onCommit(done.boxes.map((box) => box.id));
 		}
 	}
 
@@ -148,7 +158,10 @@ export function createSelectionGestureController(deps: SelectionGestureDeps) {
 			attach();
 		},
 		beginTransform(kind: 'move' | 'resize', event: PointerEvent, handle?: ResizeHandleId): boolean {
-			const ids = new Set(deps.getSelectedIds());
+			// A locked member stays put while its unlocked neighbours travel, which
+			// is what PowerPoint does; the filter is the shared lock decision, not a
+			// second opinion held here.
+			const ids = new Set(deps.getTransformIds?.(kind) ?? deps.getSelectedIds());
 			const boxes = deps.getElements().filter((element) => ids.has(element.id));
 			const bounds = selectionBounds(boxes);
 			if (boxes.length < 2 || !bounds) {

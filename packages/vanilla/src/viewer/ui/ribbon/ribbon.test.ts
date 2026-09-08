@@ -1,8 +1,11 @@
+import { EMPTY_RIBBON_TRANSITION_DRAFT } from 'pptx-viewer-shared';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { EditActions } from '../../editor/editor-edit-ops';
 import type { FindReplaceActions } from '../../editor/editor-find-replace-actions';
+import { readTextFormatState } from '../../editor/editor-format-mutations';
 import { createTranslator } from '../../i18n';
+import { createFontGroup } from './home/font-group';
 import { createRibbon } from './ribbon';
 import type { RibbonHandlers, RibbonInsertHandlers } from './ribbon-types';
 
@@ -41,8 +44,12 @@ function buildHandlers(): RibbonHandlers {
 			openCompare: vi.fn(),
 			openSelectionPane: vi.fn(),
 			openSlideSorter: vi.fn(),
+			openReadingView: vi.fn(),
+			openOutlineView: vi.fn(),
 			openComments: vi.fn(),
 			openHyperlink: vi.fn(),
+			toggleInspector: vi.fn(),
+			clearSelection: vi.fn(),
 			toggleViewOption: vi.fn(),
 			addGuide: vi.fn(),
 			activateEyedropper: vi.fn(),
@@ -60,15 +67,16 @@ function buildHandlers(): RibbonHandlers {
 			openDigitalSignatures: vi.fn(),
 			openPasswordProtection: vi.fn(),
 			openVersionHistory: vi.fn(),
+			getRecentPresentationsCount: vi.fn(() => 50),
 			save: vi.fn(),
 			saveAsPpsx: vi.fn(),
 			saveAsPptm: vi.fn(),
-			packageForSharing: vi.fn(),
 			exportPng: vi.fn(),
 			copySlideAsImage: vi.fn(),
 			exportPdf: vi.fn(),
 			exportGif: vi.fn(),
 			exportVideo: vi.fn(),
+			exportJson: vi.fn(),
 			print: vi.fn(),
 		},
 		slideShow: {
@@ -81,11 +89,20 @@ function buildHandlers(): RibbonHandlers {
 			openCustomShows: vi.fn(),
 			toggleSubtitles: vi.fn(),
 			openSubtitleSettings: vi.fn(),
+			toggleHideSlide: vi.fn(),
+			showOptions: () => ({}),
+			updateShowOptions: vi.fn(),
 		},
 		insert: fakeActions<RibbonInsertHandlers>(),
 		edit: fakeActions<EditActions>(),
 		findReplace: fakeActions<FindReplaceActions>(),
 		design: { setTheme: vi.fn(), applyPresentationTheme: vi.fn() },
+		transitions: {
+			readDraft: () => ({ ...EMPTY_RIBBON_TRANSITION_DRAFT }),
+			applyDraft: vi.fn(),
+			readTransition: () => undefined,
+			applyChange: vi.fn(),
+		},
 		draw: { setTool: vi.fn(), setColor: vi.fn(), setWidth: vi.fn() },
 	};
 }
@@ -108,7 +125,7 @@ describe('createRibbon', () => {
 		const panes = ribbon.el.querySelectorAll<HTMLElement>('.pptxv-ribbon-tab-content');
 		const visible = Array.from(panes).filter((p) => !p.hidden);
 		expect(visible).toHaveLength(1);
-		expect(visible[0].querySelector('.pptxv-shape-grid')).toBeTruthy();
+		expect(visible[0].querySelector('.pptxv-select-button')).toBeTruthy();
 	});
 
 	it('dispatches the supported Slide Show actions', () => {
@@ -118,9 +135,7 @@ describe('createRibbon', () => {
 		const tabs = ribbon.el.querySelectorAll<HTMLButtonElement>('.pptxv-ribbon-tab');
 		tabs[7].click();
 		ribbon.el
-			.querySelector<HTMLButtonElement>(
-				`[aria-label="${t('pptx.slideShow.fromBeginningTooltip')}"]`,
-			)
+			.querySelector<HTMLButtonElement>(`[aria-label="${t('pptx.slideShow.fromBeginning')}"]`)
 			?.click();
 		Array.from(
 			ribbon.el.querySelectorAll<HTMLButtonElement>(
@@ -137,10 +152,10 @@ describe('createRibbon', () => {
 			.find((button) => button.textContent === t('pptx.slideShow.subtitleSettings'))
 			?.click();
 		ribbon.el
-			.querySelector<HTMLButtonElement>(`[aria-label="${t('pptx.slideShow.fromCurrentTooltip')}"]`)
+			.querySelector<HTMLButtonElement>(`[aria-label="${t('pptx.slideShow.fromCurrent')}"]`)
 			?.click();
 		ribbon.el
-			.querySelector<HTMLButtonElement>(`[aria-label="${t('pptx.slideShow.broadcastTooltip')}"]`)
+			.querySelector<HTMLButtonElement>(`[aria-label="${t('pptx.slideShow.broadcast')}"]`)
 			?.click();
 		expect(handlers.slideShow.startFromBeginning).toHaveBeenCalledOnce();
 		expect(handlers.slideShow.startFromCurrent).toHaveBeenCalledOnce();
@@ -161,11 +176,19 @@ describe('createRibbon', () => {
 		const ribbon = createRibbon(document, t, handlers);
 		const tabs = ribbon.el.querySelectorAll<HTMLButtonElement>('.pptxv-ribbon-tab');
 		tabs[8].click();
-		const recordButtons = ribbon.el.querySelectorAll<HTMLButtonElement>(
-			'.pptxv-ribbon-tab-content:not([hidden]) button',
+		const recordButtons = Array.from(
+			ribbon.el.querySelectorAll<HTMLButtonElement>(
+				'.pptxv-ribbon-tab-content:not([hidden]) button',
+			),
 		);
-		recordButtons[0].click();
-		recordButtons[1].click();
+		// Camera / Manage / Help are disabled placeholders, as in React; only the
+		// two Record commands do anything.
+		const byLabel = (label: string) =>
+			recordButtons.find((button) => button.getAttribute('aria-label') === label);
+		expect(byLabel('Cameo')?.disabled).toBeTruthy();
+		expect(byLabel('Learn More')?.disabled).toBeTruthy();
+		byLabel(t('pptx.slideShow.fromBeginning'))?.click();
+		byLabel(t('pptx.slideShow.fromCurrent'))?.click();
 		expect(handlers.slideShow.startRehearsal).toHaveBeenCalledTimes(2);
 
 		tabs[9].click();
@@ -177,6 +200,27 @@ describe('createRibbon', () => {
 			.find((button) => button.textContent === t('pptx.review.language'))
 			?.click();
 		expect(handlers.nav.openSettings).toHaveBeenCalledWith('general');
+	});
+
+	it('routes Design > Slide Size to the inspector card, not Document Properties', () => {
+		const t = createTranslator();
+		const handlers = buildHandlers();
+		const ribbon = createRibbon(document, t, handlers);
+		ribbon.el
+			.querySelector<HTMLButtonElement>(`[aria-label="${t('pptx.ribbon.slideSize')}"]`)
+			?.click();
+		// The only slide-size control is the inspector deck panel's SLIDE SIZE
+		// card, and that panel only renders with nothing selected.
+		expect(handlers.nav.clearSelection).toHaveBeenCalledOnce();
+		expect(handlers.nav.toggleInspector).toHaveBeenCalledOnce();
+		expect(handlers.file.openDocumentProperties).not.toHaveBeenCalled();
+
+		// Already open: opening it again would close it.
+		ribbon.setInspectorOpen(true);
+		ribbon.el
+			.querySelector<HTMLButtonElement>(`[aria-label="${t('pptx.ribbon.slideSize')}"]`)
+			?.click();
+		expect(handlers.nav.toggleInspector).toHaveBeenCalledOnce();
 	});
 
 	it('setEditState hides the primary row and tab bar when not editable', () => {
@@ -257,13 +301,13 @@ describe('createRibbon', () => {
 		ribbon.setEditable(false);
 		const button = (label: string) =>
 			ribbon.el.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
-		expect(button(t('pptx.ribbon.compareTitle'))?.disabled).toBeTruthy();
+		expect(button(t('pptx.ribbon.compare'))?.disabled).toBeTruthy();
 		expect(button(t('pptx.master.title'))?.disabled).toBeTruthy();
 		expect(button(t('pptx.ribbon.templatesOff'))?.disabled).toBeTruthy();
 		expect(button(t('pptx.ribbon.eyedropper'))?.disabled).toBeTruthy();
 
 		ribbon.setEditable(true);
-		expect(button(t('pptx.ribbon.compareTitle'))?.disabled).toBeFalsy();
+		expect(button(t('pptx.ribbon.compare'))?.disabled).toBeFalsy();
 		expect(button(t('pptx.master.title'))?.disabled).toBeFalsy();
 		expect(button(t('pptx.ribbon.templatesOff'))?.disabled).toBeFalsy();
 		expect(button(t('pptx.ribbon.eyedropper'))?.disabled).toBeFalsy();
@@ -284,7 +328,7 @@ describe('createRibbon', () => {
 				(btn) => btn.textContent,
 			);
 			expect(tabLabels).not.toContain(t('pptx.ribbon.tab.insert'));
-			expect(ribbon.el.querySelector('.pptxv-shape-grid')).toBeNull();
+			expect(ribbon.el.querySelector('.pptxv-ribbon-insert-content')).toBeNull();
 		});
 
 		it('falls back to the first visible tab (File) when the default (Home) tab is hidden', () => {
@@ -302,9 +346,7 @@ describe('createRibbon', () => {
 			const ribbon = createRibbon(document, t, buildHandlers(), ['broadcast']);
 			const tabs = ribbon.el.querySelectorAll<HTMLButtonElement>('.pptxv-ribbon-tab');
 			tabs[7].click();
-			expect(
-				ribbon.el.querySelector(`[aria-label="${t('pptx.slideShow.broadcastTooltip')}"]`),
-			).toBeNull();
+			expect(ribbon.el.querySelector(`[aria-label="${t('pptx.slideShow.broadcast')}"]`)).toBeNull();
 		});
 
 		it('hides the Export actions grid in the File tab', () => {
@@ -322,23 +364,63 @@ describe('createRibbon', () => {
 			expect(backstage?.querySelectorAll('.pptxv-bs-actions button')).toHaveLength(0);
 		});
 
-		it('hides zoom, fullscreen, and notes actions from the View tab as independent units', () => {
+		it('hides the zoom commands from the View tab', () => {
 			const t = createTranslator();
-			const ribbon = createRibbon(document, t, buildHandlers(), ['zoom', 'fullscreen', 'notes']);
+			const ribbon = createRibbon(document, t, buildHandlers(), ['zoom']);
 			const tabs = ribbon.el.querySelectorAll<HTMLButtonElement>('.pptxv-ribbon-tab');
 			const viewTabIndex = Array.from(tabs).findIndex(
 				(button) => button.textContent === t('pptx.ribbon.tab.view'),
 			);
 			tabs[viewTabIndex].click();
-			expect(ribbon.el.querySelector(`[aria-label="${t('pptx.statusBar.zoomOut')}"]`)).toBeNull();
-			expect(ribbon.el.querySelector(`[aria-label="${t('pptx.statusBar.slideShow')}"]`)).toBeNull();
-			expect(
-				ribbon.el.querySelector(`[aria-label="${t('pptx.statusBar.toggleNotes')}"]`),
-			).toBeNull();
-			// An unrelated View action stays, proving the hide is scoped to those ids.
-			expect(
-				ribbon.el.querySelector(`[aria-label="${t('pptx.ribbon.accessibilityCheck')}"]`),
-			).not.toBeNull();
+			expect(ribbon.el.querySelector(`[aria-label="${t('pptx.view.zoomToFit')}"]`)).toBeNull();
+			expect(ribbon.el.querySelector(`[aria-label="${t('pptx.slideSorter.zoom')}"]`)).toBeNull();
+			// An unrelated View action stays, proving the hide is scoped to that id.
+			expect(ribbon.el.querySelector(`[aria-label="${t('pptx.view.normal')}"]`)).not.toBeNull();
 		});
+	});
+});
+
+describe('home font size', () => {
+	it('shows points and sends a point preset to the format action', () => {
+		const t = createTranslator();
+		const setFontSize = vi.fn();
+		const group = createFontGroup(document, t, {
+			toggleBold: vi.fn(),
+			toggleItalic: vi.fn(),
+			toggleUnderline: vi.fn(),
+			toggleStrikethrough: vi.fn(),
+			toggleTextShadow: vi.fn(),
+			setFontFamily: vi.fn(),
+			setFontSize,
+			changeFontSize: vi.fn(),
+			setTextColor: vi.fn(),
+			setHighlightColor: vi.fn(),
+			setCharacterSpacing: vi.fn(),
+			changeCase: vi.fn(),
+			clearFormatting: vi.fn(),
+		});
+		group.update({
+			canFormat: true,
+			editable: true,
+			text: readTextFormatState({
+				type: 'text',
+				id: 'font-size',
+				x: 0,
+				y: 0,
+				width: 100,
+				height: 20,
+				text: 'Hello',
+				textStyle: { fontSize: 48.1 * (96 / 72) },
+			}),
+		});
+
+		const dropdown = group.el.querySelector<HTMLElement>('.pptxv-font-size-dd');
+		expect(dropdown?.querySelector('.pptxv-dropdown-text')?.textContent).toBe('48.1');
+		dropdown?.querySelector<HTMLButtonElement>('.pptxv-dropdown-trigger')?.click();
+		const tenPoint = [
+			...(dropdown?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []),
+		].find((option) => option.textContent === '10');
+		tenPoint?.click();
+		expect(setFontSize).toHaveBeenCalledWith(10);
 	});
 });

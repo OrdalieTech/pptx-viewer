@@ -1,5 +1,6 @@
 import { XmlObject, TextStyle, TextSegment } from '../../types';
 import type { BulletInfo } from '../../types';
+import { formatAutoNumberMarker } from '../../utils/auto-number-format';
 import {
 	buildParagraphPropertiesXml,
 	assembleParagraphXml,
@@ -7,6 +8,7 @@ import {
 } from './PptxHandlerRuntimeSaveParagraphHelpers';
 import type { ParagraphSpacingConfig } from './PptxHandlerRuntimeSaveParagraphHelpers';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveRunProperties';
+import { toRunScopedTextStyle } from './run-scoped-text-style';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	private isRenderedBulletMarker(segment: TextSegment): boolean {
@@ -14,14 +16,20 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		if (!bullet) {
 			return false;
 		}
+		if (bullet.autoNumType) {
+			if (bullet.paragraphIndex === undefined) {
+				return false;
+			}
+			const ordinal = Math.max(1, (bullet.autoNumStartAt ?? 1) + bullet.paragraphIndex);
+			const marker = formatAutoNumberMarker(bullet.autoNumType, ordinal);
+			return segment.text === marker || segment.text === `${marker} `;
+		}
 		const marker = bullet.char
 			? `${bullet.char} `
 			: bullet.imageRelId || bullet.imageDataUrl
 				? '\u{1F4CE} '
-				: bullet.autoNumType
-					? undefined
-					: '• ';
-		return marker ? segment.text === marker : bullet.paragraphIndex !== undefined;
+				: '• ';
+		return segment.text === marker;
 	}
 
 	protected createParagraphsFromTextContent(
@@ -30,11 +38,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		textSegments: TextSegment[] | undefined,
 		resolveHyperlinkRelationshipId?: (target: string) => string | undefined,
 	): XmlObject[] {
+		// `a:pPr` wants the element style whole; every `a:rPr` must not inherit
+		// its paragraph-only members. See `toRunScopedTextStyle`.
+		const runScopedTextStyle = toRunScopedTextStyle(textStyle);
 		// #69: Each paragraph's own pPr geometry (align / spacing / margins /
 		// indent / tabs / rtl), carried on the first segment as
 		// `paragraphProperties`, overrides the shape-level style for that
 		// paragraph. Paragraphs without their own properties fall back to the
 		// shape-level style, preserving prior behaviour for SDK-built text.
+		// `paragraphProperties` also travels to the builder as the authored set,
+		// so the shape-level half of the merge is not written back as explicit
+		// per-paragraph values (see `buildParagraphPropertiesXml`).
 		const createParagraph = (
 			runs: XmlObject[],
 			bulletInfo?: BulletInfo,
@@ -58,6 +72,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				bulletInfo,
 				spacing,
 				level,
+				paragraphProperties,
 			);
 			return assembleParagraphXml(runs, paragraphProps, endParaRunProperties);
 		};
@@ -144,24 +159,34 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		let currentLevel: number | undefined;
 		let currentEndParaRunProperties: Record<string, unknown> | undefined;
 		let currentParagraphProperties: TextStyle | undefined;
-		// #69: track whether this paragraph has taken its metadata yet. A
-		// paragraph-break segment (`\n`) splits and leaves a trailing empty run,
-		// so `currentRuns.length === 0` would miss the metadata on the *next*
-		// paragraph's first segment (dropping its per-paragraph pPr / level).
+		// #69: track whether this paragraph has taken its metadata yet.
+		// `currentRuns.length === 0` cannot stand in for "new paragraph", because
+		// a paragraph-break segment (`\n`) can open one that has no runs yet, and
+		// testing the run count would miss the metadata on the *next* paragraph's
+		// first segment (dropping its per-paragraph pPr / level).
 		let capturedParagraphMeta = false;
 		const pushParagraph = (): void => {
-			if (currentRuns.length === 0) {
-				currentRuns.push(createRun('', textStyle));
-			}
-			paragraphs.push(
-				createParagraph(
-					currentRuns,
-					currentBulletInfo,
-					currentLevel,
-					currentEndParaRunProperties,
-					currentParagraphProperties,
-				),
+			const paragraph = createParagraph(
+				currentRuns,
+				currentBulletInfo,
+				currentLevel,
+				currentEndParaRunProperties,
+				currentParagraphProperties,
 			);
+			if (currentRuns.length === 0) {
+				// A paragraph with no content is `<a:p><a:pPr/><a:endParaRPr/></a:p>`,
+				// exactly as PowerPoint writes a blank line: the line's size, weight
+				// and colour live in `a:endParaRPr` (§21.1.2.2.7), which
+				// `assembleParagraphXml` has already re-emitted above. This used to
+				// backfill `<a:r><a:rPr/><a:t/></a:r>` instead, inventing a run the
+				// source never had and giving it a full resolved `a:rPr` to carry:
+				// measured on `issue-132-hr-deck.pptx` slide 1, a deck with 7
+				// authored runs came back with 45. `assembleParagraphXml` writes an
+				// `a:r` key for whatever it is handed, so the empty slot it leaves
+				// behind goes with it.
+				delete paragraph['a:r'];
+			}
+			paragraphs.push(paragraph);
 			currentRuns = [];
 			currentBulletInfo = undefined;
 			currentLevel = undefined;
@@ -171,11 +196,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		};
 
 		if (textSegments && textSegments.length > 0) {
-			const uniformSegmentOverrides = computeUniformSegmentOverrides(textStyle, textSegments);
+			// This pushes element-level edits back down onto previously uniform
+			// runs, so it is a run destination too: passing the WHOLE element style
+			// re-added the paragraph `rtl` the spread below had already dropped.
+			const uniformSegmentOverrides = computeUniformSegmentOverrides(
+				runScopedTextStyle,
+				textSegments,
+			);
 
 			textSegments.forEach((segment) => {
 				const segmentStyle = {
-					...textStyle,
+					...runScopedTextStyle,
 					...segment.style,
 					...uniformSegmentOverrides,
 				} as TextStyle;
@@ -233,8 +264,24 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 				const segmentText = String(segment.text ?? '');
 				const lineParts = segmentText.split('\n');
+				// A paragraph-break segment is the literal "\n", which splits into
+				// two empty halves. Emitting a run for each of them appended one
+				// empty `a:r` to the paragraph that closed AND to the one that
+				// opened; the next load read those back as segments, which emitted
+				// their own empty runs, so the run count grew by one per paragraph
+				// on every save forever. Only a split product that carries text
+				// deserves a run. A paragraph left with none is written runless,
+				// which is how PowerPoint writes a blank line; its size still comes
+				// from the `a:endParaRPr` that `pushParagraph` re-emits.
+				const isSplitProduct = lineParts.length > 1;
 
 				lineParts.forEach((linePart, lineIndex) => {
+					if (isSplitProduct && linePart.length === 0) {
+						if (lineIndex < lineParts.length - 1) {
+							pushParagraph();
+						}
+						return;
+					}
 					if (segment.rubyText !== undefined) {
 						// Ruby segment: emit as a:ruby structure
 						const rubySeg = { ...segment, text: linePart };
@@ -269,11 +316,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const normalizedText = typeof text === 'string' ? text : '';
 		const textLines = normalizedText.split('\n');
 		textLines.forEach((line) => {
-			paragraphs.push(createParagraph([createRun(line, textStyle)]));
+			paragraphs.push(createParagraph([createRun(line, runScopedTextStyle)]));
 		});
 
 		if (paragraphs.length === 0) {
-			paragraphs.push(createParagraph([createRun('', textStyle)]));
+			paragraphs.push(createParagraph([createRun('', runScopedTextStyle)]));
 		}
 
 		return paragraphs;

@@ -10,13 +10,19 @@
  */
 
 import { PptxHandler } from 'pptx-viewer-core';
-import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
-import type { CollaborationConfig, YjsFactories, YTransactionLike } from 'pptx-viewer-shared';
+import type { PptxElement, PptxHandlerSaveOptions, PptxSlide } from 'pptx-viewer-core';
+import type {
+	CollabLoadOrigin,
+	CollaborationConfig,
+	YjsFactories,
+	YTransactionLike,
+} from 'pptx-viewer-shared';
 import {
 	reconcileSlidesInYDoc,
 	LOCAL_SYNC_ORIGIN,
 	readSlidesFromYDoc,
 	observeYDocSlides,
+	shouldRoomSlidesReplaceLoad,
 } from 'pptx-viewer-shared';
 import { useCallback, useEffect, useRef } from 'react';
 import type { Doc as YDoc } from 'yjs';
@@ -51,6 +57,15 @@ export interface UseYjsDocumentSyncInput {
 	 */
 	getSourceBytes?: () => Uint8Array | null;
 	/**
+	 * Session-level save options (view properties, table styles, tags, deck
+	 * properties, ...), built the same way as the Save/Export path
+	 * (`buildDeckSaveOptions` in `pptx-viewer-shared`). Without this the
+	 * write-back reloaded the source bytes and called `handler.save(slides)`
+	 * with NO options, so an owner's write-back file dropped every
+	 * session-level edit that lives outside `slides`.
+	 */
+	getSaveOptions?: () => PptxHandlerSaveOptions;
+	/**
 	 * Monotonic counter bumped each time the content-load pipeline finishes
 	 * applying a parsed deck to viewer state. A local load that lands while the
 	 * shared doc already holds slides (a late joiner's bootstrap deck parsing
@@ -58,6 +73,13 @@ export interface UseYjsDocumentSyncInput {
 	 * each bump re-adopts the doc's slides when the room has content.
 	 */
 	loadVersion?: number;
+	/**
+	 * Why the last content load ran. Only a `bootstrap` deck (the host's
+	 * `content`) yields to a room that already holds slides; a file the user
+	 * opened mid-session is what they asked for and is published instead
+	 * (`shouldRoomSlidesReplaceLoad`).
+	 */
+	loadOrigin?: CollabLoadOrigin;
 }
 
 export function useYjsDocumentSync({
@@ -69,7 +91,9 @@ export function useYjsDocumentSync({
 	isSynced = true,
 	config,
 	getSourceBytes,
+	getSaveOptions,
 	loadVersion = 0,
+	loadOrigin = 'user',
 }: UseYjsDocumentSyncInput): void {
 	const isApplyingRemoteRef = useRef(false);
 	const lastSyncedRef = useRef('');
@@ -120,13 +144,13 @@ export function useYjsDocumentSync({
 				// Merge the separated template (master/layout) elements back so any
 				// edit-template-mode changes persist into the write-back snapshot.
 				const slidesToSave = buildSaveSlides(currentSlides, templateElementsBySlideId);
-				const bytes = await handler.save(slidesToSave);
+				const bytes = await handler.save(slidesToSave, getSaveOptions?.());
 				config.onWriteBack(bytes);
 			} catch {
 				/* write-back failures are non-fatal */
 			}
 		}, debounceMs);
-	}, [doc, config, getSourceBytes, templateElementsBySlideId]);
+	}, [doc, config, getSourceBytes, getSaveOptions, templateElementsBySlideId]);
 
 	// Re-adopt the shared doc after a local content load. The load pipeline
 	// applies its parsed slides unconditionally, so when a load finishes AFTER
@@ -146,7 +170,7 @@ export function useYjsDocumentSync({
 		const docSlides = readSlidesFromYDoc(
 			doc as unknown as Parameters<typeof readSlidesFromYDoc>[0],
 		);
-		if (docSlides.length === 0) {
+		if (!shouldRoomSlidesReplaceLoad(loadOrigin, docSlides.length)) {
 			return;
 		}
 		// Unconditional re-apply: the freshly loaded slides differ from the doc
@@ -161,7 +185,7 @@ export function useYjsDocumentSync({
 		// outbound edits until refocus. The `lastSyncedRef` JSON dedupe already
 		// suppresses the echo, so no deferral is needed.
 		isApplyingRemoteRef.current = false;
-	}, [loadVersion, doc, isConnected, setSlides]);
+	}, [loadVersion, loadOrigin, doc, isConnected, setSlides]);
 
 	// Sync local slide changes -> Y.Doc. Gated on isSynced: until the provider
 	// confirms its initial sync (or the grace period lifts the gate), local
@@ -204,6 +228,9 @@ export function useYjsDocumentSync({
 	useEffect(() => {
 		hasInitializedRef.current = false;
 		lastSyncedRef.current = '';
+		// `doc` is not read in the body; it's the identity-change trigger described
+		// in the comment above.
+		// oxlint-disable-next-line react/exhaustive-effect-dependencies -- see comment above
 	}, [doc]);
 
 	// Sync remote Y.Doc changes -> local state

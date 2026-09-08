@@ -44,6 +44,48 @@ describe('chartRenderer', () => {
 		expect(bars).toHaveLength(6);
 	});
 
+	it('reveals only the authored p:graphicEl series via animationState.chartReveal', () => {
+		// A reverse-order series build fires seriesIdx 1 ("Cost") first: the
+		// reveal must be exactly {1}, not a forward-count guess.
+		const wrapper = mount(ChartRenderer, {
+			props: {
+				element: chartElement(data('bar')),
+				zIndex: 1,
+				animationState: {
+					visible: true,
+					cssAnimation: undefined,
+					chartReveal: {
+						mode: 'bySeries',
+						descriptor: {
+							background: true,
+							series: new Set([1]),
+							categories: new Set(),
+							points: [],
+						},
+					},
+				},
+			},
+		});
+		const bars = wrapper.findAll('rect').filter((r) => r.attributes('rx') === '1');
+		expect(bars).toHaveLength(3);
+	});
+
+	it('falls back to count-based reveal (animationState.build) when chartReveal is absent', () => {
+		const wrapper = mount(ChartRenderer, {
+			props: {
+				element: chartElement(data('bar')),
+				zIndex: 1,
+				animationState: {
+					visible: true,
+					cssAnimation: undefined,
+					build: { kind: 'chart', mode: 'bySeries', progress: 0.1 },
+				},
+			},
+		});
+		const bars = wrapper.findAll('rect').filter((r) => r.attributes('rx') === '1');
+		expect(bars).toHaveLength(3);
+	});
+
 	it('renders a rect per data point for a column (bar3D maps to bar) chart', () => {
 		const wrapper = mount(ChartRenderer, {
 			props: { element: chartElement(data('bar3D')), zIndex: 0 },
@@ -142,12 +184,16 @@ describe('chartRenderer', () => {
 		expect(wrapper.find('svg').exists()).toBeTruthy();
 	});
 
-	it('renders the labelled placeholder for a still-unsupported chart type (ofPie)', () => {
+	// Pie-of-pie used to hit Vue's local dispatch table, which had no branch for
+	// it and fell through to the placeholder - while React, Angular, Svelte and
+	// Vanilla all drew it, because the shared engine has had a `buildOfPieViewModel`
+	// for as long as the token has existed. Vue now asks shared what the kind is.
+	it('draws pie-of-pie through the shared engine instead of a placeholder', () => {
 		const wrapper = mount(ChartRenderer, {
 			props: { element: chartElement(data('ofPie')), zIndex: 0 },
 		});
-		expect(wrapper.find('.pptx-vue-chart-placeholder').exists()).toBeTruthy();
-		expect(wrapper.text()).toContain('Chart: ofPie');
+		expect(wrapper.find('.pptx-vue-chart-placeholder').exists()).toBeFalsy();
+		expect(wrapper.findAll('path').length).toBeGreaterThanOrEqual(3);
 	});
 
 	it('renders the placeholder when chart data is missing', () => {
@@ -222,7 +268,7 @@ describe('chartRenderer', () => {
 		});
 		expect(wrapper.find('.pptx-vue-chart-placeholder').exists()).toBeFalsy();
 		expect(wrapper.find('svg').exists()).toBeTruthy();
-		// At least some rects drawn by WaterfallChart
+		// At least some rects drawn by the shared waterfall builder
 		expect(wrapper.findAll('rect').length).toBeGreaterThanOrEqual(1);
 	});
 
@@ -341,5 +387,113 @@ describe('chartRenderer', () => {
 		expect(wrapper.find('svg').exists()).toBeTruthy();
 		// 2 categories → 2 box-whisker groups with multiple lines each
 		expect(wrapper.findAll('line').length).toBeGreaterThanOrEqual(4);
+	});
+});
+
+/**
+ * Regression cover for the six kinds Vue used to draw with bespoke components
+ * (waterfall / combo / stock / surface / treemap / regionMap). They emitted no
+ * `data-chart-part` attributes, so on-canvas mark selection did nothing for
+ * exactly these kinds while it worked in Angular, Svelte and Vanilla.
+ */
+describe('chartRenderer: interactive marks on the formerly bespoke kinds', () => {
+	const cases: Array<[string, PptxChartData]> = [
+		['waterfall', data('waterfall', { series: [{ name: 'Cash flow', values: [45, 62, 58] }] })],
+		['combo', data('combo')],
+		[
+			'stock',
+			data('stock', {
+				series: [
+					{ name: 'Open', values: [42, 58, 55] },
+					{ name: 'High', values: [50, 65, 62] },
+					{ name: 'Low', values: [38, 52, 51] },
+					{ name: 'Close', values: [47, 61, 53] },
+				],
+			}),
+		],
+		['treemap', data('treemap')],
+		['regionMap', data('regionMap', { categories: ['United States', 'Germany', 'China'] })],
+		['surface', data('surface')],
+	];
+
+	for (const [name, chartData] of cases) {
+		it(`tags ${name} data marks so the canvas can select them`, () => {
+			const wrapper = mount(ChartRenderer, {
+				props: { element: chartElement(chartData), zIndex: 0 },
+			});
+			expect(wrapper.findAll('[data-chart-part="dataPoint"]').length).toBeGreaterThan(0);
+		});
+	}
+
+	/**
+	 * The bespoke waterfall scaled cumulative bars against the RAW value range,
+	 * so a rising waterfall ran off the top of the plot.
+	 */
+	it('keeps every waterfall bar inside the plot box', () => {
+		const wrapper = mount(ChartRenderer, {
+			props: {
+				element: chartElement(
+					data('waterfall', { series: [{ name: 'Cash flow', values: [45, 62, 58, 71] }] }),
+				),
+				zIndex: 0,
+			},
+		});
+		const bars = wrapper.findAll('rect');
+		expect(bars.length).toBeGreaterThan(1);
+		for (const bar of bars) {
+			const y = Number(bar.attributes('y'));
+			const h = Number(bar.attributes('height'));
+			expect(y).toBeGreaterThanOrEqual(-8);
+			expect(y + h).toBeLessThanOrEqual(308);
+		}
+	});
+
+	it('names each region-map region in a tooltip', () => {
+		const wrapper = mount(ChartRenderer, {
+			props: {
+				element: chartElement(data('regionMap', { categories: ['United States', 'Germany'] })),
+				zIndex: 0,
+			},
+		});
+		expect(wrapper.html()).toContain('United States: 10');
+	});
+});
+
+// C2-G9 (render half): a data point's c:dPt/c:pictureOptions picture fill
+// reaches the SVG as a <pattern>/<image> def and a fill="url(#...)" bar rect.
+describe('chartRenderer: c:dPt/c:pictureOptions picture fill', () => {
+	it('renders a <pattern>/<image> def and points the bar fill at it', () => {
+		const wrapper = mount(ChartRenderer, {
+			props: {
+				element: chartElement(
+					data('bar', {
+						series: [
+							{
+								name: 'Revenue',
+								values: [10, 20, 30],
+								dataPoints: [
+									{
+										idx: 0,
+										picture: {
+											imageUrl: 'data:image/png;base64,AAA',
+											pictureFormat: 'stretch',
+										},
+									},
+								],
+							},
+						],
+					}),
+				),
+				zIndex: 1,
+			},
+		});
+		const pattern = wrapper.find('pattern');
+		expect(pattern.exists()).toBeTruthy();
+		expect(wrapper.find('image').exists()).toBeTruthy();
+		const patternId = pattern.attributes('id');
+		const filledRect = wrapper
+			.findAll('rect')
+			.find((r) => r.attributes('fill') === `url(#${patternId})`);
+		expect(filledRect).toBeDefined();
 	});
 });

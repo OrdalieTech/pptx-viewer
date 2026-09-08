@@ -1,16 +1,26 @@
-import { hasTextProperties } from 'pptx-viewer-core';
+import {
+	cloneElement as cloneElementDeep,
+	groupElements as groupElementArray,
+	hasTextProperties,
+	isTemplateElementId,
+	makeStoreAwareId,
+	reassignDescendantIds,
+	resolveThemeColorRef,
+	ungroupElements as ungroupElementInArray,
+} from 'pptx-viewer-core';
 import type {
 	TextPptxElement,
 	ShapePptxElement,
 	ConnectorPptxElement,
 	ImagePptxElement,
-	GroupPptxElement,
 	PptxElementWithText,
 	PptxElementAnimation,
+	PptxThemeColorRef,
 } from 'pptx-viewer-core';
 
 import type { ToolContext, ToolResult } from '../types.js';
 import { validateSlideIndex, generateElementId } from './helpers.js';
+import { applyElementAltText, applyElementTitle } from './style-tools.js';
 
 // ── addElement ──────────────────────────────────────────────────────────────
 
@@ -233,6 +243,13 @@ export interface UpdateElementParams {
 	fontSize?: number;
 	fontFamily?: string;
 	fontColor?: string;
+	/**
+	 * A theme colour for the run text (`{ scheme: 'accent1', lumMod: 0.8 }`).
+	 * Wins on save (`<a:schemeClr>` instead of a canonical `<a:srgbClr>`), and
+	 * resolves `fontColor` immediately when `fontColor` was not also given.
+	 * Passing `fontColor` alone clears a previously-set text theme colour.
+	 */
+	fontThemeColor?: PptxThemeColorRef;
 	bold?: boolean;
 	italic?: boolean;
 	underline?: boolean;
@@ -244,6 +261,10 @@ export interface UpdateElementParams {
 	hidden?: boolean;
 	flipH?: boolean;
 	flipV?: boolean;
+	/** Accessibility description; see {@link applyElementAltText} for the accepted kinds. */
+	altText?: string;
+	/** Accessibility title; see {@link applyElementTitle} for the accepted kinds. */
+	title?: string;
 }
 
 export function updateElement(
@@ -288,6 +309,12 @@ export function updateElement(
 	if (params.flipV !== undefined) {
 		el.flipVertical = params.flipV;
 	}
+	if (params.altText !== undefined) {
+		applyElementAltText(el, params.altText);
+	}
+	if (params.title !== undefined) {
+		applyElementTitle(el, params.title);
+	}
 
 	if (hasTextProperties(el)) {
 		const textEl = el as PptxElementWithText;
@@ -308,8 +335,17 @@ export function updateElement(
 		if (params.fontFamily !== undefined) {
 			textEl.textStyle.fontFamily = params.fontFamily;
 		}
-		if (params.fontColor !== undefined) {
+		if (params.fontThemeColor !== undefined) {
+			textEl.textStyle.colorRef = params.fontThemeColor;
+			const resolved = resolveThemeColorRef(params.fontThemeColor, ctx.pptxData.themeColorMap);
+			if (params.fontColor !== undefined) {
+				textEl.textStyle.color = params.fontColor;
+			} else if (resolved) {
+				textEl.textStyle.color = resolved;
+			}
+		} else if (params.fontColor !== undefined) {
 			textEl.textStyle.color = params.fontColor;
+			textEl.textStyle.colorRef = undefined;
 		}
 		if (params.bold !== undefined) {
 			textEl.textStyle.bold = params.bold;
@@ -354,6 +390,44 @@ export function updateElement(
 		pptxData: ctx.pptxData,
 		dirty: true,
 		result: { elementId: params.elementId },
+	};
+}
+
+// ── renameElement ───────────────────────────────────────────────────────────
+
+export interface RenameElementParams {
+	slideIndex: number;
+	elementId: string;
+	/** New element name (`cNvPr/@name`); an empty string clears the name. */
+	name: string;
+}
+
+export function renameElement(
+	ctx: ToolContext,
+	params: RenameElementParams,
+): ToolResult<{ elementId: string; name: string }> {
+	const err = validateSlideIndex(params.slideIndex, ctx.pptxData.slides.length);
+	if (err) {
+		throw new Error(err);
+	}
+
+	const slide = ctx.pptxData.slides[params.slideIndex];
+	const el = slide.elements.find((e) => e.id === params.elementId);
+	if (!el) {
+		throw new Error(`Element '${params.elementId}' not found on slide ${params.slideIndex}.`);
+	}
+
+	const name = params.name.trim();
+	if (name.length === 0) {
+		delete el.name;
+	} else {
+		el.name = name;
+	}
+
+	return {
+		pptxData: ctx.pptxData,
+		dirty: true,
+		result: { elementId: params.elementId, name },
 	};
 }
 
@@ -553,8 +627,14 @@ export function cloneElement(
 		if (terr) {
 			throw new Error(terr);
 		}
-		const clone = structuredClone(original);
-		clone.id = generateElementId();
+		const clone = cloneElementDeep(original);
+		const intoTemplate = isTemplateElementId(original.id);
+		clone.id = makeStoreAwareId(intoTemplate, original.id);
+		// Only the ROOT used to be re-ided. Element ids are written back out as
+		// `p:cNvPr/@id`, so duplicating a group left two shapes answering to the
+		// same id: an animation's `p:spTgt/@spid` then names both, and selection,
+		// hit testing and collaboration reconcile are keyed by id as well.
+		reassignDescendantIds(clone, () => makeStoreAwareId(intoTemplate, original.id));
 		clone.x += offsetX;
 		clone.y += offsetY;
 		ctx.pptxData.slides[targetIdx].elements.push(clone);
@@ -660,47 +740,25 @@ export function groupElements(
 
 	const slide = ctx.pptxData.slides[params.slideIndex];
 	const idSet = new Set(params.elementIds);
-	const children = slide.elements.filter((e) => idSet.has(e.id));
-	if (children.length !== params.elementIds.length) {
-		const childIds = new Set(children.map((element) => element.id));
-		const missing = params.elementIds.filter((id) => !childIds.has(id));
+	const found = new Set(slide.elements.filter((e) => idSet.has(e.id)).map((e) => e.id));
+	if (found.size !== idSet.size) {
+		const missing = params.elementIds.filter((id) => !found.has(id));
 		throw new Error(`Elements not found: ${missing.join(', ')}`);
 	}
 
-	// compute bounding box
-	const minX = Math.min(...children.map((e) => e.x));
-	const minY = Math.min(...children.map((e) => e.y));
-	const maxX = Math.max(...children.map((e) => e.x + e.width));
-	const maxY = Math.max(...children.map((e) => e.y + e.height));
-
-	// offset children relative to group origin
-	const localChildren = children.map((e) => {
-		const c = structuredClone(e);
-		c.x -= minX;
-		c.y -= minY;
-		return c;
-	});
-
-	// remove original elements
-	slide.elements = slide.elements.filter((e) => !idSet.has(e.id));
-
-	// create group
+	// The bounding box, the group-relative child coordinates and (critically)
+	// the slot the group takes in the element array all come from core, which
+	// every viewer binding uses too. This tool used to compute them itself and
+	// then `push` the group, which moved the whole selection to the FRONT of the
+	// paint order: an AI-panel "group these" silently restacked the slide.
 	const groupId = generateElementId();
-	const group: GroupPptxElement = {
-		id: groupId,
-		type: 'group',
-		x: minX,
-		y: minY,
-		width: maxX - minX,
-		height: maxY - minY,
-		children: localChildren,
-	};
-	slide.elements.push(group);
+	const grouped = groupElementArray(slide.elements, params.elementIds, groupId);
+	slide.elements = grouped.elements;
 
 	return {
 		pptxData: ctx.pptxData,
 		dirty: true,
-		result: { groupId },
+		result: { groupId: grouped.groupId ?? groupId },
 	};
 }
 
@@ -725,31 +783,39 @@ export function ungroupElements(
 	}
 
 	const slide = ctx.pptxData.slides[params.slideIndex];
-	const groupIdx = slide.elements.findIndex((e) => e.id === params.groupElementId);
-	if (groupIdx < 0) {
+	const group = slide.elements.find((e) => e.id === params.groupElementId);
+	if (!group) {
 		throw new Error(`Group element '${params.groupElementId}' not found.`);
 	}
-
-	const group = slide.elements[groupIdx];
 	if (group.type !== 'group') {
 		throw new Error(`Element '${params.groupElementId}' is not a group.`);
 	}
 
-	const grp = group as GroupPptxElement;
-	const restored = grp.children.map((child) => {
-		const c = structuredClone(child);
-		c.x += grp.x;
-		c.y += grp.y;
-		return c;
+	// Promote through core rather than by hand: it deep-clones each promoted
+	// child (so an undo snapshot still holding the group is not aliased) and
+	// re-ids a promoted NESTED group's descendants when their ids route to the
+	// wrong store. The hand-rolled version kept every id as it was, which put a
+	// template subtree's ids on the slide store (and vice versa), where later
+	// edits are dropped on save. Ids that already route correctly are left
+	// alone, so animations and collaborators keep their targets.
+	// A promoted child keeps its own id when that id already routes to the store
+	// it lands in, so a tool call does not churn ids the caller (or an animation)
+	// still refers to; only a mis-routed one is re-minted.
+	const intoTemplate = isTemplateElementId(group.id);
+	const childIds = group.children.map((child) =>
+		isTemplateElementId(child.id) === intoTemplate
+			? child.id
+			: makeStoreAwareId(intoTemplate, group.id),
+	);
+	const promoted = ungroupElementInArray(slide.elements, params.groupElementId, childIds, {
+		intoTemplate,
 	});
-
-	// replace group with children
-	slide.elements.splice(groupIdx, 1, ...restored);
+	slide.elements = promoted.elements;
 
 	return {
 		pptxData: ctx.pptxData,
 		dirty: true,
-		result: { restoredIds: restored.map((c) => c.id) },
+		result: { restoredIds: promoted.childIds },
 	};
 }
 

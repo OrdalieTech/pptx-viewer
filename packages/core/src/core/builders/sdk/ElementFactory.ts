@@ -8,6 +8,7 @@
  * @module sdk/ElementFactory
  */
 
+import { DEFAULT_POWERPOINT_TABLE_STYLE_ID } from '../../core/runtime/table-style-defaults';
 import { svgToCustomGeometryPaths } from '../../geometry/custom-geometry';
 import type { PptxChartData, PptxChartSeries, PptxChartType } from '../../types/chart';
 import type {
@@ -72,6 +73,7 @@ function mapFillToShapeStyle(fill?: FillInput): Partial<ShapeStyle> {
 				fillMode: 'solid',
 				fillColor: fill.color,
 				fillOpacity: fill.opacity,
+				...(fill.themeColorRef ? { fillColorRef: fill.themeColorRef } : {}),
 			};
 		case 'gradient':
 			return {
@@ -114,6 +116,7 @@ function mapStrokeToShapeStyle(stroke?: StrokeInput): Partial<ShapeStyle> {
 		strokeOpacity: stroke.opacity,
 		lineJoin: stroke.join,
 		lineCap: stroke.cap,
+		...(stroke.themeColorRef ? { strokeColorRef: stroke.themeColorRef } : {}),
 	};
 }
 
@@ -168,6 +171,9 @@ function mapTextStyleInput(opts?: Partial<TextStyleInput>): Partial<TextStyle> {
 	}
 	if (opts.color !== undefined) {
 		ts.color = opts.color;
+	}
+	if (opts.themeColorRef !== undefined) {
+		ts.colorRef = opts.themeColorRef;
 	}
 	if (opts.alignment !== undefined) {
 		ts.align = opts.alignment;
@@ -438,22 +444,20 @@ export function createTableElement(input: TableInput, options?: TableOptions): T
 
 	const rows: PptxTableRow[] = input.rows.map((rowInput) => ({
 		height: rowInput.height ?? rowHeight,
-		cells: rowInput.cells.map(
-			(cellInput): PptxTableCell => ({
-				text: cellInput.text,
-				gridSpan: cellInput.gridSpan,
-				rowSpan: cellInput.rowSpan,
-				style: cellInput.style
-					? {
-							fontSize: cellInput.style.fontSize,
-							bold: cellInput.style.bold,
-							italic: cellInput.style.italic,
-							color: cellInput.style.color,
-							align: cellInput.style.alignment,
-						}
-					: undefined,
-			}),
-		),
+		cells: rowInput.cells.map((cellInput): PptxTableCell => ({
+			text: cellInput.text,
+			gridSpan: cellInput.gridSpan,
+			rowSpan: cellInput.rowSpan,
+			style: cellInput.style
+				? {
+						fontSize: cellInput.style.fontSize,
+						bold: cellInput.style.bold,
+						italic: cellInput.style.italic,
+						color: cellInput.style.color,
+						align: cellInput.style.alignment,
+					}
+				: undefined,
+		})),
 	}));
 
 	const tableData: PptxTableData = {
@@ -465,7 +469,11 @@ export function createTableElement(input: TableInput, options?: TableOptions): T
 		lastRow: input.lastRow,
 		firstCol: input.firstCol,
 		lastCol: input.lastCol,
-		tableStyleId: input.style,
+		// Match PowerPoint's "Insert > Table": a new table gets Medium Style 2 -
+		// Accent 1 unless the caller picked a style. This is decided at
+		// creation time so the save pipeline never has to invent a style for
+		// loaded tables that legitimately have none.
+		tableStyleId: input.style ?? DEFAULT_POWERPOINT_TABLE_STYLE_ID,
 	};
 
 	return {
@@ -536,6 +544,7 @@ export function createChartElement(
 		series,
 		title: input.title,
 		grouping: input.grouping,
+		...(input.barDirection !== undefined ? { barDirection: input.barDirection } : {}),
 		style: {
 			hasLegend: input.hasLegend ?? true,
 			legendPosition: input.legendPosition,

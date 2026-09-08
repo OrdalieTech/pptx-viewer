@@ -1,4 +1,10 @@
 import type { PptxAction, PptxElement, PptxSlide } from 'pptx-viewer-core';
+import type { ViewerOptions } from 'pptx-viewer-shared';
+import {
+	buildFieldSubstitutionContext,
+	resolvePresentationAction,
+	shouldConfirmExternalHyperlink,
+} from 'pptx-viewer-shared';
 
 import type { SlideCanvasProps, ZoomViewport } from '../components/canvas/canvas-types';
 import type { CanvasSize, TableCellEditorState, ViewerMode } from '../types';
@@ -41,6 +47,15 @@ export interface BuildCanvasPropsInput {
 	presentation: UsePresentationModeResult;
 	findResults?: SlideCanvasProps['findResults'];
 	findResultIndex?: number;
+	/** Live File > Options snapshot, for the Trust Center hyperlink-confirm gate. */
+	viewerOptions: ViewerOptions;
+	/**
+	 * Confirmation prompt text for `window.confirm`, pre-built by the caller
+	 * (a hook, so it can call `useTranslation`) as
+	 * `` `${t('pptx.options.trust.confirmHyperlinks')}\n\n${url}` ``. Only
+	 * invoked when `shouldConfirmExternalHyperlink` says the gate applies.
+	 */
+	buildHyperlinkConfirmMessage: (url: string) => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +82,8 @@ export function buildCanvasProps(input: BuildCanvasPropsInput): SlideCanvasProps
 		presentation,
 		findResults,
 		findResultIndex,
+		viewerOptions,
+		buildHyperlinkConfirmMessage,
 	} = input;
 
 	const effectiveSlide = mode === 'master' ? masterPseudoSlide : activeSlide;
@@ -74,44 +91,54 @@ export function buildCanvasProps(input: BuildCanvasPropsInput): SlideCanvasProps
 		mode === 'master' ? (s.activeLayout ? (s.activeMaster?.elements ?? []) : []) : templateElements;
 
 	// ── Field substitution context (slide title, header/footer, etc.) ────
-	let slideTitle: string | undefined;
-	if (activeSlide) {
-		for (const el of activeSlide.elements) {
-			const phType = (el as unknown as { placeholderType?: string }).placeholderType;
-			if (phType === 'title' || phType === 'ctrTitle') {
-				const txt = (el as unknown as { text?: string }).text;
-				if (txt) {
-					slideTitle = txt;
-					break;
-				}
-			}
-		}
-	}
-	const hf = s.headerFooter;
-	const fieldContext: FieldSubstitutionContext = {
-		slideNumber: activeSlide?.slideNumber,
-		dateTimeText: hf.dateTimeText,
-		dateFormat: hf.dateFormat,
-		footerText: hf.footerText,
-		headerText: hf.headerText,
-		slideTitle,
-		customProperties: s.customProperties.map((p) => ({ name: p.name, value: p.value })),
-	};
+	// Assembled by `pptx-viewer-shared` so all five bindings resolve fields
+	// identically. In particular the slide title now comes from core's
+	// `deriveSlideTitle`: the `placeholderType` property this used to scan for
+	// is never set on a parsed deck, so `slidetitle` fields silently kept their
+	// cached literal ("Title") on every real `.pptx`.
+	const fieldContext: FieldSubstitutionContext = buildFieldSubstitutionContext({
+		headerFooter: s.headerFooter,
+		customProperties: s.customProperties,
+		slide: activeSlide,
+	});
 
 	// ── Table style context (theme + table style map for band colours) ──
 	const tableStyleContext: TableStyleContext | undefined =
 		s.theme || s.tableStyleMap ? { theme: s.theme, tableStyleMap: s.tableStyleMap } : undefined;
 
 	// ── Action / hyperlink handlers ────────────────────────────────────
-	const handleActionClick = (_elementId: string, action: PptxAction) => {
+	// Trust Center gate: external http(s) links may require confirmation
+	// before opening (Options > Trust Center > confirm external hyperlinks),
+	// same as `ViewerCanvasArea`'s wiring for the packaged `PowerPointViewer`.
+	const openExternalUrl = (url: string, target?: string) => {
+		if (
+			shouldConfirmExternalHyperlink(viewerOptions, url) &&
+			!window.confirm(buildHyperlinkConfirmMessage(url))
+		) {
+			return;
+		}
+		safeOpenUrl(url, target);
+	};
+
+	const handleActionClick = (elementId: string, action: PptxAction) => {
 		if (mode === 'present') {
-			presentation.handlePresentationAction(action);
+			// `runPresentationAction` (inside `handlePresentationAction`) opens an
+			// action's own external hyperlink unconditionally: it has no host hook
+			// for the Trust Center gate. Resolve the action here first so an
+			// `openUrl` intent goes through `openExternalUrl`'s confirm check
+			// instead.
+			const resolved = resolvePresentationAction(action, { slideCount: slides.length });
+			if (resolved.intent.kind === 'openUrl') {
+				openExternalUrl(resolved.intent.url);
+				return;
+			}
+			presentation.handlePresentationAction(action, elementId);
 		} else if (action.url) {
-			safeOpenUrl(action.url);
+			openExternalUrl(action.url);
 		}
 	};
 
-	const handleHyperlinkClick = (url: string) => {
+	const handleHyperlinkClick = (url: string, target?: string) => {
 		if (isPpactionUrl(url)) {
 			if (mode === 'present') {
 				const parsed = parsePpactionUrl(url);
@@ -124,7 +151,9 @@ export function buildCanvasProps(input: BuildCanvasPropsInput): SlideCanvasProps
 			}
 			return;
 		}
-		safeOpenUrl(url);
+		// `target` (`a:hlinkClick/@tgtFrame`) only applies to a real hyperlink,
+		// never to the internal ppaction jump handled above.
+		openExternalUrl(url, target);
 	};
 
 	return {
@@ -147,7 +176,9 @@ export function buildCanvasProps(input: BuildCanvasPropsInput): SlideCanvasProps
 		showGrid: s.showGrid,
 		gridSpacingPx,
 		showRulers: s.showRulers,
-		guides: s.guides,
+		// View ▸ Guides hides the overlay without discarding the guides: they are
+		// still snapped to while dragging and still round-trip on save.
+		guides: s.showGuides ? s.guides : [],
 		presentationElementStates:
 			mode === 'present' ? presentation.presentationElementStates : undefined,
 		presentationKeyframesCss:

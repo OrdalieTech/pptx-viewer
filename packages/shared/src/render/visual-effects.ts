@@ -14,7 +14,7 @@
  *  - **Outer glow**         → CSS `filter: drop-shadow(...)` (simple path) and
  *                             optional layered `box-shadow` (high-fidelity path)
  *  - **Soft edges / blur**  → CSS `filter: blur(...)`
- *  - **Reflection**         → Chromium `-webkit-box-reflect`
+ *  - **Reflection**         → a mirrored sibling's wrapper style (`reflection.ts`)
  *  - **Effect DAG**         → CSS `filter` (grayscale/biLevel/lum/hsl/tint…),
  *                             `opacity`, `mix-blend-mode`, + optional duotone
  *                             `<filter>` SVG markup (high-fidelity path)
@@ -28,7 +28,11 @@
  */
 
 import type { PptxElement, ShapeStyle } from 'pptx-viewer-core';
-import { isImageLikeElement } from 'pptx-viewer-core';
+import { getShapeType, isImageLikeElement } from 'pptx-viewer-core';
+
+import { hexToRgbUnit } from './color-units';
+import type { ReflectionWrapperStyle } from './reflection';
+import { getReflectionWrapperStyle } from './reflection';
 
 // ── Low-level colour helpers (ported from React color-core.ts) ─────────────
 
@@ -41,9 +45,22 @@ const DEFAULT_GLOW_COLOR = '#ffff00';
  * `<filter>` markup (some bindings inject that markup via `innerHTML`/
  * `v-html`, so an unescaped id from a crafted OOXML shape id could otherwise
  * break out of the attribute).
+ *
+ * This is the ONE escaper for every string-concatenated SVG in `render/`.
+ * `chart-sparkline`, `svg-gradient-paint` and `image-tiling` all build markup
+ * that lands in `innerHTML`, and each grew its own private copy of exactly
+ * this function; the copies are the failure mode, because a hardening applied
+ * to one of four escapers protects a quarter of the surface.
+ *
+ * `String(value)` is deliberate rather than decorative: these builders are
+ * fed descriptors assembled from parsed OOXML, so a field typed `string` can
+ * still arrive `undefined` from a malformed deck. Coercing yields an inert
+ * `"undefined"` in the attribute instead of throwing partway through building
+ * a markup string, which is what one of the private copies already did and
+ * what the consolidated version must keep doing.
  */
-function escapeSvgAttr(value: string): string {
-	return value
+export function escapeSvgAttr(value: string): string {
+	return String(value)
 		.replace(/&/g, '&amp;')
 		.replace(/"/g, '&quot;')
 		.replace(/</g, '&lt;')
@@ -98,40 +115,80 @@ function colorWithOpacity(color: string, opacity: number | undefined): string {
 // ── Outer / inner / multi-layer shadow (box-shadow) ────────────────────────
 
 /**
+ * Geometry context enabling the `a:outerShdw/@rotWithShape=false` correction
+ * in {@link getOuterShadowCss}: the element's own rotation, so the shadow
+ * angle can be counter-rotated to stay fixed in page space. Mirrors
+ * {@link GradientRenderContext} in `fill-style.ts`, which applies the same
+ * correction to `a:gradFill/@rotWithShape`.
+ */
+export interface ShadowRenderContext {
+	/** Element rotation in degrees (`PptxElementBase.rotation`). */
+	rotation?: number;
+}
+
+/**
  * Build a CSS `box-shadow` value from the single outer-shadow properties on a
  * {@link ShapeStyle}. Supports both angle/distance and direct x/y offset modes.
  * Returns `undefined` when no shadow colour is defined.
+ *
+ * When `style.shadowRotateWithShape` is explicitly `false` (`a:outerShdw
+ * /@rotWithShape="0"`) and `context.rotation` is supplied, the shadow angle is
+ * counter-rotated by the element's own rotation so the shadow stays fixed in
+ * page space instead of spinning with the (CSS-transformed) shape - the same
+ * correction {@link adjustLinearGradientAngle} in `fill-style.ts` applies to
+ * `a:gradFill/@rotWithShape`. The default (`true`/unset) needs no correction:
+ * a `box-shadow` already rotates for free with the element's own `transform`.
  */
-export function getOuterShadowCss(style: ShapeStyle | undefined): string | undefined {
+export function getOuterShadowCss(
+	style: ShapeStyle | undefined,
+	context?: ShadowRenderContext,
+): string | undefined {
 	if (!style?.shadowColor || style.shadowColor === 'transparent') {
 		return undefined;
 	}
 
+	const usesOoxmlDefaults = style.outerShadowXml !== undefined;
 	let offsetX: number;
 	let offsetY: number;
 	if (typeof style.shadowAngle === 'number' && typeof style.shadowDistance === 'number') {
-		const angleRad = (style.shadowAngle * Math.PI) / 180;
+		const angle =
+			style.shadowRotateWithShape === false && typeof context?.rotation === 'number'
+				? style.shadowAngle - context.rotation
+				: style.shadowAngle;
+		const angleRad = (angle * Math.PI) / 180;
 		offsetX = Math.cos(angleRad) * style.shadowDistance;
 		offsetY = Math.sin(angleRad) * style.shadowDistance;
 	} else {
 		offsetX =
 			typeof style.shadowOffsetX === 'number' && Number.isFinite(style.shadowOffsetX)
 				? style.shadowOffsetX
-				: 4;
+				: usesOoxmlDefaults
+					? 0
+					: 4;
 		offsetY =
 			typeof style.shadowOffsetY === 'number' && Number.isFinite(style.shadowOffsetY)
 				? style.shadowOffsetY
-				: 4;
+				: usesOoxmlDefaults
+					? 0
+					: 4;
 	}
 
-	const blur =
+	const rawBlur =
 		typeof style.shadowBlur === 'number' && Number.isFinite(style.shadowBlur)
 			? Math.max(0, style.shadowBlur)
-			: 6;
+			: usesOoxmlDefaults
+				? 0
+				: 6;
+	// DrawingML `blurRad` is a radius while CSS shadows take a Gaussian
+	// standard deviation. Halving authored OOXML radii matches PowerPoint's
+	// falloff; host-authored CSS-style values retain their historical meaning.
+	const blur = usesOoxmlDefaults ? rawBlur / 2 : rawBlur;
 	const opacity =
 		typeof style.shadowOpacity === 'number' && Number.isFinite(style.shadowOpacity)
 			? clampUnitInterval(style.shadowOpacity)
-			: 0.35;
+			: usesOoxmlDefaults
+				? 1
+				: 0.35;
 
 	// Honour @sx/@sy (1000ths of a percent, 100000 = 100%) as a box-shadow
 	// spread: a scaled-up shadow grows outward, a scaled-down one shrinks. This
@@ -146,6 +203,94 @@ export function getOuterShadowCss(style: ShapeStyle | undefined): string | undef
 	);
 	const geometry = `${Math.round(offsetX)}px ${Math.round(offsetY)}px ${Math.round(blur)}px`;
 	return spread === 0 ? `${geometry} ${color}` : `${geometry} ${spread}px ${color}`;
+}
+
+/**
+ * Build pixel-composited outer shadows for images, text and groups.
+ *
+ * `box-shadow` follows the rectangular element box; PowerPoint shadows the
+ * already-composited pixels. CSS `drop-shadow()` has those semantics.
+ */
+export function getCompositeOuterShadowFilterCss(
+	style: ShapeStyle | undefined,
+	context?: ShadowRenderContext,
+): string | undefined {
+	if (!style) {
+		return undefined;
+	}
+	const usesOoxmlDefaults = style.outerShadowXml !== undefined;
+	const shadows: Array<{
+		angle?: number;
+		distance?: number;
+		offsetX?: number;
+		offsetY?: number;
+		blur?: number;
+		color?: string;
+		opacity?: number;
+	}> =
+		style.shadows && style.shadows.length > 0
+			? style.shadows
+			: style.shadowColor && style.shadowColor !== 'transparent'
+				? [
+						{
+							angle: style.shadowAngle,
+							distance: style.shadowDistance,
+							offsetX: style.shadowOffsetX,
+							offsetY: style.shadowOffsetY,
+							blur: style.shadowBlur,
+							color: style.shadowColor,
+							opacity: style.shadowOpacity,
+						},
+					]
+				: [];
+	const parts: string[] = [];
+	for (const shadow of shadows) {
+		if (!shadow.color || shadow.color === 'transparent') {
+			continue;
+		}
+		let offsetX: number;
+		let offsetY: number;
+		if (typeof shadow.angle === 'number' && typeof shadow.distance === 'number') {
+			const angle =
+				style.shadowRotateWithShape === false && typeof context?.rotation === 'number'
+					? shadow.angle - context.rotation
+					: shadow.angle;
+			const angleRad = (angle * Math.PI) / 180;
+			offsetX = Math.cos(angleRad) * shadow.distance;
+			offsetY = Math.sin(angleRad) * shadow.distance;
+		} else {
+			offsetX =
+				typeof shadow.offsetX === 'number' && Number.isFinite(shadow.offsetX)
+					? shadow.offsetX
+					: usesOoxmlDefaults
+						? 0
+						: 4;
+			offsetY =
+				typeof shadow.offsetY === 'number' && Number.isFinite(shadow.offsetY)
+					? shadow.offsetY
+					: usesOoxmlDefaults
+						? 0
+						: 4;
+		}
+		const rawBlur =
+			typeof shadow.blur === 'number' && Number.isFinite(shadow.blur)
+				? Math.max(0, shadow.blur)
+				: usesOoxmlDefaults
+					? 0
+					: 6;
+		const blur = usesOoxmlDefaults ? rawBlur / 2 : rawBlur;
+		const opacity =
+			typeof shadow.opacity === 'number' && Number.isFinite(shadow.opacity)
+				? clampUnitInterval(shadow.opacity)
+				: usesOoxmlDefaults
+					? 1
+					: 0.35;
+		const color = colorWithOpacity(normalizeHexColor(shadow.color, DEFAULT_SHADOW_COLOR), opacity);
+		parts.push(
+			`drop-shadow(${Math.round(offsetX)}px ${Math.round(offsetY)}px ${Math.round(blur)}px ${color})`,
+		);
+	}
+	return parts.length > 0 ? parts.join(' ') : undefined;
 }
 
 /**
@@ -264,6 +409,7 @@ export function getGlowBoxShadowCss(
 export function getBoxShadowCss(
 	style: ShapeStyle | undefined,
 	options: { includeGlow?: boolean } = {},
+	context?: ShadowRenderContext,
 ): string | undefined {
 	if (!style) {
 		return undefined;
@@ -274,7 +420,7 @@ export function getBoxShadowCss(
 	if (multiLayer) {
 		parts.push(multiLayer);
 	} else {
-		const outer = getOuterShadowCss(style);
+		const outer = getOuterShadowCss(style, context);
 		if (outer) {
 			parts.push(outer);
 		}
@@ -308,8 +454,6 @@ export const buildInnerShadowCssFromShapeStyle = getInnerShadowCss;
 export const buildMultiLayerShadowCss = getMultiLayerShadowCss;
 /** Alias of {@link getGlowBoxShadowCss} (React `buildGlowBoxShadow`). */
 export const buildGlowBoxShadow = getGlowBoxShadowCss;
-/** Alias of {@link buildReflectionCssValue} (React `buildReflectionCss`). */
-export const buildReflectionCss = buildReflectionCssValue;
 
 // ── Line effects (connector / shape outline shadow + glow) ─────────────────
 
@@ -503,7 +647,7 @@ export function getEffectFilterCss(
 	// Outer glow → drop-shadow
 	if (style.glowColor && style.glowColor !== 'transparent' && style.glowRadius) {
 		const glowOpacity = typeof style.glowOpacity === 'number' ? style.glowOpacity : 0.75;
-		const glowRad = Math.round(Math.max(0, style.glowRadius));
+		const glowRad = Math.max(0, style.glowRadius / 2);
 		const glowCol = colorWithOpacity(
 			normalizeHexColor(style.glowColor, DEFAULT_GLOW_COLOR),
 			glowOpacity,
@@ -538,119 +682,6 @@ export function getEffectFilterCss(
 	}
 
 	return parts.length > 0 ? parts.join(' ') : undefined;
-}
-
-// ── Reflection (-webkit-box-reflect) ───────────────────────────────────────
-
-/**
- * Result of {@link getReflectionCss}: the `-webkit-box-reflect` value plus the
- * raw inputs (useful for tests / alternative renderers).
- *
- * Note: `-webkit-box-reflect` is Chromium/WebKit only — Firefox does not
- * support it. The React viewer accepts this limitation; a pseudo-element
- * fallback would be needed for full cross-browser fidelity.
- */
-export interface ReflectionCss {
-	/** The `-webkit-box-reflect` CSS value. */
-	webkitBoxReflect: string;
-	distance: number;
-	startOpacity: number;
-	endOpacity: number;
-	fadeLength: number;
-	blurRadius: number;
-}
-
-/**
- * Build the `-webkit-box-reflect` value for a reflection effect. `fadeLength`
- * is in px (the React caller derives it from `reflectionEndPosition × height`).
- */
-export function buildReflectionCssValue(
-	distance: number,
-	startOpacity: number,
-	endOpacity: number,
-	fadeLength: number,
-	blurRadius = 0,
-	startOffset = 0,
-): string {
-	const effectiveFadeLength = fadeLength + blurRadius * 2;
-	const midOpacity = (startOpacity + endOpacity) / 2;
-	const midPoint = Math.round(effectiveFadeLength * 0.5);
-
-	// `@stPos` holds full startOpacity until `startOffset` px before the fade
-	// begins. Clamp below the fade length so the hold stop stays ordered.
-	const holdPx = Math.round(Math.max(0, Math.min(startOffset, effectiveFadeLength - 1)));
-	const holdStop = holdPx > 0 ? `rgba(255,255,255,${startOpacity}) ${holdPx}px, ` : '';
-
-	if (blurRadius > 0) {
-		return (
-			`below ${Math.round(distance)}px linear-gradient(to bottom, ` +
-			`rgba(255,255,255,${startOpacity}), ${holdStop}` +
-			`rgba(255,255,255,${midOpacity}) ${midPoint}px, ` +
-			`rgba(255,255,255,${endOpacity}) ${effectiveFadeLength}px)`
-		);
-	}
-
-	return `below ${Math.round(distance)}px linear-gradient(to bottom, rgba(255,255,255,${startOpacity}), ${holdStop}rgba(255,255,255,${endOpacity}) ${fadeLength}px)`;
-}
-
-/**
- * Compute the reflection CSS for a {@link ShapeStyle} given the element height
- * (needed to convert `reflectionEndPosition` fraction → px fade length).
- * Mirrors the reflection block in the React `getShapeVisualStyle`.
- *
- * @returns A {@link ReflectionCss}, or `undefined` when no reflection applies.
- */
-export function getReflectionCss(
-	style: ShapeStyle | undefined,
-	elementHeight: number,
-): ReflectionCss | undefined {
-	if (!style) {
-		return undefined;
-	}
-	const hasReflection =
-		(typeof style.reflectionStartOpacity === 'number' && style.reflectionStartOpacity > 0) ||
-		(typeof style.reflectionDistance === 'number' && style.reflectionDistance > 0) ||
-		(typeof style.reflectionBlurRadius === 'number' && style.reflectionBlurRadius > 0);
-	if (!hasReflection) {
-		return undefined;
-	}
-
-	const distance = style.reflectionDistance ?? 0;
-	const startOpacity =
-		typeof style.reflectionStartOpacity === 'number' ? style.reflectionStartOpacity : 0.5;
-	const endOpacity =
-		typeof style.reflectionEndOpacity === 'number' ? style.reflectionEndOpacity : 0;
-	const fadeLength =
-		typeof style.reflectionEndPosition === 'number'
-			? Math.round(style.reflectionEndPosition * Math.max(elementHeight, 1))
-			: 100;
-	const blurRadius =
-		typeof style.reflectionBlurRadius === 'number' ? style.reflectionBlurRadius : 0;
-	// `@stPos` is a 0-1 fraction of the reflection's fade length: the reflection
-	// stays at full startOpacity until this point before fading out. Other
-	// reflection params (@sx/@sy scale, @kx/@ky skew, @rot, @fadeDir, @algn)
-	// cannot be represented by `-webkit-box-reflect` and are left as-is (see
-	// report; note box-reflect is WebKit/Chromium-only, unsupported in Firefox).
-	const startOffset =
-		typeof style.reflectionStartPosition === 'number' && style.reflectionStartPosition > 0
-			? Math.round(clampUnitInterval(style.reflectionStartPosition) * fadeLength)
-			: 0;
-
-	return {
-		webkitBoxReflect: buildReflectionCssValue(
-			distance,
-			startOpacity,
-			endOpacity,
-			fadeLength,
-			blurRadius,
-			startOffset,
-		),
-		distance,
-		startOpacity,
-		endOpacity,
-		fadeLength,
-		blurRadius,
-	};
 }
 
 // ── DAG opacity & blend mode ───────────────────────────────────────────────
@@ -713,24 +744,32 @@ export function getEffectDagFillOverlay(style: ShapeStyle | undefined): FillOver
 	return { color, blendMode };
 }
 
+/**
+ * Resolve a DIRECT `a:effectLst/a:fillOverlay` (D1-G3: CT_EffectList
+ * §20.1.8.24 lists it as a legal sibling of shadow/glow/blur, not only inside
+ * `a:effectDag`) into the same {@link FillOverlayCss} shape as
+ * {@link getEffectDagFillOverlay}, so both render through one integrator path.
+ * Kept in separate `shapeFillOverlay*` fields (see `ShapeStyle`) since the two
+ * forms come from different XML locations and could theoretically both be
+ * present.
+ */
+export function getShapeFillOverlay(style: ShapeStyle | undefined): FillOverlayCss | undefined {
+	if (!style?.shapeFillOverlayColor || style.shapeFillOverlayColor === 'transparent') {
+		return undefined;
+	}
+	const blendMode = getEffectDagBlendMode(style.shapeFillOverlayBlend) ?? 'normal';
+	const color = colorWithOpacity(
+		normalizeHexColor(style.shapeFillOverlayColor, DEFAULT_SHADOW_COLOR),
+		style.shapeFillOverlayOpacity,
+	);
+	return { color, blendMode };
+}
+
 // ── High-fidelity duotone SVG <filter> markup (secondary path) ─────────────
 
 /** Stable SVG filter id for a DAG duotone effect on a given element. */
 export function getDuotoneFilterId(elementId: string): string {
 	return `dag-duotone-${elementId}`;
-}
-
-/** Parse a hex colour to normalised 0–1 RGB components (invalid → 0). */
-function hexToRgbUnit(hex: string): { r: number; g: number; b: number } {
-	const clean = hex.replace('#', '');
-	const r = Number.parseInt(clean.substring(0, 2), 16) / 255;
-	const g = Number.parseInt(clean.substring(2, 4), 16) / 255;
-	const b = Number.parseInt(clean.substring(4, 6), 16) / 255;
-	return {
-		r: Number.isFinite(r) ? r : 0,
-		g: Number.isFinite(g) ? g : 0,
-		b: Number.isFinite(b) ? b : 0,
-	};
 }
 
 /**
@@ -884,8 +923,14 @@ export interface ComputedEffectStyle {
 	boxShadow?: string;
 	/** Combined glow/soft-edge/blur/DAG `filter`. */
 	filter?: string;
-	/** `-webkit-box-reflect` (Chromium/WebKit only). */
-	webkitBoxReflect?: string;
+	/**
+	 * Reflection wrapper style (see `reflection.ts`'s `getReflectionWrapperStyle`)
+	 * for a mirrored sibling node the integrator renders just below the
+	 * element, painted with the SAME resolved fill/image content. Cross-browser
+	 * (unlike the `-webkit-box-reflect` this replaced), and expresses
+	 * `@sx`/`@sy`/`@kx`/`@ky`/`@rot`/`@fadeDir`/`@algn`.
+	 */
+	reflection?: ReflectionWrapperStyle;
 	/** Overall `opacity` from `dagAlphaModFix`. */
 	opacity?: number;
 	/**
@@ -917,29 +962,101 @@ export interface ComputedEffectStyle {
  *
  * @returns A {@link ComputedEffectStyle}; all-undefined when no effects apply.
  */
+/**
+ * The `ShapeStyle` {@link getComputedEffectStyle} reads effects from: a shape
+ * / image / text / connector's own `shapeStyle`, or a group's
+ * `groupEffectStyle` (the SAME `p:grpSpPr` extraction, kept for shadow / glow
+ * / soft-edge / reflection even when the group has no fill of its own - see
+ * that field's doc on `GroupPptxElement`).
+ *
+ * Exported so a binding's soft-edge `<filter>` injection - which needs the
+ * raw `ShapeStyle` to call {@link getSoftEdgeSvgFilter}, not just the
+ * aggregated `ComputedEffectStyle` - can find the exact same style
+ * `getComputedEffectStyle` used, for a group as much as for a shape. Every
+ * binding had its own copy of the `hasShapeProperties(...) ? el.shapeStyle :
+ * undefined` ternary and none of them accounted for a group, which is why a
+ * group's own `a:softEdge` filter reference resolved to nothing.
+ */
+export function getEffectStyleSource(element: PptxElement): ShapeStyle | undefined {
+	if ('shapeStyle' in element) {
+		return element.shapeStyle;
+	}
+	return element.type === 'group' ? element.groupEffectStyle : undefined;
+}
+
 export function getComputedEffectStyle(
 	element: PptxElement,
 	options: { includeGlowBoxShadow?: boolean } = {},
 ): ComputedEffectStyle {
-	const style = 'shapeStyle' in element ? element.shapeStyle : undefined;
+	const style = getEffectStyleSource(element);
 	const result: ComputedEffectStyle = {};
 	if (!style) {
 		return result;
 	}
 
-	const boxShadow = getBoxShadowCss(style, { includeGlow: options.includeGlowBoxShadow });
-	if (boxShadow) {
-		result.boxShadow = boxShadow;
+	// A group has no `shapeStyle` of its own, but `p:grpSpPr/a:effectLst`
+	// (shadow / glow / soft edge / reflection) is parsed through the SAME
+	// extractor as a regular shape's `p:spPr` and lands on
+	// `GroupPptxElement.groupEffectStyle` (`getEffectStyleSource` above), a
+	// separate field from `groupFill`, which is reserved for `a:grpFill`
+	// inheritance and stays `undefined` when the group has no fill of its own -
+	// see that field's doc for why conflating the two broke the inheritance
+	// chain. From here a group with a `groupEffectStyle` flows through the SAME
+	// pipeline as a shape/image below: PowerPoint applies `p:grpSpPr/a:effectLst`
+	// to the group's COMPOSITE raster (shadow/glow trace the silhouette of
+	// every child painted together, not each child's own box), which is
+	// exactly what `shadowsCompositePixels` already routes a group through - a
+	// CSS `filter: drop-shadow(...)` on the group's wrapper produces that same
+	// result. A group has no `a:ln` (so the line-shadow/line-glow branches
+	// below are no-ops for it) and OOXML does not author fill-overlay/DAG
+	// adjustments on `p:grpSpPr`, so those stay harmlessly absent too.
+
+	// A connector paints its own `a:ln` effects onto the stroked SVG path (an
+	// `feDropShadow` / `drop-shadow` on the line itself), so adding them to the
+	// container as well would shadow the bounding RECTANGLE on top of the line.
+	const paintsLineEffectsItself =
+		element.type === 'connector' ||
+		getShapeType('shapeType' in element ? element.shapeType : undefined) === 'connector';
+
+	const shadowsCompositePixels =
+		element.type === 'group' ||
+		element.type === 'text' ||
+		element.type === 'image' ||
+		element.type === 'picture';
+	const compositeShadow = shadowsCompositePixels
+		? getCompositeOuterShadowFilterCss(style, { rotation: element.rotation })
+		: undefined;
+	const boxShadow = shadowsCompositePixels
+		? undefined
+		: getBoxShadowCss(
+				style,
+				{ includeGlow: options.includeGlowBoxShadow },
+				{ rotation: element.rotation },
+			);
+	// The line-level shadow (`a:ln/a:effectLst/a:outerShdw`) is part of the same
+	// box-shadow channel. Only React applied it to a shape container; folding it
+	// in here is what carries it to the other four bindings.
+	const lineShadow = paintsLineEffectsItself ? undefined : getLineShadowCss(style);
+	const shadowParts = [boxShadow, lineShadow].filter(
+		(part): part is string => part !== undefined && part !== '',
+	);
+	if (shadowParts.length > 0) {
+		result.boxShadow = shadowParts.join(', ');
 	}
 
 	const filter = getEffectFilterCss(style, element.id);
-	if (filter) {
-		result.filter = filter;
+	// As above for `a:ln/a:effectLst/a:glow`, which is a `drop-shadow` filter.
+	const lineGlow = paintsLineEffectsItself ? undefined : getLineGlowFilterCss(style);
+	const filterParts = [compositeShadow, filter, lineGlow].filter(
+		(part): part is string => part !== undefined && part !== '',
+	);
+	if (filterParts.length > 0) {
+		result.filter = filterParts.join(' ');
 	}
 
-	const reflection = getReflectionCss(style, element.height);
+	const reflection = getReflectionWrapperStyle(style, element.height);
 	if (reflection) {
-		result.webkitBoxReflect = reflection.webkitBoxReflect;
+		result.reflection = reflection;
 	}
 
 	const opacity = getEffectDagOpacity(style);
@@ -948,8 +1065,10 @@ export function getComputedEffectStyle(
 	}
 
 	// Fill overlay: paint the tint layer when a colour was parsed; otherwise
-	// fall back to the legacy whole-element blend-mode proxy.
-	const overlay = getEffectDagFillOverlay(style);
+	// fall back to the legacy whole-element blend-mode proxy. The direct
+	// effectLst form (shape-level) is checked second since it is far rarer
+	// than the effectDag form and the two should not both be authored.
+	const overlay = getEffectDagFillOverlay(style) ?? getShapeFillOverlay(style);
 	if (overlay) {
 		result.fillOverlay = overlay;
 	} else {

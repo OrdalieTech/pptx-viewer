@@ -13,11 +13,14 @@ import type {
 	TableStyleContext,
 } from 'pptx-viewer-shared';
 import {
+	canDrillDown,
 	cellPatternFillCss,
 	cellRunStyle,
-	cellStyleToCss,
+	DEFAULT_FONT_FAMILY,
 	getCellDiagonalBorders,
-	getTableCellBandStyle,
+	tableCellCss,
+	tableCellPointerIntent,
+	tableContainerCss,
 } from 'pptx-viewer-shared';
 import type { ComponentPublicInstance, CSSProperties } from 'vue';
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
@@ -26,7 +29,6 @@ import { getContainerStyle } from '../composables/element-style';
 import { injectTableCellEdit } from '../composables/table-edit';
 import { injectTableSelection, useTableCellSelection } from '../composables/table-selection';
 import { injectTableTheme, resolveTableTheme } from '../composables/table-theme';
-import { DEFAULT_TEXT_COLOR } from '../constants';
 import TableResizeOverlay from './TableResizeOverlay.vue';
 
 /**
@@ -48,7 +50,7 @@ import TableResizeOverlay from './TableResizeOverlay.vue';
  *
  * Editing affordances (inline cell text edit, cell selection + Shift+range
  * highlight, and column/row drag-resize handles) are layered on when an edit
- * context is provided. The raw-OOXML render path is not ported.
+ * context is provided.
  */
 const props = withDefaults(
 	defineProps<{
@@ -62,6 +64,8 @@ const props = withDefaults(
 		 * are disabled regardless of the injected editing context.
 		 */
 		interactive?: boolean;
+		/** Emit the data-pptx-element marker even when not interactive (template layer). */
+		marked?: boolean;
 		/**
 		 * PPTX theme colour scheme from the active presentation theme.
 		 * When supplied, band / header emphasis colours are resolved against
@@ -73,12 +77,32 @@ const props = withDefaults(
 		 * Enables accurate banding / header style lookups by table style GUID.
 		 */
 		tableStyleMap?: ParsedTableStyleMap;
+		/**
+		 * Scoped `!important` CSS override for an active font-style emphasis
+		 * effect (Bold Flash, Bold Reveal, Underline, Change Font Style/Size),
+		 * built by the parent `ElementRenderer` (`buildTextStyleOverrideCss`) so
+		 * a table cell animates the same way a shape's text does.
+		 */
+		textStyleOverrideCss?: string;
 	}>(),
 	{ interactive: true },
 );
 
 const containerStyle = computed<CSSProperties>(() =>
 	getContainerStyle(props.element, props.zIndex),
+);
+
+/**
+ * `pointer-events: none` on the root while not interactive, mirroring
+ * React's `pointer-events-none` class / Angular's `rootPointerEvents`.
+ * `marked` keeps the element findable via `data-pptx-element` even while
+ * locked (e.g. a template/master table with `editTemplateMode` off); this is
+ * what actually stops it from being clicked, dragged, or cell-edited. `null`
+ * while interactive so the style-array merge leaves any pre-existing
+ * `pointerEvents` untouched.
+ */
+const rootPointerEvents = computed<CSSProperties | null>(() =>
+	props.interactive ? null : { pointerEvents: 'none' },
 );
 
 // Viewer-root-provided theme context (colour scheme / table-style map), used as
@@ -95,6 +119,15 @@ const tableData = computed<PptxTableData | undefined>(() => {
 	return td && td.rows.length > 0 ? td : undefined;
 });
 
+/**
+ * `<table>`-level style: the shared default font stack (load-bearing - an
+ * unstyled cell would otherwise inherit the HOST chrome's font) plus
+ * `a:tblPr@rtl`, which mirrors the column order for right-to-left decks.
+ */
+const tableRootStyle = computed<CSSProperties>(() => ({
+	fontFamily: DEFAULT_FONT_FAMILY,
+	...(tableContainerCss(tableData.value) as CSSProperties),
+}));
 const rowCount = computed(() => tableData.value?.rows.length ?? 0);
 const columnCount = computed(() => tableData.value?.columnWidths.length ?? 0);
 
@@ -182,19 +215,16 @@ const rows = computed<RenderableRow[]>(() => {
 			const colSpan = cell.gridSpan && cell.gridSpan > 1 ? cell.gridSpan : undefined;
 			const rowSpan = cell.rowSpan && cell.rowSpan > 1 ? cell.rowSpan : undefined;
 
-			const bandStyle = getTableCellBandStyle(td, rowIndex, cellIndex, rCount, cCount, styleCtx);
-			const cellStyle = cellStyleToCss(cell.style);
-			// Explicit cell style wins over band style (mirrors the React layering).
-			const style: TableCellCss = { ...bandStyle, ...cellStyle };
-			// Default body-cell text to the dark slide-text colour when nothing
-			// (cell style, band/header emphasis, or per-run colour) sets one.
-			// Otherwise the cell inherits the dark-UI chrome `foreground`
-			// (near-white), rendering invisible on a light table; React resolves
-			// these cells to DEFAULT_TEXT_COLOR (#111827). Per-run colours still win
-			// because their `<span>` overrides this cascaded `<td>` colour.
-			if (style.color === undefined) {
-				style.color = DEFAULT_TEXT_COLOR;
-			}
+			// Band beneath the explicit cell style, then the dark-text floor for a
+			// cell nothing gave a colour (otherwise it inherits the chrome's
+			// near-white `foreground` and vanishes on a light table). All three
+			// layers are decided once, in shared, for all five bindings.
+			const style: TableCellCss = tableCellCss(
+				td,
+				cell,
+				{ rowIndex, cellIndex, rowCount: rCount, columnCount: cCount },
+				styleCtx,
+			);
 
 			// Pattern fill: resolve separately so the Vue template can apply
 			// `backgroundImage` in addition to `backgroundColor`.
@@ -316,40 +346,61 @@ function setCellInput(el: Element | ComponentPublicInstance | null): void {
 	cellInputRef.value = el instanceof HTMLInputElement ? el : null;
 }
 
-const editingEnabled = computed(() => props.interactive && (cellEdit?.canEdit() ?? false));
+// G8: `a:graphicFrameLocks/@noDrilldown` forbids selecting/editing this
+// table's individual cells, even on an otherwise-editable deck.
+const editingEnabled = computed(
+	() => props.interactive && (cellEdit?.canEdit() ?? false) && canDrillDown(props.element),
+);
 
 function isEditing(cell: RenderableCell): boolean {
 	const e = editingCell.value;
 	return e !== null && e.rowIndex === cell.rowIndex && e.colIndex === cell.colIndex;
 }
 
-// ── Touch double-tap detection ────────────────────────────────────────────
-// On mobile, `dblclick` is not reliably synthesised from two quick taps.
-// React/Angular detect the double-tap manually in their canvas pointerdown
-// handler; Vue must do the same per-cell so tapping a cell twice on touch
-// correctly enters inline edit mode.
-const DOUBLE_TAP_MS = 400;
-const lastCellTap = ref<{ rowIndex: number; colIndex: number; time: number } | null>(null);
-
-/** Detect touch double-tap on a cell (native dblclick is unreliable on touch). */
-function onCellPointerDown(event: PointerEvent, cell: RenderableCell): void {
-	if (event.pointerType === 'mouse' || !editingEnabled.value) {
-		return;
-	}
-	const now = event.timeStamp || Date.now();
-	const last = lastCellTap.value;
+/**
+ * Arbitrate the press between the CELL range and the slide's element selection.
+ * Touch double-tap-to-edit is NOT handled per-cell here: `useCanvasPointer`'s
+ * `trackTap` / `handleDoubleTap` already own double-tap detection for the whole
+ * canvas, including a dedicated table branch that resolves the nearest `<td>`
+ * and dispatches a real `dblclick` on it (mirroring React/Angular, which also
+ * detect the double-tap once, at the canvas level, never per element).
+ *
+ * A per-cell tracker used to duplicate that detection here, and the duplication
+ * was itself the bug: this handler's own second-tap match called
+ * `event.stopPropagation()`, so that tap never reached `useCanvasPointer`'s
+ * tracker to retire ITS OWN pending tap. A later tap on a different cell,
+ * within the double-tap window and close enough in screen position (e.g.
+ * tapping an adjacent cell shortly after to commit an edit by blurring away),
+ * was then wrongly paired with that stale first tap and reopened the editor on
+ * the wrong cell right after the edit had committed. Deleting the duplicate
+ * tracker removes the stale state entirely, one canvas-level tracker owns the
+ * gesture.
+ *
+ * A Shift-click inside a cell is a cell-range gesture, and left to bubble it
+ * reached the canvas's additive branch in `useCanvasPointer`, which TOGGLES this
+ * table out of the slide selection. `PowerPointViewer`'s selection watcher then
+ * nulls the cell selection, so by the time `onCellClick` ran there was no anchor
+ * left and `computeCellSelection` - which is correct - could only ever return a
+ * single cell. Block merge was therefore unreachable in Vue: the context menu
+ * offered "merge right / merge down" where React offered "merge selected cells".
+ * Consuming the press is what Svelte's `applyTableCellPointer` does, and for
+ * exactly this reason.
+ */
+function onCellPointerDown(event: PointerEvent): void {
 	if (
-		last &&
-		last.rowIndex === cell.rowIndex &&
-		last.colIndex === cell.colIndex &&
-		now - last.time < DOUBLE_TAP_MS
+		editingEnabled.value &&
+		tableCellPointerIntent({
+			isTableCell: true,
+			shiftKey: event.shiftKey,
+			// In Vue these two facts coincide: the cell range is dropped the moment
+			// its owning table leaves the element selection, so a range that is still
+			// on this table proves the table is still selected.
+			elementSelected: cellSelection.activeSelection.value !== null,
+			rangeOnSameElement: cellSelection.activeSelection.value !== null,
+		}) === 'extend'
 	) {
-		lastCellTap.value = null;
 		event.stopPropagation();
-		enterCellEdit(cell);
-		return;
 	}
-	lastCellTap.value = { rowIndex: cell.rowIndex, colIndex: cell.colIndex, time: now };
 }
 
 /** Enter inline cell editing for the given cell. */
@@ -442,16 +493,27 @@ onBeforeUnmount(() => {
 	<div
 		v-if="tableData"
 		class="pptx-vue-element pptx-vue-table"
-		:style="containerStyle"
+		:style="[containerStyle, rootPointerEvents]"
 		:data-element-id="element.id"
+		:data-pptx-element="interactive || marked ? 'true' : undefined"
 	>
+		<!--
+			`<style>` is a forbidden side-effect tag in an SFC template, so the
+			override is rendered through the dynamic `<component :is>` escape
+			hatch instead (see `ElementRenderer.vue`).
+		-->
+		<component :is="'style'" v-if="textStyleOverrideCss">{{ textStyleOverrideCss }}</component>
 		<TableResizeOverlay
 			:column-widths="tableData.columnWidths"
 			:editable="editingEnabled"
 			@resize-columns="onResizeColumns"
 			@resize-row="onResizeRow"
 		>
-			<table class="pptx-vue-table__grid">
+			<!-- The explicit family is load-bearing: an unstyled cell otherwise
+			     inherits the HOST chrome's font, so the same table measured a
+			     different stack in every binding's demo. All five bindings declare
+			     the same shared default on the table root. -->
+			<table class="pptx-vue-table__grid" :style="tableRootStyle">
 				<colgroup v-if="columnPercentages.length > 0">
 					<col
 						v-for="(width, ci) in columnPercentages"
@@ -482,7 +544,7 @@ onBeforeUnmount(() => {
 							:colspan="cell.colSpan"
 							:rowspan="cell.rowSpan"
 							:style="tdStyle(cell)"
-							@pointerdown="onCellPointerDown($event, cell)"
+							@pointerdown="onCellPointerDown($event)"
 							@click="onCellClick($event, cell)"
 							@dblclick="onCellDblClick($event, cell)"
 						>

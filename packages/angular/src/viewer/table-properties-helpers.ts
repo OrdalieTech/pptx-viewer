@@ -2,17 +2,21 @@
  * table-properties-helpers.ts: pure helpers for the table properties inspector.
  *
  * The small immutable transforms behind the Angular port of the React
- * `TablePropertiesPanel` / `TableCellAdvancedFill`: applying a quick-style
- * preset, redistributing a single column's width across its neighbours,
- * even-distributing column widths / row heights, and building a CSS gradient
+ * `TablePropertiesPanel` / `TableCellAdvancedFill`: building a CSS gradient
  * string from structured stops so the renderer shows edited gradients live.
+ * Table quick-style preset application (`applyTableStylePreset`) and
+ * column-width redistribution / "distribute evenly" one-liners live in
+ * `pptx-viewer-shared`'s `render/table-style-presets.ts` and
+ * `render/table-resize.ts` (imported from `../internal/shared`) so every
+ * binding shares one copy of that logic.
  *
  * No Angular imports, so they are unit-testable with plain vitest.
  */
-import type { PptxTableCellStyle, PptxTableData, PptxTableRow } from 'pptx-viewer-core';
+/* oxlint-disable eslint/one-var -- independent, unrelated locals across these
+   helpers; merging them into one statement would hurt readability. */
 import { ooxmlGradientAngleToCssDegrees } from 'pptx-viewer-core';
 
-import type { TableStylePreset } from '../internal/shared';
+import { PATTERN_OPTIONS } from '../internal/shared';
 
 /** Default row height (px) used when a row has no explicit height. */
 export const DEFAULT_TABLE_ROW_HEIGHT = 32;
@@ -40,79 +44,6 @@ export const TABLE_STRUCTURE_TOGGLES: ReadonlyArray<{
 ];
 
 /**
- * Apply a table quick-style preset to every cell's style, mirroring the React
- * `TablePropertiesPanel` preset `onClick`. Header cells get the header fill /
- * foreground + bold; banded body rows get the band background; every cell gets
- * the preset border colour. Returns a new rows array.
- */
-export function applyTableStylePreset(td: PptxTableData, preset: TableStylePreset): PptxTableRow[] {
-	return td.rows.map((row, ri) => ({
-		...row,
-		cells: row.cells.map((cell) => {
-			const isHeader = ri === 0 && Boolean(td.firstRowHeader);
-			const isBand = Boolean(td.bandedRows) && (ri - (td.firstRowHeader ? 1 : 0)) % 2 === 0;
-			const style: PptxTableCellStyle = {
-				...cell.style,
-				backgroundColor: isHeader ? preset.headerBg : isBand ? preset.bandBg : undefined,
-				color: isHeader ? preset.headerFg : cell.style?.color,
-				bold: isHeader ? true : cell.style?.bold,
-				borderColor: preset.borderColor,
-			};
-			return { ...cell, style };
-		}),
-	}));
-}
-
-/**
- * Redistribute column widths when a single column is set to `newFraction`,
- * scaling the other columns proportionally so the array still sums to 1.
- * Mirrors the React column-width slider `onChange`.
- */
-export function redistributeColumnWidth(
-	widths: number[],
-	index: number,
-	newFraction: number,
-): number[] {
-	const oldFraction = widths[index];
-	if (oldFraction === undefined) {
-		return widths;
-	}
-	const diff = newFraction - oldFraction;
-	const next = [...widths];
-	next[index] = newFraction;
-	const othersTotal = 1 - oldFraction;
-	if (othersTotal > 0) {
-		for (let j = 0; j < next.length; j++) {
-			if (j !== index) {
-				next[j] = Math.max(0.05, widths[j] - diff * (widths[j] / othersTotal));
-			}
-		}
-	}
-	const sum = next.reduce((a, b) => a + b, 0);
-	return sum > 0 ? next.map((w) => w / sum) : next;
-}
-
-/** An equal-width column array for `count` columns. */
-export function evenColumnWidths(count: number): number[] {
-	if (count <= 0) {
-		return [];
-	}
-	return Array.from({ length: count }, () => 1 / count);
-}
-
-/** Rows with a uniform (average) height applied. */
-export function evenRowHeights(td: PptxTableData): PptxTableRow[] {
-	const count = td.rows.length;
-	if (count === 0) {
-		return td.rows;
-	}
-	const avg = Math.round(
-		td.rows.reduce((s, r) => s + (r.height ?? DEFAULT_TABLE_ROW_HEIGHT), 0) / count,
-	);
-	return td.rows.map((r) => ({ ...r, height: avg }));
-}
-
-/**
  * Build a CSS gradient string from structured cell-style gradient fields, so
  * the renderer (which reads `gradientFillCss`) shows an edited gradient live.
  *
@@ -131,4 +62,31 @@ export function buildGradientFillCss(
 		return `radial-gradient(circle, ${parts})`;
 	}
 	return `linear-gradient(${Math.round(ooxmlGradientAngleToCssDegrees(angle))}deg, ${parts})`;
+}
+
+// ── Pattern fill presets ─────────────────────────────────────────────────────
+
+/**
+ * Preset a pattern fill falls back to when the cell carries none.
+ *
+ * Matches the reference binding, and the value the panel seeds when the fill
+ * mode is switched to "pattern".
+ */
+export const DEFAULT_PATTERN_FILL_PRESET = 'ltDnDiag';
+
+/**
+ * The presets the pattern picker offers for a cell currently set to `current`.
+ *
+ * WHY this is not just `PATTERN_OPTIONS`: that list is the first 20 of the 56
+ * OOXML presets, and the fallback preset (`ltDnDiag`, index 27) is not among
+ * them. A cell carrying any preset outside the slice therefore rendered a
+ * `<select>` whose value matched no `<option>`, so the browser displayed the
+ * first entry instead and the very next interaction silently rewrote a fill the
+ * user never touched. Appending the current preset when it is off-list keeps it
+ * representable without changing the catalogue the picker offers.
+ */
+export function patternPresetOptions(current: string | undefined): readonly string[] {
+	const preset = current ?? DEFAULT_PATTERN_FILL_PRESET;
+	const offered = PATTERN_OPTIONS as readonly string[];
+	return offered.includes(preset) ? offered : [...offered, preset];
 }

@@ -9,9 +9,10 @@
 	import type { PptxElement } from 'pptx-viewer-core';
 	import { hasTextProperties } from 'pptx-viewer-core';
 	import {
+		buildFontCatalog,
 		CHANGE_CASE_OPTIONS,
 		CHARACTER_SPACING_OPTIONS,
-		COMMON_FONT_FAMILIES,
+		resolveDefaultFontFamily,
 		textColorOf,
 	} from 'pptx-viewer-shared';
 
@@ -50,13 +51,40 @@
 
 	const el = $derived(editor.selectedElement);
 	const active = $derived(el !== undefined && hasTextProperties(el));
+	/**
+	 * The dropdown's contents, grouped the way PowerPoint groups them: theme
+	 * fonts first, then anything the deck embeds, then fonts added this session
+	 * via File > Options > Fonts, then the full catalogue.
+	 */
+	const themeFonts = $derived({
+		heading: editor.theme?.fontScheme?.majorFont?.latin,
+		body: editor.theme?.fontScheme?.minorFont?.latin,
+	});
+	const fontGroups = $derived(
+		buildFontCatalog({
+			themeFonts,
+			embeddedFonts: editor.embeddedFontFamilies,
+			customFonts: editor.customFontFamilies,
+		}),
+	);
+
+	// With nothing overriding it on the element, the box shows the family the
+	// deck would actually render rather than a hardcoded "Segoe UI", which
+	// misreported every themed deck.
 	const fontFamily = $derived(
-		el && hasTextProperties(el) ? (el.textStyle?.fontFamily ?? 'Segoe UI') : 'Segoe UI',
+		(el && hasTextProperties(el) ? el.textStyle?.fontFamily : undefined) ??
+			resolveDefaultFontFamily(
+				(el as { placeholderType?: string } | undefined)?.placeholderType,
+				themeFonts,
+			),
 	);
 	const strikethrough = $derived(
 		el && hasTextProperties(el) ? Boolean(el.textStyle?.strikethrough) : false,
 	);
 	const textColor = $derived(el ? textColorOf(el) : '#000000');
+	const textColorRef = $derived(
+		el && hasTextProperties(el) ? el.textStyle?.colorRef : undefined,
+	);
 	const highlight = $derived(el ? highlightColorOf(el) || '#ffff00' : '#ffff00');
 
 	function apply(patch: Partial<PptxElement>): void {
@@ -65,16 +93,26 @@
 </script>
 
 <div class="pptx-svelte-fontx" role="group" aria-label={t('pptx.ribbon.font')}>
+	<!-- Never disabled, for the same reason as the size box in
+	     `TextFormatGroup.svelte`: React leaves the font pickers live and the
+	     patch below is a no-op without a text element. -->
 	<select
 		class="pptx-svelte-ribbon-select pptx-svelte-fontx-family"
-		disabled={!active}
-		aria-label={t('pptx.text.fontFamily')}
-		title={t('pptx.text.fontFamily')}
+		aria-label={t('pptx.ribbon.fontFamily')}
+		title={t('pptx.ribbon.fontFamily')}
 		value={fontFamily}
 		onchange={(e) => el && apply(setFontFamilyPatch(el, e.currentTarget.value))}
 	>
-		{#each COMMON_FONT_FAMILIES as family (family)}
-			<option value={family}>{family}</option>
+		{#each fontGroups as group (group.id)}
+			<optgroup label={t(group.labelKey)}>
+				{#each group.entries as entry (entry.family)}
+					<option value={entry.family} style:font-family={entry.family}
+						>{entry.family}{entry.themeRole
+							? ` (${t(`pptx.font.role.${entry.themeRole}`)})`
+							: ''}</option
+					>
+				{/each}
+			</optgroup>
 		{/each}
 	</select>
 
@@ -169,9 +207,24 @@
 	<SwatchColorPicker
 		value={textColor}
 		disabled={!active}
-		label={t('pptx.textProperties.textColor')}
+		label={t('pptx.text.fontColor')}
+		title={t('pptx.textProperties.textColor')}
 		glyph="A"
-		onselect={(hex) => el && apply(setTextColorPatch(el, hex))}
+		recentColors={editor.mruColors}
+		themeColorMap={editor.themeColorMap}
+		currentRef={textColorRef}
+		onselect={(hex) => {
+			if (el) {
+				apply(setTextColorPatch(el, hex));
+			}
+			editor.recordRecentColor(hex);
+		}}
+		onselectTheme={(commit) => {
+			if (el) {
+				apply(setTextColorPatch(el, commit.hex, commit.ref));
+			}
+			editor.recordRecentColor(commit.hex);
+		}}
 	/>
 	<SwatchColorPicker
 		value={highlight}
@@ -179,7 +232,12 @@
 		label={t('pptx.text.highlightColor')}
 		glyph="H"
 		swatches={['#ffff00', '#00ff00', '#00ffff', '#ff00ff', '#0000ff', '#ff0000', '#000080', '#008080', '#008000', '#800080']}
-		onselect={(hex) => el && apply(setHighlightColorPatch(el, hex))}
+		onselect={(hex) => {
+			if (el) {
+				apply(setHighlightColorPatch(el, hex));
+			}
+			editor.recordRecentColor(hex);
+		}}
 	/>
 </div>
 

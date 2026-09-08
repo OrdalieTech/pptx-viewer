@@ -3,19 +3,31 @@ import { describe, it, expect } from 'vitest';
 
 import {
 	generateMorphAnimations,
+	isInertMorphPair,
+	generateMorphGhostAnimations,
+	shortestRotationTarget,
 	generateUnmatchedFadeOutAnimations,
 	generateUnmatchedFadeInAnimations,
 	generateTextMorphAnimations,
 	generateFullMorphTransition,
 	buildColorInterpolationProps,
 	buildStrokeInterpolationProps,
+	morphPairNeedsCrossfade,
 } from './morph-animation';
 import { parseHexColor, lerpColor, rgbaToHex } from './morph-color';
 import { matchMorphElements, matchMorphElementsFull, getElementMorphName } from './morph-matching';
 import { parseSvgPath, serializeSvgPath, equalizePaths, interpolatePaths } from './morph-svg-path';
 import { tokenizeText, matchTextTokens } from './morph-text';
-import { MORPH_EASING } from './morph-types';
+import {
+	MORPH_CROSSFADE_EASING,
+	MORPH_EASING,
+	MORPH_FADE_IN_EASING,
+	MORPH_FADE_IN_START_PERCENT,
+	MORPH_FADE_OUT_END_PERCENT,
+	MORPH_FADE_OUT_HOLD_PERCENT,
+} from './morph-types';
 import type { MorphPair, RgbaColor, SvgPathCommand } from './morph-types';
+import { computeZOrderSwaps } from './morph-z-order';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -870,6 +882,195 @@ describe('generateMorphAnimations', () => {
 		expect(anims[0].keyframes).toContain('translate(-40px, -50px)');
 	});
 
+	it('turns the SHORT way round instead of unwinding a near-full circle', () => {
+		// The issue #131 wheel points its arrow at the selected wedge by rotating
+		// a ring in 45deg steps. Going from Trust & Sovereignty (315deg) to
+		// Secure Data Movement (0deg) is 45deg clockwise, but CSS interpolates
+		// `rotate(315deg)` -> `rotate(0deg)` numerically and spun the arrow
+		// 315deg anti-clockwise, all the way round the dial.
+		const pairs: MorphPair[] = [
+			{
+				fromElement: makeElement({ id: 'a', type: 'image', rotation: 315 }),
+				toElement: makeElement({ id: 'b', type: 'image', rotation: 0 }),
+			},
+		];
+		const anims = generateMorphAnimations(pairs, 1000);
+		// -45deg is the same orientation as the authored 315deg, but travelling
+		// from it to 0deg is 45deg CLOCKWISE. The `to` frame keeps the authored
+		// angle so the element lands exactly on its own static transform.
+		expect(anims[0].keyframes).toContain('rotate(-45deg)');
+		expect(anims[0].keyframes).toContain('rotate(0deg)');
+		expect(anims[0].keyframes).not.toContain('rotate(315deg)');
+	});
+
+	it('animates a flip change through edge-on instead of snapping it', () => {
+		// A small photo is mirror-flipped and upside down; its grown counterpart
+		// on the next slide is upright. Stating one endpoint's flips on BOTH
+		// frames either flew an upright copy (losing the authored mirror) or
+		// snapped it at landing. Per-frame factors with a constant function
+		// list let CSS interpolate scaleX -1 -> 1 through 0, which is the
+		// edge-on card flip PowerPoint plays, while rotation runs its own arc
+		// alongside.
+		const pairs: MorphPair[] = [
+			{
+				fromElement: makeElement({
+					id: 'a',
+					type: 'picture',
+					imagePath: 'ppt/media/photo.jpeg',
+					rotation: 183.5,
+					flipHorizontal: true,
+				}),
+				toElement: makeElement({
+					id: 'b',
+					type: 'picture',
+					imagePath: 'ppt/media/photo.jpeg',
+				}),
+			},
+		];
+		const anims = generateMorphAnimations(pairs, 1000);
+		const frames = anims[0].keyframes;
+		expect(frames).toContain('scaleX(-1)');
+		expect(frames).toContain('scaleX(1)');
+		// The unflipped axis stays explicit on both frames too, so the transform
+		// lists pair up and interpolate numerically rather than by matrix.
+		expect(frames.match(/scaleY\(1\)/gu)?.length).toBe(2);
+		expect(frames).toContain('rotate(-176.5deg)');
+		expect(frames).toContain('rotate(0deg)');
+
+		// The ghost mirrors the same journey in reverse.
+		const ghosts = generateMorphGhostAnimations(pairs, 1000, 0);
+		expect(ghosts[0].keyframes).toContain('scaleX(-1)');
+		expect(ghosts[0].keyframes).toContain('scaleX(1)');
+	});
+
+	it('keeps a shared flip stated on every frame', () => {
+		// Both endpoints mirrored horizontally: the factor must survive on both
+		// frames or the flight loses the authored mirror and snaps at the end.
+		const pairs: MorphPair[] = [
+			{
+				fromElement: makeElement({ id: 'a', type: 'shape', flipHorizontal: true }),
+				toElement: makeElement({ id: 'b', type: 'shape', flipHorizontal: true }),
+			},
+		];
+		const anims = generateMorphAnimations(pairs, 1000);
+		expect(anims[0].keyframes.match(/scaleX\(-1\)/gu)?.length).toBe(2);
+	});
+
+	it('steps an inert counterpart of a stacking swap together with the mover', () => {
+		// The outgoing slide stacks the photo UNDER a full-frame graphic and the
+		// incoming slide stacks it ABOVE; the graphic itself is visually
+		// unchanged (an inert pair). The z-index journey only works if BOTH
+		// sides of the flip are stepped together: skipping the inert half
+		// leaves it at its static (incoming) layer, where the DOM-order
+		// tie-break already favours the mover, and the swap renders
+		// immediately instead of at the animation midpoint.
+		const inertFrom = makeElement({
+			id: 'inert-a',
+			type: 'picture',
+			imagePath: 'ppt/media/g.png',
+			x: 345,
+			y: 65,
+			width: 590,
+			height: 590,
+		});
+		const inertTo = makeElement({
+			id: 'inert-b',
+			type: 'picture',
+			imagePath: 'ppt/media/g.png',
+			x: 345,
+			y: 65,
+			width: 590,
+			height: 590,
+		});
+		const moverFrom = makeElement({
+			id: 'a',
+			type: 'picture',
+			imagePath: 'ppt/media/p.jpeg',
+			x: 601,
+			y: 282,
+			width: 79,
+			height: 76,
+		});
+		const moverTo = makeElement({
+			id: 'b',
+			type: 'picture',
+			imagePath: 'ppt/media/p.jpeg',
+			x: 307,
+			y: 37,
+			width: 667,
+			height: 645,
+		});
+		const pairs: MorphPair[] = [
+			{ fromElement: inertFrom, toElement: inertTo },
+			{ fromElement: moverFrom, toElement: moverTo },
+		];
+		// Outgoing doc order: mover first (under the graphic); incoming: mover
+		// last (above it).
+		const zSwaps = computeZOrderSwaps(pairs, [moverFrom, inertFrom], [inertTo, moverTo]);
+		expect(zSwaps.get('b')).toStrictEqual({ from: 0, to: 1 });
+		expect(zSwaps.get('inert-b')).toStrictEqual({ from: 1, to: 0 });
+
+		const anims = generateMorphAnimations(pairs, 1000, 'object', new Set(), zSwaps);
+		const inertAnim = anims.find((a) => a.elementId === 'inert-b');
+		expect(inertAnim).toBeDefined();
+		expect(inertAnim!.keyframes).toContain('z-index: 1');
+		expect(inertAnim!.keyframes).toContain('z-index: 0');
+		expect(inertAnim!.keyframes).not.toContain('transform');
+		const moverAnim = anims.find((a) => a.elementId === 'b');
+		expect(moverAnim!.keyframes).toContain('z-index: 0');
+		expect(moverAnim!.keyframes).toContain('z-index: 1');
+	});
+
+	it('keeps a short forward turn untouched', () => {
+		const pairs: MorphPair[] = [
+			{
+				fromElement: makeElement({ id: 'a', type: 'image', rotation: 0 }),
+				toElement: makeElement({ id: 'b', type: 'image', rotation: 45 }),
+			},
+		];
+		const anims = generateMorphAnimations(pairs, 1000);
+		expect(anims[0].keyframes).toContain('rotate(0deg)');
+		expect(anims[0].keyframes).toContain('rotate(45deg)');
+	});
+
+	it('lands the ghost on the same short arc as its incoming half', () => {
+		const pairs: MorphPair[] = [
+			{
+				fromElement: makeElement({ id: 'a', type: 'image', rotation: 315 }),
+				toElement: makeElement({ id: 'b', type: 'image', rotation: 0 }),
+			},
+		];
+		const ghosts = generateMorphGhostAnimations(pairs, 1000, 0);
+		// Ghost starts on its authored 315 and travels forward to 360 (= 0).
+		expect(ghosts[0].keyframes).toContain('rotate(315deg)');
+		expect(ghosts[0].keyframes).toContain('rotate(360deg)');
+	});
+
+	it('resolves the shortest arc for any pair of angles', () => {
+		expect(shortestRotationTarget(315, 0)).toBe(360);
+		expect(shortestRotationTarget(0, 315)).toBe(-45);
+		expect(shortestRotationTarget(0, 45)).toBe(45);
+		expect(shortestRotationTarget(350, 10)).toBe(370);
+		expect(shortestRotationTarget(10, 350)).toBe(-10);
+	});
+
+	it('turns a half turn the way PowerPoint does, which is not a fixed sign', () => {
+		// A half turn has no shorter arc. PowerPoint 16 goes CLOCKWISE from a
+		// start angle in [90, 270) and anti-clockwise otherwise, measured off
+		// the rendered frames of both the issue #131 wheel and a synthetic
+		// two-slide deck; the two agree on every case below. Always taking +180
+		// sent the wheel's arrow round the wrong side for the wedge diametrically
+		// opposite the one on screen.
+		expect(shortestRotationTarget(0, 180)).toBe(-180);
+		expect(shortestRotationTarget(45, 225)).toBe(-135);
+		expect(shortestRotationTarget(90, 270)).toBe(270);
+		expect(shortestRotationTarget(135, 315)).toBe(315);
+		expect(shortestRotationTarget(180, 0)).toBe(360);
+		expect(shortestRotationTarget(270, 90)).toBe(90);
+		// Still a half turn once the raw angles are reduced mod 360.
+		expect(shortestRotationTarget(360, 180)).toBe(180);
+	});
+
 	it('should include scale transform from size delta', () => {
 		const pairs: MorphPair[] = [
 			{
@@ -1049,6 +1250,34 @@ describe('generateMorphAnimations', () => {
 		expect(anims[0].keyframes).toContain('opacity: 1');
 	});
 
+	it('never fades a restyled pair IN: the ghost above it does the dissolve', () => {
+		// Fading both halves left the middle of the transition part-transparent,
+		// so the slide background showed through a solid object and both states
+		// were legible at once (issue #131: the wheel's centre disc went
+		// see-through). PowerPoint keeps the object solid and dissolves the old
+		// appearance on top of it, which is what the ghost animation does.
+		const pairs: MorphPair[] = [
+			{
+				fromElement: makeElement({
+					id: 'a',
+					type: 'shape',
+					shapeStyle: { fillColor: '#ff0000' },
+				} as Partial<PptxElement> & { id: string; type: PptxElement['type'] }),
+				toElement: makeElement({
+					id: 'b',
+					type: 'shape',
+					shapeStyle: { fillColor: '#00ff00' },
+				} as Partial<PptxElement> & { id: string; type: PptxElement['type'] }),
+			},
+		];
+		expect(morphPairNeedsCrossfade(pairs[0].fromElement, pairs[0].toElement)).toBeTruthy();
+		const anims = generateMorphAnimations(pairs, 500);
+		expect(anims[0].keyframes).not.toContain('opacity: 0;');
+		// ...while the ghost still fades right out over the top of it.
+		const ghosts = generateMorphGhostAnimations(pairs, 500, 0);
+		expect(ghosts[0].keyframes).toContain('opacity: 0;');
+	});
+
 	it('should include background-color for fill color changes', () => {
 		const pairs: MorphPair[] = [
 			{
@@ -1117,7 +1346,34 @@ describe('generateUnmatchedFadeOutAnimations', () => {
 		const anims = generateUnmatchedFadeOutAnimations(elements, 500, 0);
 		expect(anims).toHaveLength(2);
 		expect(anims[0].keyframes).toContain('opacity: 0');
-		expect(anims[0].animation).toContain(MORPH_EASING);
+		// Percentage stops carry the shape of the ramp, so the animation itself
+		// runs linear rather than on the whole-morph easing.
+		expect(anims[0].animation).toContain('500ms linear forwards');
+	});
+
+	it('dissolves out inside the first quarter and holds at zero (measured)', () => {
+		// PowerPoint clears an unmatched shape well before its replacement
+		// appears: alpha 0.98 at 3ms, 0.62 at 112ms, 0.13 at 210ms and gone by
+		// 238ms of a 1s morph. Fading across the whole duration instead left the
+		// midpoint a double exposure of both slides.
+		const anims = generateUnmatchedFadeOutAnimations([makeElement({ id: 'a' })], 1000, 0);
+		expect(anims[0].keyframes).toContain(`${MORPH_FADE_OUT_HOLD_PERCENT}% {`);
+		expect(anims[0].keyframes).toContain(`${MORPH_FADE_OUT_END_PERCENT}% {`);
+		expect(MORPH_FADE_OUT_END_PERCENT).toBeLessThan(MORPH_FADE_IN_START_PERCENT);
+		// Zero from the end of the ramp all the way to 100%.
+		const after = anims[0].keyframes.slice(
+			anims[0].keyframes.indexOf(`${MORPH_FADE_OUT_END_PERCENT}% {`),
+		);
+		expect(after).toContain('opacity: 0');
+		expect(after).not.toContain('opacity: 1');
+	});
+
+	it('never scales an unmatched element, in or out', () => {
+		// The measured box neither moves nor changes size: 427.1 x 241.4 slide
+		// px on every sampled frame of both a fade-out and a fade-in.
+		const el = makeElement({ id: 'a' });
+		expect(generateUnmatchedFadeOutAnimations([el], 500, 0)[0].keyframes).not.toContain('0.95');
+		expect(generateUnmatchedFadeInAnimations([el], 500, 0)[0].keyframes).not.toContain('0.95');
 	});
 
 	it('preserves element opacity in from state', () => {
@@ -1144,6 +1400,22 @@ describe('generateUnmatchedFadeInAnimations', () => {
 		const elements = [makeElement({ id: 'a', type: 'shape', opacity: 0.6 })];
 		const anims = generateUnmatchedFadeInAnimations(elements, 500, 0);
 		expect(anims[0].keyframes).toContain('opacity: 0.6');
+	});
+
+	it('stays invisible until the morph is nearly half done (measured)', () => {
+		// Nothing of the incoming shape is on screen before 401ms of a 1s morph;
+		// alpha is 0.18 at 464ms, 0.72 at 652ms and 0.99 at 935ms. Holding at
+		// zero for the first 42% is what leaves a clean gap between an
+		// unmatched shape leaving and its replacement arriving.
+		const anims = generateUnmatchedFadeInAnimations([makeElement({ id: 'a' })], 1000, 0);
+		const css = anims[0].keyframes;
+		expect(css).toContain(`${MORPH_FADE_IN_START_PERCENT}% {`);
+		// Zero at 0% AND at the start of the ramp; the ramp itself decelerates.
+		const upToRamp = css.slice(0, css.indexOf(`${MORPH_FADE_IN_START_PERCENT}% {`));
+		expect(upToRamp).toContain('opacity: 0');
+		expect(upToRamp).not.toContain('opacity: 1');
+		expect(css).toContain(`animation-timing-function: ${MORPH_FADE_IN_EASING}`);
+		expect(anims[0].animation).toContain('1000ms linear forwards');
 	});
 });
 
@@ -1261,8 +1533,22 @@ describe('generateFullMorphTransition', () => {
 			makeElement({ id: 'only-to', type: 'image', x: 300, y: 300 }),
 		]);
 		const anims = generateFullMorphTransition(from, to, 800, 'object');
-		// Should have: 1 pair animation + 1 fade-out + 1 fade-in
+		// Should have: 1 pair animation + 1 fade-out + 1 fade-in. The pair only
+		// MOVED, so its ghost would draw exactly what the incoming half already
+		// draws along the same path, and gets dropped (issue #144).
 		expect(anims).toHaveLength(3);
+		expect(anims.filter((a) => a.keyframes.includes('ghost'))).toHaveLength(0);
+	});
+
+	it('ghosts a pair whose appearance changed, so the old look can dissolve', () => {
+		const from = makeSlide([
+			makeElement({ id: 'a', type: 'shape', x: 0, y: 0, shapeStyle: { fillColor: '#FF0000' } }),
+		]);
+		const to = makeSlide([
+			makeElement({ id: 'a', type: 'shape', x: 100, y: 100, shapeStyle: { fillColor: '#00FF00' } }),
+		]);
+		const anims = generateFullMorphTransition(from, to, 800, 'object');
+		expect(anims.filter((a) => a.keyframes.includes('ghost'))).toHaveLength(1);
 	});
 
 	it('includes text morph animations in word mode', () => {
@@ -1340,8 +1626,99 @@ describe('generateFullMorphTransition', () => {
 		const from = makeSlide([makeElement({ id: 'a', type: 'shape', x: 0, y: 0 })]);
 		const to = makeSlide([makeElement({ id: 'a', type: 'shape', x: 100, y: 100 })]);
 		const anims = generateFullMorphTransition(from, to, 500);
-		// Object mode: 1 pair animation, no text animations
+		// Object mode: the pair's incoming animation and nothing else - no ghost
+		// (the pair only moved) and no text animations.
 		expect(anims).toHaveLength(1);
+		expect(anims.filter((a) => a.keyframes.includes('ghost'))).toHaveLength(0);
+	});
+});
+
+// ==========================================================================
+// morphPairNeedsCrossfade
+// ==========================================================================
+
+describe('morphPairNeedsCrossfade', () => {
+	it('is false for a pair that only moves', () => {
+		const from = makeElement({ id: 'a', type: 'shape', x: 0, y: 0 });
+		const to = makeElement({ id: 'b', type: 'shape', x: 300, y: 200 });
+		expect(morphPairNeedsCrossfade(from, to)).toBeFalsy();
+	});
+
+	it('is true when the painted appearance changes', () => {
+		const from = makeElement({
+			id: 'a',
+			type: 'text',
+			text: 'Open Integration',
+		} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+		const to = makeElement({
+			id: 'b',
+			type: 'text',
+			text: 'Tactical Edge',
+		} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+		expect(morphPairNeedsCrossfade(from, to)).toBeTruthy();
+	});
+
+	it('is true when only an adjustment handle moved', () => {
+		// `shouldGeometryMorph` already treats a moved handle as an outline change
+		// and emits a `clip-path` tween for it. If the appearance compared EQUAL
+		// the pair also read as inert, and an inert pair's ghost is painted
+		// statically (issue #161) while the live half is held invisible beneath
+		// it: the tween ran where nobody could see it and the new outline appeared
+		// in one frame when the overlay came down.
+		const rounded = (id: string, adj: number): PptxElement =>
+			makeElement({
+				id,
+				type: 'shape',
+				shapeType: 'roundRect',
+				shapeAdjustments: { adj },
+			} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+
+		expect(morphPairNeedsCrossfade(rounded('a', 16667), rounded('b', 40000))).toBeTruthy();
+		expect(isInertMorphPair(rounded('a', 16667), rounded('b', 40000))).toBeFalsy();
+		expect(isInertMorphPair(rounded('a', 16667), rounded('b', 16667))).toBeTruthy();
+	});
+
+	it('ignores the order two decks wrote the same handles in', () => {
+		const handles = (id: string, adjustments: Record<string, number>): PptxElement =>
+			makeElement({
+				id,
+				type: 'shape',
+				shapeType: 'roundRect',
+				shapeAdjustments: adjustments,
+			} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+
+		expect(
+			morphPairNeedsCrossfade(
+				handles('a', { adj1: 1, adj2: 2 }),
+				handles('b', { adj2: 2, adj1: 1 }),
+			),
+		).toBeFalsy();
+	});
+
+	it('looks inside a group, whose own properties paint nothing (issue #131)', () => {
+		// The reporter's deck keeps each slide's centre copy in a group. Comparing
+		// only the group itself made every pair look unchanged, so its ghost stayed
+		// opaque for the whole morph and the old text snapped to the new one in a
+		// single frame when the overlay was torn down.
+		const group = (id: string, childText: string): PptxElement =>
+			({
+				id,
+				type: 'group',
+				x: 0,
+				y: 0,
+				width: 100,
+				height: 50,
+				children: [
+					{ id: `${id}-c`, type: 'text', x: 0, y: 0, width: 80, height: 20, text: childText },
+				],
+			}) as unknown as PptxElement;
+
+		expect(
+			morphPairNeedsCrossfade(group('a', 'Open Integration'), group('b', 'Tactical Edge')),
+		).toBeTruthy();
+		expect(
+			morphPairNeedsCrossfade(group('a', 'Open Integration'), group('b', 'Open Integration')),
+		).toBeFalsy();
 	});
 });
 
@@ -1352,5 +1729,256 @@ describe('generateFullMorphTransition', () => {
 describe('mORPH_EASING', () => {
 	it('is a cubic-bezier string', () => {
 		expect(MORPH_EASING).toMatch(/^cubic-bezier\(/u);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// issue #131 follow-up: what a morph does with pairs it should leave alone
+// ---------------------------------------------------------------------------
+
+describe('morph inert pairs (issue #131 follow-up)', () => {
+	const still = (id: string, extra: Partial<PptxElement> = {}) =>
+		makeElement({
+			id,
+			type: 'shape',
+			x: 10,
+			y: 20,
+			width: 100,
+			height: 50,
+			shapeStyle: { fillMode: 'solid', fillColor: '#3D4146', fillOpacity: 0.5 },
+			...extra,
+		} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+
+	it('recognises an unchanged, unmoved pair as inert', () => {
+		expect(isInertMorphPair(still('a'), still('b'))).toBeTruthy();
+	});
+
+	it('does not call a moved or restyled pair inert', () => {
+		expect(isInertMorphPair(still('a'), still('b', { x: 40 }))).toBeFalsy();
+		expect(
+			isInertMorphPair(
+				still('a'),
+				still('b', {
+					shapeStyle: { fillMode: 'solid', fillColor: '#000000' },
+				} as Partial<PptxElement>),
+			),
+		).toBeFalsy();
+		expect(isInertMorphPair(still('a'), still('b', { rotation: 90 }))).toBeFalsy();
+	});
+
+	it('holds an inert pair’s incoming half hidden so its ghost is the only copy', () => {
+		// The ghost is pixel-identical and sits directly above it. Painting both
+		// composites a part-transparent element with itself, so it reads more
+		// solid for the whole transition and snaps back at teardown - the
+		// reporter's "opacity animating on elements that should be unchanged".
+		const anims = generateMorphAnimations(
+			[{ fromElement: still('a'), toElement: still('b') }],
+			500,
+		);
+		const frames = anims[0].keyframes;
+		expect(frames).toContain('opacity: 0;');
+		expect(frames).not.toContain('opacity: 1;');
+	});
+
+	it('gives the inert ghost no animation at all (issue #161)', () => {
+		// Its keyframes would run from itself to itself: nothing changes over
+		// time, but a running animation puts the shape on its own compositing
+		// layer, and the browser snaps that layer's raster to whole device
+		// pixels. A ghost at a fractional position/size is then painted up to a
+		// pixel smaller and offset for the whole morph and snaps back when the
+		// overlay is torn down - the reporter's "micro-movements".
+		//
+		// The ghost is still PAINTED (see morph-plan: `outgoingElements` comes
+		// from the ghost set, not from this map); it is simply static.
+		const ghosts = generateMorphGhostAnimations(
+			[{ fromElement: still('a'), toElement: still('b') }],
+			500,
+			0,
+		);
+		expect(ghosts).toHaveLength(0);
+	});
+
+	it('still animates a ghost whose pair is NOT inert', () => {
+		const ghosts = generateMorphGhostAnimations(
+			[{ fromElement: still('a'), toElement: still('b', { x: 240 }) }],
+			500,
+			0,
+		);
+		expect(ghosts).toHaveLength(1);
+		// It stands in for the live element, so it stays fully visible: only a
+		// restyled pair's ghost dissolves.
+		expect(ghosts[0].keyframes).not.toContain('opacity: 0;');
+	});
+});
+
+describe('morph crossfade fade-in (issue #131 follow-up)', () => {
+	const textBox = (id: string, text: string) =>
+		makeElement({
+			id,
+			type: 'text',
+			x: 10,
+			y: 20,
+			width: 100,
+			height: 50,
+			text,
+			shapeStyle: { fillMode: 'none' },
+		} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+
+	it('fades a body-less text pair IN so the new wording dissolves', () => {
+		// Pinned at full opacity the new words are at full strength on frame 1
+		// with the old dissolving off them, which reads as the next slide's text
+		// simply appearing.
+		const anims = generateMorphAnimations(
+			[
+				{
+					fromElement: textBox('a', 'Multi-Domain Fusion'),
+					toElement: textBox('b', 'Cyber and EM'),
+				},
+			],
+			500,
+		);
+		expect(anims[0].keyframes).toContain('opacity: 0;');
+		expect(anims[0].keyframes).toContain('opacity: 1;');
+	});
+
+	it('still refuses to fade in anything that paints a body', () => {
+		// Regression guard for the wheel's centre disc: fading both halves left
+		// the middle of the transition see-through.
+		const disc = (id: string, colour: string) =>
+			makeElement({
+				id,
+				type: 'shape',
+				x: 10,
+				y: 20,
+				width: 100,
+				height: 50,
+				shapeStyle: { fillMode: 'solid', fillColor: colour },
+			} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+		const anims = generateMorphAnimations(
+			[{ fromElement: disc('a', '#ff0000'), toElement: disc('b', '#00ff00') }],
+			500,
+		);
+		expect(anims[0].keyframes).not.toContain('opacity: 0;');
+	});
+
+	it('refuses for a picture too', () => {
+		const pic = (id: string, path: string) =>
+			makeElement({
+				id,
+				type: 'picture',
+				x: 0,
+				y: 0,
+				width: 100,
+				height: 50,
+				imagePath: path,
+			} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+		const anims = generateMorphAnimations(
+			[{ fromElement: pic('a', 'a.png'), toElement: pic('b', 'b.png') }],
+			500,
+		);
+		expect(anims[0].keyframes).not.toContain('opacity: 0;');
+	});
+});
+
+describe('replaced wording in the same slot (issue #160)', () => {
+	/** A centre-panel paragraph, re-fitted around its own wording. */
+	const paragraph = (id: string, text: string, box: Partial<PptxElement>) =>
+		makeElement({
+			id,
+			type: 'text',
+			x: 536,
+			y: 361,
+			width: 215,
+			height: 44,
+			text,
+			shapeStyle: { fillMode: 'none' },
+			...box,
+		} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+
+	const refitted: MorphPair = {
+		fromElement: paragraph('a', 'Challenge: Integration of cyber', {}),
+		toElement: paragraph('b', 'Challenge: Decision advantage', { y: 360, height: 32 }),
+	};
+
+	it('dissolves both halves where they stand, without stretching the type', () => {
+		// PowerPoint re-lays the wording out inside whatever box now fits it; it
+		// never scales the glyphs. Interpolating the box squeezed this paragraph
+		// by the 27% its own height changed.
+		const [incoming] = generateMorphAnimations([refitted], 1000);
+		const [ghost] = generateMorphGhostAnimations([refitted], 1000, 0);
+		for (const keyframes of [incoming.keyframes, ghost.keyframes]) {
+			expect(keyframes).toContain('scale(1, 1)');
+			expect(keyframes).not.toMatch(/translate\((?!0)/u);
+		}
+	});
+
+	it('gives the two halves complementary opacity on the same curve', () => {
+		// The whole point of the pair: PowerPoint's own render of this transition
+		// is a blend of the two end states whose weights sum to 1.000 throughout.
+		const [incoming] = generateMorphAnimations([refitted], 1000);
+		const [ghost] = generateMorphGhostAnimations([refitted], 1000, 0);
+		expect(incoming.animation).toContain(MORPH_CROSSFADE_EASING);
+		expect(ghost.animation).toContain(MORPH_CROSSFADE_EASING);
+		expect(incoming.keyframes).toMatch(/-fade \{\s*from \{\s*opacity: 0;/u);
+		expect(ghost.keyframes).toMatch(/-fade \{\s*from \{\s*opacity: 1;/u);
+	});
+
+	it('still interpolates a text box that genuinely moved', () => {
+		// Measured: a text box whose wording changed AND which moved 460px travels
+		// the whole way while its glyphs cross-dissolve.
+		const moved: MorphPair = {
+			fromElement: paragraph('a', 'AAAA BBBB', { x: 100, y: 80 }),
+			toElement: paragraph('b', 'CCCC DDDD', { x: 560, y: 400 }),
+		};
+		const [incoming] = generateMorphAnimations([moved], 1000);
+		expect(incoming.keyframes).toContain('translate(-460px, -320px)');
+	});
+
+	it('dissolves a paragraph that re-fitted far enough to clear half its box (issue #161)', () => {
+		// The wheel deck's "Challenge" line, in px: its box shifts 17.75px up a
+		// 55px-tall box and narrows, which drops the box overlap to 0.487. At the
+		// old 0.5 slot threshold it fell through to interpolation and stretched its
+		// glyphs by the 1.56% its width changed - the reporter's "text moving".
+		const challenge: MorphPair = {
+			fromElement: paragraph('a', 'Challenge: Pan-DLOD solutions, avoiding vendor lock-in', {
+				x: 494.24,
+				y: 365.6,
+				width: 290.2,
+				height: 55.11,
+			}),
+			toElement: paragraph('b', 'Challenge: Resilient, deployable compute and analytics', {
+				x: 503.67,
+				y: 347.85,
+				width: 271.32,
+				height: 55.11,
+			}),
+		};
+		const [incoming] = generateMorphAnimations([challenge], 1000);
+		const [ghost] = generateMorphGhostAnimations([challenge], 1000, 0);
+		for (const keyframes of [incoming.keyframes, ghost.keyframes]) {
+			expect(keyframes).toContain('scale(1, 1)');
+			expect(keyframes).not.toMatch(/translate\((?!0)/u);
+		}
+	});
+
+	it('leaves a shape with a body alone', () => {
+		// Only a bare text box is a container PowerPoint re-fits; a rounded
+		// rectangle that resizes really does change size on screen.
+		const chip = (id: string, text: string, width: number) =>
+			makeElement({
+				id,
+				type: 'shape',
+				x: 0,
+				y: 0,
+				width,
+				height: 40,
+				text,
+				shapeStyle: { fillMode: 'solid', fillColor: '#ff0000' },
+			} as Partial<PptxElement> & { id: string; type: PptxElement['type'] });
+		const [incoming] = generateMorphAnimations(
+			[{ fromElement: chip('a', 'Before', 100), toElement: chip('b', 'After', 200) }],
+			1000,
+		);
+		expect(incoming.keyframes).toContain('scale(0.5, 1)');
 	});
 });

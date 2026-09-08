@@ -4,8 +4,9 @@
  * Selector: `pptx-comments-panel`
  *
  * Presentational only: it renders the supplied `comments` (already filtered to
- * the active slide by the host) and surfaces add / remove / resolve intents via
- * outputs. The host owns state and commits history-aware comment-array writes.
+ * the active slide by the host, nested replies included) and surfaces
+ * add / remove / resolve / reply intents via outputs. The host owns state and
+ * commits history-aware comment-array writes.
  *
  * Timestamps are formatted with the core `formatCommentTimestamp` helper so the
  * Angular binding matches the React/Vue formatting exactly.
@@ -18,6 +19,7 @@
  *   (add)="onAddComment($event)"
  *   (remove)="onRemoveComment($event)"
  *   (resolve)="onResolveComment($event)"
+ *   (reply)="onReplyComment($event)"
  * />
  * ```
  */
@@ -32,250 +34,25 @@ import {
 	signal,
 } from '@angular/core';
 import { TranslatePipe, TranslateService } from '@ngx-translate/core';
-import type { PptxComment } from 'pptx-viewer-core';
+import type { PptxComment, PptxCommentMention, PptxModernCommentAuthor } from 'pptx-viewer-core';
 import { formatCommentTimestamp } from 'pptx-viewer-core';
+
+import { CommentBodyComponent } from './comment-body.component';
+import { CommentMentionTextareaComponent } from './comment-mention-textarea.component';
+
+/** The trimmed text plus the mention spans an add/reply submit carries. */
+export interface CommentSubmission {
+	text: string;
+	mentions: PptxCommentMention[];
+}
 
 @Component({
 	selector: 'pptx-comments-panel',
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
-	imports: [TranslatePipe],
-	template: `
-		<aside class="pptx-ng-comments" [attr.aria-label]="'pptx.comments.slideComments' | translate">
-			<header class="pptx-ng-comments__header">
-				<h2 class="pptx-ng-comments__title">{{ 'pptx.toolbar.comments' | translate }}</h2>
-				<span class="pptx-ng-comments__count" data-testid="comment-count">
-					{{ comments().length }}
-				</span>
-			</header>
-
-			@if (comments().length > 0) {
-				<ul class="pptx-ng-comments__list">
-					@for (comment of comments(); track comment.id) {
-						<li
-							class="pptx-ng-comments__item"
-							[class.pptx-ng-comments__item--resolved]="comment.resolved"
-							[attr.data-comment-id]="comment.id"
-						>
-							<div class="pptx-ng-comments__meta">
-								<span class="pptx-ng-comments__author">{{
-									comment.author || ('pptx.comments.unknownAuthor' | translate)
-								}}</span>
-								@if (formatTimestamp(comment.createdAt); as ts) {
-									<time class="pptx-ng-comments__time">{{ ts }}</time>
-								}
-							</div>
-							<p class="pptx-ng-comments__text">{{ comment.text }}</p>
-							<div class="pptx-ng-comments__actions">
-								<button
-									type="button"
-									class="pptx-ng-comments__action"
-									[attr.data-comment-id]="comment.id"
-									[attr.aria-pressed]="comment.resolved ? 'true' : 'false'"
-									(click)="resolve.emit(comment.id)"
-								>
-									{{
-										(comment.resolved ? 'pptx.comments.reopen' : 'pptx.comments.resolve')
-											| translate
-									}}
-								</button>
-								<button
-									type="button"
-									class="pptx-ng-comments__action pptx-ng-comments__action--danger"
-									[attr.data-comment-id]="comment.id"
-									[attr.aria-label]="'pptx.comments.removeComment' | translate"
-									(click)="remove.emit(comment.id)"
-								>
-									{{ 'pptx.comments.remove' | translate }}
-								</button>
-							</div>
-						</li>
-					}
-				</ul>
-			} @else {
-				<p class="pptx-ng-comments__empty" data-testid="comments-empty">
-					{{ 'pptx.comments.noneOnSlide' | translate }}
-				</p>
-			}
-
-			<form class="pptx-ng-comments__compose" (submit)="submit($event)">
-				<label
-					class="pptx-ng-comments__compose-label"
-					[title]="'pptx.comments.commentingAs' | translate: { name: authorName() }"
-				>
-					{{ 'pptx.comments.addComment' | translate }}
-				</label>
-				<textarea
-					class="pptx-ng-comments__textarea"
-					rows="3"
-					[placeholder]="'pptx.comments.writePlaceholder' | translate"
-					[attr.aria-label]="'pptx.comments.addComment' | translate"
-					[value]="draft()"
-					(input)="onDraftInput($event)"
-				></textarea>
-				<button
-					type="submit"
-					class="pptx-ng-comments__submit"
-					[disabled]="!canAdd()"
-					data-testid="add-comment"
-				>
-					{{ 'pptx.comments.addComment' | translate }}
-				</button>
-			</form>
-		</aside>
-	`,
-	styles: [
-		`
-			:host {
-				display: block;
-				height: 100%;
-				width: 100%;
-			}
-
-			.pptx-ng-comments {
-				display: flex;
-				flex-direction: column;
-				min-height: 0;
-				height: 100%;
-				width: 100%;
-				background: var(--pptx-card, #111827);
-				color: var(--pptx-foreground, #f3f4f6);
-				border-left: 1px solid var(--pptx-border, #374151);
-				font-family: system-ui, sans-serif;
-			}
-
-			.pptx-ng-comments__header {
-				display: flex;
-				align-items: center;
-				justify-content: space-between;
-				padding: 12px 16px;
-				border-bottom: 1px solid var(--pptx-border, #374151);
-			}
-
-			.pptx-ng-comments__title {
-				margin: 0;
-				font-size: 14px;
-				font-weight: 600;
-			}
-
-			.pptx-ng-comments__count {
-				font-size: 12px;
-				color: var(--pptx-muted-foreground, #9ca3af);
-			}
-
-			.pptx-ng-comments__list {
-				list-style: none;
-				margin: 0;
-				padding: 8px;
-				overflow-y: auto;
-				flex: 1 1 auto;
-				min-height: 0;
-			}
-
-			.pptx-ng-comments__item {
-				padding: 10px 12px;
-				border: 1px solid var(--pptx-border, #374151);
-				border-radius: 8px;
-				margin-bottom: 8px;
-			}
-
-			.pptx-ng-comments__item--resolved {
-				opacity: 0.6;
-			}
-
-			.pptx-ng-comments__meta {
-				display: flex;
-				align-items: baseline;
-				justify-content: space-between;
-				gap: 8px;
-				margin-bottom: 4px;
-			}
-
-			.pptx-ng-comments__author {
-				font-size: 13px;
-				font-weight: 600;
-			}
-
-			.pptx-ng-comments__time {
-				font-size: 11px;
-				color: var(--pptx-muted-foreground, #9ca3af);
-			}
-
-			.pptx-ng-comments__text {
-				margin: 0 0 8px;
-				font-size: 13px;
-				white-space: pre-wrap;
-				word-break: break-word;
-			}
-
-			.pptx-ng-comments__actions {
-				display: flex;
-				gap: 8px;
-			}
-
-			.pptx-ng-comments__action {
-				font-size: 12px;
-				padding: 4px 8px;
-				border-radius: 6px;
-				border: 1px solid var(--pptx-border, #374151);
-				background: transparent;
-				color: inherit;
-				cursor: pointer;
-			}
-
-			.pptx-ng-comments__action--danger {
-				color: #f87171;
-			}
-
-			.pptx-ng-comments__empty {
-				padding: 16px;
-				font-size: 13px;
-				color: var(--pptx-muted-foreground, #9ca3af);
-				flex: 1 1 auto;
-			}
-
-			.pptx-ng-comments__compose {
-				display: flex;
-				flex-direction: column;
-				gap: 8px;
-				padding: 12px 16px;
-				border-top: 1px solid var(--pptx-border, #374151);
-			}
-
-			.pptx-ng-comments__compose-label {
-				font-size: 12px;
-				font-weight: 600;
-			}
-
-			.pptx-ng-comments__textarea {
-				resize: vertical;
-				width: 100%;
-				padding: 8px;
-				border-radius: 6px;
-				border: 1px solid var(--pptx-border, #374151);
-				background: var(--pptx-background, #030712);
-				color: inherit;
-				font: inherit;
-				font-size: 13px;
-			}
-
-			.pptx-ng-comments__submit {
-				align-self: flex-end;
-				font-size: 13px;
-				padding: 6px 14px;
-				border-radius: 6px;
-				border: none;
-				background: var(--pptx-primary, #6366f1);
-				color: #fff;
-				cursor: pointer;
-			}
-
-			.pptx-ng-comments__submit:disabled {
-				opacity: 0.5;
-				cursor: not-allowed;
-			}
-		`,
-	],
+	imports: [TranslatePipe, CommentBodyComponent, CommentMentionTextareaComponent],
+	templateUrl: './comments-panel.component.html',
+	styleUrl: './comments-panel.component.css',
 })
 export class CommentsPanelComponent {
 	// -------------------------------------------------------------------------
@@ -290,8 +67,11 @@ export class CommentsPanelComponent {
 	/** Display name shown in the compose label ("Commenting as …"). */
 	readonly authorName = input<string>(this.translate.instant('pptx.comments.defaultAuthorName'));
 
-	/** Emits the trimmed comment text the user wants to add. */
-	readonly add = output<string>();
+	/** Office 2021 modern comment authors, for the `@`-mention typeahead. */
+	readonly modernCommentAuthors = input<readonly PptxModernCommentAuthor[]>([]);
+
+	/** Emits the trimmed comment text (+ mentions) the user wants to add. */
+	readonly add = output<CommentSubmission>();
 
 	/** Emits the id of a comment the user wants to remove. */
 	readonly remove = output<string>();
@@ -299,24 +79,35 @@ export class CommentsPanelComponent {
 	/** Emits the id of a comment whose resolved flag should toggle. */
 	readonly resolve = output<string>();
 
+	/** Emits the parent comment id + trimmed text (+ mentions) of a threaded reply. */
+	readonly reply = output<{ parentId: string } & CommentSubmission>();
+
 	// -------------------------------------------------------------------------
 	// Draft state
 	// -------------------------------------------------------------------------
 
 	/** Current text typed into the compose textarea. */
 	readonly draft = signal('');
+	/** `@`-mentions recorded in {@link draft} so far. */
+	readonly draftMentions = signal<PptxCommentMention[]>([]);
 
 	/** Whether the draft has non-whitespace content (enables the submit button). */
 	readonly canAdd = computed<boolean>(() => this.draft().trim().length > 0);
 
+	/** Id of the comment whose reply composer is open (one at a time). */
+	readonly replyingTo = signal<string | null>(null);
+
+	/** Current text typed into the open reply composer. */
+	readonly replyDraft = signal('');
+	/** `@`-mentions recorded in {@link replyDraft} so far. */
+	readonly replyMentions = signal<PptxCommentMention[]>([]);
+
+	/** Whether the reply draft has content (enables the reply submit button). */
+	readonly canReply = computed<boolean>(() => this.replyDraft().trim().length > 0);
+
 	// -------------------------------------------------------------------------
 	// Event handlers
 	// -------------------------------------------------------------------------
-
-	onDraftInput(event: Event): void {
-		const target = event.target as HTMLTextAreaElement;
-		this.draft.set(target.value);
-	}
 
 	submit(event: Event): void {
 		event.preventDefault();
@@ -324,8 +115,38 @@ export class CommentsPanelComponent {
 		if (text.length === 0) {
 			return;
 		}
-		this.add.emit(text);
+		this.add.emit({ text, mentions: this.draftMentions() });
 		this.draft.set('');
+		this.draftMentions.set([]);
+	}
+
+	/** Localized reply-composer placeholder ("Reply to <author>..."). */
+	replyPlaceholder(comment: PptxComment): string {
+		return this.translate.instant('pptx.comments.replyPlaceholder', {
+			author: comment.author || this.translate.instant('pptx.comments.unknownAuthor'),
+		});
+	}
+
+	/** Open the reply composer under `parentId` (closing any other composer). */
+	startReply(parentId: string): void {
+		this.replyingTo.set(parentId);
+		this.replyDraft.set('');
+		this.replyMentions.set([]);
+	}
+
+	cancelReply(): void {
+		this.replyingTo.set(null);
+		this.replyDraft.set('');
+		this.replyMentions.set([]);
+	}
+
+	submitReply(parentId: string): void {
+		const text = this.replyDraft().trim();
+		if (text.length === 0) {
+			return;
+		}
+		this.reply.emit({ parentId, text, mentions: this.replyMentions() });
+		this.cancelReply();
 	}
 
 	formatTimestamp(value: string | undefined): string {

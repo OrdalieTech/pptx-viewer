@@ -20,9 +20,10 @@ import {
 	signal,
 } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
-import type { PptxComment, PptxElement } from 'pptx-viewer-core';
+import type { PptxComment, PptxElement, PptxModernCommentAuthor } from 'pptx-viewer-core';
 import { hasTextProperties } from 'pptx-viewer-core';
 
+import type { CommentSubmission } from './comments-panel.component';
 import { CommentsPanelComponent } from './comments-panel.component';
 import { EditorStateService } from './editor-state.service';
 import { INSPECTOR_CARD_STYLES } from './inspector-card-styles';
@@ -30,6 +31,7 @@ import type { SlideInspectorTab } from './inspector-pane-header.component';
 import { InspectorPaneHeaderComponent } from './inspector-pane-header.component';
 import { InspectorPanelComponent } from './inspector-panel.component';
 import { PresentationPropertiesPanelComponent } from './presentation-properties-panel.component';
+import { SlideBackgroundCardComponent } from './slide-background-card.component';
 import { ViewerCanvasEditingService } from './viewer-canvas-editing.service';
 import { ViewerInspectorPanelService } from './viewer-inspector-panel.service';
 
@@ -50,6 +52,7 @@ interface LayerRow {
 		InspectorPaneHeaderComponent,
 		InspectorPanelComponent,
 		PresentationPropertiesPanelComponent,
+		SlideBackgroundCardComponent,
 		CommentsPanelComponent,
 	],
 	template: `
@@ -93,18 +96,15 @@ interface LayerRow {
 						/>
 					} @else {
 						<pptx-presentation-properties-panel [canEdit]="canEdit()" [slideIndex]="slideIndex()" />
+						<!--
+							BACKGROUND card (colour / picture / clear), matching React's
+							SlideBackgroundPanel. The SLIDE card below keeps the speaker-notes
+							field, which Angular surfaces here rather than only in the notes pane.
+						-->
+						<pptx-slide-background-card [slideIndex]="slideIndex()" [canEdit]="canEdit()" />
 						@if (activeSlide(); as sl) {
 							<section class="icard" [attr.data-slide-key]="slideKey()">
 								<h3 class="icard__heading">{{ 'pptx.viewer.slide' | translate }}</h3>
-								<label class="icard__row">
-									<span class="icard__label">{{ 'pptx.viewer.background' | translate }}</span>
-									<input
-										type="color"
-										[disabled]="!canEdit()"
-										[attr.value]="sl.backgroundColor || '#ffffff'"
-										(change)="canvasEditing.onSlideBackground($event)"
-									/>
-								</label>
 								<label class="icard__col">
 									<span class="icard__label">{{ 'pptx.notes.title' | translate }}</span>
 									<textarea
@@ -114,8 +114,7 @@ interface LayerRow {
 										[attr.placeholder]="'pptx.viewer.speakerNotesPlaceholder' | translate"
 										(change)="canvasEditing.onSlideNotes($event)"
 										(blur)="canvasEditing.onSlideNotes($event)"
-										>{{ sl.notes || '' }}</textarea
-									>
+										>{{ sl.notes || '' }}</textarea>
 								</label>
 							</section>
 						}
@@ -124,9 +123,11 @@ interface LayerRow {
 				@case ('comments') {
 					<pptx-comments-panel
 						[comments]="comments()"
+						[modernCommentAuthors]="modernCommentAuthors()"
 						(add)="commentAdd.emit($event)"
 						(remove)="commentRemove.emit($event)"
 						(resolve)="commentResolve.emit($event)"
+						(reply)="commentReply.emit($event)"
 					/>
 				}
 			}
@@ -200,11 +201,14 @@ export class SlideDefaultInspectorComponent {
 	readonly selectedElement = input<PptxElement | null>(null);
 	/** The active slide's comments (host-owned; history-aware writes stay there). */
 	readonly comments = input<PptxComment[]>([]);
+	/** Office 2021 modern comment authors, for the `@`-mention typeahead. */
+	readonly modernCommentAuthors = input<readonly PptxModernCommentAuthor[]>([]);
 
 	/** Re-emitted comments-panel events (the host owns the comment writes). */
-	readonly commentAdd = output<string>();
+	readonly commentAdd = output<CommentSubmission>();
 	readonly commentRemove = output<string>();
 	readonly commentResolve = output<string>();
+	readonly commentReply = output<{ parentId: string } & CommentSubmission>();
 
 	protected readonly editor = inject(EditorStateService);
 	protected readonly canvasEditing = inject(ViewerCanvasEditingService);

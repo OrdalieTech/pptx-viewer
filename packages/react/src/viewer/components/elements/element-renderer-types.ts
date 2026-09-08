@@ -15,11 +15,22 @@ export interface ConnectorRendererProps {
 	selectionColorClass: 'blue-400' | 'blue-500';
 	opacity?: number;
 	zIndex?: number;
-	adjustmentHandleDescriptor: ShapeAdjustmentHandleDescriptor | null;
+	adjustmentHandles: ShapeAdjustmentHandleDescriptor[];
 	onResizePointerDown: (elementId: string, e: React.MouseEvent, handle: string) => void;
-	onAdjustmentPointerDown: (elementId: string, e: React.MouseEvent) => void;
+	onAdjustmentPointerDown: (
+		elementId: string,
+		e: React.MouseEvent,
+		descriptor: ShapeAdjustmentHandleDescriptor,
+	) => void;
 	onRotate?: (elementId: string, rotationDeg: number) => void;
 	animationState?: ElementAnimationState;
+	/**
+	 * Scoped `!important` CSS override for an active font-style emphasis effect
+	 * (Bold Flash, Bold Reveal, Underline, Change Font Style/Size), computed by
+	 * the caller from `buildTextStyleOverrideCss` so a connector caption
+	 * animates the same way a shape's own text does.
+	 */
+	textStyleOverrideCss?: string;
 }
 
 export interface ElementRendererProps {
@@ -29,6 +40,16 @@ export interface ElementRendererProps {
 	isInlineEditing: boolean;
 	inlineEditingText: string;
 	canInteract: boolean;
+	/**
+	 * Whether the stage painting this element is a RUNNING SHOW.
+	 *
+	 * Distinct from `!canInteract`, which is also true for a thumbnail or a
+	 * locked template element. It gates the inline `pointer-events` rule: during a
+	 * show the shared `PRESENTATION_HIT_TEST_CSS` owns hit-testing (it is the only
+	 * form that can re-enable an action shape nested inside inert scenery), and an
+	 * inline `none` written here would outrank it.
+	 */
+	presenting?: boolean;
 	spellCheckEnabled: boolean;
 	mediaDataUrls: Map<string, string>;
 	tableEditorState?: TableCellEditorState | null;
@@ -47,9 +68,13 @@ export interface ElementRendererProps {
 	showResizeHandles: boolean;
 	renderInk: boolean;
 	renderGroups: boolean;
-	adjustmentHandleDescriptor: ShapeAdjustmentHandleDescriptor | null;
+	adjustmentHandles: ShapeAdjustmentHandleDescriptor[];
 	onResizePointerDown: (elementId: string, e: React.MouseEvent, handle: string) => void;
-	onAdjustmentPointerDown: (elementId: string, e: React.MouseEvent) => void;
+	onAdjustmentPointerDown: (
+		elementId: string,
+		e: React.MouseEvent,
+		descriptor: ShapeAdjustmentHandleDescriptor,
+	) => void;
 	/** Commit a new rotation (degrees) when the on-canvas rotate handle is dragged. */
 	onRotate?: (elementId: string, rotationDeg: number) => void;
 	onInlineEditChange: (text: string) => void;

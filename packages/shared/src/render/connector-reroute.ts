@@ -1,5 +1,5 @@
 /**
- * Connector dynamic rerouting — recalculates connector endpoints when
+ * Connector dynamic rerouting: recalculates connector endpoints when
  * connected shapes are moved or resized. Pure (no framework imports).
  *
  * Connectors reference shapes via `shapeStyle.connectorStartConnection` and
@@ -8,71 +8,17 @@
  * connector's position and dimensions must be updated to follow.
  */
 
-import { createBuiltinVariables, resolveCoordinate } from 'pptx-viewer-core';
 import type { PptxElement } from 'pptx-viewer-core';
 
-/** A single connection site on a shape's bounding box (element-local coords). */
-export interface ConnectionSite {
-	x: number;
-	y: number;
-	index: number;
-}
+import { getShapeConnectionSites } from './connector-sites';
 
-/**
- * Compute connection sites for a rectangular bounding box. Returns the four
- * edge midpoints in element-local coordinates: top, right, bottom, left.
- *
- * This is the fallback used for shapes whose real connection sites are
- * unknown (preset shapes without a parsed `a:cxnLst`).
- */
-export function getConnectionSites(width: number, height: number): ConnectionSite[] {
-	return [
-		{ x: width / 2, y: 0, index: 0 }, // top center
-		{ x: width, y: height / 2, index: 1 }, // right center
-		{ x: width / 2, y: height, index: 2 }, // bottom center
-		{ x: 0, y: height / 2, index: 3 }, // left center
-	];
-}
-
-/** Structural view of the custom-geometry fields we read off a shape element. */
-interface ShapeGeometryFields {
-	customGeometryConnectionSites?: Array<{ posX?: string; posY?: string; ang?: string }>;
-	pathWidth?: number;
-	pathHeight?: number;
-}
-
-/**
- * Resolve the connection sites of a shape element in element-local pixel
- * coordinates.
- *
- * When the shape carries typed custom-geometry connection sites (parsed from
- * `a:custGeom/a:cxnLst/a:cxn`), each `a:pos` formula is evaluated against the
- * shape's path coordinate space and scaled to the element's pixel box, so a
- * connector referencing `stCxn/@idx` on a non-rectangular shape attaches near
- * the real site rather than collapsing to an edge midpoint. Shapes with no
- * known sites fall back to the four edge midpoints.
- */
-export function getShapeConnectionSites(shape: PptxElement): ConnectionSite[] {
-	const geo = shape as PptxElement & ShapeGeometryFields;
-	const cxn = geo.customGeometryConnectionSites;
-	if (!cxn || cxn.length === 0) {
-		return getConnectionSites(shape.width, shape.height);
-	}
-
-	// Path coordinate space the `a:pos` formulas are expressed in. Fall back to
-	// the element's pixel dimensions (scale factor 1) when unavailable.
-	const pathW = geo.pathWidth && geo.pathWidth > 0 ? geo.pathWidth : shape.width;
-	const pathH = geo.pathHeight && geo.pathHeight > 0 ? geo.pathHeight : shape.height;
-	const vars = createBuiltinVariables({ w: pathW, h: pathH });
-	const scaleX = pathW > 0 ? shape.width / pathW : 1;
-	const scaleY = pathH > 0 ? shape.height / pathH : 1;
-
-	return cxn.map((site, index) => ({
-		x: resolveCoordinate(site.posX, vars) * scaleX,
-		y: resolveCoordinate(site.posY, vars) * scaleY,
-		index,
-	}));
-}
+export {
+	getConnectionSites,
+	getShapeConnectionSites,
+	getUnrotatedShapeConnectionSites,
+	transformConnectionSite,
+} from './connector-sites';
+export type { ConnectionSite, ConnectionSiteFrame } from './connector-sites';
 
 /** Describes the updated geometry for a connector after rerouting. */
 export interface ReroutedConnector {
@@ -104,6 +50,49 @@ export interface ConnectorConnectionRef {
 }
 
 /**
+ * Index the slide's elements by every id a connector may reference them with.
+ *
+ * `a:stCxn/@id` is the OOXML `p:cNvPr/@id` of the target shape ("2"), which the
+ * parser keeps on the element as `shapeId`; the element's own `id` is a
+ * synthetic part-scoped key ("ppt/slides/slide1.xml-shape-0"). A connector the
+ * USER draws in the viewer instead stores the model id, because that is what
+ * the canvas has in hand. Both spellings therefore occur in one deck, and a
+ * lookup that honoured only the model id silently skipped every connector that
+ * came out of a real `.pptx` - which is why "connectors follow their shape"
+ * looked implemented while never firing on an authored deck.
+ *
+ * Model ids are written last so they win any collision with a raw id.
+ */
+export function buildConnectorElementLookup(elements: PptxElement[]): Map<string, PptxElement> {
+	const map = new Map<string, PptxElement>();
+	for (const el of elements) {
+		if (el.shapeId) {
+			map.set(el.shapeId, el);
+		}
+	}
+	for (const el of elements) {
+		map.set(el.id, el);
+	}
+	return map;
+}
+
+/** True when `ref` points at an element that is in `movedElementIds`. */
+function isConnectionAffected(
+	ref: ConnectorConnectionRef | undefined,
+	elementMap: Map<string, PptxElement>,
+	movedElementIds: Set<string>,
+): boolean {
+	if (!ref?.shapeId) {
+		return false;
+	}
+	if (movedElementIds.has(ref.shapeId)) {
+		return true;
+	}
+	const target = elementMap.get(ref.shapeId);
+	return target !== undefined && movedElementIds.has(target.id);
+}
+
+/**
  * Find all connectors on the slide that reference any of the given element IDs
  * via `connectorStartConnection`/`connectorEndConnection`, and recalculate
  * their positions based on the current shape positions.
@@ -120,10 +109,7 @@ export function rerouteConnectorsForMovedElements(
 		return [];
 	}
 
-	const elementMap = new Map<string, PptxElement>();
-	for (const el of elements) {
-		elementMap.set(el.id, el);
-	}
+	const elementMap = buildConnectorElementLookup(elements);
 
 	const rerouted: ReroutedConnector[] = [];
 
@@ -145,8 +131,8 @@ export function rerouteConnectorsForMovedElements(
 		const startConn = ss.connectorStartConnection;
 		const endConn = ss.connectorEndConnection;
 
-		const startAffected = startConn?.shapeId && movedElementIds.has(startConn.shapeId);
-		const endAffected = endConn?.shapeId && movedElementIds.has(endConn.shapeId);
+		const startAffected = isConnectionAffected(startConn, elementMap, movedElementIds);
+		const endAffected = isConnectionAffected(endConn, elementMap, movedElementIds);
 		if (!startAffected && !endAffected) {
 			continue;
 		}

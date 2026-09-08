@@ -14,16 +14,41 @@
 	import { createViewerState } from './create-viewer-state.svelte';
 	import type { ViewerStateBag } from './create-viewer-state-types';
 
-	const { onready }: { onready: (state: ViewerStateBag) => void } = $props();
+	const {
+		onready,
+		source,
+		autosave,
+		filePath,
+		editable = false,
+		onautosavetoggle,
+	}: {
+		onready: (state: ViewerStateBag) => void;
+		/** Optional deck bytes, so a test can exercise the real load pipeline. */
+		source?: Uint8Array | ArrayBuffer;
+		/**
+		 * The host `autosave` POLICY prop, passed through verbatim (including
+		 * `undefined`, which permits autosave: see `resolveAutosaveActivation`).
+		 */
+		autosave?: boolean;
+		filePath?: string;
+		editable?: boolean;
+		onautosavetoggle?: (enabled: boolean) => void;
+	} = $props();
 
 	const state = createViewerState({
-		getSource: () => undefined,
-		getAutosave: () => false,
-		getFilePath: () => undefined,
+		getSource: () => source,
+		getAutosave: () => autosave,
+		getFilePath: () => filePath,
 		getInitialSlide: () => 0,
 		t: (key: string) => key,
 		getSmartArt3D: () => false,
-		getEditable: () => false,
+		getSurfaceChart3D: () => false,
+		getBarChart3D: () => false,
+		getLineChart3D: () => false,
+		getAreaChart3D: () => false,
+		getPieChart3D: () => false,
+		getEditable: () => editable,
+		onautosavetoggle: (enabled) => onautosavetoggle?.(enabled),
 		getStageHolderEl: () => undefined,
 		getRootEl: () => undefined,
 		getViewportWidth: () => 0,

@@ -25,8 +25,10 @@
 @source '../viewer/**/*.ts';
 /* Shared class-token modules consumed verbatim by the Angular chrome (the
    title bar reads TITLE_BAR_CLASSES / TAB_ROW_ACTION_CLASSES from the vendored
-   shared source); scan them so their utilities are emitted. */
-@source '../internal/shared-src/render/title-bar.ts';
+   shared source); scan them so their utilities are emitted. The glob covers the
+   whole render directory rather than the one file, so a token added to a NEW
+   shared module is emitted without anyone remembering to widen this line. */
+@source '../internal/shared-src/render/**/*.ts';
 
 @import './theme.css';
 
@@ -36,29 +38,52 @@
    global sheet. Global classes still match emulated-encapsulated component
    elements (same pattern as the .pptx-ng-* rules below). */
 @layer components {
+	/*
+	 * flex-shrink:0 (Tailwind `shrink-0`) is applied directly on every one of
+	 * these classes rather than relied on from the ribbon row's `[&>*]:shrink-0`
+	 * (ribbon.component.ts). That ancestor selector only ever reaches its
+	 * *actual* DOM children, and every ribbon tab-section custom element
+	 * between the row and these controls is `display: contents` (see the
+	 * `pptx-ribbon-*-section { display: contents }` block below) precisely so
+	 * its children lay out as if they were direct children of the row - which
+	 * also means the row's `> *` selector stops at the section element and
+	 * never reaches the buttons/pills nested inside it. Left at the flexbox
+	 * default (`shrink: 1`), a wide tab (View's flat, ungrouped pill row is the
+	 * worst case: every command is one long `flex-nowrap` line with no
+	 * per-group wrapping to absorb the width) silently shrinks pills below
+	 * their label's min-content width instead of scrolling
+	 * (`overflow-x: auto` on the row), clipping/overlapping text like
+	 * "Eyedropper" mid-word. Setting shrink-0 here, on the control itself,
+	 * survives no matter how many `display: contents` layers sit in between. */
 	.pptx-rb-icon {
-		@apply inline-flex h-7 min-w-7 items-center justify-center rounded text-[0.95rem] text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
+		@apply inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded text-[0.95rem] text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
 	}
 	.pptx-rb-pill {
-		@apply inline-flex items-center gap-1.5 rounded bg-muted px-2.5 py-1.5 text-xs text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
+		@apply inline-flex shrink-0 items-center gap-1.5 rounded bg-muted px-2.5 py-1.5 text-xs text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
 	}
 	.pptx-rb-grp {
-		@apply inline-flex items-center overflow-hidden rounded bg-muted text-xs text-foreground;
+		@apply inline-flex shrink-0 items-center overflow-hidden rounded bg-muted text-xs text-foreground;
 	}
 	.pptx-rb-gb {
-		@apply inline-flex items-center justify-center border-r border-border px-2.5 py-1.5 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
+		@apply inline-flex shrink-0 items-center justify-center border-r border-border px-2.5 py-1.5 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
 	}
 	.pptx-rb-gl {
-		@apply inline-flex items-center justify-center px-2.5 py-1.5 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
+		@apply inline-flex shrink-0 items-center justify-center px-2.5 py-1.5 hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
 	}
 	.pptx-rb-sep {
-		@apply mx-1 w-px self-stretch bg-border/40;
+		@apply mx-1 w-px shrink-0 self-stretch bg-border/40;
+	}
+	/* Compact checkbox/label row used by the ribbon's "Options"-style groups
+	   (Slide Show, View), where PowerPoint stacks three small toggles in the
+	   height of one command button. */
+	.pptx-rb-toggle {
+		@apply flex h-[19px] shrink-0 items-center gap-1 whitespace-nowrap rounded-sm px-1 text-[10px] text-foreground;
 	}
 	/* Native selects styled to sit flush with the surrounding ribbon pills
 	   (same height, radius, background and type size as .pptx-rb-pill /
 	   .pptx-rb-gb) instead of the stock OS select chrome. */
 	.pptx-rb-select {
-		@apply h-7 cursor-pointer rounded border border-border bg-muted px-1.5 text-xs text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
+		@apply h-7 shrink-0 cursor-pointer rounded border border-border bg-muted px-1.5 text-xs text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40;
 	}
 	/* Horizontal-scroll container for the ribbon tab row with a hidden
 	   scrollbar (mirrors React's `overflow-x-auto scrollbar-none`), so on
@@ -96,6 +121,9 @@ pptx-ribbon-draw-section,
 pptx-ribbon-design-section,
 pptx-ribbon-transitions-section,
 pptx-ribbon-animations-section,
+pptx-ribbon-animation-gallery,
+pptx-ribbon-shape-extras,
+pptx-ribbon-hyperlink-button,
 pptx-ribbon-paragraph-controls,
 pptx-ribbon-insert-fields,
 pptx-ribbon-font-controls {
@@ -126,6 +154,7 @@ pptx-element-renderer {
 	   (inspector cards, toolbar, thumbnail rail) to dark. Passing a `theme` input
 	   to <pptx-viewer> still themes it, because `themeStyle` writes the vars inline
 	   on this element, which wins over the fallback below. */
+	position: relative;
 	display: flex;
 	flex-direction: column;
 	width: 100%;
@@ -274,6 +303,7 @@ pptx-element-renderer {
 }
 
 .pptx-ng-main {
+	display: flex;
 	position: relative;
 	flex: 1;
 	min-width: 0;
@@ -294,7 +324,25 @@ pptx-element-renderer {
 }
 
 /* ── Canvas ─────────────────────────────────────────────────────────── */
+/*
+ * The `<pptx-slide-canvas>` host has no template of its own around
+ * `.pptx-ng-canvas-viewport`, but unlike a Vue SFC root it IS a real element
+ * in the DOM. Once `.pptx-ng-main` becomes a flex container (for the
+ * viewport's `margin: auto` centering below), this host would otherwise
+ * become a flex item with an auto/shrink-to-fit main size (percentage widths
+ * don't contribute to that calculation), collapsing the canvas. `flex: 1`
+ * gives it a definite size to fill instead, matching what block layout gave
+ * it for free before.
+ */
+pptx-slide-canvas {
+	display: flex;
+	flex: 1;
+	min-width: 0;
+	min-height: 0;
+}
+
 .pptx-ng-canvas-viewport {
+	display: flex;
 	width: 100%;
 	height: 100%;
 }
@@ -338,7 +386,16 @@ pptx-element-renderer {
 	margin: 0;
 	padding: 2px;
 	border: 2px solid #4f86ff;
-	background: rgba(255, 255, 255, 0.96);
+	/* Fully opaque (not the previous 0.96 alpha): this textarea always renders
+	   plain black text regardless of the element's own colour, so - unlike
+	   React/Vue's richer inline editors - it cannot safely go transparent over
+	   an arbitrary (e.g. dark-filled or white-on-colour) shape without risking
+	   invisible text. A near-opaque backdrop used to double as a (leaky) mask
+	   for the element's real text rendering underneath; with
+	   pptx-element-renderer now suppressing that render for the element being
+	   edited (issue #182), full opacity here is just a plain, always-legible
+	   editing surface. */
+	background: #fff;
 	color: #000;
 	font: inherit;
 	line-height: 1.2;
@@ -388,6 +445,42 @@ pptx-element-renderer {
 	pointer-events: auto;
 	touch-action: none;
 	z-index: 10001;
+}
+
+/* Connector endpoint authoring: the two handles on a selected connector, and
+   the candidate connection sites revealed while one is being dragged. A bound
+   end is filled, a loose one hollow, so "is this connector actually attached?"
+   is answerable at a glance. */
+.pptx-ng-connector-endpoint {
+	position: absolute;
+	box-sizing: border-box;
+	padding: 0;
+	border-radius: 9999px;
+	border: 2px solid #fff;
+	background: #fff;
+	box-shadow: 0 0 0 1px #16a34a;
+	cursor: crosshair;
+	pointer-events: auto;
+	touch-action: none;
+	z-index: 10002;
+}
+
+.pptx-ng-connector-endpoint.is-attached {
+	background: #16a34a;
+}
+
+.pptx-ng-connection-site {
+	position: absolute;
+	box-sizing: border-box;
+	border-radius: 9999px;
+	border: 2px solid #3b82f6;
+	background: rgba(96, 165, 250, 0.6);
+	pointer-events: none;
+	z-index: 10001;
+}
+
+.pptx-ng-connection-site.is-snapped {
+	background: #3b82f6;
 }
 
 .pptx-ng-inspector-host {
@@ -456,7 +549,11 @@ pptx-element-renderer {
 }
 
 .pptx-ng-bullet {
-	white-space: pre;
+	/* Inherit the text body's `white-space` (normally `pre-wrap`): hard-coding
+	   `pre` made the marker the ONE run on the slide with a different wrapping
+	   mode from every other binding, and from the runs beside it. Its authored
+	   spaces survive under `pre-wrap` just the same. */
+	white-space: inherit;
 }
 
 .pptx-ng-link {
@@ -797,20 +894,25 @@ pptx-element-renderer {
 		cursor: pointer;
 	}
 
-	/* AI assistant pane: dock it as a bottom sheet (full width, bounded height,
-	   below the canvas) instead of the desktop right-rail side panel. Overrides
-	   the component's Tailwind `w-80 h-full border-l` so the canvas above stays
-	   visible and interactive (the panel is a flex sibling, not an overlay, so
-	   without this it keeps `height:100%` and squeezes the canvas to nothing).
-	   Matches React's mobile bottom sheet (fixed 75dvh so it reads as a proper
-	   sheet rather than shrinking to its content, rounded top, top border, no
-	   left border, elevated shadow). Un-layered so it beats the Tailwind
+	/* AI assistant pane: an OVERLAY bottom sheet pinned to the body's bottom
+	   edge (React/Vue parity: `absolute inset-x-0 bottom-0 top-auto h-[75dvh]`),
+	   not an in-flow flex sibling. As a flex child it sat after the canvas (with
+	   its own min-height), so the sheet's top landed at ~56% of the viewport
+	   while its 75dvh height pushed ~280px, including the composer, below the
+	   fold and unreachable. Pinning `bottom: 0` inside the positioned
+	   `.pptx-ng-body` keeps the whole sheet, composer included, on screen with
+	   the canvas visible and interactive above it. Overrides the component's
+	   Tailwind `w-80 h-full border-l`; un-layered so it beats the Tailwind
 	   `utilities` layer. */
 	.pptx-ng-ai-panel {
-		flex: 0 0 auto;
+		position: absolute;
+		inset-inline: 0;
+		bottom: 0;
+		top: auto;
+		z-index: 30;
 		width: 100%;
 		height: 75dvh;
-		max-height: 75dvh;
+		max-height: 90dvh;
 		border-left: none;
 		border-top: 1px solid var(--pptx-border, #374151);
 		border-top-left-radius: 1rem;

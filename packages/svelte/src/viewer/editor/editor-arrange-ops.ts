@@ -2,14 +2,14 @@ import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 import type { AlignEdge, DistributeAxis } from 'pptx-viewer-shared';
 import {
 	alignElements,
+	canInteractWithElement,
 	distributeElements,
 	generateElementId,
 	groupElements,
 	makeCloneId,
+	mapSlideElements,
 	ungroupElements,
 } from 'pptx-viewer-shared';
-
-import { mapSlideElements } from './editor-mutations';
 
 /**
  * Pure, multi-select-aware arrange mutations for the Home tab's Arrange
@@ -90,6 +90,16 @@ export function groupSelectedOnSlide(
 	ids: readonly string[],
 	intoTemplate = false,
 ): { slides: PptxSlide[]; groupId: string } | null {
+	// G10: a:spLocks/@noGrouping rejects the whole attempt if it involves a
+	// locked shape, not just that one shape.
+	const elementsById = slides[slideIndex]?.elements;
+	if (!elementsById?.some((el) => ids.includes(el.id))) {
+		return null;
+	}
+	const selected = ids.map((id) => elementsById.find((el) => el.id === id));
+	if (!selected.every((el) => canInteractWithElement(el, 'group'))) {
+		return null;
+	}
 	let groupId: string | null = null;
 	const next = mapSlideElements(slides, slideIndex, (elements) => {
 		const result = groupElements(
@@ -114,10 +124,16 @@ export function ungroupOnSlide(
 	if (!group || group.type !== 'group') {
 		return null;
 	}
+	// G10: a:grpSpLocks/@noGrouping forbids ungrouping this specific group.
+	if (!canInteractWithElement(group, 'group')) {
+		return null;
+	}
 	const childIds = group.children.map((child: PptxElement) => makeCloneId(fromTemplate, child.id));
 	let resultIds: string[] = [];
 	const next = mapSlideElements(slides, slideIndex, (elements) => {
-		const result = ungroupElements(elements, groupId, childIds);
+		// `intoTemplate` also governs a promoted NESTED group's descendants, which
+		// nothing re-ided while only the top level was renamed.
+		const result = ungroupElements(elements, groupId, childIds, { intoTemplate: fromTemplate });
 		resultIds = result.childIds;
 		return result.elements;
 	});

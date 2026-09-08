@@ -1,7 +1,14 @@
 import type { PptxElement, PptxImageEffects } from 'pptx-viewer-core';
 import { isImageLikeElement } from 'pptx-viewer-core';
 
+import { hexToRgbUnit } from './color-units';
+import { getImageCorrectionsFilterTokens, getImageSharpenFilter } from './image-effect-corrections';
 import { buildImageBiLevelTable, buildImageLuminanceTransfer } from './image-effect-filter-values';
+import {
+	getImageFillOverlayFilter,
+	getImageFillOverlayFilterId,
+	hasImageFillOverlayEffect,
+} from './image-fill-overlay';
 
 /**
  * Image-effects composable — Vue port of the React `viewer/utils` image-effect
@@ -58,19 +65,6 @@ function normalizeRadius01(radius: number): number {
 	return clamp(radius / 100, 0, 1);
 }
 
-/** Parse a hex colour (`#RRGGBB` or `RRGGBB`) to normalised 0–1 RGB components. */
-function hexToRgbUnit(hex: string): { r: number; g: number; b: number } {
-	const clean = hex.replace(/^#/u, '');
-	const r = parseInt(clean.substring(0, 2), 16) / 255;
-	const g = parseInt(clean.substring(2, 4), 16) / 255;
-	const b = parseInt(clean.substring(4, 6), 16) / 255;
-	return {
-		r: Number.isFinite(r) ? r : 0,
-		g: Number.isFinite(g) ? g : 0,
-		b: Number.isFinite(b) ? b : 0,
-	};
-}
-
 /** Get the image effects off an element, or `undefined` for non-image elements. */
 function getEffects(element: PptxElement): PptxImageEffects | undefined {
 	if (!isImageLikeElement(element)) {
@@ -115,6 +109,9 @@ const SVG_FILTER_EFFECTS = new Set<string>([
 	'crisscrossEtching',
 	'artisticMosaic',
 	'artisticMosaicBubbles',
+	// The DrawingML element really is spelled "Mosiaic"; Microsoft's typo is part
+	// of the format, so a file-sourced effect only ever arrives under this name.
+	'artisticMosiaicBubbles',
 	'mosaicBubbles',
 	'mosaic',
 	'artisticGlowEdges',
@@ -130,6 +127,27 @@ const SVG_FILTER_EFFECTS = new Set<string>([
 	'grayPencil',
 ]);
 
+/**
+ * Whether an element's artistic effect has to be drawn by us.
+ *
+ * PowerPoint applies an artistic effect DESTRUCTIVELY: the bitmap the picture
+ * points at already carries the effect, and the `a14` blip extension we parse it
+ * from only records the settings (next to the pristine original, kept as a
+ * `.wdp` HD Photo part) so the effect can be re-edited. Verified against
+ * PowerPoint COM: exporting a slide with and without that extension produces a
+ * byte-identical render. Core therefore records the baked effect's name in
+ * `artisticPrerenderedEffect`, and only an effect that differs from it (i.e. one
+ * chosen in this library's own inspector) is rendered here.
+ */
+export function isArtisticEffectRendered(
+	effects: PptxImageEffects | undefined,
+): effects is PptxImageEffects & { artisticEffect: string } {
+	return (
+		Boolean(effects?.artisticEffect) &&
+		effects?.artisticEffect !== effects?.artisticPrerenderedEffect
+	);
+}
+
 /** Whether an artistic effect name needs an inline SVG `<filter>` (vs pure CSS). */
 export function needsSvgArtisticFilter(effectName: string | undefined): boolean {
 	if (!effectName) {
@@ -144,8 +162,8 @@ export function needsSvgArtisticFilter(effectName: string | undefined): boolean 
  * Returns true when the element has any blip-side alpha primitive or advanced
  * colour effect that CSS filters can't express (alphaInv, alphaCeiling,
  * alphaFloor, alphaRepl, alphaBiLevel, biLevel, lum, hsl with sat, tint,
- * clrRepl, alphaModFix). Brightness/contrast/saturation/grayscale/duotone are
- * still handled via CSS filters in {@link getImageFilterCss}.
+ * clrRepl, alphaModFix, alphaMod). Brightness/contrast/saturation/grayscale/
+ * duotone are still handled via CSS filters in {@link getImageFilterCss}.
  */
 export function hasAdvancedImageAlphaEffects(element: PptxElement): boolean {
 	const e = getEffects(element);
@@ -157,6 +175,7 @@ export function hasAdvancedImageAlphaEffects(element: PptxElement): boolean {
 		e.alphaInv ||
 		e.alphaCeiling ||
 		e.alphaFloor ||
+		typeof e.alphaMod?.amt === 'number' ||
 		typeof e.alphaRepl === 'number' ||
 		typeof e.alphaBiLevel === 'number' ||
 		typeof e.biLevel === 'number' ||
@@ -209,6 +228,14 @@ export function getImageFilterCss(
 	if (effects.grayscale) {
 		filters.push('grayscale(100%)');
 	}
+	// PowerPoint 2010+ Corrections/Color panel (a14 extensions): distinct from,
+	// and additive with, the legacy a:blip bright/contrast/saturation above.
+	// See image-effect-corrections.ts for the precision and approximation notes.
+	filters.push(...getImageCorrectionsFilterTokens(effects));
+	const sharpenFilter = getImageSharpenFilter(effects, element.id);
+	if (sharpenFilter) {
+		filters.push(sharpenFilter.cssReference);
+	}
 	// Duotone: reference inline SVG filter (rendered by getImageSvgFilters).
 	if (effects.duotone && !options?.excludeDuotone) {
 		filters.push(`url(#${getImageDuotoneFilterId(element.id)})`);
@@ -218,9 +245,16 @@ export function getImageFilterCss(
 	if (hasAdvancedImageAlphaEffects(element)) {
 		filters.push(`url(#${getImageAlphaFilterId(element.id)})`);
 	}
+	// Blip fill-overlay (a:fillOverlay): flood + blend + clip-to-alpha, built by
+	// getImageSvgFilters() via image-fill-overlay.ts.
+	if (hasImageFillOverlayEffect(element)) {
+		filters.push(`url(#${getImageFillOverlayFilterId(element.id)})`);
+	}
 	// Artistic effects: complex ones reference the SVG filter; simple ones use
-	// CSS filter functions directly.
-	if (effects.artisticEffect) {
+	// CSS filter functions directly. A pre-rendered effect (one PowerPoint baked
+	// into the stored bitmap and recorded in the a14 blip extension) is skipped:
+	// re-applying it here would double it up. See `isArtisticEffectRendered`.
+	if (isArtisticEffectRendered(effects)) {
 		const radius = effects.artisticRadius ?? 5;
 
 		if (needsSvgArtisticFilter(effects.artisticEffect)) {
@@ -307,6 +341,14 @@ function buildSimpleArtisticCss(effect: string, radius: number): string {
 		case 'glass':
 		case 'artisticGlass':
 			return `blur(${Math.min(radius, 6)}px) brightness(110%)`;
+
+		// Inspector-gallery entries with no DrawingML counterpart. Without these
+		// they fell through to the generic default below, so picking Sepia or
+		// Grayscale in the gallery previewed the effect but rendered a near no-op.
+		case 'sepia':
+			return 'sepia(100%)';
+		case 'grayscale':
+			return 'grayscale(100%)';
 
 		default:
 			return 'contrast(105%) saturate(105%)';
@@ -404,6 +446,19 @@ function buildImageAlphaFilterMarkup(effects: PptxImageEffects): string | undefi
 			(inp, out) =>
 				`<feColorMatrix in="${inp}" result="${out}" type="matrix" ` +
 				`values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 ${mul} 0"/>`,
+		);
+	}
+
+	// a:alphaMod: multiplicative alpha from the nested a:alphaModFix inside its
+	// a:cont container (see PptxImageEffects.alphaMod.amt). Distinct from, and
+	// composable with, the sibling alphaModFix effect above.
+	if (typeof effects.alphaMod?.amt === 'number') {
+		const mul = clamp(effects.alphaMod.amt / 100, 0, 1);
+		next(
+			(inp, out) =>
+				`<feComponentTransfer in="${inp}" result="${out}">` +
+				`<feFuncA type="linear" slope="${mul}" intercept="0"/>` +
+				'</feComponentTransfer>',
 		);
 	}
 
@@ -665,6 +720,7 @@ function buildArtisticFilterMarkup(effectName: string, radius: number): string |
 
 		case 'artisticMosaic':
 		case 'artisticMosaicBubbles':
+		case 'artisticMosiaicBubbles':
 		case 'mosaicBubbles':
 		case 'mosaic': {
 			const blurAmount = Math.max(2, Math.round(radius * 0.8));
@@ -759,7 +815,7 @@ export function getArtisticImageFilter(
 	elementId: string = isImageLikeElement(element) ? element.id : '',
 ): { id: string; cssReference: string; filterMarkup: string } | undefined {
 	const effects = getEffects(element);
-	if (!effects?.artisticEffect || !needsSvgArtisticFilter(effects.artisticEffect)) {
+	if (!isArtisticEffectRendered(effects) || !needsSvgArtisticFilter(effects.artisticEffect)) {
 		return undefined;
 	}
 	const markup = buildArtisticFilterMarkup(effects.artisticEffect, effects.artisticRadius ?? 5);
@@ -790,6 +846,15 @@ export function getImageSvgFilters(element: PptxElement): ImageSvgFilterDefiniti
 	const artistic = getArtisticImageFilter(element);
 	if (artistic) {
 		defs.push({ id: artistic.id, markup: artistic.filterMarkup });
+	}
+	const fillOverlay = getImageFillOverlayFilter(element);
+	if (fillOverlay) {
+		defs.push({ id: fillOverlay.id, markup: fillOverlay.filterMarkup });
+	}
+	const effects = getEffects(element);
+	const sharpen = effects && getImageSharpenFilter(effects, element.id);
+	if (sharpen) {
+		defs.push({ id: sharpen.id, markup: sharpen.filterMarkup });
 	}
 	return defs;
 }

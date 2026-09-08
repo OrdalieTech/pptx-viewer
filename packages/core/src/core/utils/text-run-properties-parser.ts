@@ -56,12 +56,17 @@ export function parseRunPropertyAttributes(rPr: XmlObject | undefined): TextStyl
 		}
 	}
 
-	// Bold / Italic
-	if (rPr['@_b'] !== undefined) {
-		style.bold = rPr['@_b'] === '1';
+	// Bold / Italic. `ST_Boolean` permits "1", "0", "true" and "false"; a
+	// literal `=== '1'` test read the spec-legal `b="true"` as an EXPLICIT
+	// false, which then also beat the inherited bold. Same tolerant helper as
+	// every other boolean below.
+	const bold = parseBoolAttr(rPr['@_b']);
+	if (bold !== undefined) {
+		style.bold = bold;
 	}
-	if (rPr['@_i'] !== undefined) {
-		style.italic = rPr['@_i'] === '1';
+	const italic = parseBoolAttr(rPr['@_i']);
+	if (italic !== undefined) {
+		style.italic = italic;
 	}
 
 	// Underline
@@ -267,8 +272,9 @@ export function parseRunFontElements(
 	const eastAsian = rPr['a:ea'] as XmlObject | undefined;
 	const complexScript = rPr['a:cs'] as XmlObject | undefined;
 
-	const chosenTypeface =
-		latin?.['@_typeface'] || eastAsian?.['@_typeface'] || complexScript?.['@_typeface'];
+	// Keep the Latin face as the primary family. Per-script faces are stored in
+	// their dedicated fields below and selected at render time.
+	const chosenTypeface = latin?.['@_typeface'];
 
 	if (typeof chosenTypeface === 'string' && chosenTypeface.trim().length > 0) {
 		result.fontFamily = chosenTypeface.trim();

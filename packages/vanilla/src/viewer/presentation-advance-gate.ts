@@ -1,5 +1,11 @@
 import type { PptxSlide } from 'pptx-viewer-core';
-import { isClickAdvanceAllowed } from 'pptx-viewer-shared';
+import type { PresentationActionRunner } from 'pptx-viewer-shared';
+import {
+	applyHighlightClickStyle,
+	findHighlightClickTarget,
+	handlePresentationStageClick,
+	isClickAdvanceAllowed,
+} from 'pptx-viewer-shared';
 
 /** Inputs to the swipe/tap advance gate, read from the live viewer state. */
 export interface SwipeAdvanceGateInput {
@@ -24,4 +30,59 @@ export function isSwipeAdvanceBlocked(input: SwipeAdvanceGateInput): boolean {
 	return (
 		input.presenting && input.animationBuildsComplete && !isClickAdvanceAllowed(input.currentSlide)
 	);
+}
+
+/** Inputs to the full stage-click decision (action first, then advance). */
+export interface PresentationStageClickInput extends SwipeAdvanceGateInput {
+	/** The clicked node, used to find the on-slide action under the pointer. */
+	target: EventTarget | null;
+	/** Deck length, used to clamp a jump target. */
+	slideCount: number;
+	/** The show's navigation, for an action that navigates. */
+	runner: PresentationActionRunner;
+}
+
+/**
+ * The whole "what does this click mean" decision for a running show, in one
+ * testable place rather than inline in the chrome's listener.
+ *
+ * PowerPoint's precedence: an on-slide Action Setting under the pointer runs
+ * and consumes the click; live content and show chrome own their own clicks;
+ * only what is left over advances, and then only if the slide's
+ * `advanceOnClick` gate allows it.
+ *
+ * @returns `true` when the caller should advance the show.
+ */
+export function resolvePresentationStageClick(input: PresentationStageClickInput): boolean {
+	applyClickHighlight(input.target, input.currentSlide);
+	const outcome = handlePresentationStageClick(
+		input.target,
+		input.currentSlide,
+		{ slideCount: input.slideCount },
+		input.runner,
+	);
+	if (outcome !== 'advance') {
+		return false;
+	}
+	return !isSwipeAdvanceBlocked(input);
+}
+
+/**
+ * `@highlightClick` ("Highlight click"): a brief flash independent of
+ * whatever the action itself does, so it runs even for a no-op action.
+ */
+function applyClickHighlight(target: EventTarget | null, slide: PptxSlide | undefined): void {
+	const found = findHighlightClickTarget(target, slide);
+	if (!found?.descriptor.click) {
+		return;
+	}
+	const { element } = found;
+	const { style, clearStyle, durationMs } = found.descriptor.click;
+	applyHighlightClickStyle(element, style);
+	if (typeof setTimeout === 'undefined') {
+		return;
+	}
+	setTimeout(() => {
+		applyHighlightClickStyle(element, clearStyle);
+	}, durationMs);
 }

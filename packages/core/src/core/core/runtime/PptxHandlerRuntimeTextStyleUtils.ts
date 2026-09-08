@@ -154,10 +154,30 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 * survive a save: collapsing them to the plain-text path silently downgrades
 	 * a field to static text (e.g. a slide-number field becomes a frozen number)
 	 * or drops the equation, ruby, or bullet.
+	 *
+	 * `paragraphLevel` (`a:pPr/@lvl`) belongs on this list for the same reason
+	 * and used to be missing from it: a nested bullet whose runs all share one
+	 * style looked "uniform", so the save path discarded its segments and rebuilt
+	 * the paragraph from the flat string, which carries no indent level. Every
+	 * such paragraph came back from a round-trip flattened to the top level.
 	 */
 	protected isStructuralTextSegment(segment: TextSegment): boolean {
 		return Boolean(
-			segment.fieldType || segment.equationXml || segment.rubyText || segment.bulletInfo,
+			segment.fieldType ||
+			segment.equationXml ||
+			segment.rubyText ||
+			segment.bulletInfo ||
+			segment.paragraphLevel ||
+			// The zero-length carrier of an EMPTY paragraph's end properties.
+			// `a:endParaRPr` is what PowerPoint sizes and styles a BLANK line
+			// from, and a body that is one empty paragraph is a single segment,
+			// which "uniform" accepted: the save path then discarded it and
+			// rebuilt the paragraph from the flat text, emitting the bare
+			// `<a:endParaRPr lang="en-US"/>` stub. Deliberately narrow to the
+			// EMPTY carrier - a segment holding real text keeps taking the
+			// flat-string path, which is what lets an edited `element.text`
+			// override stale segments.
+			(segment.text === '' && segment.endParaRunProperties),
 		);
 	}
 

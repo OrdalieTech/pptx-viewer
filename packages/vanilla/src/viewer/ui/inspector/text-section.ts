@@ -1,7 +1,9 @@
 import type { TextAdvancedChanges } from 'pptx-viewer-shared';
 
 import type { Translator } from '../../i18n';
-import { makeNumberField } from '../controls';
+import { makeColorControl, makeNumberField } from '../controls';
+import { createRecentColorsRow } from '../recent-colors-row';
+import { createThemeColorSwatchGrid } from '../theme-color-swatch-grid';
 import { makeCheckboxField, makeSelectField } from './controls-extra';
 import { createTextEffectsControls } from './text-effects-controls';
 import type { InspectorHandlers, InspectorState } from './types';
@@ -23,6 +25,42 @@ export function createTextSection(
 	handlers: InspectorHandlers,
 ): TextSection {
 	const el = section(t('pptx.inspector.text'));
+
+	// B6 (A3): the inspector's own text-colour picker, distinct from the
+	// ribbon's Home > Font colour swatch picker (both write the same
+	// `textStyle.color`). `onInput` commits live, matching every other colour
+	// field here; the "Recent colours" row below commits through the same
+	// `setTextStyle` call and pushes on both the row click and the native
+	// picker's `change` (never the continuous `input` a drag fires).
+	const colorRow = doc.createElement('div');
+	colorRow.className = 'pptxv-inspector-row';
+	const colorLabel = doc.createElement('span');
+	colorLabel.className = 'pptxv-inspector-row-label';
+	colorLabel.textContent = t('pptx.textPanel.color');
+	const color = makeColorControl(
+		doc,
+		{
+			label: t('pptx.textPanel.color'),
+			onInput: (hex) => handlers.setTextStyle({ color: hex, colorRef: undefined }),
+			onCommit: handlers.pushRecentColor,
+		},
+		'#000000',
+	);
+	colorRow.append(colorLabel, color.el);
+	el.appendChild(colorRow);
+	// The deck's real "Theme Colors" grid: a theme-swatch click commits both
+	// the resolved hex and the ref (so the text colour keeps following the
+	// theme after a later theme change); the native input above and the
+	// recent-colours row below always clear it.
+	const colorTheme = createThemeColorSwatchGrid(doc, t, (commit) =>
+		handlers.setTextStyle({ color: commit.hex, colorRef: commit.ref }),
+	);
+	el.appendChild(colorTheme.el);
+	const colorRecent = createRecentColorsRow(doc, t, (hex) => {
+		handlers.setTextStyle({ color: hex, colorRef: undefined });
+		handlers.pushRecentColor(hex);
+	});
+	el.appendChild(colorRecent.el);
 
 	const vAlign = makeSelectField(doc, {
 		label: t('pptx.textPanel.verticalAlign'),
@@ -60,8 +98,8 @@ export function createTextSection(
 	const characterSpacing = number(t('pptx.textAdvanced.characterSpacing'), 'characterSpacing');
 	const lineSpacing = number(t('pptx.textAdvanced.lineSpacing'), 'lineSpacing', 0);
 	const exactSpacing = number(t('pptx.textAdvanced.lineSpacingExact'), 'lineSpacingExactPt', 0);
-	const spacingBefore = number(t('pptx.textAdvanced.spacingBefore'), 'paragraphSpacingBefore', 0);
-	const spacingAfter = number(t('pptx.textAdvanced.spacingAfter'), 'paragraphSpacingAfter', 0);
+	const spacingBefore = number(t('pptx.textAdvanced.spaceBefore'), 'paragraphSpacingBefore', 0);
+	const spacingAfter = number(t('pptx.textAdvanced.spaceAfter'), 'paragraphSpacingAfter', 0);
 	const indent = number(t('pptx.textAdvanced.indent'), 'paragraphIndent');
 	const margin = number(t('pptx.textAdvanced.marginLeft'), 'paragraphMarginLeft');
 	const direction = makeSelectField(doc, {
@@ -97,12 +135,18 @@ export function createTextSection(
 	const effects = createTextEffectsControls(doc, t, handlers);
 	el.appendChild(effects.el);
 
-	const gated = [vAlign, wrap, autoFit, ...advanced, direction, rtl];
+	const gated = [color, vAlign, wrap, autoFit, ...advanced, direction, rtl];
 
 	return {
 		el,
 		update(state) {
 			el.hidden = !state.hasSelection || !state.canText;
+			color.setValue(state.textStyle?.color);
+			colorTheme.setThemeColorMap(state.themeColorMap);
+			colorTheme.setSelected(state.textStyle?.colorRef, state.textStyle?.color);
+			colorTheme.setDisabled(!state.canText);
+			colorRecent.setColors(state.recentColors ?? []);
+			colorRecent.setDisabled(!state.canText);
 			vAlign.setValue(state.vAlign);
 			wrap.setValue(state.textWrap === 'square');
 			autoFit.setValue(state.autoFitMode);

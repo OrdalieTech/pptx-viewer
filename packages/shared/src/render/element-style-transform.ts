@@ -3,15 +3,57 @@
  * dasharray, element transform strings, and drawing-unit parsing. Pure
  * TypeScript shared by the React, Vue, and Angular bindings.
  */
-import type { StrokeDashType, PptxElement } from 'pptx-viewer-core';
+import type { StrokeDashType, PptxElement, TextOrientationMatrix } from 'pptx-viewer-core';
 
 import { clampUnitInterval } from './fill-style';
 
 /** CSS `border-style` keyword used for stroke rendering. */
-export type CssBorderStyle = 'solid' | 'dotted' | 'dashed';
+export type CssBorderStyle = 'solid' | 'dotted' | 'dashed' | 'double';
 
 /** A neutral CSS map (framework `CSSProperties` are structurally compatible). */
 export type CssStyleMap = Record<string, string | number>;
+
+export const TEXT_ORIENTATION_IDENTITY: TextOrientationMatrix = [1, 0, 0, 1];
+
+export function isTextOrientationMatrix(value: unknown): value is TextOrientationMatrix {
+	return (
+		Array.isArray(value) &&
+		value.length === 4 &&
+		value.every((entry) => typeof entry === 'number' && Number.isFinite(entry))
+	);
+}
+
+export function multiplyTextOrientationMatrices(
+	left: TextOrientationMatrix,
+	right: TextOrientationMatrix,
+): TextOrientationMatrix {
+	return [
+		left[0] * right[0] + left[2] * right[1],
+		left[1] * right[0] + left[3] * right[1],
+		left[0] * right[2] + left[2] * right[3],
+		left[1] * right[2] + left[3] * right[3],
+	];
+}
+
+export function getElementOrientationMatrix(
+	element: Pick<PptxElement, 'rotation' | 'flipHorizontal' | 'flipVertical'>,
+): TextOrientationMatrix {
+	const radians = ((Number(element.rotation) || 0) * Math.PI) / 180;
+	const cosine = Math.cos(radians);
+	const sine = Math.sin(radians);
+	const rotation: TextOrientationMatrix = [cosine, sine, -sine, cosine];
+	const flip: TextOrientationMatrix = [
+		element.flipHorizontal ? -1 : 1,
+		0,
+		0,
+		element.flipVertical ? -1 : 1,
+	];
+	return multiplyTextOrientationMatrices(rotation, flip);
+}
+
+function textOrientationAngleScore(matrix: TextOrientationMatrix): number {
+	return Math.abs(Math.atan2(matrix[1], matrix[0]));
+}
 
 /**
  * Normalizes a raw stroke dash type string to a valid `StrokeDashType` enum value.
@@ -48,25 +90,43 @@ export function normalizeStrokeDashType(
 
 /**
  * Maps an OOXML stroke dash type to a CSS `border-style` value.
- * For compound lines (dbl, thickThin, etc.) returns "solid" because the
- * compound effect is rendered via box-shadow instead.
+ *
+ * A compound line (`a:ln/@cmpd`) maps to `double`, the one CSS border style that
+ * paints more than one strand: it splits `border-width` into three equal parts
+ * (line, gap, line), which is exactly ECMA-376's `dbl` ("Double Lines of equal
+ * width"). `thickThin` / `thinThick` / `tri` have no CSS equivalent and are
+ * approximated by the same `double`; the strand RATIO is lost but the line still
+ * reads as compound, which a single solid stroke does not.
+ *
+ * This replaced an inset-`box-shadow` construction that could not work: inset
+ * shadows paint front-to-back from the padding edge inward, and a `transparent`
+ * ring paints nothing rather than punching a hole, so the "gap" ring was never
+ * rendered and a compound outline came out as one THICKER solid line (verified
+ * in Chromium). See {@link getCompoundLineBoxShadow}.
+ *
+ * A third strand for `tri` could be drawn with an `outline` + `outline-offset`
+ * (which does leave a real see-through gap), but the outline is already spoken
+ * for: every binding paints its selection / hover affordance with one, because
+ * an affordance border would take part in layout. Correctness of the common
+ * case beats a strand of the rarest one.
+ *
  * @param dashType - The normalized dash type.
  * @param compoundLine - Optional compound line type (e.g. "dbl", "tri").
- * @returns A CSS border-style value ("solid", "dotted", "dashed"), or `undefined`.
+ * @returns A CSS border-style value, or `undefined`.
  */
 export function getCssBorderDashStyle(
 	dashType: StrokeDashType | undefined,
 	compoundLine?: string,
 ): CssBorderStyle | undefined {
-	// For compound lines, we use box-shadow instead of border-style for better rendering
-	// So return solid to keep the base border intact for box-shadow to work with
+	// A compound line's strands outrank its dash pattern: CSS cannot express both
+	// at once, and losing the multi-strand look is the more visible of the two.
 	if (
 		compoundLine === 'dbl' ||
 		compoundLine === 'thickThin' ||
 		compoundLine === 'thinThick' ||
 		compoundLine === 'tri'
 	) {
-		return 'solid';
+		return 'double';
 	}
 	if (!dashType || dashType === 'solid') {
 		return 'solid';
@@ -78,120 +138,60 @@ export function getCssBorderDashStyle(
 }
 
 /**
- * Generate box-shadow approximation for compound line types.
- * Returns a box-shadow string that can be combined with other shadows.
+ * Always `undefined`: a compound line needs NO box-shadow.
  *
- * Uses concentric inset box-shadows with spread to create parallel border
- * lines on all four sides of the shape. The element's CSS border is set to
- * the outermost line, and inner lines are rendered as inset box-shadows.
+ * This used to build concentric inset `box-shadow` rings ("outer strand is the
+ * CSS border, inner strands are inset shadows"), and it did not work. Inset
+ * shadows are painted front-to-back from the padding edge inward, and the ring
+ * that was supposed to be the GAP was declared `transparent` - which paints
+ * nothing at all rather than punching a hole in the ring underneath it. The
+ * result, confirmed by rendering both constructions in Chromium, is a single
+ * solid band as thick as the whole compound line, on every browser.
+ *
+ * Compound lines are now painted by `border-style: double`
+ * ({@link getCssBorderDashStyle}) on a CSS-bordered shape, and by the real
+ * parallel strands of `buildStrokeOutline` on a stroke-only preset / connector.
+ *
+ * @deprecated Kept only so existing call sites keep compiling; drop the call.
  */
 export function getCompoundLineBoxShadow(
-	compoundLine: string | undefined,
-	strokeWidth: number,
-	strokeColor: string,
+	_compoundLine: string | undefined,
+	_strokeWidth: number,
+	_strokeColor: string,
 ): string | undefined {
-	if (!compoundLine || compoundLine === 'sng' || strokeWidth <= 0) {
-		return undefined;
-	}
-
-	const color = strokeColor || '#000000';
-	const width = Math.max(1, strokeWidth);
-
-	switch (compoundLine) {
-		case 'dbl': {
-			// Double line: outer line is the CSS border, inner line via inset box-shadow.
-			// Outer border width = ~35% of total, gap = ~30%, inner = ~35%
-			const outerW = Math.max(1, Math.round(width * 0.35));
-			const gap = Math.max(1, Math.round(width * 0.3));
-			const innerW = Math.max(1, Math.round(width * 0.35));
-			// Inset shadow: offset inward past outer border + gap, spread = inner line width
-			const inset = outerW + gap;
-			return `inset 0 0 0 ${inset}px transparent, inset 0 0 0 ${inset + innerW}px ${color}`;
-		}
-
-		case 'thickThin': {
-			// Outer thick + inner thin with gap
-			const outerW = Math.max(2, Math.round(width * 0.5));
-			const gap = Math.max(1, Math.round(width * 0.25));
-			const innerW = Math.max(1, Math.round(width * 0.25));
-			const inset = outerW + gap;
-			return `inset 0 0 0 ${inset}px transparent, inset 0 0 0 ${inset + innerW}px ${color}`;
-		}
-
-		case 'thinThick': {
-			// Outer thin + inner thick with gap
-			const outerW = Math.max(1, Math.round(width * 0.25));
-			const gap = Math.max(1, Math.round(width * 0.25));
-			const innerW = Math.max(2, Math.round(width * 0.5));
-			const inset = outerW + gap;
-			return `inset 0 0 0 ${inset}px transparent, inset 0 0 0 ${inset + innerW}px ${color}`;
-		}
-
-		case 'tri': {
-			// Three parallel lines: outer border, middle inset, inner inset
-			const lineW = Math.max(1, Math.round(width * 0.22));
-			const gap = Math.max(1, Math.round(width * 0.17));
-			const inset1 = lineW + gap;
-			const inset2 = inset1 + lineW + gap;
-			return [
-				`inset 0 0 0 ${inset1}px transparent`,
-				`inset 0 0 0 ${inset1 + lineW}px ${color}`,
-				`inset 0 0 0 ${inset2}px transparent`,
-				`inset 0 0 0 ${inset2 + lineW}px ${color}`,
-			].join(', ');
-		}
-
-		default:
-			return undefined;
-	}
+	return undefined;
 }
 
 /**
- * Computes the CSS border width for the outermost line of a compound line style.
+ * The CSS `border-width` a compound line is painted at: the FULL stroke width.
  *
- * For compound types the CSS border renders the outer line, while inner lines
- * are rendered via `getCompoundLineBoxShadow`. This function returns the
- * correct outer border width for each compound type.
+ * `border-style: double` divides `border-width` between its two strands and the
+ * gap, so the border must carry the whole `a:ln/@w`. (It previously returned a
+ * fraction, because the remaining strands were supposed to come from
+ * {@link getCompoundLineBoxShadow} - which never painted them, so a compound
+ * line was drawn at a third of its authored weight.)
  *
  * @param compoundLine - The compound line type (e.g. "dbl", "tri").
  * @param strokeWidth - Total stroke width in pixels.
- * @returns The outer border width in pixels, or the original strokeWidth for "sng"/undefined.
+ * @returns The CSS border width in pixels.
+ * @deprecated Prefer `getComputedStrokeStyle`, which resolves the whole outline.
  */
 export function getCompoundLineBorderWidth(
-	compoundLine: string | undefined,
+	_compoundLine: string | undefined,
 	strokeWidth: number,
 ): number {
-	if (!compoundLine || compoundLine === 'sng' || strokeWidth <= 0) {
-		return strokeWidth;
-	}
-
-	const width = Math.max(1, strokeWidth);
-
-	switch (compoundLine) {
-		case 'dbl':
-			return Math.max(1, Math.round(width * 0.35));
-		case 'thickThin':
-			return Math.max(2, Math.round(width * 0.5));
-		case 'thinThick':
-			return Math.max(1, Math.round(width * 0.25));
-		case 'tri':
-			return Math.max(1, Math.round(width * 0.22));
-		default:
-			return strokeWidth;
-	}
+	return strokeWidth;
 }
 
 /**
- * Computes a complete set of CSS properties for rendering compound line borders.
- *
- * For single or undefined compound types, returns standard border properties.
- * For double, thickThin, thinThick, and triple types, returns border properties
- * for the outer line plus box-shadow for inner parallel lines.
+ * The CSS properties that paint a compound (`a:ln/@cmpd`) border: the full
+ * stroke width with `border-style: double`.
  *
  * @param compoundLine - The compound line type from `a:ln/@cmpd`.
  * @param strokeColor - Resolved stroke colour (with opacity applied).
  * @param strokeWidth - Total stroke width in pixels.
  * @returns CSS properties to apply to the shape container element.
+ * @deprecated Prefer `getComputedStrokeStyle`, which resolves the whole outline.
  */
 export function getCompoundLineStyle(
 	compoundLine: string | undefined,
@@ -201,15 +201,10 @@ export function getCompoundLineStyle(
 	if (!compoundLine || compoundLine === 'sng' || strokeWidth <= 0) {
 		return {};
 	}
-
-	const borderWidth = getCompoundLineBorderWidth(compoundLine, strokeWidth);
-	const boxShadow = getCompoundLineBoxShadow(compoundLine, strokeWidth, strokeColor);
-
 	return {
-		borderWidth,
+		borderWidth: strokeWidth,
 		borderColor: strokeColor,
-		borderStyle: 'solid',
-		...(boxShadow ? { boxShadow } : {}),
+		borderStyle: 'double',
 	};
 }
 
@@ -335,11 +330,44 @@ export function getElementTransformWithoutRotation(element: PptxElement): string
  */
 export function getTextCompensationTransform(element: PptxElement): string | undefined {
 	const transforms: string[] = [];
-	if (element.flipHorizontal) {
+	const normalizedRotation = (((Number(element.rotation) || 0) % 360) + 360) % 360;
+	const swapFlipAxis =
+		normalizedRotation > 90 &&
+		normalizedRotation < 270 &&
+		element.flipHorizontal !== element.flipVertical;
+	const compensateHorizontal = swapFlipAxis ? element.flipVertical : element.flipHorizontal;
+	const compensateVertical = swapFlipAxis ? element.flipHorizontal : element.flipVertical;
+	if (compensateHorizontal) {
 		transforms.push('scaleX(-1)');
 	}
-	if (element.flipVertical) {
+	if (compensateVertical) {
 		transforms.push('scaleY(-1)');
+	}
+	const ancestorGroupTransform =
+		'textStyle' in element ? element.textStyle?.ancestorGroupTransform : undefined;
+	if (isTextOrientationMatrix(ancestorGroupTransform)) {
+		const localCompensation: TextOrientationMatrix = [
+			compensateHorizontal ? -1 : 1,
+			0,
+			0,
+			compensateVertical ? -1 : 1,
+		];
+		const visibleTransform = multiplyTextOrientationMatrices(
+			multiplyTextOrientationMatrices(ancestorGroupTransform, getElementOrientationMatrix(element)),
+			localCompensation,
+		);
+		const determinant =
+			visibleTransform[0] * visibleTransform[3] - visibleTransform[1] * visibleTransform[2];
+		if (determinant < -1e-6) {
+			const horizontalCandidate = multiplyTextOrientationMatrices(visibleTransform, [-1, 0, 0, 1]);
+			const verticalCandidate = multiplyTextOrientationMatrices(visibleTransform, [1, 0, 0, -1]);
+			transforms.push(
+				textOrientationAngleScore(horizontalCandidate) <=
+					textOrientationAngleScore(verticalCandidate)
+					? 'scaleX(-1)'
+					: 'scaleY(-1)',
+			);
+		}
 	}
 	return transforms.length > 0 ? transforms.join(' ') : undefined;
 }

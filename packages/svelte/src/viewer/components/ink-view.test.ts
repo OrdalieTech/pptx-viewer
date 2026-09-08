@@ -13,12 +13,12 @@ import ElementRenderer from './ElementRenderer.svelte';
 
 let cleanup: (() => void) | undefined;
 
-function mountEl(element: PptxElement): HTMLElement {
+function mountEl(element: PptxElement, presenting = false): HTMLElement {
 	const target = document.createElement('div');
 	document.body.appendChild(target);
 	const instance = mount(ElementRenderer, {
 		target,
-		props: { element, mediaDataUrls: new Map<string, string>(), zIndex: 7 },
+		props: { element, mediaDataUrls: new Map<string, string>(), zIndex: 7, presenting },
 	});
 	flushSync();
 	cleanup = () => {
@@ -47,6 +47,16 @@ function inkElement(overrides: Record<string, unknown>): PptxElement {
 }
 
 describe('inkView', () => {
+	it('emits the replay keyframes as real CSS while presenting', () => {
+		// A literal `<style>{expr}</style>` in a Svelte template does not interpolate,
+		// so the keyframes must go through `<svelte:element this={'style'}>`.
+		const target = mountEl(
+			inkElement({ inkPaths: ['M 0 0 L 50 50'], inkColors: ['#ff0000'], inkWidths: [2] }),
+			true,
+		);
+		expect(target.querySelector('style')?.textContent).toContain('@keyframes pptx-ink-replay');
+	});
+
 	it('renders strokes as SVG paths with per-stroke colour, width, and opacity', () => {
 		const target = mountEl(
 			inkElement({
@@ -108,6 +118,25 @@ describe('inkView', () => {
 		);
 		expect(target.querySelector('svg path')).toBeNull();
 		expect(target.querySelectorAll('svg circle')).toHaveLength(3);
+	});
+
+	it('renders calligraphic nib ellipses when inkPointTiltX/Y carry a genuine lean, taking priority over pressure circles', () => {
+		const target = mountEl(
+			inkElement({
+				inkPaths: ['M 0 0 L 10 0 L 20 0'],
+				inkColors: ['#123456'],
+				inkWidths: [3],
+				inkPointPressures: [[0.1, 0.9, 0.4]],
+				inkPointTiltX: [[10, 0, 0]],
+				inkPointTiltY: [[0, 20, 0]],
+			}),
+		);
+		const svg = target.querySelector('svg');
+		expect(svg?.querySelector('path')).toBeNull();
+		expect(svg?.querySelector('circle')).toBeNull();
+		const ellipses = svg?.querySelectorAll('ellipse');
+		expect(ellipses?.length).toBeGreaterThan(0);
+		expect(ellipses?.[0].getAttribute('fill')).toBe('#123456');
 	});
 
 	it('renders no SVG for an element without strokes', () => {

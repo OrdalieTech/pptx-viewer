@@ -1,5 +1,47 @@
-import { ANIMATION_KEYFRAMES_CSS, SLIDE_TRANSITION_KEYFRAMES_CSS } from 'pptx-viewer-shared';
+import {
+	ANIMATION_KEYFRAMES_CSS,
+	buildTextStyleOverrideCss,
+	PRESENTATION_HIT_TEST_CSS,
+	SLIDE_TRANSITION_KEYFRAMES_CSS,
+} from 'pptx-viewer-shared';
 import type { ElementAnimationState } from 'pptx-viewer-shared';
+
+import { applyChart3DTextStyle } from '../render/elements/chart-3d-text-style-registry';
+
+/** Marker attribute on the `<style>` child a text-style override patches in place. */
+const TEXT_STYLE_OVERRIDE_ATTR = 'data-pptx-text-style-override';
+
+/**
+ * Create/update/remove `el`'s scoped font-style-emphasis override `<style>`
+ * child (Bold Flash, Bold Reveal, Underline, Change Font Style/Size), which
+ * OVERRIDES the runs' own inline bold/italic/underline/size since plain CSS
+ * inheritance cannot reach them. See `animation-text-style-css.ts`.
+ *
+ * Also forwards the same descriptor to a mounted 3D chart/SmartArt3D scene's
+ * own `setTextStyle` (via `chart-3d-text-style-registry.ts`): its axis labels
+ * / node captions are canvas-drawn textures the CSS override above can never
+ * reach, so the registry lookup is the robust path for those elements
+ * regardless of whether the (harmless) CSS override also runs.
+ */
+function applyTextStyleOverride(
+	el: HTMLElement,
+	id: string,
+	state: ElementAnimationState | undefined,
+): void {
+	applyChart3DTextStyle(el.ownerDocument, id, state?.textStyle);
+	const css = buildTextStyleOverrideCss(id, state?.textStyle);
+	let styleTag = el.querySelector<HTMLStyleElement>(`:scope > style[${TEXT_STYLE_OVERRIDE_ATTR}]`);
+	if (!css) {
+		styleTag?.remove();
+		return;
+	}
+	if (!styleTag) {
+		styleTag = el.ownerDocument.createElement('style');
+		styleTag.setAttribute(TEXT_STYLE_OVERRIDE_ATTR, '');
+		el.prepend(styleTag);
+	}
+	styleTag.textContent = css;
+}
 
 /** `<style>` id for the once-per-document static presentation keyframe block. */
 const KEYFRAMES_ELEMENT_ID = 'pptx-vanilla-presentation-keyframes';
@@ -18,7 +60,9 @@ export function ensurePresentationKeyframes(doc: Document): void {
 	}
 	const style = doc.createElement('style');
 	style.id = KEYFRAMES_ELEMENT_ID;
-	style.textContent = `${ANIMATION_KEYFRAMES_CSS}\n${SLIDE_TRANSITION_KEYFRAMES_CSS}`;
+	// Plus the show's hit-testing rule: scenery is pointer-transparent so a click
+	// reaches the action shape underneath it (or the show's own advance).
+	style.textContent = `${ANIMATION_KEYFRAMES_CSS}\n${SLIDE_TRANSITION_KEYFRAMES_CSS}\n${PRESENTATION_HIT_TEST_CSS}`;
 	(doc.head ?? doc.documentElement).appendChild(style);
 }
 
@@ -72,6 +116,7 @@ export function applyElementAnimationStyles(
 		el.style.visibility = state?.visible === false ? 'hidden' : '';
 		el.style.cursor =
 			interactiveTriggerShapeIds.has(id) || hoverTriggerShapeIds.has(id) ? 'pointer' : '';
+		applyTextStyleOverride(el, id, state);
 	});
 
 	// Staged text builds render one span per paragraph / word / letter, keyed

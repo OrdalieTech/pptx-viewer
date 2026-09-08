@@ -5,6 +5,10 @@ import type {
 	PptxChartAxisFormatting,
 } from 'pptx-viewer-core';
 
+import { niceValueAxisBounds } from './chart-axis-nice';
+import { reserveLegendSpace } from './chart-legend-placement';
+import { formatChartNumber } from './chart-number-format';
+
 /**
  * Framework-agnostic chart helpers, a focused Vue port of the React package's
  * `viewer/utils/chart-helpers.ts`, `chart-layout.ts`, and
@@ -32,16 +36,25 @@ const ACCENT6 = '#70AD47';
 
 const ACCENTS = [ACCENT1, ACCENT2, ACCENT3, ACCENT4, ACCENT5, ACCENT6];
 
-/** The default fallback palette used when no chart style is specified. */
+/**
+ * The default fallback palette used when no chart style is specified.
+ *
+ * The Office accent cycle (accent1-6 plus the two chart extras), i.e. what
+ * PowerPoint paints for a chart with no style part. This MUST stay identical
+ * to `chart-view-model.ts`'s `DEFAULT_PALETTE` (which aliases it): the two
+ * used to differ (this one was a Tailwind-ish set), and since the bindings
+ * reach the shared engine through both entry points, the same deck fell back
+ * to two different palettes depending on the binding.
+ */
 export const DEFAULT_CHART_PALETTE: ReadonlyArray<string> = [
-	'#3b82f6',
-	'#22c55e',
-	'#f97316',
-	'#eab308',
-	'#a855f7',
-	'#ec4899',
-	'#14b8a6',
-	'#f43f5e',
+	'#4472C4',
+	'#ED7D31',
+	'#A5A5A5',
+	'#FFC000',
+	'#5B9BD5',
+	'#70AD47',
+	'#FF0000',
+	'#00B0F0',
 ];
 
 /** Parse a hex colour string (#RRGGBB) into [r, g, b]. */
@@ -157,15 +170,22 @@ export function getChartStylePalette(styleId?: number): ReadonlyArray<string> {
 	return palette;
 }
 
-/** Resolve a series colour: explicit colour → parsed palette → style palette. */
+/**
+ * Resolve a series colour: explicit colour → marker fill → parsed palette →
+ * style palette. The marker fallback covers scatter series authored with
+ * `c:ser/c:spPr/a:ln/a:noFill` plus a coloured `c:marker/c:spPr`: the points
+ * paint the marker fill directly, so the legend swatch must match it rather
+ * than fall back to the palette.
+ */
 export function seriesColor(
 	series: PptxChartSeries,
 	index: number,
 	styleId?: number,
 	colorPalette?: string[],
 ): string {
-	if (series.color) {
-		return series.color;
+	const explicit = series.color ?? series.marker?.spPr?.fillColor;
+	if (explicit) {
+		return explicit;
 	}
 	if (colorPalette && colorPalette.length > 0) {
 		return colorPalette[index % colorPalette.length];
@@ -195,20 +215,32 @@ export interface ValueRange {
 	logBase?: number;
 	/** Whether values increase from top to bottom (`c:orientation="maxMin"`). */
 	reverseOrder?: boolean;
+	/**
+	 * Step between major gridlines when the bounds came from the automatic
+	 * scale, which always spans a whole number of them. Tick generators use it
+	 * instead of dividing the span evenly, which is what keeps the labels on
+	 * round numbers. Absent when an explicit `c:min`/`c:max` overrode the
+	 * automatic bounds, since the unit no longer divides them.
+	 */
+	majorUnit?: number;
 }
 
-/** Compute a Y-axis range that always includes zero. */
+/**
+ * Automatic Y-axis range, on PowerPoint's terms: zero-anchored where that reads
+ * sensibly, padded, and rounded out to whole major units. See
+ * `chart-axis-nice.ts` for the rules. Running the axis to the raw data maximum
+ * instead put the top gridline on whatever the tallest bar happened to be.
+ */
 export function computeValueRange(series: ReadonlyArray<PptxChartSeries>): ValueRange {
 	const allValues = series.flatMap((s) => s.values);
 	if (allValues.length === 0) {
 		return { min: 0, max: 1, span: 1 };
 	}
-	const dataMin = Math.min(...allValues);
-	const dataMax = Math.max(...allValues);
-	const min = Math.min(dataMin, 0);
-	const max = Math.max(dataMax, 0);
-	const span = Math.max(max - min, 1);
-	return { min, max, span };
+	const { min, max, majorUnit } = niceValueAxisBounds(
+		Math.min(...allValues),
+		Math.max(...allValues),
+	);
+	return { min, max, span: Math.max(max - min, Number.EPSILON), majorUnit };
 }
 
 /**
@@ -232,8 +264,20 @@ export function valueToY(val: number, range: ValueRange, topY: number, bottomY: 
 	return range.reverseOrder ? topY + ratio * usable : bottomY - ratio * usable;
 }
 
-/** Compact axis-value formatting (1.2K / 3.4M / integer / one-decimal). */
-export function formatAxisValue(val: number): string {
+/**
+ * Compact axis-value formatting (1.2K / 3.4M / integer / one-decimal).
+ *
+ * `formatCode` is the chart's own `c:numFmt/@formatCode`. When the source
+ * declares one - `0%`, `#,##0`, `$#,##0.00` - it WINS: the cached values behind
+ * a percentage chart are fractions, and the compact fallback renders them as
+ * `0.5` where PowerPoint shows `50%`. Codes outside the supported subset fall
+ * through to the compact form, which is what every caller did before.
+ */
+export function formatAxisValue(val: number, formatCode?: string): string {
+	const formatted = formatChartNumber(val, formatCode);
+	if (formatted !== undefined) {
+		return formatted;
+	}
 	if (Math.abs(val) >= 1_000_000) {
 		return `${(val / 1_000_000).toFixed(1)}M`;
 	}
@@ -283,8 +327,11 @@ export function computeLayout(
 	legendPos: string,
 	options?: ComputeLayoutOptions,
 ): PlotLayout {
-	const svgWidth = Math.max(320, elementWidth);
-	const svgHeight = Math.max(180, elementHeight);
+	// Match the element frame exactly; bindings stretch the viewBox with
+	// preserveAspectRatio "none", so a minimum would scale non-uniformly
+	// (see computePlotLayout in chart-view-model.ts).
+	const svgWidth = Math.max(1, elementWidth);
+	const svgHeight = Math.max(1, elementHeight);
 	let plotLeft = hasAxes ? 48 : 8;
 	let plotTop = 8;
 	let plotRight = svgWidth - 8;
@@ -294,15 +341,14 @@ export function computeLayout(
 		plotTop += 20;
 	}
 	if (style?.hasLegend) {
-		if (legendPos === 'b') {
-			plotBottom -= 20;
-		} else if (legendPos === 't') {
-			plotTop += 20;
-		} else if (legendPos === 'r') {
-			plotRight -= 80;
-		} else if (legendPos === 'l') {
-			plotLeft += 80;
-		}
+		// `tr` (top-right corner) overlays the plot per PowerPoint's own
+		// quick-layout behaviour: no band is reserved for it.
+		({ plotLeft, plotTop, plotRight, plotBottom } = reserveLegendSpace(legendPos, {
+			plotLeft,
+			plotTop,
+			plotRight,
+			plotBottom,
+		}));
 	}
 
 	// Reserve space for a secondary value axis on the right.

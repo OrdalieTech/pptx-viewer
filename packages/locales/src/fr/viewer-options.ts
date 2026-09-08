@@ -25,6 +25,19 @@ export const translations = {
 	'pptx.options.general.userName': "Nom d'utilisateur",
 	'pptx.options.general.userInitials': 'Initiales',
 	'pptx.options.general.appearance': 'Thème de la visionneuse',
+	'pptx.options.general.fonts': 'Polices',
+	'pptx.options.general.fontsDescription':
+		"Les présentations utilisent parfois des polices qui ne sont pas installées sur votre appareil, et la visionneuse les remplace par la police disponible la plus proche. Ajouter le fichier de police permet d'afficher la présentation avec la police d'origine.",
+	'pptx.options.general.enableCustomFonts':
+		'M’autoriser à ajouter des fichiers de police à cette session',
+	'pptx.options.general.enableCustomFontsInfo':
+		'Les polices ajoutées servent au rendu et apparaissent dans la liste des polices de l’onglet Accueil. Elles ne sont conservées qu’en mémoire, ne sont jamais téléversées ni enregistrées dans la présentation, et sont supprimées au rechargement de la page.',
+	'pptx.options.general.addFontFile': 'Ajouter un fichier de police',
+	'pptx.options.general.customFontsAdded': 'Polices ajoutées lors de cette session',
+	'pptx.options.general.customFontsEmpty': 'Aucune police ajoutée pour le moment.',
+	'pptx.options.general.customFontsDisabled':
+		'Activez le paramètre ci-dessus pour ajouter un fichier de police.',
+	'pptx.options.general.customFontError': 'Ce fichier n’a pas pu être lu comme une police.',
 	'pptx.options.general.startup': 'Options de démarrage',
 	'pptx.options.general.showStartScreen':
 		"Afficher l'écran de démarrage au lancement de cette application",
@@ -69,12 +82,6 @@ export const translations = {
 	'pptx.options.save.minutes': 'minutes',
 	'pptx.options.save.keepLastAutoRecovered':
 		'Conserver la dernière version récupérée automatiquement si je ferme sans enregistrer',
-	'pptx.options.save.fidelity': 'Préserver la fidélité lors du partage de cette présentation',
-	'pptx.options.save.embedFonts': 'Incorporer les polices dans le fichier',
-	'pptx.options.save.embedFontsInfo':
-		"L'incorporation des polices augmente la taille du fichier mais garantit un texte identique sur les autres appareils.",
-	'pptx.options.save.embedAllCharacters':
-		"Incorporer tous les caractères (adapté aux modifications effectuées par d'autres personnes)",
 	'pptx.options.save.cache': 'Paramètres du cache',
 	'pptx.options.save.cacheRetentionDays':
 		'Nombre de jours de conservation des fichiers dans le cache de documents local',
@@ -127,6 +134,9 @@ export const translations = {
 	'pptx.options.advanced.recentCount': 'Afficher ce nombre de présentations récentes',
 	'pptx.options.advanced.disableHardwareAcceleration':
 		"Désactiver l'accélération graphique matérielle",
+	'pptx.options.advanced.disable3DRendering': 'Désactiver le rendu 3D (pour la performance)',
+	'pptx.options.advanced.disable3DRenderingInfo':
+		'Force chaque graphique 3D et scène SmartArt à revenir à un rendu 2D plat, même dans une présentation qui active la 3D. Activez cette option si les scènes 3D sont lentes sur cet appareil.',
 	'pptx.options.advanced.openDocumentsView': "Ouvrir tous les documents avec ce mode d'affichage",
 	'pptx.options.openView.savedView': "Le mode d'affichage enregistré dans le fichier",
 	'pptx.options.openView.normal': 'Normal',

@@ -7,8 +7,14 @@ import { SELECT_CLS } from './element-properties-constants';
 
 interface ConnectorArrowsSectionProps {
 	selectedShapeStyle: ShapeStyle | undefined;
+	/** Disables every dropdown when the viewer is not editable. */
+	canEdit?: boolean;
 	onUpdateShapeStyle: (updates: Partial<ShapeStyle>) => void;
-	markDirty: () => void;
+	/**
+	 * Optional: the live inspector path already marks the deck dirty inside its
+	 * style updater, so only callers that mutate slides directly pass this.
+	 */
+	markDirty?: () => void;
 }
 
 const END_LABEL_KEYS = {
@@ -26,6 +32,7 @@ const END_LABEL_KEYS = {
 
 export function ConnectorArrowsSection({
 	selectedShapeStyle,
+	canEdit = true,
 	onUpdateShapeStyle,
 	markDirty,
 }: ConnectorArrowsSectionProps): React.ReactElement {
@@ -38,13 +45,15 @@ export function ConnectorArrowsSection({
 					<label key={end} className='flex flex-col gap-1'>
 						<span className='text-muted-foreground'>{t(END_LABEL_KEYS[end].arrow)}</span>
 						<select
+							aria-label={t(END_LABEL_KEYS[end].arrow)}
 							value={selectedShapeStyle?.[key] || 'none'}
 							onChange={(e) => {
 								onUpdateShapeStyle({
 									[key]: e.target.value as ConnectorArrowType,
 								});
-								markDirty();
+								markDirty?.();
 							}}
+							disabled={!canEdit}
 							className={SELECT_CLS}
 						>
 							{CONNECTOR_ARROW_OPTIONS.map((o) => (
@@ -64,13 +73,15 @@ export function ConnectorArrowsSection({
 						<label className='flex flex-col gap-1'>
 							<span className='text-muted-foreground'>{t(END_LABEL_KEYS[end].width)}</span>
 							<select
+								aria-label={t(END_LABEL_KEYS[end].width)}
 								value={selectedShapeStyle?.[widthKey] || 'med'}
 								onChange={(e) => {
 									onUpdateShapeStyle({
 										[widthKey]: e.target.value as 'sm' | 'med' | 'lg',
 									});
-									markDirty();
+									markDirty?.();
 								}}
+								disabled={!canEdit}
 								className={SELECT_CLS}
 							>
 								{ARROW_SIZE_OPTIONS.map((o) => (
@@ -83,13 +94,15 @@ export function ConnectorArrowsSection({
 						<label className='flex flex-col gap-1'>
 							<span className='text-muted-foreground'>{t(END_LABEL_KEYS[end].length)}</span>
 							<select
+								aria-label={t(END_LABEL_KEYS[end].length)}
 								value={selectedShapeStyle?.[lengthKey] || 'med'}
 								onChange={(e) => {
 									onUpdateShapeStyle({
 										[lengthKey]: e.target.value as 'sm' | 'med' | 'lg',
 									});
-									markDirty();
+									markDirty?.();
 								}}
+								disabled={!canEdit}
 								className={SELECT_CLS}
 							>
 								{ARROW_SIZE_OPTIONS.map((o) => (

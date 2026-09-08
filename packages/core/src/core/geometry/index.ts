@@ -27,13 +27,47 @@ export {
 } from './preset-shape-definitions-table';
 
 export {
+	ST_SHAPE_TYPE_VALUES,
+	PRESET_GEOMETRY_ALIASES,
+	isStShapeType,
+	normalizeStShapeType,
+} from './preset-geometry-names';
+
+export {
 	evaluatePresetShape,
 	lookupPresetShape,
 	type PresetShapeEvaluationResult,
 	type PresetSubpathResult,
 } from './preset-shape-evaluator';
 
+export { filterValidShapeAdjustmentEntries } from './preset-adjustment-validation';
+
+export {
+	getPresetConnectionSites,
+	lookupPresetConnectionSites,
+	type EvaluatedPresetConnectionSite,
+} from './preset-connection-sites-table';
+export type {
+	PresetConnectionSiteDefinition,
+	PresetConnectionSiteToken,
+} from './preset-connection-sites-types';
+
+export { getPresetTextRect, lookupPresetTextRectOverride } from './preset-text-rect-table';
+export type { PresetTextRectDefinition } from './preset-text-rect-types';
+
 export { customGeometryPathsToSvgSubpaths, type CustomGeometrySubpathSvg } from './custom-geometry';
+
+export {
+	resolveCustomGeometryGuideContext,
+	resolveCustomGeometryToken,
+} from './custom-geometry-guides';
+
+export { applyCustomGeometryGuideOverrides } from './custom-geometry-guide-writeback';
+
+export {
+	evaluateCustomGeometryPathData,
+	evaluateCustomGeometryPaths,
+} from './custom-geometry-live-eval';
 
 export { getAdjustmentAwareClipPath } from './adjustment-aware-shapes';
 
@@ -47,7 +81,14 @@ export {
 export { getConnectorAdjustment, getConnectorPathGeometry } from './connector-geometry';
 export type { ConnectorPathGeometry } from './connector-geometry';
 
-export { getElementTransform, getTextCompensationTransform } from './transform-utils';
+export {
+	TEXT_ORIENTATION_IDENTITY,
+	getElementOrientationMatrix,
+	getElementTransform,
+	getTextCompensationTransform,
+	isTextOrientationMatrix,
+	multiplyTextOrientationMatrices,
+} from './transform-utils';
 
 export {
 	PRESET_SHAPE_CLIP_PATHS,
@@ -67,7 +108,10 @@ export {
 	ooxmlArcToSvg,
 } from './guide-formula';
 export type { GeometryGuide, GeometryContext } from './guide-formula';
-export { parseStructuredCustomGeometry } from './custom-geometry-parser';
+export {
+	parseStructuredCustomGeometry,
+	buildCustomGeometryPathsFromNodes,
+} from './custom-geometry-parser';
 
 export { orderedXmlKey, stripXmlOrderSuffix } from './custom-geometry-command-order';
 

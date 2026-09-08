@@ -11,6 +11,7 @@ import type {
 	PptxCustomProperty,
 	PptxElement,
 	PptxHandoutMaster,
+	PptxModernCommentAuthor,
 	PptxNotesMaster,
 	PptxSlide,
 	PptxSlideMaster,
@@ -20,7 +21,9 @@ import type {
 	PptxThemeOption,
 	ShapeStyle,
 	TextStyle,
+	ParsedTableStyleMap,
 } from 'pptx-viewer-core';
+import type { SlideSizeEmu, SlideSizeRescaleMode } from 'pptx-viewer-shared';
 import { useTranslation } from 'react-i18next';
 
 import type { UseCommentsResult } from '../hooks/useComments-helpers';
@@ -38,6 +41,8 @@ export interface ViewerInspectorProps {
 	mode: ViewerMode;
 	activeSlide: PptxSlide | undefined;
 	slides: PptxSlide[];
+	/** `data.customShows`, for the Action Settings `customShow` target picker. */
+	customShows: Array<{ id: string; name: string }>;
 	canvasSize: CanvasSize;
 	selectedElement: PptxElement | null;
 	effectiveSelectedIds: string[];
@@ -45,6 +50,8 @@ export interface ViewerInspectorProps {
 	sidebarPanelMode: string;
 	activeSlideIndex: number;
 	comments: UseCommentsResult;
+	/** Modern comment authors, for the `@`-mention typeahead. */
+	commentAuthors?: PptxModernCommentAuthor[];
 	onSetSidebarPanelMode: (mode: string) => void;
 	onClose: () => void;
 	onUpdateElementStyle: (updates: Partial<ShapeStyle>) => void;
@@ -52,6 +59,10 @@ export interface ViewerInspectorProps {
 	onUpdateElement: (updates: Partial<PptxElement>) => void;
 	onApplySelection: (id: string | null) => void;
 	onSetCanvasSize: React.Dispatch<React.SetStateAction<CanvasSize>>;
+	/** The deck's `p:sldSz` in EMU, forwarded to the Slide Size card. */
+	slideSizeEmu?: SlideSizeEmu | undefined;
+	/** Applies a Slide Size preset / orientation pick (EMU + pixel canvas). */
+	onSetSlideSize?: (size: SlideSizeEmu, rescaleMode?: SlideSizeRescaleMode) => void;
 	onMoveLayer: (direction: string) => void;
 	onMoveLayerToEdge: (direction: string) => void;
 	onDeleteElement: () => void;
@@ -77,6 +88,14 @@ export interface ViewerInspectorProps {
 	onGetTemplateBackgroundColor?: (path: string) => string | undefined;
 	mediaDataUrls?: Map<string, string>;
 	theme?: PptxTheme;
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, needed by the table
+	 * properties panel's "Edit style...". See `TablePropertiesPanel`'s
+	 * docblock for why this is optional.
+	 */
+	tableStyleMap?: ParsedTableStyleMap;
+	onTableStyleMapChange?: (nextMap: ParsedTableStyleMap) => void;
+	onDeleteTableStyle?: (styleId: string) => void;
 	/** Width of the panel in pixels (for resizable panels). */
 	panelWidth?: number;
 }
@@ -91,6 +110,7 @@ export function ViewerInspector({
 	mode,
 	activeSlide,
 	slides,
+	customShows,
 	canvasSize,
 	selectedElement,
 	effectiveSelectedIds,
@@ -98,6 +118,7 @@ export function ViewerInspector({
 	sidebarPanelMode,
 	activeSlideIndex,
 	comments,
+	commentAuthors,
 	onSetSidebarPanelMode,
 	onClose,
 	onUpdateElementStyle,
@@ -105,6 +126,8 @@ export function ViewerInspector({
 	onUpdateElement,
 	onApplySelection,
 	onSetCanvasSize,
+	slideSizeEmu,
+	onSetSlideSize,
 	onMoveLayer,
 	onMoveLayerToEdge,
 	onDeleteElement,
@@ -130,6 +153,9 @@ export function ViewerInspector({
 	onGetTemplateBackgroundColor,
 	mediaDataUrls,
 	theme,
+	tableStyleMap,
+	onTableStyleMapChange,
+	onDeleteTableStyle,
 	panelWidth,
 }: ViewerInspectorProps): React.ReactElement | null {
 	const { t } = useTranslation();
@@ -138,12 +164,13 @@ export function ViewerInspector({
 		return null;
 	}
 
-	// Allow the comments tab to render even when no element is selected,
-	// because comments belong to the slide rather than a single element.
-	const tab = sidebarPanelMode as InspectorTab;
-	if (!selectedElement && tab !== 'comments' && tab !== 'properties') {
-		return null;
-	}
+	// No tab is gated on having a selection. Every one of them is slide-scoped:
+	// comments belong to the slide, properties covers the deck and slide when
+	// nothing is picked, and Elements is the per-slide layer list - the very
+	// place you go to FIND something to select. Gating it closed the whole
+	// inspector the moment you clicked "Elements" with an empty canvas
+	// selection, which is exactly when the layer list is most useful.
+	// `InspectorPane` and each tab already handle `selectedElement === null`.
 
 	const slideId = activeSlide?.id ?? '';
 	const commentDraft = comments.commentDraftBySlideId[slideId] ?? '';
@@ -163,6 +190,7 @@ export function ViewerInspector({
 				mode={mode}
 				activeSlide={activeSlide}
 				slides={slides}
+				customShows={customShows}
 				canvasSize={canvasSize}
 				selectedElement={selectedElement}
 				selectedElementIds={effectiveSelectedIds}
@@ -195,11 +223,15 @@ export function ViewerInspector({
 				onUpdateTagCollections={onUpdateTagCollections}
 				onApplyTheme={onApplyTheme}
 				commentDraft={commentDraft}
+				commentDraftMentions={comments.commentDraftMentionsBySlideId?.[slideId] ?? []}
+				commentAuthors={commentAuthors ?? []}
 				editingCommentId={editingCommentId}
 				commentEditDraft={
 					editingCommentId ? (comments.commentEditDraftByCommentId[editingCommentId] ?? '') : ''
 				}
-				onSetCommentDraft={(draft) => comments.handleCommentDraftChange(slideId, draft)}
+				onSetCommentDraft={(draft, mentions) =>
+					comments.handleCommentDraftChange(slideId, draft, mentions)
+				}
 				onAddComment={() => comments.handleAddSlideComment(activeSlideIndex)}
 				onDeleteComment={(id) => comments.handleDeleteSlideComment(activeSlideIndex, id)}
 				onStartEditComment={(id) => comments.handleStartCommentEdit(slideId, id)}
@@ -214,17 +246,25 @@ export function ViewerInspector({
 				onToggleCommentResolved={(id) => comments.handleToggleCommentResolved(activeSlideIndex, id)}
 				onStartReply={(id) => comments.handleStartReply(activeSlideIndex, id)}
 				onCancelReply={comments.handleCancelReply}
-				onReplyDraftChange={(commentId, draft) => comments.handleReplyDraftChange(commentId, draft)}
+				onReplyDraftChange={(commentId, draft, mentions) =>
+					comments.handleReplyDraftChange(commentId, draft, mentions)
+				}
 				onSubmitReply={(commentId) => comments.handleSubmitReply(activeSlideIndex, commentId)}
 				replyingToCommentId={comments.replyingToCommentId}
 				replyDraftByCommentId={comments.replyDraftByCommentId}
+				replyDraftMentionsByCommentId={comments.replyDraftMentionsByCommentId}
 				onUpdateCanvasSize={onSetCanvasSize}
+				slideSizeEmu={slideSizeEmu}
+				onUpdateSlideSize={onSetSlideSize}
 				editTemplateMode={editTemplateMode}
 				slideMasters={slideMasters}
 				onSetTemplateBackground={onSetTemplateBackground}
 				onGetTemplateBackgroundColor={onGetTemplateBackgroundColor}
 				mediaDataUrls={mediaDataUrls}
 				theme={theme}
+				tableStyleMap={tableStyleMap}
+				onTableStyleMapChange={onTableStyleMapChange}
+				onDeleteTableStyle={onDeleteTableStyle}
 				panelWidth={panelWidth}
 			/>
 		</div>

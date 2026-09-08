@@ -1,7 +1,10 @@
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input, output } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
 import type { PptxCropShape, PptxElement, PptxImageEffects } from 'pptx-viewer-core';
 import { isImageLikeElement } from 'pptx-viewer-core';
+
+import { canInteractWithElement } from '../internal/shared';
+import { RecentColorsService } from './recent-colors.service';
 
 const SIDES = ['Left', 'Top', 'Right', 'Bottom'] as const;
 const CROP_SHAPES: readonly { value: PptxCropShape; label: string; glyph: string }[] = [
@@ -50,16 +53,20 @@ export function replacementImagePatch(dataUrl: string): Partial<PptxElement> {
 							min="0"
 							max="80"
 							[value]="crop(side) * 100"
+							[disabled]="!croppable()"
 							(input)="onCrop(side, $event)"
 					/></label>
 				}
 			</div>
-			<button type="button" (click)="resetCrop()">{{ 'pptx.image.resetCrop' | translate }}</button>
+			<button type="button" [disabled]="!croppable()" (click)="resetCrop()">
+				{{ 'pptx.image.resetCrop' | translate }}
+			</button>
 			<div class="shapes" role="group" aria-label="Crop to shape">
 				@for (shape of cropShapes; track shape.value) {
 					<button
 						type="button"
 						[class.active]="cropShape() === shape.value"
+						[disabled]="!croppable()"
 						[title]="shape.label"
 						[attr.aria-label]="shape.label"
 						(click)="setCropShape(shape.value)"
@@ -149,6 +156,8 @@ export function replacementImagePatch(dataUrl: string): Partial<PptxElement> {
 export class ImageCropWashPanelComponent {
 	readonly element = input.required<PptxElement>();
 	readonly patch = output<Partial<PptxElement>>();
+	/** Optional: absent in a standalone unit test with no viewer-level DI tree. */
+	private readonly recentColors = inject(RecentColorsService, { optional: true });
 	protected readonly sides = SIDES;
 	protected readonly cropShapes = CROP_SHAPES;
 	protected readonly effects = computed(() => (this.element() as ImageElement).imageEffects ?? {});
@@ -156,6 +165,8 @@ export class ImageCropWashPanelComponent {
 	protected readonly cropShape = computed(
 		() => (this.element() as ImageElement & { cropShape?: PptxCropShape }).cropShape ?? 'none',
 	);
+	/** G7: `a:picLocks/@noCrop` forbids cropping this specific picture. */
+	protected readonly croppable = computed(() => canInteractWithElement(this.element(), 'crop'));
 
 	protected onReplaceImage(event: Event): void {
 		const file = (event.target as HTMLInputElement).files?.[0];
@@ -175,7 +186,7 @@ export class ImageCropWashPanelComponent {
 		return clampImageCrop(this.element()[`crop${side}` as keyof PptxElement] as number | undefined);
 	}
 	protected onCrop(side: CropSide, event: Event): void {
-		if (!isImageLikeElement(this.element())) {
+		if (!isImageLikeElement(this.element()) || !this.croppable()) {
 			return;
 		}
 		this.patch.emit({
@@ -183,6 +194,9 @@ export class ImageCropWashPanelComponent {
 		} as Partial<PptxElement>);
 	}
 	protected resetCrop(): void {
+		if (!this.croppable()) {
+			return;
+		}
 		this.patch.emit({
 			cropLeft: 0,
 			cropTop: 0,
@@ -191,6 +205,9 @@ export class ImageCropWashPanelComponent {
 		} as Partial<PptxElement>);
 	}
 	protected setCropShape(value: PptxCropShape): void {
+		if (!this.croppable()) {
+			return;
+		}
 		this.patch.emit({ cropShape: value } as Partial<PptxElement>);
 	}
 	protected toggleWash(event: Event): void {
@@ -201,12 +218,14 @@ export class ImageCropWashPanelComponent {
 		});
 	}
 	protected onWashColor(event: Event): void {
+		const color = (event.target as HTMLInputElement).value;
 		this.updateEffects({
 			colorWash: {
-				color: (event.target as HTMLInputElement).value,
+				color,
 				opacity: this.wash()?.opacity ?? 40,
 			},
 		});
+		this.recentColors?.push(color);
 	}
 	protected onWashOpacity(event: Event): void {
 		this.updateEffects({

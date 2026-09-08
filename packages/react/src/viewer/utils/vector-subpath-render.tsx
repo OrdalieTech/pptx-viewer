@@ -1,25 +1,31 @@
 /**
- * Per-sub-path custom-geometry and stroke-only preset SVG rendering.
+ * Per-sub-path custom-geometry SVG rendering.
  *
  * Split out of `vector-shape-renderer.tsx` so that file stays small. The pure
- * paint-decision logic lives in `vector-subpath-paint.ts`; this module only
- * emits the `<path>` elements.
+ * paint-decision logic (`buildSubpathPaints`) lives in shared
+ * `pptx-viewer-shared/render/vector-subpath-paint`, alongside the analogous
+ * decision for multi-sub-path PRESET geometry (`subpath-fill-overlay`, which
+ * the other four bindings' `ShapeEffectOverlay` render); this module only
+ * emits the `<path>` elements for custom geometry, which React alone paints as
+ * an inline SVG rather than a CSS box (`rendersCustomVectorPath`).
  *
  * The legacy renderer concatenated every custom-geometry sub-path into one
  * `<path>` with a single element-level fill, so a stroke-only sub-path inside a
  * filled shape (or a lightened contour) could not be honoured. These helpers
- * emit one `<path>` per sub-path instead. Open presets such as `arc` are
- * handled the same way: `evaluatePresetShape` reports `fillNone`, and we paint a
- * stroked outline rather than flood-filling the wedge.
+ * emit one `<path>` per sub-path instead. Open PRESETS (`line`, `arc`, the
+ * connector family) are not handled here at all: they are stroked from the
+ * shared `buildStrokeOutline` by `ShapeEffectOverlay`, so that all five bindings
+ * paint them from one implementation.
  */
 import { customGeometryPathsToSvgSubpaths } from 'pptx-viewer-core';
-import type { CustomGeometryPath, PresetSubpathResult, ShapeStyle } from 'pptx-viewer-core';
-import { svgLineCap } from 'pptx-viewer-shared';
+import type { CustomGeometryPath, ShapeStyle } from 'pptx-viewer-core';
+import { buildSubpathPaints, svgGradientFillRef, svgLineCap } from 'pptx-viewer-shared';
+import type { SvgGradientDef } from 'pptx-viewer-shared';
 import React from 'react';
 
 import { colorWithOpacity } from './color';
 import { getCompoundLineOffsets, getCompoundLineWidths } from './connector-path';
-import { buildCustomSubpathPaints } from './vector-subpath-paint';
+import { renderSvgGradientDefs } from './svg-gradient-defs';
 
 /** Line-join / miter styling derived from a shape's `a:ln` join settings. */
 function joinStyle(shapeStyle: ShapeStyle | undefined): {
@@ -97,6 +103,12 @@ function strokeStrands(d: string, keyBase: string, ctx: StrokeStyleContext): Rea
  * present each is painted individually (per-`@fill`/`@stroke`); otherwise the
  * aggregate `pathData` is painted with a single fill plus compound strokes,
  * preserving the legacy behaviour for geometry without structured sub-paths.
+ *
+ * A freeform carrying an `a:gradFill` paints through an SVG paint server
+ * (`gradient`), not the parser's representative solid colour - painting the
+ * solid flattened every fade and turned the gradient's transparent regions
+ * opaque (issue #132). Sub-paths whose `@fill` is `lighten`/`darken` keep the
+ * modulated solid, since that shift cannot be applied to a paint server.
  */
 export function renderCustomGeometryVector(
 	pathData: string,
@@ -115,6 +127,7 @@ export function renderCustomGeometryVector(
 	// The stroke is already routed through `strokePaint` (set to `inherit` by
 	// the caller when the stroke is animated), so no separate stroke flag.
 	animatesFill = false,
+	gradient?: SvgGradientDef,
 ): React.ReactNode {
 	const ctx = strokeContext(shapeStyle, strokePaint, strokeWidth, dashArray);
 	const subpaths =
@@ -133,16 +146,21 @@ export function renderCustomGeometryVector(
 		subpaths !== undefined &&
 		subpaths.some((sp) => (sp.fillMode && sp.fillMode !== 'norm') || sp.stroke === false);
 
+	const gradientPaint = gradient ? svgGradientFillRef(gradient) : undefined;
 	const nodes: React.ReactNode[] = [];
 	if (subpaths && needsPerSubpath) {
-		const paints = buildCustomSubpathPaints(subpaths, hasFill, fillColor, fillOpacity);
+		const paints = buildSubpathPaints(subpaths, hasFill, fillColor, fillOpacity);
 		paints.forEach((paint, idx) => {
 			if (paint.fill !== 'none') {
+				// `norm` (and unset) sub-paths take the gradient verbatim; a
+				// lighten/darken sub-path keeps its modulated solid.
+				const mode = subpaths[idx]?.fillMode;
+				const useGradient = gradientPaint && (mode === undefined || mode === 'norm');
 				nodes.push(
 					<path
 						key={`f${idx}`}
 						d={paint.d}
-						fill={animatesFill ? 'inherit' : paint.fill}
+						fill={animatesFill ? 'inherit' : useGradient ? gradientPaint : paint.fill}
 						stroke='none'
 						vectorEffect='non-scaling-stroke'
 					/>,
@@ -158,7 +176,9 @@ export function renderCustomGeometryVector(
 				<path
 					key='fill'
 					d={pathData}
-					fill={animatesFill ? 'inherit' : colorWithOpacity(fillColor, fillOpacity)}
+					fill={
+						animatesFill ? 'inherit' : (gradientPaint ?? colorWithOpacity(fillColor, fillOpacity))
+					}
 					stroke='none'
 					vectorEffect='non-scaling-stroke'
 				/>,
@@ -175,39 +195,7 @@ export function renderCustomGeometryVector(
 			className='w-full h-full pointer-events-none'
 			preserveAspectRatio='none'
 		>
-			{nodes}
-		</svg>
-	);
-}
-
-/**
- * Render a stroke-only preset (e.g. `arc`) as an outlined SVG. Each evaluated
- * sub-path is stroked (honouring its own `@stroke` flag and compound-line
- * strands); no fill is emitted.
- */
-export function renderStrokeOnlyPreset(
-	presetPaths: PresetSubpathResult[],
-	width: number,
-	height: number,
-	shapeStyle: ShapeStyle | undefined,
-	strokePaint: string,
-	strokeWidth: number,
-	dashArray: string | undefined,
-): React.ReactNode {
-	const ctx = strokeContext(shapeStyle, strokePaint, Math.max(strokeWidth, 1), dashArray);
-	const nodes: React.ReactNode[] = [];
-	presetPaths.forEach((path, idx) => {
-		if (path.stroke === false) {
-			return;
-		}
-		nodes.push(...strokeStrands(path.d, `pre${idx}`, ctx));
-	});
-	return (
-		<svg
-			viewBox={`0 0 ${Math.max(width, 1)} ${Math.max(height, 1)}`}
-			className='w-full h-full pointer-events-none'
-			preserveAspectRatio='none'
-		>
+			{animatesFill ? null : renderSvgGradientDefs(gradient)}
 			{nodes}
 		</svg>
 	);

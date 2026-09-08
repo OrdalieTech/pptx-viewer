@@ -21,6 +21,7 @@ function collectCnvPrNodes(
 		'p:nvCxnSpPr',
 		'p:nvGrpSpPr',
 		'p:nvGraphicFramePr',
+		'p:nvContentPartPr',
 	];
 	for (const nvKey of nvContainers) {
 		const nvNode = node[nvKey] as XmlObject | undefined;
@@ -28,13 +29,38 @@ function collectCnvPrNodes(
 			results.push(nvNode['p:cNvPr'] as XmlObject);
 		}
 	}
+	// A real `p:contentPart`'s non-visual properties are `p14:`-qualified, not
+	// `p:`-qualified (verified against PowerPoint's own SaveAs output; see
+	// `mc-capabilities.ts`), so a content part's id lives at
+	// `p14:nvContentPartPr/p14:cNvPr`. Missing this left the id invisible to
+	// this validator: it could no longer detect (or dedupe) a collision
+	// between an authored content part and an ordinary shape, so a freshly
+	// drawn stroke could silently reuse another shape's id and produce a
+	// package PowerPoint's own reader rejects as corrupted.
+	const p14ContentPartNv = node['p14:nvContentPartPr'] as XmlObject | undefined;
+	if (p14ContentPartNv?.['p14:cNvPr']) {
+		results.push(p14ContentPartNv['p14:cNvPr'] as XmlObject);
+	}
 
 	// Recurse into shape lists
-	const shapeLists = ['p:sp', 'p:pic', 'p:cxnSp', 'p:graphicFrame', 'p:grpSp'];
+	const shapeLists = ['p:sp', 'p:pic', 'p:cxnSp', 'p:graphicFrame', 'p:grpSp', 'p:contentPart'];
 	for (const listKey of shapeLists) {
 		const children = ensureArray(node[listKey]) as XmlObject[];
 		for (const child of children) {
 			collectCnvPrNodes(child, results, ensureArray);
+		}
+	}
+
+	// Ink and other Office extensions place their real element and fallback
+	// shape inside mc:AlternateContent branches. Those nodes still occupy the
+	// slide's non-visual ID space and must participate in duplicate
+	// detection, or a Draw operation can introduce a repeated id that makes
+	// desktop PowerPoint repair or reject the deck.
+	for (const alternate of ensureArray(node['mc:AlternateContent']) as XmlObject[]) {
+		for (const branchKey of ['mc:Choice', 'mc:Fallback']) {
+			for (const branch of ensureArray(alternate[branchKey]) as XmlObject[]) {
+				collectCnvPrNodes(branch, results, ensureArray);
+			}
 		}
 	}
 }

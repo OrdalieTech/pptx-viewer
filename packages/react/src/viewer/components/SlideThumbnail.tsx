@@ -9,6 +9,7 @@ import { getReactSlideBackgroundStyle } from '../utils/slide-background-style';
 import type { TableStyleContext } from '../utils/table-band-style';
 import type { FieldSubstitutionContext } from '../utils/text-field-substitution';
 import { deriveSlideFieldContext } from './slide-field-context';
+import { SlideBackgroundImageLayer } from './SlideBackgroundImageLayer';
 import { StaticElementRenderer } from './StaticElementRenderer';
 
 interface SlideThumbnailProps {
@@ -45,7 +46,13 @@ function SlideThumbnailImpl({
 	return (
 		<div
 			className='relative w-full overflow-hidden rounded border border-border bg-white'
-			style={{ height: previewHeight, ...getReactSlideBackgroundStyle(slide) }}
+			style={{
+				height: previewHeight,
+				...getReactSlideBackgroundStyle(slide, {
+					widthPx: safeCanvasWidth,
+					heightPx: safeCanvasHeight,
+				}),
+			}}
 		>
 			<div
 				className='absolute top-0 left-0 origin-top-left'
@@ -56,6 +63,7 @@ function SlideThumbnailImpl({
 					transformOrigin: 'top left',
 				}}
 			>
+				<SlideBackgroundImageLayer slide={slide} />
 				{/* Transition indicator badge */}
 				{slide.transition &&
 					slide.transition.type !== 'none' &&

@@ -5,7 +5,6 @@ import type {
 	ViewerOptionsStoreInit,
 } from 'pptx-viewer-shared';
 import {
-	DEFAULT_VIEWER_OPTIONS,
 	applyAutoCorrect,
 	applyPreferenceToOptions,
 	createViewerOptionsStore,
@@ -50,6 +49,13 @@ export interface ViewerOptionsHost {
 	setRibbonHiddenTabs(tabIds: readonly ToolbarTabId[]): void;
 	refreshQuickAccess(): void;
 	applyScreenTips(): void;
+	/**
+	 * Re-render the current slide. Needed so toggling Advanced > "Disable 3D
+	 * rendering" takes effect on the live canvas immediately: the six 3D
+	 * flag getters are read fresh on every render, but nothing re-renders on
+	 * its own just because an option changed.
+	 */
+	renderStage(): void;
 }
 
 export interface ViewerOptionsController {
@@ -105,18 +111,16 @@ export function createViewerOptionsController(
 			if (host.isAutosaveEnabled() !== prefs.autoSave) {
 				host.setAutosaveEnabled(prefs.autoSave);
 			}
-			// The minutes-scale AutoRecover cadence only replaces the binding's
-			// fast default debounce once the user actually changes it.
-			if (
-				options.save.autoRecoverIntervalMinutes !==
-				DEFAULT_VIEWER_OPTIONS.save.autoRecoverIntervalMinutes
-			) {
-				host.setAutosaveIntervalMs(resolveAutosaveIntervalSeconds(options) * 1000);
-			}
+			// The AutoRecover cadence is now the binding's cadence, not an override
+			// of a private fast debounce: it is pushed on every options change, and
+			// the shared `resolveAutosaveIntervalMs` still lets an explicit
+			// `autosaveIntervalMs` option outrank it.
+			host.setAutosaveIntervalMs(resolveAutosaveIntervalSeconds(options) * 1000);
 			host.setHistoryDepth(resolveHistoryDepth(options));
 			host.setRibbonHiddenTabs(options.ribbon.hiddenTabIds);
 			host.refreshQuickAccess();
 			host.applyScreenTips();
+			host.renderStage();
 		} finally {
 			syncing = false;
 		}

@@ -1,7 +1,6 @@
 import type { PptxSaveFormat } from 'pptx-viewer-core';
-import { downloadBlob } from 'pptx-viewer-shared';
+import { downloadBlob, savedPresentationFileName } from 'pptx-viewer-shared';
 
-import { buildSharingPackage } from '../export/package-sharing';
 import type { EditorState } from './editor-state.svelte';
 
 const PRESENTATION_MIME: Record<PptxSaveFormat, string> = {
@@ -21,7 +20,6 @@ export interface EditingApi {
 	save(format?: PptxSaveFormat): Promise<Uint8Array>;
 	downloadAs(format: PptxSaveFormat, fileName?: string): Promise<void>;
 	downloadPptx(fileName?: string): Promise<void>;
-	packageForSharing(fileName?: string): Promise<void>;
 }
 
 /**
@@ -39,24 +37,22 @@ export function createEditingApi(editor: EditorState): EditingApi {
 		deleteSelected: () => editor.deleteSelected(),
 		getSelectedElementId: () => editor.selectedElementId,
 		save: (format) => editor.save(format),
-		downloadAs: async (format, fileName = `presentation.${format}`) => {
+		// Every name below goes through the shared save-name decision, so a host
+		// that passes the deck it opened (`report.ppt`) gets `report.pptx` back
+		// rather than a `.ppt` whose bytes are an OpenXML package.
+		downloadAs: async (format, fileName) => {
 			const bytes = await editor.save(format);
 			downloadBlob(
 				new Blob([bytes as unknown as BlobPart], { type: PRESENTATION_MIME[format] }),
-				fileName,
+				savedPresentationFileName(fileName, format),
 			);
 		},
-		downloadPptx: async (fileName = 'presentation.pptx') => {
+		downloadPptx: async (fileName) => {
 			const bytes = await editor.save('pptx');
 			downloadBlob(
 				new Blob([bytes as unknown as BlobPart], { type: PRESENTATION_MIME.pptx }),
-				fileName,
+				savedPresentationFileName(fileName),
 			);
-		},
-		packageForSharing: async (fileName = 'presentation.pptx') => {
-			const bytes = await editor.save('pptx');
-			const blob = await buildSharingPackage(bytes, fileName);
-			downloadBlob(blob, `${fileName.replace(/\.pptx$/iu, '')}-package.zip`);
 		},
 	};
 }

@@ -17,6 +17,9 @@
 	const currentColor = $derived(
 		editor.slides[editor.currentSlideIndex]?.backgroundColor ?? DEFAULT_COLOR,
 	);
+	const hideBackgroundGraphics = $derived(
+		editor.slides[editor.currentSlideIndex]?.showMasterShapes === false,
+	);
 
 	function onKeydown(event: KeyboardEvent): void {
 		event.stopPropagation();
@@ -41,6 +44,7 @@
 				disabled={!editor.editable}
 				value={currentColor}
 				oninput={(e) => editor.backgroundOps.setSlideBackgroundColor(e.currentTarget.value)}
+				onchange={(e) => editor.recordRecentColor(e.currentTarget.value)}
 			/>
 		</label>
 		<button
@@ -50,8 +54,17 @@
 		>
 			{t('pptx.ribbon.theme.default')}
 		</button>
+		<label class="pptx-svelte-formatbg-hide">
+			<input
+				type="checkbox"
+				disabled={!editor.editable}
+				checked={hideBackgroundGraphics}
+				onchange={(e) => editor.backgroundOps.setHideBackgroundGraphics(e.currentTarget.checked)}
+			/>
+			<span>{t('pptx.slideBackground.hideBackgroundGraphics')}</span>
+		</label>
 		<button type="button" class="pptx-svelte-formatbg-close" onclick={onclose}>
-			{t('common.close')}
+			{t('pptx.common.close')}
 		</button>
 	</div>
 {/if}
@@ -113,6 +126,13 @@
 	.pptx-svelte-formatbg button:disabled {
 		opacity: 0.35;
 		cursor: default;
+	}
+
+	.pptx-svelte-formatbg-hide {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 12px;
 	}
 
 	.pptx-svelte-formatbg-close {

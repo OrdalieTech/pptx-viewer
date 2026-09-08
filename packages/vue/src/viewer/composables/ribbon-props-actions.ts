@@ -1,4 +1,5 @@
 import type { DistributeAxis } from 'pptx-viewer-shared';
+import { resetSlideLayoutPath } from 'pptx-viewer-shared';
 
 import type { UseRibbonPropsInput } from './ribbon-props-types';
 import { RIBBON_ALIGN, toShapePreset } from './useRibbonActions';
@@ -18,6 +19,7 @@ export function buildRibbonPropsActions(input: UseRibbonPropsInput) {
 				input.presenting.value = false;
 			}
 		},
+		onPresentFromBeginning: input.presentFromBeginning,
 		onToggleSidebar: () => {
 			input.sidebarCollapsed.value = !input.sidebarCollapsed.value;
 		},
@@ -84,6 +86,9 @@ export function buildRibbonPropsActions(input: UseRibbonPropsInput) {
 		onSetShowRulers: (enabled: boolean) => {
 			input.showRulers.value = enabled;
 		},
+		onSetShowGuides: (enabled: boolean) => {
+			input.showGuides.value = enabled;
+		},
 		onSetSnapToGrid: (enabled: boolean) => {
 			input.snapToGrid.value = enabled;
 		},
@@ -115,6 +120,10 @@ export function buildRibbonPropsActions(input: UseRibbonPropsInput) {
 			}
 		},
 		onMoveLayerToEdge: input.ribbonMoveToEdge,
+		onGroupElements: input.onGroup,
+		onUngroupElement: input.onUngroup,
+		onUpdateElementStyle: input.updateSelectedShapeStyle,
+		onOpenHyperlinkDialog: input.openHyperlinkForSelection,
 		onDuplicate: input.duplicateSelected,
 		onDelete: input.deleteSelected,
 		onOpenFile: input.handleOpenFile,
@@ -124,7 +133,7 @@ export function buildRibbonPropsActions(input: UseRibbonPropsInput) {
 		onExportPdf: input.onExportPdf,
 		onExportVideo: input.onExportWebm,
 		onExportGif: input.onExportGif,
-		onPackageForSharing: () => void input.packageForSharing(),
+		onExportJson: input.onExportJson,
 		onOpenShareDialog: () => {
 			input.shareOpen.value = true;
 		},
@@ -145,6 +154,12 @@ export function buildRibbonPropsActions(input: UseRibbonPropsInput) {
 		onToggleSlideSorter: () => {
 			input.showSorter.value = true;
 		},
+		onOpenReadingView: () => {
+			input.showReadingView.value = true;
+		},
+		onOpenOutlineView: () => {
+			input.showOutlineView.value = true;
+		},
 		onUpdateTextStyle: input.ribbonUpdateTextStyle,
 		onTransformTextCase: input.ribbonUpdateTextCase,
 		onSetOverflowMenuOpen: (o: boolean) => {
@@ -152,6 +167,9 @@ export function buildRibbonPropsActions(input: UseRibbonPropsInput) {
 		},
 		onInsertSlideFromLayout: (path: string, name?: string) =>
 			void input.insertSlideFromLayout(path, name),
+		onApplyLayout: (path: string) => void input.applyLayoutToActiveSlide(path),
+		loadLayoutPreviews: input.loadLayoutPreviews,
+		onInsertSlideFromTemplate: input.insertSlideFromTemplate,
 		onSetActiveCustomShowId: (id: string | null) => {
 			input.activeCustomShowId.value = id;
 		},
@@ -169,6 +187,14 @@ export function buildRibbonPropsActions(input: UseRibbonPropsInput) {
 		},
 		onOpenDocumentProperties: () => {
 			input.propertiesOpen.value = true;
+		},
+		// Design > Slide Size. The size control is the inspector's SLIDE SIZE
+		// card, which the deck (no-selection) panel renders, so drop the element
+		// selection and make sure the pane is open. It used to open Document
+		// Properties, which has no slide-size control in it.
+		onOpenSlideSize: () => {
+			input.clearSelection();
+			input.inspectorOpen.value = true;
 		},
 		onOpenFontEmbedding: () => {
 			input.showFontEmbedding.value = true;
@@ -204,11 +230,30 @@ export function buildRibbonPropsActions(input: UseRibbonPropsInput) {
 		onOpenSetUpSlideShow: () => {
 			input.showSetUpSlideShow.value = true;
 		},
+		// PowerPoint's Hide Slide: skip the active slide during the show while
+		// leaving it in the deck, the thumbnail rail and the sorter.
+		onToggleHideSlide: () => {
+			input.toggleSlideHidden(input.activeSlideIndex.value);
+		},
 		onOpenBroadcastDialog: () => {
 			input.broadcastOpen.value = true;
 		},
 		onToggleSubtitles: input.onToggleSubtitles,
 		onTransitionChange: input.onTransitionChange,
 		onApplyTransitionToAll: input.onApplyTransitionToAll,
+		// Reset / Section / Select All were declared on `RibbonProps` and forwarded
+		// all the way down to their buttons, but no producer ever supplied them, so
+		// the three controls rendered enabled and bound `undefined`.
+		onResetSlide: () => {
+			const path = resetSlideLayoutPath(input.activeSlide.value);
+			if (path) {
+				void input.applyLayoutToActiveSlide(path);
+			}
+		},
+		onAddSection: () => {
+			input.addSection(input.defaultSectionName(), input.activeSlideIndex.value);
+		},
+		onSelectAll: input.selectAllElements,
+		onPresentationPropertiesChange: input.onPresentationPropertiesUpdate,
 	};
 }

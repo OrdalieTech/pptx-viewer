@@ -1,4 +1,6 @@
-import type { PptxElement } from 'pptx-viewer-core';
+import type { PptxElement, ShapeStyle } from 'pptx-viewer-core';
+import { hasShapeProperties } from 'pptx-viewer-core';
+import { shapeFillChange, shapeOutlineChange } from 'pptx-viewer-shared';
 import React, { useState, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LuLayers, LuPaintBucket, LuPenLine, LuShapes, LuSparkles } from 'react-icons/lu';
@@ -6,7 +8,9 @@ import { LuLayers, LuPaintBucket, LuPenLine, LuShapes, LuSparkles } from 'react-
 import { SHAPE_PRESETS } from '../../constants';
 import type { SupportedShapeType } from '../../types-core';
 import { cn } from '../../utils';
+import { useRecentColors } from '../inspector/RecentColorsContext';
 import { RibbonMenu } from './RibbonMenu';
+import { ShapeColorPopover } from './ShapeColorPopover';
 import { ic, pill, sep } from './toolbar-constants';
 
 export interface DrawingGroupProps {
@@ -17,28 +21,23 @@ export interface DrawingGroupProps {
 	onAddShape: () => void;
 	onMoveLayer: (direction: string) => void;
 	onMoveLayerToEdge: (direction: string) => void;
-	onUpdateElementStyle?: (style: Record<string, unknown>) => void;
+	/**
+	 * Patch the selected shape's style. Optional only because the mobile menu
+	 * sheet renders the group without one; the desktop ribbon always passes it.
+	 * It used to be passed by nobody, so both swatch grids were decorative.
+	 */
+	onUpdateElementStyle?: (style: Partial<ShapeStyle>) => void;
 }
-
-const FILL_COLORS = [
-	'#ffffff',
-	'#000000',
-	'#ff0000',
-	'#00ff00',
-	'#0000ff',
-	'#ffff00',
-	'#ff00ff',
-	'#00ffff',
-	'#ff8800',
-	'#8800ff',
-	'#008888',
-	'#888888',
-];
 
 const TOP_SHAPES = SHAPE_PRESETS.slice(0, 12);
 
 export function DrawingGroup(p: DrawingGroupProps): React.ReactElement {
 	const { t } = useTranslation();
+	const { pushColor } = useRecentColors();
+	const selectedShapeStyle: ShapeStyle | undefined =
+		p.selectedElement && hasShapeProperties(p.selectedElement)
+			? p.selectedElement.shapeStyle
+			: undefined;
 	const [shapesOpen, setShapesOpen] = useState(false);
 	const [arrangeOpen, setArrangeOpen] = useState(false);
 	const [fillOpen, setFillOpen] = useState(false);
@@ -203,72 +202,42 @@ export function DrawingGroup(p: DrawingGroupProps): React.ReactElement {
 					</div>
 
 					{/* Shape Fill */}
-					<div className='relative' ref={fillRef}>
-						<button
-							type='button'
-							disabled={!p.canEdit || !p.selectedElement}
-							className={pill}
-							title={t('pptx.drawing.shapeFill')}
-							onClick={() => setFillOpen((v) => !v)}
-						>
-							<LuPaintBucket className={ic} />
-						</button>
-						{fillOpen && (
-							<RibbonMenu anchorRef={fillRef} className='pt-1'>
-								<div className='rounded-lg border border-border bg-popover backdrop-blur-lg shadow-2xl p-2 grid grid-cols-6 gap-1'>
-									{FILL_COLORS.map((c) => (
-										<button
-											key={c}
-											type='button'
-											aria-label={`Fill colour ${c}`}
-											data-pptx-compact
-											className='w-5 h-5 rounded border border-border/60 hover:scale-110 transition-transform'
-											style={{ backgroundColor: c }}
-											title={c}
-											onClick={() => {
-												p.onUpdateElementStyle?.({ fill: c });
-												setFillOpen(false);
-											}}
-										/>
-									))}
-								</div>
-							</RibbonMenu>
-						)}
-					</div>
+					<ShapeColorPopover
+						icon={<LuPaintBucket className={ic} />}
+						title={t('pptx.drawing.shapeFill')}
+						prefix='shape-fill'
+						anchorRef={fillRef}
+						open={fillOpen}
+						onToggle={() => setFillOpen((v) => !v)}
+						disabled={!p.canEdit || !p.selectedElement}
+						swatchAriaLabel='Fill colour'
+						selectedRef={selectedShapeStyle?.fillColorRef}
+						selectedHex={selectedShapeStyle?.fillColor}
+						onApply={(c, ref) => {
+							p.onUpdateElementStyle?.(shapeFillChange(c, ref));
+							pushColor(c);
+						}}
+						onClose={() => setFillOpen(false)}
+					/>
 
 					{/* Shape Outline */}
-					<div className='relative' ref={outlineRef}>
-						<button
-							type='button'
-							disabled={!p.canEdit || !p.selectedElement}
-							className={pill}
-							title={t('pptx.drawing.shapeOutline')}
-							onClick={() => setOutlineOpen((v) => !v)}
-						>
-							<LuPenLine className={ic} />
-						</button>
-						{outlineOpen && (
-							<RibbonMenu anchorRef={outlineRef} className='pt-1'>
-								<div className='rounded-lg border border-border bg-popover backdrop-blur-lg shadow-2xl p-2 grid grid-cols-6 gap-1'>
-									{FILL_COLORS.map((c) => (
-										<button
-											key={c}
-											type='button'
-											aria-label={`Outline colour ${c}`}
-											data-pptx-compact
-											className='w-5 h-5 rounded border border-border/60 hover:scale-110 transition-transform'
-											style={{ backgroundColor: c }}
-											title={c}
-											onClick={() => {
-												p.onUpdateElementStyle?.({ outlineColor: c });
-												setOutlineOpen(false);
-											}}
-										/>
-									))}
-								</div>
-							</RibbonMenu>
-						)}
-					</div>
+					<ShapeColorPopover
+						icon={<LuPenLine className={ic} />}
+						title={t('pptx.drawing.shapeOutline')}
+						prefix='shape-outline'
+						anchorRef={outlineRef}
+						open={outlineOpen}
+						onToggle={() => setOutlineOpen((v) => !v)}
+						disabled={!p.canEdit || !p.selectedElement}
+						swatchAriaLabel='Outline colour'
+						selectedRef={selectedShapeStyle?.strokeColorRef}
+						selectedHex={selectedShapeStyle?.strokeColor}
+						onApply={(c, ref) => {
+							p.onUpdateElementStyle?.(shapeOutlineChange(c, ref));
+							pushColor(c);
+						}}
+						onClose={() => setOutlineOpen(false)}
+					/>
 
 					{/* Shape Effects (placeholder) */}
 					<button

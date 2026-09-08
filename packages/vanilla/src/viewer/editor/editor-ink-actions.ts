@@ -1,8 +1,12 @@
 import type { StrokeToInkElementOpts } from 'pptx-viewer-shared';
-import { strokeToInkElement } from 'pptx-viewer-shared';
+import {
+	appendElementOnSlide,
+	findSlideElement,
+	removeElement,
+	strokeToInkElement,
+} from 'pptx-viewer-shared';
 
 import type { Store, ViewerState } from '../state';
-import { appendElementOnSlide, findSlideElement, removeElement } from './editor-mutations';
 import type { EditorOps } from './editor-operations';
 
 /**
@@ -23,10 +27,13 @@ export interface InkActions {
 	 */
 	commitStroke(stroke: StrokeToInkElementOpts): void;
 	/**
-	 * Remove the ink element with `id` from the current slide (Draw tab's
-	 * eraser tool). Returns `true` when an ink element was found and removed;
-	 * `false` for a missing id, a non-ink element, or a read-only viewer (safe
-	 * to call from a generic stage hit-test without a pre-check).
+	 * Remove the ink/contentPart element with `id` from the current slide
+	 * (Draw tab's eraser tool). `contentPart` is included because ink saved
+	 * via the Draw tab reloads in that shape, so it must stay erasable after a
+	 * save/reload round-trip. Returns `true` when a matching element was found
+	 * and removed; `false` for a missing id, an unrelated element, or a
+	 * read-only viewer (safe to call from a generic stage hit-test without a
+	 * pre-check).
 	 */
 	eraseInkElement(id: string): boolean;
 }
@@ -63,7 +70,7 @@ export function createInkActions(deps: InkActionsDeps): InkActions {
 				return false;
 			}
 			const target = findSlideElement(state.slides, state.currentSlide, id);
-			if (!target || target.type !== 'ink') {
+			if (!target || (target.type !== 'ink' && target.type !== 'contentPart')) {
 				return false;
 			}
 			ops.pushHistory();

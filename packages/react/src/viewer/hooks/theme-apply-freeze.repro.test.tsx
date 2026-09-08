@@ -8,6 +8,8 @@ import type {
 	PptxEmbeddedFont,
 	PptxHandoutMaster,
 	PptxHeaderFooter,
+	PptxModifyVerifier,
+	PptxModernCommentAuthor,
 	PptxNotesMaster,
 	PptxPresentationProperties,
 	PptxSection,
@@ -17,8 +19,14 @@ import type {
 	PptxTheme,
 	PptxThemeColorScheme,
 	PptxThemeOption,
+	PptxViewProperties,
 	ParsedTableStyleMap,
 } from 'pptx-viewer-core';
+import type {
+	CompatibilityWarningToast,
+	ReadOnlyRecommendation,
+	SlideSizeEmu,
+} from 'pptx-viewer-shared';
 // @vitest-environment happy-dom
 /**
  * Regression harness for the "AI theme colour change freezes the renderer" bug.
@@ -90,15 +98,22 @@ function Harness({ initial }: { initial: Uint8Array }): React.ReactElement {
 		setTemplateElementsBySlideId: noopDispatch<Record<string, PptxElement[]>>(),
 		mediaDataUrls: new Map<string, string>(),
 		setCanvasSize: noopDispatch<CanvasSize>(),
+		setSlideSizeEmu: noopDispatch<SlideSizeEmu | undefined>(),
 		setHeaderFooter: noopDispatch<PptxHeaderFooter>(),
 		setLayoutOptions: noopDispatch<Array<{ path: string; name: string }>>(),
 		setSlideMasters: noopDispatch<PptxSlideMaster[]>(),
+		setModernCommentAuthors: noopDispatch<PptxModernCommentAuthor[]>(),
+		setRecentColors: noopDispatch<string[]>(),
 		setTheme,
 		setTableStyleMap: noopDispatch<ParsedTableStyleMap | undefined>(),
+		setTableStylesDefaultId: noopDispatch<string | undefined>(),
+		setTableStylesToDelete: noopDispatch<string[]>(),
 		setThemeOptions: noopDispatch<PptxThemeOption[]>(),
 		setCustomShows: noopDispatch<PptxCustomShow[]>(),
+		setActiveCustomShowId: noopDispatch<string | null>(),
 		setSections: noopDispatch<PptxSection[]>(),
 		setPresentationProperties: noopDispatch<PptxPresentationProperties>(),
+		setViewProperties: noopDispatch<PptxViewProperties | undefined>(),
 		setNotesMaster: noopDispatch<PptxNotesMaster | undefined>(),
 		setHandoutMaster: noopDispatch<PptxHandoutMaster | undefined>(),
 		setNotesCanvasSize: noopDispatch<CanvasSize | undefined>(),
@@ -112,6 +127,9 @@ function Harness({ initial }: { initial: Uint8Array }): React.ReactElement {
 		setHasDigitalSignatures: noopDispatch<boolean>(),
 		setDigitalSignatureCount: noopDispatch<number>(),
 		setGuides: noopDispatch<Array<{ id: string; axis: 'h' | 'v'; position: number }>>(),
+		setReadOnlyRecommendation: noopDispatch<ReadOnlyRecommendation>(),
+		setModifyVerifier: noopDispatch<PptxModifyVerifier | undefined>(),
+		setCompatToasts: noopDispatch<CompatibilityWarningToast[]>(),
 		setLoading: noopDispatch<boolean>(),
 		setError: noopDispatch<string | null>(),
 		setIsDirty: noopDispatch<boolean>(),
@@ -141,6 +159,8 @@ function Harness({ initial }: { initial: Uint8Array }): React.ReactElement {
 		slideMasters: [],
 		history: stubHistory,
 		setSlides,
+		templateElementsBySlideId: {},
+		setTemplateElementsBySlideId: noopDispatch<Record<string, PptxElement[]>>(),
 		theme,
 		bumpHistory: () => {
 			bumpCountRef.current += 1;

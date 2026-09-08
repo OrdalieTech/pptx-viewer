@@ -2,12 +2,15 @@ import type {
 	PptxImageEffects,
 	PptxTableCellStyle,
 	PptxTableData,
+	XmlObject,
 	PptxChartData,
 	MediaPptxElement,
 	ElementAction,
 	SmartArtColorScheme,
 	SmartArtLayoutType,
 	TextStyle,
+	PptxElement,
+	PptxSmartArtData,
 	PptxSmartArtNodeStyle,
 } from 'pptx-viewer-core';
 import {
@@ -27,9 +30,14 @@ import {
 	applyStyleToSelectedSegments,
 	applyUniformCellPaddingPatch,
 	autoFitModePatch,
+	buildOleObjectNamePatch,
+	elementLockTogglePatch,
 	gradientStatePatch,
 	imageAdjustmentsPatch,
 	imageCropPatch,
+	isElementLocked,
+	reflowSmartArtData,
+	remapTextToSegments,
 	removeGradientStopPatch,
 	tableInspectorPatch,
 	textAdvancedPatch,
@@ -41,6 +49,7 @@ import type { GradientState, InlineTextSelection, TextAdvancedChanges } from 'pp
 
 import type { ApplyToSelected } from './editor-apply-to-selected';
 import { patchShapeStyle } from './editor-format-mutations';
+import { currentInlineEditorText } from './inline-text-editor';
 import {
 	mergeTableCellRange,
 	mutateTableStructure,
@@ -61,6 +70,8 @@ import type { TableCellPosition, TableStructureAction } from './table-editor-mut
  * The corresponding panels live under `ui/inspector/`.
  */
 export interface InspectorActions {
+	/** Flip the selected element's lock (writes noMove/noResize; see elementLockTogglePatch). */
+	toggleElementLock(): void;
 	setTextVerticalAlign(vAlign: NonNullable<TextStyle['vAlign']>): void;
 	setTextWrap(wrap: NonNullable<TextStyle['textWrap']>): void;
 	setAutoFitMode(mode: NonNullable<TextStyle['autoFitMode']>): void;
@@ -80,6 +91,12 @@ export interface InspectorActions {
 	setImageCrop(edge: 'left' | 'top' | 'right' | 'bottom', value: number): void;
 	setImageEffects(patch: Partial<PptxImageEffects>): void;
 	setElementAction(trigger: 'click' | 'hover', action: ElementAction): void;
+	/** Set the selection's accessibility description (inspector Alt Text field). */
+	setAltText(text: string): void;
+	/** Set the selection's accessibility title (inspector Title field). */
+	setTitle(text: string): void;
+	/** Set the selected OLE element's Object Name (`p:oleObj/@name`). */
+	setOleName(name: string): void;
 	setChartData(data: PptxChartData): void;
 	setMediaProperties(patch: Partial<MediaPptxElement>): void;
 
@@ -87,6 +104,8 @@ export interface InspectorActions {
 	setTableBandedRows(enabled: boolean): void;
 	setTableCellPadding(padding: number): void;
 	setTableOptions(patch: Partial<PptxTableData>, cellStyle?: Partial<PptxTableCellStyle>): void;
+	/** Replace the selection's whole table data (inspector data grid). */
+	setTableData(data: PptxTableData, rawXml?: XmlObject): void;
 	setTableCellStyle(row: number, column: number, patch: Partial<PptxTableCellStyle>): void;
 	setTableCellStyles(cells: TableCellPosition[], patch: Partial<PptxTableCellStyle>): void;
 	mutateTableStructure(cell: TableCellPosition, action: TableStructureAction): void;
@@ -101,6 +120,7 @@ export interface InspectorActions {
 		nodeId: string,
 		action: 'add' | 'addChild' | 'remove' | 'promote' | 'demote',
 	): void;
+	replaceSmartArtData(data: PptxSmartArtData): void;
 	setSmartArtLayout(layout: SmartArtLayoutType): void;
 	setSmartArtColorScheme(scheme: SmartArtColorScheme): void;
 }
@@ -114,6 +134,10 @@ const CROP_KEY = {
 
 export function createInspectorActions(applyToSelected: ApplyToSelected): InspectorActions {
 	return {
+		// Shared decides both what reads as "locked" and what the toggle writes,
+		// so the button's state can never drift from what the canvas enforces.
+		toggleElementLock: () =>
+			applyToSelected((el) => ({ locks: elementLockTogglePatch(!isElementLocked(el)) })),
 		setTextVerticalAlign: (vAlign) => applyToSelected((el) => vAlignPatch(el, vAlign)),
 		setTextWrap: (wrap) => applyToSelected((el) => textWrapPatch(el, wrap)),
 		setAutoFitMode: (mode) => applyToSelected((el) => autoFitModePatch(el, mode)),
@@ -124,9 +148,20 @@ export function createInspectorActions(applyToSelected: ApplyToSelected): Inspec
 					return {};
 				}
 				if (selection && el.textSegments?.length) {
+					// The inline editor is uncontrolled: reconcile against its live
+					// text (same remap the commit path uses) before slicing by
+					// `selection`, or the style applies to stale pre-keystroke
+					// content and is discarded when the edit session commits. See
+					// `currentInlineEditorText`.
+					const liveText = currentInlineEditorText();
+					const currentSegments =
+						liveText !== undefined
+							? remapTextToSegments(liveText, el.textSegments, el.textStyle)
+							: el.textSegments;
 					return {
-						textSegments: applyStyleToSelectedSegments(el.textSegments, selection, patch)
+						textSegments: applyStyleToSelectedSegments(currentSegments, selection, patch)
 							.newSegments,
+						...(liveText !== undefined ? { text: liveText } : {}),
 					};
 				}
 				return { textStyle: { ...el.textStyle, ...patch } };
@@ -162,6 +197,15 @@ export function createInspectorActions(applyToSelected: ApplyToSelected): Inspec
 			applyToSelected(() => ({
 				[trigger === 'click' ? 'actionClick' : 'actionHover']: elementActionToPptxAction(action),
 			})),
+		// `altText` is a base-element field, so this works for every element type
+		// the accessibility checker can complain about, not just pictures.
+		setAltText: (text) => applyToSelected(() => ({ altText: text })),
+		// `title` similarly applies to every element kind that models it (a plain
+		// shape/text box/connector and every graphic-frame kind); a picture has
+		// no title field, so this is a no-op there (the field is hidden in the UI).
+		setTitle: (text) => applyToSelected(() => ({ title: text })),
+		setOleName: (name) =>
+			applyToSelected((el) => (el.type === 'ole' ? buildOleObjectNamePatch(name) : {})),
 		setChartData: (data) =>
 			applyToSelected((el) => (el.type === 'chart' ? { chartData: data } : {})),
 		setMediaProperties: (patch) => applyToSelected((el) => (el.type === 'media' ? patch : {})),
@@ -193,6 +237,13 @@ export function createInspectorActions(applyToSelected: ApplyToSelected): Inspec
 					},
 				} as Partial<typeof el>;
 			}),
+		// The data grid hands over a complete `tableData` (rows included), which
+		// `setTableOptions` would silently drop: it re-applies the element's
+		// existing rows after merging the patch.
+		setTableData: (data, rawXml) =>
+			applyToSelected((el) =>
+				el.type === 'table' ? { tableData: data, ...(rawXml ? { rawXml } : {}) } : {},
+			),
 		setTableCellStyle: (rowIndex, columnIndex, patch) =>
 			applyToSelected((el) => {
 				if (el.type !== 'table' || !el.tableData?.rows[rowIndex]?.cells[columnIndex]) {
@@ -255,23 +306,15 @@ export function createInspectorActions(applyToSelected: ApplyToSelected): Inspec
 
 		setSmartArtNodeText: (nodeId, text) =>
 			applyToSelected((el) =>
-				el.type === 'smartArt' && el.smartArtData
-					? { smartArtData: updateSmartArtNodeText(el.smartArtData, nodeId, text) }
-					: {},
+				smartArtPatch(el, (data) => updateSmartArtNodeText(data, nodeId, text)),
 			),
 		setSmartArtNodeStyle: (nodeId, patch) =>
 			applyToSelected((el) =>
-				el.type === 'smartArt' && el.smartArtData
-					? { smartArtData: setSmartArtNodeStyle(el.smartArtData, nodeId, patch) }
-					: {},
+				smartArtPatch(el, (data) => setSmartArtNodeStyle(data, nodeId, patch)),
 			),
 		mutateSmartArtNode: (nodeId, action) =>
-			applyToSelected((el) => {
-				if (el.type !== 'smartArt' || !el.smartArtData) {
-					return {};
-				}
-				const data = el.smartArtData;
-				const next =
+			applyToSelected((el) =>
+				smartArtPatch(el, (data) =>
 					action === 'add'
 						? addSmartArtNode(data, 'New item')
 						: action === 'addChild'
@@ -280,20 +323,37 @@ export function createInspectorActions(applyToSelected: ApplyToSelected): Inspec
 								? removeSmartArtNode(data, nodeId)
 								: action === 'promote'
 									? promoteSmartArtNode(data, nodeId)
-									: demoteSmartArtNode(data, nodeId);
-				return { smartArtData: next };
-			}),
+									: demoteSmartArtNode(data, nodeId),
+				),
+			),
+		replaceSmartArtData: (data) => applyToSelected((el) => smartArtPatch(el, () => data)),
 		setSmartArtLayout: (layout) =>
-			applyToSelected((el) =>
-				el.type === 'smartArt' && el.smartArtData
-					? { smartArtData: switchSmartArtLayout(el.smartArtData, layout) }
-					: {},
-			),
+			applyToSelected((el) => smartArtPatch(el, (data) => switchSmartArtLayout(data, layout))),
 		setSmartArtColorScheme: (scheme) =>
-			applyToSelected((el) =>
-				el.type === 'smartArt' && el.smartArtData
-					? { smartArtData: { ...el.smartArtData, colorScheme: scheme } }
-					: {},
-			),
+			applyToSelected((el) => smartArtPatch(el, (data) => ({ ...data, colorScheme: scheme }))),
 	};
+}
+
+/**
+ * Apply a SmartArt data edit to a selected element and reflow the cached
+ * drawing shapes when the edit cleared them.
+ *
+ * Every edit routed through here can clear `drawingShapes` (add / remove /
+ * promote / demote / style / layout switch all do). Without the reflow the
+ * renderer dropped from PowerPoint's cached `dsp` geometry to the crude family
+ * approximation, which is what React has always avoided by calling
+ * `rebuildDrawingShapesIfCleared` at each commit. The reflow is a no-op while
+ * the cached drawing survives an edit (a text edit patches it in place), so the
+ * cached-drawing-wins precedence between the two render paths is unchanged.
+ */
+function smartArtPatch(
+	el: PptxElement,
+	edit: (data: PptxSmartArtData) => PptxSmartArtData,
+): Partial<PptxElement> {
+	if (el.type !== 'smartArt' || !el.smartArtData) {
+		return {};
+	}
+	const next = edit(el.smartArtData);
+	const box = { width: el.width, height: el.height };
+	return { smartArtData: reflowSmartArtData(next, el.id, box) };
 }

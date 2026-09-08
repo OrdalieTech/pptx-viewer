@@ -182,4 +182,116 @@ describe('smartArtView', () => {
 		flushSync();
 		expect(onsmartartnodecommit).toHaveBeenCalledWith('sa-1', 'n1', 'Changed');
 	});
+
+	// G8 (OpenXML parity audit, D3): a:graphicFrameLocks/@noDrilldown was
+	// parsed but never enforced - a node was still double-click editable on a
+	// locked SmartArt.
+	it('does not open the node editor on double-click when noDrilldown is set', () => {
+		const onsmartartnodecommit = vi.fn();
+		const locked = { ...drawingShapesElement(), locks: { noDrilldown: true } };
+		const target = mountEl(locked, 3, { interactive: true, onsmartartnodecommit });
+		const group = target.querySelector<SVGGElement>('[data-smartart-node-id="n1"]')!;
+
+		group.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		flushSync();
+		expect(target.querySelector('.pptx-svelte-smartart-editor')).toBeNull();
+	});
+});
+
+// Regression: `colorsDef @meth="span"` ("Colorful Range" quick styles) was
+// parsed into `colorTransform.fillInterpolation` but never reached the layout
+// engine, so a 2-colour range alternated instead of gradienting. `smartart-view.ts`
+// now goes through the shared `computeSmartArtElementLayout`, which derives the
+// interpolation from `smartArtData.colorTransform` itself.
+describe('smartArtView colour interpolation (colorsDef @meth="span")', () => {
+	it('gradients a 2-colour "Colorful Range" scheme across all nodes', () => {
+		const element: PptxElement = {
+			type: 'smartArt',
+			id: 'sa-span',
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			smartArtData: {
+				nodes: [
+					{ id: 'n1', text: 'A' },
+					{ id: 'n2', text: 'B' },
+					{ id: 'n3', text: 'C' },
+					{ id: 'n4', text: 'D' },
+					{ id: 'n5', text: 'E' },
+				],
+				colorTransform: {
+					fillColors: ['#000000', '#ffffff'],
+					lineColors: [],
+					fillInterpolation: { method: 'span' },
+				},
+			},
+		};
+		const svg = mountEl(element).querySelector('svg.pptx-svelte-smartart-svg');
+		const fills = [...(svg?.querySelectorAll('rect') ?? [])].map((r) => r.getAttribute('fill'));
+		expect(fills).toHaveLength(5);
+		expect(fills[0]).toBe('#000000');
+		expect(fills[4]).toBe('#ffffff');
+		expect(new Set(fills).size).toBe(5);
+	});
+});
+
+/**
+ * The shared layout descriptor's OPTIONAL paint / placement fields. This SFC
+ * used to render every fallback label through a `centeredText` snippet fixed at
+ * `fill="white"`, `text-anchor="middle"` and the node centre, so a target
+ * caption sat on the bullseye and a timeline caption on its dot; connectors
+ * were likewise pinned to the grey default.
+ */
+describe('smartArtView fallback label + connector paint', () => {
+	function fallbackElement(resolvedLayoutType: 'target' | 'timeline' | 'gear'): PptxElement {
+		return {
+			type: 'smartArt',
+			id: 'sa-fb',
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			smartArtData: {
+				nodes: [
+					{ id: 'n1', text: 'One' },
+					{ id: 'n2', text: 'Two' },
+					{ id: 'n3', text: 'Three' },
+				],
+				resolvedLayoutType,
+			},
+		} as PptxElement;
+	}
+
+	function labels(type: 'target' | 'timeline' | 'gear'): SVGTextElement[] {
+		return [...mountEl(fallbackElement(type)).querySelectorAll('svg text')];
+	}
+
+	it('parks a target leader caption beside the ring in the node colour', () => {
+		const label = labels('target')[0]!;
+		// Not the circle centre (cx = 160): the descriptor's textX / textAnchor.
+		expect(label.getAttribute('x')).toBe('310');
+		expect(label.getAttribute('text-anchor')).toBe('start');
+		expect(label.getAttribute('fill')).toBe('#3b82f6');
+		expect(label.querySelector('tspan')?.getAttribute('y')).toBe('13');
+	});
+
+	it('stacks timeline captions above and below the axis', () => {
+		const found = labels('timeline');
+		expect(found[0]!.getAttribute('dominant-baseline')).toBe('auto');
+		expect(found[0]!.querySelector('tspan')?.getAttribute('y')).toBe('110');
+		expect(found[1]!.getAttribute('dominant-baseline')).toBe('hanging');
+		expect(found[1]!.querySelector('tspan')?.getAttribute('y')).toBe('190');
+	});
+
+	it('applies the node text style (gear hubs are bold)', () => {
+		expect(labels('gear')[0]!.getAttribute('font-weight')).toBe('700');
+	});
+
+	it('paints timeline stems in their own node colour, not the default grey', () => {
+		const paths = [...mountEl(fallbackElement('timeline')).querySelectorAll('svg path')];
+		expect(paths[0]!.getAttribute('stroke-width')).toBe('2');
+		expect(paths[0]!.getAttribute('opacity')).toBe('1');
+		expect(paths[1]!.getAttribute('stroke')).toBe('#3b82f6');
+	});
 });

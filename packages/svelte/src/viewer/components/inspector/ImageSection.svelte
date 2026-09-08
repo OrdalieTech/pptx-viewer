@@ -7,6 +7,7 @@
 	 */
 	import type { PptxElement } from 'pptx-viewer-core';
 	import {
+		canInteractWithElement,
 		imageAdjustmentsPatch,
 		imageAdjustmentsStateOf,
 		imageCropPatch,
@@ -23,6 +24,8 @@
 
 	const adjustments = $derived(imageAdjustmentsStateOf(el));
 	const crop = $derived(imageCropStateOf(el));
+	// G7: `a:picLocks/@noCrop` forbids cropping this specific picture.
+	const croppable = $derived(canInteractWithElement(el, 'crop'));
 	const effects = $derived('imageEffects' in el ? el.imageEffects : undefined);
 	function setEffects(next: Record<string, unknown>): void {
 		editor.patchSelected({ imageEffects: { ...effects, ...next } } as Partial<PptxElement>);
@@ -42,6 +45,9 @@
 		editor.patchSelected(imageAdjustmentsPatch(el, { saturation: Number(value) }));
 	}
 	function setCrop(edge: 'cropLeft' | 'cropTop' | 'cropRight' | 'cropBottom', value: string): void {
+		if (!croppable) {
+			return;
+		}
 		const n = Number(value);
 		if (Number.isFinite(n)) {
 			editor.patchSelected(imageCropPatch(el, { [edge]: n / 100 }));
@@ -106,6 +112,7 @@
 			type="number"
 			min="0"
 			max="90"
+			disabled={!croppable}
 			value={Math.round(crop.cropLeft * 100)}
 			onchange={(e) => setCrop('cropLeft', e.currentTarget.value)}
 		/>
@@ -116,6 +123,7 @@
 			type="number"
 			min="0"
 			max="90"
+			disabled={!croppable}
 			value={Math.round(crop.cropTop * 100)}
 			onchange={(e) => setCrop('cropTop', e.currentTarget.value)}
 		/>
@@ -126,6 +134,7 @@
 			type="number"
 			min="0"
 			max="90"
+			disabled={!croppable}
 			value={Math.round(crop.cropRight * 100)}
 			onchange={(e) => setCrop('cropRight', e.currentTarget.value)}
 		/>
@@ -136,18 +145,19 @@
 			type="number"
 			min="0"
 			max="90"
+			disabled={!croppable}
 			value={Math.round(crop.cropBottom * 100)}
 			onchange={(e) => setCrop('cropBottom', e.currentTarget.value)}
 		/>
 	</label>
 </div>
 
-<label class="pptx-svelte-field"><span>{t('pptx.image.artisticEffects')}</span><select value={effects?.artisticEffect ?? 'none'} onchange={(e) => setEffects({ artisticEffect: e.currentTarget.value === 'none' ? undefined : e.currentTarget.value })}>{#each ARTISTIC_EFFECTS as preset}<option value={preset[0]}>{t(preset[1])}</option>{/each}</select></label>
+<label class="pptx-svelte-field"><span>{t('pptx.image.artisticEffects')}</span><select aria-label={t('pptx.image.artisticEffects')} value={effects?.artisticEffect ?? 'none'} onchange={(e) => setEffects({ artisticEffect: e.currentTarget.value === 'none' ? undefined : e.currentTarget.value })}>{#each ARTISTIC_EFFECTS as preset}<option value={preset[0]}>{t(preset[1])}</option>{/each}</select></label>
 <div class="pptx-svelte-duotone"><span>{t('pptx.image.duotone')}</span>{#each DUOTONE_PRESETS as preset}<button type="button" title={t(preset.labelKey)} style={`--shadow:${preset.shadow};--highlight:${preset.highlight}`} onclick={() => setEffects({ duotone: { color1: preset.shadow, color2: preset.highlight } })}></button>{/each}<button type="button" title={t('pptx.image.duotoneClear')} onclick={() => setEffects({ duotone: undefined })}>×</button></div>
 <label class="pptx-svelte-field"><span>Transparency {100 - (effects?.alphaModFix ?? 100)}%</span><input type="range" min="0" max="100" value={100 - (effects?.alphaModFix ?? 100)} oninput={(event) => setEffects({ alphaModFix: 100 - Number(event.currentTarget.value) })} /></label>
 <label class="pptx-svelte-field"><span>Bi-level threshold {effects?.biLevel ?? 0}%</span><input type="range" min="0" max="100" value={effects?.biLevel ?? 0} oninput={(event) => setEffects({ biLevel: Number(event.currentTarget.value) || undefined })} /></label>
 <label class="pptx-svelte-field-checkbox"><input type="checkbox" checked={Boolean(effects?.colorWash)} onchange={(event) => setEffects({ colorWash: event.currentTarget.checked ? { color: '#0066cc', opacity: 40 } : undefined })} /><span>Color wash</span></label>
-{#if effects?.colorWash}<div class="pptx-svelte-inspector-grid"><label><span>Wash color</span><input type="color" value={effects.colorWash.color} onchange={(event) => setEffects({ colorWash: { ...effects.colorWash, color: event.currentTarget.value } })} /></label><label><span>Wash opacity</span><input type="number" min="0" max="100" value={effects.colorWash.opacity ?? 40} onchange={(event) => setEffects({ colorWash: { ...effects.colorWash, opacity: Number(event.currentTarget.value) } })} /></label></div>{/if}
+{#if effects?.colorWash}<div class="pptx-svelte-inspector-grid"><label><span>Wash color</span><input type="color" value={effects.colorWash.color} onchange={(event) => { setEffects({ colorWash: { ...effects.colorWash, color: event.currentTarget.value } }); editor.recordRecentColor(event.currentTarget.value); }} /></label><label><span>Wash opacity</span><input type="number" min="0" max="100" value={effects.colorWash.opacity ?? 40} onchange={(event) => setEffects({ colorWash: { ...effects.colorWash, opacity: Number(event.currentTarget.value) } })} /></label></div>{/if}
 
 <style>
 	.pptx-svelte-field {

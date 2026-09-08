@@ -1,9 +1,11 @@
 import type { MediaPptxElement } from 'pptx-viewer-core';
+import {
+	mediaPlaybackAttributes,
+	registerCrossSlideAudio,
+	scheduleMediaTrimAndFade,
+} from 'pptx-viewer-shared';
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-
-import { registerMediaElement } from './media-element-registry';
-import { registerPersistentAudio } from './media-persistent-audio';
 
 // ---------------------------------------------------------------------------
 // PresentationMediaController: manages trim, fade, volume at runtime
@@ -20,6 +22,14 @@ interface PresentationMediaControllerProps {
 	 * on this to actually start playback for media inserted without the flag.
 	 */
 	shouldAutoPlay: boolean;
+	/**
+	 * The resolved media source the inline element renders with:
+	 * `element.mediaData` or the `mediaDataUrls` lookup by `element.mediaPath`
+	 * (see `renderMediaElement`). The play-across-slides branch registers the
+	 * persistent audio with this, so audio whose bytes live in the map (not on
+	 * the element) still survives slide unmount.
+	 */
+	resolvedDataUrl?: string;
 	/** Whether this media is in full-screen overlay mode. */
 	isFullScreen: boolean;
 	/** Callback fired when media play/pause state changes. */
@@ -35,62 +45,43 @@ export function PresentationMediaController({
 	element,
 	isPresentationMode,
 	shouldAutoPlay,
+	resolvedDataUrl,
 	isFullScreen,
 	onPlayStateChange,
 	children,
 }: PresentationMediaControllerProps): React.ReactElement {
 	const { t } = useTranslation();
 	const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
-	const fadeTimerRef = useRef<number | null>(null);
-	const trimTimerRef = useRef<number | null>(null);
 	const [isMediaPlaying, setIsMediaPlaying] = useState(false);
 
-	const volume = element.volume ?? 1;
-	const fadeIn = element.fadeInDuration ?? 0;
-	const fadeOut = element.fadeOutDuration ?? 0;
 	const trimStartSec = element.trimStartMs !== undefined ? element.trimStartMs / 1000 : 0;
-	const trimEndSec =
-		element.trimEndMs !== undefined && element.trimEndMs > 0 ? element.trimEndMs / 1000 : 0;
 	const hideWhenNotPlaying = isPresentationMode && element.hideWhenNotPlaying === true;
 
-	// Cleanup timers
-	useEffect(() => {
-		return () => {
-			if (fadeTimerRef.current !== null) {
-				cancelAnimationFrame(fadeTimerRef.current);
-			}
-			if (trimTimerRef.current !== null) {
-				window.clearTimeout(trimTimerRef.current);
-			}
-		};
-	}, []);
-
-	// Register the media node so `p:cmd` command steps in the animation timeline
-	// can drive it (play/pause/seek) by the owning element id.
-	useEffect(() => {
-		const el = mediaRef.current;
-		if (!el) {
-			return;
-		}
-		return registerMediaElement(element.id, el);
-	}, [element.id]);
+	// The clamps that turn authored playback settings into DOM values live in
+	// shared, so all five bindings agree on what `vol="0"` or a 10x rate means.
+	// `loop` is declarative here (the <video>/<audio> `loop` prop, from
+	// `element.loop`), so only the two IDL-only properties are applied by hand.
+	const { volume: playbackVolume, playbackRate } = mediaPlaybackAttributes({
+		loop: element.loop,
+		volume: element.volume,
+		playbackSpeed: element.playbackSpeed,
+	});
 
 	// Apply volume
 	useEffect(() => {
 		const el = mediaRef.current;
 		if (el) {
-			el.volume = Math.max(0, Math.min(1, volume));
+			el.volume = playbackVolume;
 		}
-	}, [volume]);
+	}, [playbackVolume]);
 
 	// Apply playback speed
-	const playbackSpeed = element.playbackSpeed ?? 1;
 	useEffect(() => {
 		const el = mediaRef.current;
 		if (el) {
-			el.playbackRate = Math.max(0.25, Math.min(4, playbackSpeed));
+			el.playbackRate = playbackRate;
 		}
-	}, [playbackSpeed]);
+	}, [playbackRate]);
 
 	// Track play/pause state and notify parent
 	useEffect(() => {
@@ -120,109 +111,30 @@ export function PresentationMediaController({
 		};
 	}, [onPlayStateChange]);
 
-	// Fade-in effect
-	const applyFadeIn = useCallback((): void => {
-		const el = mediaRef.current;
-		if (!el || fadeIn <= 0) {
-			return;
-		}
-
-		const startTime = performance.now();
-		const durationMs = fadeIn * 1000;
-		el.volume = 0;
-
-		const tick = (): void => {
-			const elapsed = performance.now() - startTime;
-			const progress = Math.min(1, elapsed / durationMs);
-			el.volume = progress * volume;
-			if (progress < 1) {
-				fadeTimerRef.current = requestAnimationFrame(tick);
-			}
-		};
-		fadeTimerRef.current = requestAnimationFrame(tick);
-	}, [fadeIn, volume]);
-
-	// Trim enforcement + fade-out scheduling
-	const handlePlay = useCallback((): void => {
+	// Trim-end stop + fade in/out (G20): shared with the other four bindings so
+	// a trimmed/faded clip behaves identically everywhere, not just here. Only
+	// active in presentation mode, matching the previous React-only behaviour;
+	// re-schedules whenever the authored trim/fade/volume settings change.
+	useEffect(() => {
 		const el = mediaRef.current;
 		if (!el || !isPresentationMode) {
 			return;
 		}
-
-		// Apply trim start
-		if (trimStartSec > 0 && el.currentTime < trimStartSec) {
-			el.currentTime = trimStartSec;
-		}
-
-		// Apply fade-in
-		if (fadeIn > 0) {
-			applyFadeIn();
-		}
-
-		// Schedule trim-end stop + fade-out
-		if (trimEndSec > 0) {
-			const remaining = trimEndSec - el.currentTime;
-			if (remaining > 0) {
-				// Schedule fade-out before trim end
-				const fadeOutStart = Math.max(0, (remaining - fadeOut) * 1000);
-				if (fadeOut > 0) {
-					trimTimerRef.current = window.setTimeout(() => {
-						const fadeStartTime = performance.now();
-						const fadeMs = fadeOut * 1000;
-						const startVol = el.volume;
-						const fadeOutTick = (): void => {
-							const elapsed = performance.now() - fadeStartTime;
-							const progress = Math.min(1, elapsed / fadeMs);
-							el.volume = startVol * (1 - progress);
-							if (progress < 1 && !el.paused) {
-								fadeTimerRef.current = requestAnimationFrame(fadeOutTick);
-							}
-						};
-						fadeTimerRef.current = requestAnimationFrame(fadeOutTick);
-					}, fadeOutStart);
-				}
-
-				// Stop at trim end
-				const stopTimer = window.setTimeout(() => {
-					if (!el.paused) {
-						el.pause();
-						el.currentTime = trimEndSec;
-					}
-				}, remaining * 1000);
-
-				// Store for cleanup
-				const prevTimer = trimTimerRef.current;
-				trimTimerRef.current = stopTimer;
-				if (prevTimer !== null) {
-					window.clearTimeout(prevTimer);
-				}
-			}
-		} else if (fadeOut > 0) {
-			// No trim end but has fade-out; listen for near-end
-			const handleTimeUpdate = (): void => {
-				if (!Number.isFinite(el.duration)) {
-					return;
-				}
-				const timeLeft = el.duration - el.currentTime;
-				if (timeLeft <= fadeOut && timeLeft > 0) {
-					el.removeEventListener('timeupdate', handleTimeUpdate);
-					const fadeStartTime = performance.now();
-					const fadeMs = timeLeft * 1000;
-					const startVol = el.volume;
-					const fadeOutTick = (): void => {
-						const elapsed = performance.now() - fadeStartTime;
-						const progress = Math.min(1, elapsed / fadeMs);
-						el.volume = startVol * (1 - progress);
-						if (progress < 1 && !el.paused) {
-							fadeTimerRef.current = requestAnimationFrame(fadeOutTick);
-						}
-					};
-					fadeTimerRef.current = requestAnimationFrame(fadeOutTick);
-				}
-			};
-			el.addEventListener('timeupdate', handleTimeUpdate);
-		}
-	}, [applyFadeIn, fadeIn, fadeOut, isPresentationMode, trimEndSec, trimStartSec]);
+		return scheduleMediaTrimAndFade(el, {
+			trimStartMs: element.trimStartMs,
+			trimEndMs: element.trimEndMs,
+			fadeInDuration: element.fadeInDuration,
+			fadeOutDuration: element.fadeOutDuration,
+			volume: playbackVolume,
+		});
+	}, [
+		isPresentationMode,
+		element.trimStartMs,
+		element.trimEndMs,
+		element.fadeInDuration,
+		element.fadeOutDuration,
+		playbackVolume,
+	]);
 
 	// Auto-play in presentation mode
 	useEffect(() => {
@@ -232,25 +144,17 @@ export function PresentationMediaController({
 
 		// Play-across-slides: register with persistent manager so audio
 		// survives slide unmount. The media element in the slide is hidden;
-		// a detached <audio> plays instead.
+		// a detached <audio> plays instead. The source is resolved exactly like
+		// the inline path's src: element bytes first, then the caller's
+		// mediaDataUrls lookup (passed in as `resolvedDataUrl`).
 		if (element.playAcrossSlides && element.mediaType === 'audio') {
-			const dataUrl =
-				element.mediaData ??
-				(element.mediaPath
-					? undefined // resolved later when rendering
-					: undefined);
-			if (dataUrl) {
-				registerPersistentAudio(
-					element.id,
-					dataUrl,
-					element.mediaMimeType,
-					element.loop === true,
-					volume,
-					trimStartSec,
-				);
+			const dataUrl = element.mediaData ?? resolvedDataUrl;
+			if (registerCrossSlideAudio(element, dataUrl)) {
+				// The detached persistent element plays; don't also play inline.
+				return;
 			}
-			// Don't also play the inline element
-			return;
+			// No source resolved: fall through so the inline element at least
+			// plays on this slide instead of the audio being silently dropped.
 		}
 
 		const el = mediaRef.current;
@@ -268,19 +172,7 @@ export function PresentationMediaController({
 			});
 		}, 100);
 		return () => window.clearTimeout(timer);
-	}, [
-		isPresentationMode,
-		shouldAutoPlay,
-		element.playAcrossSlides,
-		element.mediaType,
-		element.mediaData,
-		element.mediaPath,
-		element.mediaMimeType,
-		element.loop,
-		element.id,
-		trimStartSec,
-		volume,
-	]);
+	}, [isPresentationMode, shouldAutoPlay, element, resolvedDataUrl, trimStartSec]);
 
 	const wrapperStyle: React.CSSProperties = hideWhenNotPlaying
 		? {
@@ -297,9 +189,14 @@ export function PresentationMediaController({
 		}
 	}, []);
 
+	// Trim/fade scheduling is now driven entirely by the DOM `play` listener
+	// `scheduleMediaTrimAndFade` attaches above, not this render prop; kept in
+	// the `children` contract (stable no-op) so callers do not need to change.
+	const noopOnPlay = useCallback((): void => {}, []);
+
 	return (
 		<div className='w-full h-full' style={wrapperStyle}>
-			{children({ mediaRef, onPlay: handlePlay, isMediaPlaying })}
+			{children({ mediaRef, onPlay: noopOnPlay, isMediaPlaying })}
 			{/* Subtle close/stop button for full-screen media overlay */}
 			{isFullScreen && isPresentationMode && isMediaPlaying && (
 				<button

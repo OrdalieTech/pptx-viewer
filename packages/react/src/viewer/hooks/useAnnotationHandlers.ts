@@ -7,6 +7,7 @@ import { useCallback, useRef, useState } from 'react';
 
 import type { ViewerMode } from '../types-core';
 import { stopAllPersistentAudio } from '../utils/media';
+import { mayLeaveSlideShow } from './presentation-mode/audience-content-store';
 import type { EditorHistoryResult } from './useEditorHistory';
 import type {
 	AnnotationStroke,
@@ -142,16 +143,23 @@ export function useAnnotationHandlers(input: UseAnnotationHandlersInput): Annota
 	// ── handleSetMode ─────────────────────────────────────────────
 	const handleSetMode = useCallback(
 		(nextMode: ViewerMode) => {
+			// An audience display mirrors the presenter's screen. Every exit path
+			// (Escape, the toolbar, the end-of-show advance) is refused there so the
+			// editing chrome can never appear in front of the room.
+			if (mode === 'present' && nextMode !== 'present' && !mayLeaveSlideShow()) {
+				return;
+			}
 			if (nextMode === 'present') {
 				presentation.enterPresentMode();
 			} else if (mode === 'present' && annotations.hasAnyAnnotations) {
 				stopAllPersistentAudio();
-				pendingModeAfterAnnotationsRef.current = nextMode;
 				if (promptKeepInkAnnotations) {
+					pendingModeAfterAnnotationsRef.current = nextMode;
 					setShowKeepAnnotationsDialog(true);
 				} else {
-					// Option off: keep the ink silently, no dialog.
-					handleKeepAnnotations();
+					// Option off: discard the ink silently, no dialog (PowerPoint parity).
+					annotations.clearAllAnnotations();
+					setMode(nextMode);
 				}
 			} else {
 				if (mode === 'present') {
@@ -160,14 +168,7 @@ export function useAnnotationHandlers(input: UseAnnotationHandlersInput): Annota
 				setMode(nextMode);
 			}
 		},
-		[
-			presentation,
-			mode,
-			annotations.hasAnyAnnotations,
-			promptKeepInkAnnotations,
-			handleKeepAnnotations,
-			setMode,
-		],
+		[presentation, mode, annotations, promptKeepInkAnnotations, setMode],
 	);
 
 	// ── Discard annotations ───────────────────────────────────────

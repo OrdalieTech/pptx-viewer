@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ChevronDown, ChevronRight } from 'lucide-vue-next';
-import type { PptxSlide } from 'pptx-viewer-core';
+import type { PptxSlide, PptxTextStyleLevels } from 'pptx-viewer-core';
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
@@ -46,6 +46,22 @@ const props = defineProps<{
 	 * Notes button and the header chevron stay in sync.
 	 */
 	expanded?: boolean;
+	/**
+	 * True when hosted inside a chrome that already renders its own title +
+	 * close button (the mobile `MobileSheet`). Suppresses the internal
+	 * collapsible header, since the sheet is already fully open and provides
+	 * its own close affordance - avoids a mismatched "Notes" / "Speaker Notes"
+	 * double header on mobile.
+	 */
+	embedded?: boolean;
+	/**
+	 * The deck's notes master `<p:notesStyle>` (`PptxData.notesMaster.
+	 * notesStyle`), when the host has it loaded. Its level-0 font/colour/indent
+	 * defaults fill in any gap left by a segment that does not already carry an
+	 * explicit value, so an authored deck's notes-text defaults reach this
+	 * editor and the printed notes pages instead of a hardcoded look.
+	 */
+	notesStyle?: PptxTextStyleLevels;
 }>();
 
 const emit = defineEmits<{
@@ -77,6 +93,7 @@ const {
 } = useNotesEditor(
 	() => props.slide,
 	(notes) => emit('update', notes),
+	() => props.notesStyle,
 );
 
 /**
@@ -98,6 +115,7 @@ function toggle(): void {
 		:data-collapsed="collapsed"
 	>
 		<button
+			v-if="!embedded"
 			type="button"
 			class="pptx-vue-notes-header flex w-full items-center justify-between px-3 py-2 text-left text-[0.8125rem] font-semibold text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground"
 			:aria-expanded="!collapsed"

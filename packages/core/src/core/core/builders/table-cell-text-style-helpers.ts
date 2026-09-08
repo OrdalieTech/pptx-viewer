@@ -116,7 +116,7 @@ function applyRunProperties(
 		hasStyle = true;
 	}
 	if (runProperties['@_sz']) {
-		style.fontSize = Math.round(parseInt(String(runProperties['@_sz']), 10) / 100);
+		style.fontSize = parseInt(String(runProperties['@_sz']), 10) / 100;
 		hasStyle = true;
 	}
 	if (runProperties['a:solidFill']) {
@@ -124,6 +124,20 @@ function applyRunProperties(
 		if (textColor) {
 			style.color = textColor;
 			hasStyle = true;
+		}
+	}
+	// `a:rPr/a:latin@typeface` (with `a:ea` / `a:cs` as fallbacks) is the run's
+	// font. Without it a cell that names an explicit face rendered in the
+	// binding's default stack, so a deck whose tables use a display face for
+	// headers looked wrong everywhere.
+	for (const key of ['a:latin', 'a:ea', 'a:cs'] as const) {
+		const typeface = String(
+			(runProperties[key] as XmlObject | undefined)?.['@_typeface'] ?? '',
+		).trim();
+		if (typeface) {
+			style.fontFamily = typeface;
+			hasStyle = true;
+			break;
 		}
 	}
 

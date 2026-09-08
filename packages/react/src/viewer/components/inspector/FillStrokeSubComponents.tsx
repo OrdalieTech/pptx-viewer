@@ -1,31 +1,44 @@
-import type { ShapeStyle } from 'pptx-viewer-core';
+import type { PptxThemeColorRef } from 'pptx-viewer-core';
+import { OFFICE_COLOR_SWATCHES } from 'pptx-viewer-shared';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { LuPipette } from 'react-icons/lu';
 
-import { THEME_COLOR_SWATCHES } from '../../constants';
 import { normalizeHexColor, openNativeEyeDropper } from '../../utils';
-import type { EffectToggleCfg } from './fill-stroke-effect-configs';
-import { SEL, NUM, RNG, SWATCH, DIS, LBL, COL2, safeNum } from './FillStrokeHelpers';
+import { SEL, RNG, SWATCH, DIS, LBL, COL2 } from './FillStrokeHelpers';
 import type { GradientStop } from './FillStrokeHelpers';
+import { useRecentColors } from './RecentColorsContext';
+import { RecentColorsRow } from './RecentColorsRow';
+import { ThemeColorSwatchGrid } from './ThemeColorSwatchGrid';
 
 // ---------------------------------------------------------------------------
 // SelectRow
 // ---------------------------------------------------------------------------
 
 /** Render a simple <select> row. */
-export const SelectRow: React.FC<{
+export function SelectRow({
+	label,
+	value,
+	span2,
+	options,
+	onChange,
+}: {
 	label: string;
 	value: string;
 	span2?: boolean;
-	options: Array<{ value: string; label: string; i18nKey?: string }>;
+	options: readonly { value: string; label: string; i18nKey?: string }[];
 	onChange: (v: string) => void;
-}> = ({ label, value, span2, options, onChange }) => {
+}): React.ReactElement {
 	const { t } = useTranslation();
 	return (
 		<label className={`flex flex-col gap-1 ${span2 ? COL2 : ''}`}>
 			<span className={LBL}>{label}</span>
-			<select value={value} onChange={(e) => onChange(e.target.value)} className={SEL}>
+			<select
+				aria-label={label}
+				value={value}
+				onChange={(e) => onChange(e.target.value)}
+				className={SEL}
+			>
 				{options.map((o) => (
 					<option key={o.value} value={o.value}>
 						{o.i18nKey ? t(o.i18nKey) : o.label}
@@ -34,26 +47,55 @@ export const SelectRow: React.FC<{
 			</select>
 		</label>
 	);
-};
+}
 
 // ---------------------------------------------------------------------------
 // ColorPickerRow
 // ---------------------------------------------------------------------------
 
-/** Color picker + theme swatches + recent colors + eyedropper. */
-export const ColorPickerRow: React.FC<{
+/**
+ * Color picker + theme colours + standard colours + recent colors + eyedropper.
+ *
+ * The recent-colours row is sourced from {@link useRecentColors} (context),
+ * not a prop: every caller used to have to thread its own `recentColors`
+ * array down from the loaded deck, and one of the two calls (the fill
+ * colour's own row) simply never did, so its row silently rendered nothing.
+ * Every commit here (typed colour, theme swatch, standard swatch, recent
+ * swatch, eyedropper) also pushes the resolved hex back into that same
+ * shared list.
+ *
+ * Clicking a {@link ThemeColorSwatchGrid} swatch commits BOTH the resolved
+ * hex and its `PptxThemeColorRef`, so the colour keeps following the theme
+ * after a later theme change; every other commit path (native picker,
+ * standard swatch, recent swatch, eyedropper) clears the ref, since none of
+ * those carry a theme identity.
+ */
+export function ColorPickerRow({
+	label,
+	value,
+	selectedRef,
+	disabled,
+	prefix,
+	onChange,
+}: {
 	label: string;
 	value: string;
+	/** The element's current theme ref, if any (highlights the matching theme swatch). */
+	selectedRef?: PptxThemeColorRef;
 	disabled?: boolean;
 	prefix: string;
-	recentColors?: string[];
-	onChange: (c: string) => void;
-}> = ({ label, value, disabled, prefix, recentColors, onChange }) => {
+	onChange: (c: string, ref?: PptxThemeColorRef) => void;
+}): React.ReactElement {
 	const { t } = useTranslation();
+	const { pushColor } = useRecentColors();
+	const commit = (color: string, ref?: PptxThemeColorRef): void => {
+		onChange(color, ref);
+		pushColor(color);
+	};
 	const handleEyedropper = async (): Promise<void> => {
 		const color = await openNativeEyeDropper();
 		if (color) {
-			onChange(color);
+			commit(color);
 		}
 	};
 
@@ -65,7 +107,7 @@ export const ColorPickerRow: React.FC<{
 					type='color'
 					value={value}
 					disabled={disabled}
-					onChange={(e) => onChange(e.target.value)}
+					onChange={(e) => commit(e.target.value)}
 					className={`h-8 flex-1 ${SEL} px-1 ${DIS}`}
 				/>
 				<button
@@ -81,50 +123,63 @@ export const ColorPickerRow: React.FC<{
 					<LuPipette className='w-3.5 h-3.5' />
 				</button>
 			</div>
-			<div className='mt-1 flex flex-wrap gap-1'>
-				{THEME_COLOR_SWATCHES.map((c) => (
-					<button
-						key={`${prefix}-theme-${c}`}
-						type='button'
-						className={`${SWATCH} ${DIS}`}
-						style={{ backgroundColor: c }}
-						title={`${label} ${c}`}
-						aria-label={`${label} ${c}`}
-						data-pptx-compact
-						disabled={disabled}
-						onClick={() => onChange(c)}
-					/>
-				))}
-				{recentColors?.map((c) => (
-					<button
-						key={`${prefix}-recent-${c}`}
-						type='button'
-						data-pptx-compact
-						className='h-4 w-4 rounded border border-primary'
-						style={{ backgroundColor: c }}
-						title={`Recent ${c}`}
-						aria-label={`Recent ${c}`}
-						onClick={() => onChange(c)}
-					/>
-				))}
+			<ThemeColorSwatchGrid
+				prefix={prefix}
+				disabled={disabled}
+				selectedRef={selectedRef}
+				selectedHex={value}
+				onPick={(c) => commit(c.hex, c.ref)}
+			/>
+			<div className='mt-1'>
+				<div className='text-[10px] text-muted-foreground mb-1'>
+					{t('pptx.colorPicker.standardColors')}
+				</div>
+				<div className='flex flex-wrap gap-1'>
+					{OFFICE_COLOR_SWATCHES.map((c) => (
+						<button
+							key={`${prefix}-standard-${c.hex}`}
+							type='button'
+							className={`${SWATCH} ${DIS}`}
+							style={{ backgroundColor: c.hex }}
+							title={`${label} ${c.label}`}
+							aria-label={`${label} ${c.label}`}
+							data-pptx-compact
+							disabled={disabled}
+							onClick={() => commit(c.hex)}
+						/>
+					))}
+				</div>
 			</div>
+			<RecentColorsRow prefix={prefix} disabled={disabled} onCommit={commit} />
 		</label>
 	);
-};
+}
 
 // ---------------------------------------------------------------------------
 // GradientStopRow
 // ---------------------------------------------------------------------------
 
-/** A single gradient stop row. */
-export const GradientStopRow: React.FC<{
+/**
+ * A single gradient stop row. The theme colour grid sits below the native
+ * colour input, same "swatch commits hex + ref, native input clears it"
+ * contract as {@link ColorPickerRow}: picking a theme swatch keeps this stop
+ * following the deck's theme after a later theme change.
+ */
+export function GradientStopRow({
+	stop,
+	index,
+	total,
+	onUpdate,
+	allStops,
+}: {
 	stop: GradientStop;
 	index: number;
 	total: number;
 	onUpdate: (stops: GradientStop[]) => void;
 	allStops: GradientStop[];
-}> = ({ stop, index, total, onUpdate, allStops }) => {
+}): React.ReactElement {
 	const { t } = useTranslation();
+	const { pushColor } = useRecentColors();
 	const patchStop = (patch: Partial<GradientStop>): void => {
 		const next = allStops.map((s, i) => (i === index ? { ...s, ...patch } : s));
 		onUpdate(next);
@@ -135,7 +190,11 @@ export const GradientStopRow: React.FC<{
 				<input
 					type='color'
 					value={normalizeHexColor(stop.color, '#3b82f6')}
-					onChange={(e) => patchStop({ color: normalizeHexColor(e.target.value, '#3b82f6') })}
+					onChange={(e) => {
+						const hex = normalizeHexColor(e.target.value, '#3b82f6');
+						patchStop({ color: hex, colorRef: undefined });
+						pushColor(hex);
+					}}
 					className='h-7 w-10 rounded border border-border bg-muted'
 				/>
 				<input
@@ -155,6 +214,15 @@ export const GradientStopRow: React.FC<{
 					{t('pptx.comments.remove')}
 				</button>
 			</div>
+			<ThemeColorSwatchGrid
+				prefix={`gradient-stop-${index}`}
+				selectedRef={stop.colorRef}
+				selectedHex={stop.color}
+				onPick={(c) => {
+					patchStop({ color: c.hex, colorRef: c.ref });
+					pushColor(c.hex);
+				}}
+			/>
 			<div className='grid grid-cols-[auto,1fr,auto] items-center gap-2 pl-1'>
 				<span className='text-[10px] text-muted-foreground w-10 text-center'>Opacity</span>
 				<input
@@ -171,109 +239,8 @@ export const GradientStopRow: React.FC<{
 			</div>
 		</div>
 	);
-};
+}
 
-// ---------------------------------------------------------------------------
-// EffectField
-// ---------------------------------------------------------------------------
-
-/** Render fields for a togglable effect (shadow, glow, etc.). */
-export const EffectField: React.FC<{
-	field: EffectToggleCfg['fields'][number];
-	style: ShapeStyle | undefined;
-	onUpdate: (u: Partial<ShapeStyle>) => void;
-}> = ({ field, style, onUpdate }) => {
-	const { t } = useTranslation();
-	const fieldLabel = field.i18nKey ? t(field.i18nKey) : field.label;
-	const val = field.read(style);
-	const cls = `flex flex-col gap-1 ${field.span2 ? COL2 : ''}`;
-	if (field.type === 'select' && field.options) {
-		return (
-			<label className={cls}>
-				<span className={LBL}>{fieldLabel}</span>
-				<select
-					value={String(val)}
-					onChange={(e) => {
-						const result = field.write(e.target.value, style);
-						onUpdate(typeof result === 'function' ? result(style) : result);
-					}}
-					className={SEL}
-				>
-					{field.options.map((o) => (
-						<option key={o.value} value={o.value}>
-							{o.label}
-						</option>
-					))}
-				</select>
-			</label>
-		);
-	}
-	if (field.type === 'color') {
-		return (
-			<label className={cls}>
-				<span className={LBL}>{fieldLabel}</span>
-				<input
-					type='color'
-					value={String(val)}
-					onChange={(e) => {
-						const result = field.write(e.target.value, style);
-						onUpdate(typeof result === 'function' ? result(style) : result);
-					}}
-					className={`h-8 ${SEL} px-1`}
-				/>
-			</label>
-		);
-	}
-	if (field.type === 'checkbox') {
-		return (
-			<label className={`flex items-center gap-2 ${field.span2 ? COL2 : ''}`}>
-				<input
-					type='checkbox'
-					checked={Boolean(val)}
-					onChange={(e) => {
-						const result = field.write(e.target.checked, style);
-						onUpdate(typeof result === 'function' ? result(style) : result);
-					}}
-					className='h-4 w-4'
-				/>
-				<span className={LBL}>{fieldLabel}</span>
-			</label>
-		);
-	}
-	if (field.type === 'range') {
-		return (
-			<label className={cls}>
-				<span className={LBL}>{fieldLabel}</span>
-				<input
-					type='range'
-					min={field.min ?? 0}
-					max={field.max ?? 100}
-					value={Number(val)}
-					onChange={(e) => {
-						const result = field.write(Number(e.target.value), style);
-						onUpdate(typeof result === 'function' ? result(style) : result);
-					}}
-					className={RNG}
-				/>
-			</label>
-		);
-	}
-	return (
-		<label className={cls}>
-			<span className={LBL}>{fieldLabel}</span>
-			<input
-				type='number'
-				min={field.min}
-				max={field.max}
-				step={field.step}
-				value={Number(val)}
-				onChange={(e) => {
-					const n = safeNum(e.target.value, Number(val));
-					const result = field.write(n, style);
-					onUpdate(typeof result === 'function' ? result(style) : result);
-				}}
-				className={NUM}
-			/>
-		</label>
-	);
-};
+// EffectField was extracted to `./EffectField` to keep this file inside the
+// per-file line budget; re-exported here so existing imports keep working.
+export { EffectField } from './EffectField';

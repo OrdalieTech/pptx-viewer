@@ -33,7 +33,16 @@ function buildSlide(): PptxSlide {
 				width: 200,
 				height: 120,
 				shapeType: 'roundRect',
-				shapeStyle: { fillColor: '#00aa55', strokeColor: '#111111', strokeWidth: 2 },
+				// `lineAlignment: 'in'` pins the CSS border path this fixture's own
+				// "renders shape fill and stroke" test asserts on: the default `ctr`
+				// alignment routes a solid outline through the SVG stroke overlay
+				// instead (see shared `stroke-outline.ts`).
+				shapeStyle: {
+					fillColor: '#00aa55',
+					strokeColor: '#111111',
+					strokeWidth: 2,
+					lineAlignment: 'in',
+				},
 			},
 			{
 				type: 'image',
@@ -101,6 +110,15 @@ describe('renderSlideStage', () => {
 		expect(stage.style.backgroundColor).toBeTruthy();
 	});
 
+	it('publishes its slide size for the shared motion-path keyframes', () => {
+		// The keyframes translate by `calc(var(--pptx-slide-w) * fraction)`; a CSS
+		// `translate(%)` would resolve against the ELEMENT box and barely move a
+		// small shape. Every stage (editing and presentation) has to declare it.
+		const stage = renderStage();
+		expect(stage.style.getPropertyValue('--pptx-slide-w')).toBe('1280px');
+		expect(stage.style.getPropertyValue('--pptx-slide-h')).toBe('720px');
+	});
+
 	it('renders text elements with positioned runs', () => {
 		const stage = renderStage();
 		const text = stage.querySelector<HTMLElement>('[data-element-id="el-text"]');
@@ -109,8 +127,10 @@ describe('renderSlideStage', () => {
 		expect(text?.style.top).toBe('20px');
 		expect(text?.textContent).toContain('Hello world');
 		// The element-level textStyle (bold/size/colour) lands on the text block.
+		// Numeric weight, as React emits: the block style is now built by the
+		// shared `buildTextBlockStyle` that all five bindings render from.
 		const block = text?.querySelector<HTMLElement>('.pptxv-text');
-		expect(block?.style.fontWeight).toBe('bold');
+		expect(block?.style.fontWeight).toBe('700');
 		expect(block?.style.fontSize).toBe('24px');
 	});
 
@@ -197,5 +217,127 @@ describe('renderSlideStage', () => {
 		expect(
 			thumbnail.querySelector('[data-element-id="el-image"]')?.getAttribute('role'),
 		).toBeNull();
+	});
+
+	/**
+	 * `image.ts`'s own `<img>` has always hardcoded `alt=""`, matching every
+	 * other binding's own image renderer (React, Vue, Angular, Svelte all do
+	 * the same): the real accessible name and "Mark as decorative" (G16) state
+	 * belong on the CONTAINER `applyRenderedElementAccessibility` labels, not
+	 * duplicated onto the native `<img>`. This binding's stage used to run a
+	 * hand-rolled subset of that shared pass with no decorative handling at
+	 * all, so a picture's authored alt text reached the container fine but
+	 * "Mark as decorative" never did (`isElementMarkedDecorative` was never
+	 * consulted): a decorative picture stayed announced to assistive tech in
+	 * this binding alone.
+	 */
+	it('reaches the DOM with a picture element own alt text and its decorative flag', () => {
+		const slide = buildSlide();
+		slide.elements = [
+			{
+				type: 'image',
+				id: 'el-alt',
+				x: 0,
+				y: 0,
+				width: 100,
+				height: 100,
+				imageData: PNG_DATA_URL,
+				altText: 'A cat on a mat',
+			},
+			{
+				type: 'image',
+				id: 'el-decorative',
+				x: 0,
+				y: 0,
+				width: 100,
+				height: 100,
+				imageData: PNG_DATA_URL,
+				isDecorative: true,
+			},
+		] as PptxSlide['elements'];
+		const stage = renderSlideStage({
+			document,
+			slide,
+			canvasSize: { width: 1280, height: 720 },
+			mediaDataUrls: new Map<string, string>(),
+			registry: createDefaultRegistry(),
+			t: createTranslator(),
+			interactive: true,
+		});
+
+		const withAlt = stage.querySelector<HTMLElement>('[data-element-id="el-alt"]');
+		expect(withAlt?.getAttribute('aria-label')).toBe('A cat on a mat');
+		expect(withAlt?.getAttribute('aria-hidden')).toBeNull();
+		expect(withAlt?.querySelector('img')?.alt).toBe('');
+
+		const decorative = stage.querySelector<HTMLElement>('[data-element-id="el-decorative"]');
+		expect(decorative?.getAttribute('aria-hidden')).toBe('true');
+	});
+
+	it('announces an action-carrying shape as a button, like React does', () => {
+		const slide = buildSlide();
+		slide.elements = [
+			{
+				type: 'shape',
+				id: 'el-action',
+				x: 0,
+				y: 0,
+				width: 100,
+				height: 40,
+				shapeType: 'roundRect',
+				actionClick: { url: 'https://example.com' },
+			},
+		] as PptxSlide['elements'];
+		const stage = renderSlideStage({
+			document,
+			slide,
+			canvasSize: { width: 1280, height: 720 },
+			mediaDataUrls: new Map<string, string>(),
+			registry: createDefaultRegistry(),
+			t: createTranslator(),
+			interactive: true,
+		});
+		expect(stage.querySelector('[data-element-id="el-action"]')?.getAttribute('role')).toBe(
+			'button',
+		);
+	});
+
+	it('draws a labelled placeholder badge for an ActiveX control', () => {
+		const slide = buildSlide();
+		slide.activeXControls = [{ relId: 'rId9', name: 'CommandButton1' }];
+		const stage = renderStage(slide);
+		const badge = stage.querySelector('.pptxv-activex-overlay-placeholder');
+		expect(badge).not.toBeNull();
+		expect(badge?.textContent).toBe('CommandButton1');
+	});
+
+	it('renders no ActiveX overlay when the slide has no controls', () => {
+		const stage = renderStage(buildSlide());
+		expect(stage.querySelector('.pptxv-activex-overlay')).toBeNull();
+	});
+
+	it('anchors a shadeToTitle gradient on the title placeholder', () => {
+		const gradient = 'linear-gradient(90.00deg, #000000 0%, #ffffff 100%)';
+		const slide: PptxSlide = {
+			id: 'slide-1',
+			rId: 'rId1',
+			slideNumber: 1,
+			backgroundGradient: gradient,
+			backgroundShadeToTitle: true,
+			elements: [
+				{
+					id: 'title-1',
+					type: 'text',
+					x: 0,
+					y: 0,
+					width: 100,
+					height: 50,
+					placeholderType: 'title',
+				},
+			] as PptxSlide['elements'],
+		};
+		const stage = renderStage(slide);
+		expect(stage.style.backgroundImage).not.toContain(gradient);
+		expect(stage.style.backgroundImage).toContain('data:image/svg+xml');
 	});
 });

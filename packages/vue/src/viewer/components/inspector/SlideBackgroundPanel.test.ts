@@ -1,7 +1,9 @@
 import { mount } from '@vue/test-utils';
-import type { PptxSlide } from 'pptx-viewer-core';
-import { describe, it, expect } from 'vitest';
+import type { PptxSlide, PptxSlideMaster } from 'pptx-viewer-core';
+import { describe, it, expect, vi } from 'vitest';
+import { ref } from 'vue';
 
+import { RecentColorsKey } from '../../composables/recent-colors-context';
 import SlideBackgroundPanel from './SlideBackgroundPanel.vue';
 
 function slide(over: Partial<PptxSlide> = {}): PptxSlide {
@@ -48,10 +50,112 @@ describe('slideBackgroundPanel', () => {
 		]);
 	});
 
+	it('hide background graphics checkbox reflects showMasterShapes and toggles it', async () => {
+		const shown = mount(SlideBackgroundPanel, { props: { slide: slide() } });
+		const shownCheckbox = shown.get('input[type="checkbox"]').element as HTMLInputElement;
+		expect(shownCheckbox.checked).toBeFalsy();
+
+		const hidden = mount(SlideBackgroundPanel, {
+			props: { slide: slide({ showMasterShapes: false }) },
+		});
+		const hiddenCheckbox = hidden.get('input[type="checkbox"]').element as HTMLInputElement;
+		expect(hiddenCheckbox.checked).toBeTruthy();
+
+		hiddenCheckbox.checked = false;
+		await hidden.get('input[type="checkbox"]').trigger('change');
+		expect(hidden.emitted('update')?.[0]).toStrictEqual([{ showMasterShapes: true }]);
+	});
+
 	it('disables controls when canEdit is false', () => {
 		const wrapper = mount(SlideBackgroundPanel, {
 			props: { slide: slide(), canEdit: false },
 		});
 		expect((wrapper.get('input[type="color"]').element as HTMLInputElement).disabled).toBeTruthy();
+	});
+
+	it('does not show the template background card outside template-edit mode', () => {
+		const wrapper = mount(SlideBackgroundPanel, {
+			props: { slide: slide({ layoutPath: 'layout1.xml' }) },
+		});
+		expect(wrapper.findAll('input[type="color"]')).toHaveLength(1);
+		expect(wrapper.text()).not.toContain('Layout');
+	});
+
+	it('shows layout and master background rows in template-edit mode', () => {
+		const masters: PptxSlideMaster[] = [
+			{ path: 'master1.xml', name: 'Office Theme', layoutPaths: ['layout1.xml'] },
+		];
+		const wrapper = mount(SlideBackgroundPanel, {
+			props: {
+				slide: slide({ layoutPath: 'layout1.xml', layoutName: 'Title Slide' }),
+				editTemplateMode: true,
+				slideMasters: masters,
+				getTemplateBackgroundColor: () => '#abcdef',
+			},
+		});
+		expect(wrapper.text()).toContain('Title Slide');
+		expect(wrapper.text()).toContain('Office Theme');
+		expect(wrapper.findAll('input[type="color"]')).toHaveLength(3);
+	});
+
+	it('emits set-template-background when a template row colour changes', async () => {
+		const masters: PptxSlideMaster[] = [
+			{ path: 'master1.xml', name: 'Office Theme', layoutPaths: ['layout1.xml'] },
+		];
+		const wrapper = mount(SlideBackgroundPanel, {
+			props: {
+				slide: slide({ layoutPath: 'layout1.xml' }),
+				editTemplateMode: true,
+				slideMasters: masters,
+				getTemplateBackgroundColor: vi.fn(() => undefined),
+			},
+		});
+		const colorInputs = wrapper.findAll('input[type="color"]');
+		const layoutInput = colorInputs[1];
+		(layoutInput.element as HTMLInputElement).value = '#00ff00';
+		await layoutInput.trigger('change');
+		expect(wrapper.emitted('set-template-background')?.[0]).toStrictEqual([
+			'layout1.xml',
+			'#00ff00',
+		]);
+	});
+
+	it('pushes the main background colour onto the injected recent-colours list and offers it back', async () => {
+		const recent = ref<string[]>(['#112233']);
+		const push = (hex: string): void => {
+			recent.value = [hex, ...recent.value.filter((c) => c !== hex)];
+		};
+		const wrapper = mount(SlideBackgroundPanel, {
+			props: { slide: slide() },
+			global: { provide: { [RecentColorsKey as symbol]: { recent, push } } },
+		});
+
+		expect(wrapper.find('[data-testid="pptx-color-recent"]').exists()).toBeTruthy();
+
+		const input = wrapper.get('input[type="color"]');
+		await input.setValue('#00ff00');
+		expect(recent.value[0]).toBe('#00ff00');
+	});
+
+	it('pushes a template-row colour onto the injected recent-colours list too', async () => {
+		const masters: PptxSlideMaster[] = [
+			{ path: 'master1.xml', name: 'Office Theme', layoutPaths: ['layout1.xml'] },
+		];
+		const recent = ref<string[]>([]);
+		const push = (hex: string): void => {
+			recent.value = [hex, ...recent.value.filter((c) => c !== hex)];
+		};
+		const wrapper = mount(SlideBackgroundPanel, {
+			props: {
+				slide: slide({ layoutPath: 'layout1.xml' }),
+				editTemplateMode: true,
+				slideMasters: masters,
+				getTemplateBackgroundColor: vi.fn(() => undefined),
+			},
+			global: { provide: { [RecentColorsKey as symbol]: { recent, push } } },
+		});
+		const layoutInput = wrapper.findAll('input[type="color"]')[1];
+		await layoutInput.setValue('#00ff00');
+		expect(recent.value[0]).toBe('#00ff00');
 	});
 });

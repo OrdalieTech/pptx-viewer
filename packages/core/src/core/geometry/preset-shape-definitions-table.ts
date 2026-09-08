@@ -47,6 +47,8 @@ import { ACTION_BUTTON_PRESET_DEFINITIONS } from './preset-shape-definitions-act
 import { ARROW_CALLOUT_PRESET_DEFINITIONS } from './preset-shape-definitions-arrow-callouts';
 import { ARROW_PRESET_DEFINITIONS } from './preset-shape-definitions-arrows';
 import { REFINED_ARROW_PRESET_DEFINITIONS } from './preset-shape-definitions-arrows-refined';
+import { CHART_MARK_PRESET_DEFINITIONS } from './preset-shape-definitions-chart-marks';
+import { CLOUD_CALLOUT_PRESET_DEFINITIONS } from './preset-shape-definitions-cloud-callout';
 import { CONNECTORS_BRACKETS_PRESET_DEFINITIONS } from './preset-shape-definitions-connectors-brackets';
 import { CURVED_ARROWS_CONNECTORS_PRESET_DEFINITIONS } from './preset-shape-definitions-curved-arrows-connectors';
 import { EXACT_CURVED_ARROW_PRESET_DEFINITIONS } from './preset-shape-definitions-curved-arrows-exact';
@@ -154,8 +156,15 @@ const roundRect: PresetShapeGeometryDefinition = {
 		gd('x1', '*/ ss a 100000'),
 		gd('x2', '+- r 0 x1'),
 		gd('y2', '+- b 0 x1'),
+		// The corner fillet's 45deg touch point insets the text rect from EACH
+		// edge by `x1 * (1 - cos45deg)` (COM-measured at 200x100pt: ~4.88pt,
+		// i.e. ~2.44% of width, matching the audit's cited figure). Was
+		// `FULL_RECT` (no inset at all), so text spilled to the very corners.
+		gd('il', '*/ x1 29289 100000'),
+		gd('ir', '+- r 0 il'),
+		gd('ib', '+- b 0 il'),
 	],
-	rect: FULL_RECT,
+	rect: { l: 'il', t: 'il', r: 'ir', b: 'ib' },
 	pathLst: [
 		{
 			commands: [
@@ -175,8 +184,19 @@ const roundRect: PresetShapeGeometryDefinition = {
 
 const ellipse: PresetShapeGeometryDefinition = {
 	name: 'ellipse',
-	gdLst: [gd('idx', '*/ ss 3 4'), gd('idy', '*/ ls 3 4')],
-	rect: FULL_RECT,
+	gdLst: [
+		// The inscribed axis-aligned rectangle touches the ellipse at 45deg, so
+		// each edge insets by `wd2/hd2 * (1 - cos45deg)` (COM-measured at
+		// 200x100pt: ~14.64% of each dimension, matching the audit's cited
+		// `(1 - 1/sqrt(2))/2` figure). Was `FULL_RECT` (no inset at all).
+		gd('idx', 'cos wd2 2700000'),
+		gd('idy', 'sin hd2 2700000'),
+		gd('il', '+- hc 0 idx'),
+		gd('ir', '+- hc idx 0'),
+		gd('it', '+- vc 0 idy'),
+		gd('ib', '+- vc idy 0'),
+	],
+	rect: { l: 'il', t: 'it', r: 'ir', b: 'ib' },
 	pathLst: [
 		{
 			commands: [
@@ -194,8 +214,20 @@ const ellipse: PresetShapeGeometryDefinition = {
 const triangle: PresetShapeGeometryDefinition = {
 	name: 'triangle',
 	avLst: { adj: 50000 },
-	gdLst: [gd('a', 'pin 0 adj 100000'), gd('x1', '*/ w a 100000')],
-	rect: FULL_RECT,
+	gdLst: [
+		gd('a', 'pin 0 adj 100000'),
+		gd('x1', '*/ w a 100000'),
+		// The largest axis-aligned rectangle inscribed in a triangle of base `w`
+		// and height `h` always has height `h/2` sitting on the base, regardless
+		// of where the apex (`x1`) sits: at any candidate top `y0` the available
+		// width is `w*y0/h` (derived from the two slanted sides), so area
+		// `w*y0/h*(h-y0)` is maximized at `y0 = h/2` for every apex position.
+		// Was `FULL_RECT`; COM-measured at 200x100pt (apex centered) confirms
+		// `l=w/4, t=h/2, r=3w/4, b=h`.
+		gd('g1', '*/ x1 1 2'),
+		gd('g2', '+/ x1 r 2'),
+	],
+	rect: { l: 'g1', t: 'vc', r: 'g2', b: 'b' },
 	pathLst: [
 		{
 			commands: [
@@ -210,7 +242,12 @@ const triangle: PresetShapeGeometryDefinition = {
 
 const rtTriangle: PresetShapeGeometryDefinition = {
 	name: 'rtTriangle',
-	rect: FULL_RECT,
+	// COM-measured at 200x100pt: l=w/12, t=7h/12, r=7w/12, b=11h/12 (was
+	// `FULL_RECT`). Unlike `triangle`, the right-angle corner breaks the
+	// left/right symmetry, so the inscribed-rectangle optimum lands on
+	// twelfths of each dimension rather than quarters/halves.
+	gdLst: [gd('g1', '*/ hd12 7 1'), gd('g2', '*/ wd12 7 1'), gd('g3', '*/ hd12 11 1')],
+	rect: { l: 'wd12', t: 'g1', r: 'g2', b: 'g3' },
 	pathLst: [
 		{
 			commands: [
@@ -227,10 +264,17 @@ const parallelogram: PresetShapeGeometryDefinition = {
 	name: 'parallelogram',
 	avLst: { adj: 25000 },
 	gdLst: [
-		gd('a', 'pin 0 adj 100000'),
-		gd('x1', '*/ w a 200000'),
+		// The skew is measured against `ss` (the SHORT side), not `w`, and `adj`
+		// pins against `maxAdj` rather than a flat 100000 (ECMA-376 20.1.9.venus).
+		// Scaling off `w` only agrees with PowerPoint while w <= h; for a wide,
+		// short parallelogram it overstates the skew, so a band authored to butt
+		// against a neighbouring shape fell short of it and left a wedge of slide
+		// background showing through the seam.
+		gd('maxAdj', '*/ 100000 w ss'),
+		gd('a', 'pin 0 adj maxAdj'),
+		gd('x1', '*/ ss a 200000'),
 		gd('x2', '+- w 0 x1'),
-		gd('x3', '*/ w a 100000'),
+		gd('x3', '*/ ss a 100000'),
 		gd('x4', '+- r 0 x3'),
 		gd('x5', '*/ x3 1 2'),
 		gd('x6', '+- r 0 x5'),
@@ -275,8 +319,20 @@ const trapezoid: PresetShapeGeometryDefinition = {
 
 const diamond: PresetShapeGeometryDefinition = {
 	name: 'diamond',
-	gdLst: [gd('ir', '*/ wd2 1 2'), gd('it', '*/ hd2 1 2')],
-	rect: { l: 'ir', t: 'it', r: 'wd2', b: 'hd2' },
+	// The optimal inscribed axis-aligned rectangle in a rhombus with vertices at
+	// the midpoints of each side is exactly the box's inner quarter-to-3-quarter
+	// span (`l=w/4, r=3w/4, t=h/4, b=3h/4`; area is maximized when the rectangle
+	// touches all 4 edges symmetrically). The old `r`/`b` reused the CENTER
+	// guides (`wd2`/`hd2`) instead of mirroring `il`/`it` off the far edge, so
+	// the rect collapsed to a quarter-box (`l..wd2` x `t..hd2`) instead of the
+	// full half-box. COM-measured at 200x100pt confirms l=50,t=25,r=150,b=75.
+	gdLst: [
+		gd('il', '*/ wd2 1 2'),
+		gd('it', '*/ hd2 1 2'),
+		gd('ir', '+- r 0 il'),
+		gd('ib', '+- b 0 it'),
+	],
+	rect: { l: 'il', t: 'it', r: 'ir', b: 'ib' },
 	pathLst: [
 		{
 			commands: [
@@ -310,10 +366,19 @@ const pentagon: PresetShapeGeometryDefinition = {
 		gd('x4', '+- hc dx1 0'),
 		gd('y1', '+- vc 0 dy1'),
 		gd('y2', '+- vc dy2 0'),
-		gd('ir', '*/ y2 dx1 dy1'),
-		gd('ib', '+- b 0 ir'),
+		// The old `ir`/`ib` ("*/ y2 dx1 dy1") evaluates to ~150 at 200x100 (over
+		// the box height of 100), so `ib = b - ir` went NEGATIVE - the pentagon's
+		// text rect was flipped inside-out. COM-measured at 200x100pt instead:
+		// l=x2, r=x3 (the NARROWER pair of vertices, not the wider x1/x4), t
+		// lands at `h*(sqrt(5)-2)` (a golden-ratio constant of this regular
+		// pentagon's proportions - COM measured t/h == sqrt(5)-2 to 5 decimal
+		// places), b stays the full box bottom (the two bottom vertices already
+		// sit ON `b`).
+		gd('sq5', 'sqrt 5'),
+		gd('tOff', '+- sq5 0 2'),
+		gd('it', '*/ h tOff 1'),
 	],
-	rect: { l: 'x1', t: 'y1', r: 'x4', b: 'ib' },
+	rect: { l: 'x2', t: 'it', r: 'x3', b: 'b' },
 	pathLst: [
 		{
 			commands: [
@@ -331,18 +396,43 @@ const pentagon: PresetShapeGeometryDefinition = {
 const hexagon: PresetShapeGeometryDefinition = {
 	name: 'hexagon',
 	avLst: { adj: 25000, vf: 115470 },
+	// Spec guides (ECMA-376 §20.1.9.18). Two corrections over the earlier port:
+	//
+	//  - `dy1` is `sin shd2 3600000`, i.e. shd2 scaled by sin(60deg). Using the
+	//    raw `shd2` as the half-height made it `hd2 * vf` = 1.1547 * hd2, so the
+	//    top and bottom vertices sat ~7.7% of the height OUTSIDE the shape box
+	//    and were clipped off at every size.
+	//  - `a` pins against `maxAdj` (which scales with the width/`ss` ratio), not
+	//    a flat 100000, so a wide hexagon can take its full authored inset.
+	//
+	// The `q1`..`q8` chain is the spec's own conditional for the text rect; the
+	// previous ad-hoc `q1` produced a right edge left of its left edge.
 	gdLst: [
-		gd('a', 'pin 0 adj 100000'),
+		gd('maxAdj', '*/ 50000 w ss'),
+		gd('a', 'pin 0 adj maxAdj'),
 		gd('shd2', '*/ hd2 vf 100000'),
 		gd('x1', '*/ ss a 100000'),
 		gd('x2', '+- r 0 x1'),
-		gd('y1', '+- vc 0 shd2'),
-		gd('y2', '+- vc shd2 0'),
-		gd('q1', '*/ shd2 115470 100000'),
-		gd('ir', '+- x1 0 q1'),
-		gd('il', '+- x1 q1 0'),
+		gd('dy1', 'sin shd2 3600000'),
+		gd('y1', '+- vc 0 dy1'),
+		gd('y2', '+- vc dy1 0'),
+		gd('q1', '*/ maxAdj -1 2'),
+		gd('q2', '+- a q1 0'),
+		gd('q3', '?: q2 4 2'),
+		gd('q4', '?: q2 3 2'),
+		gd('q5', '?: q2 q1 0'),
+		gd('q6', '+/ a q5 q1'),
+		gd('q7', '*/ q6 q4 -1'),
+		gd('q8', '+- q3 q7 0'),
+		gd('il', '*/ w q8 24'),
+		gd('ir', '+- r 0 il'),
 	],
-	rect: { l: 'il', t: 'y1', r: 'ir', b: 'y2' },
+	// COM-measured (200x100pt, TextFrame.TextRange.Bound*): the vertical text
+	// rect is NOT `y1`/`y2` (those are the vertex y-coordinates, ~0/~h at the
+	// default adjustment: they left almost no vertical inset at all). PowerPoint
+	// insets top/bottom by `hd8` regardless of the vertex geometry; `il`/`ir`
+	// (already correct: they matched measurement exactly) are unaffected.
+	rect: { l: 'il', t: 'hd8', r: 'ir', b: '+- b 0 hd8' },
 	pathLst: [
 		{
 			commands: [
@@ -713,32 +803,40 @@ const blockArc: PresetShapeGeometryDefinition = {
 	],
 };
 
-// Arrow shapes — adj1 = head body width %, adj2 = head length %.
+// Arrow shapes: adj1 = shaft thickness %, adj2 = head length %.
+//
+// The head length is measured against `ss` (the SHORT side), never `w`/`h`:
+// ISO/IEC 29500-1 §20.1.9 defines `dx1` as `*/ ss a2 100000`, which is what
+// keeps a long, thin arrow's head in proportion to its shaft instead of letting
+// it swallow half the shape. `adj2` is pinned to `maxAdj2 = 100000 * w / ss`
+// (`h / ss` for the vertical arrows) so the head can still be dragged out to the
+// full length of the shape, but no further.
 const rightArrow: PresetShapeGeometryDefinition = {
 	name: 'rightArrow',
 	avLst: { adj1: 50000, adj2: 50000 },
 	gdLst: [
+		gd('maxAdj2', '*/ 100000 w ss'),
 		gd('a1', 'pin 0 adj1 100000'),
-		gd('a2', 'pin 0 adj2 100000'),
-		gd('y1', '*/ hd2 a1 100000'),
-		gd('y2', '+- vc 0 y1'),
-		gd('y3', '+- vc y1 0'),
-		gd('x2', '*/ w a2 100000'),
-		gd('x1', '+- r 0 x2'),
-		gd('dx2', '*/ hd2 x2 wd2'),
-		gd('x3', '+- x1 dx2 0'),
+		gd('a2', 'pin 0 adj2 maxAdj2'),
+		gd('dx1', '*/ ss a2 100000'),
+		gd('x1', '+- r 0 dx1'),
+		gd('dy1', '*/ h a1 200000'),
+		gd('y1', '+- vc 0 dy1'),
+		gd('y2', '+- vc dy1 0'),
+		gd('dx2', '*/ y1 dx1 hd2'),
+		gd('x2', '+- x1 dx2 0'),
 	],
-	rect: { l: 'l', t: 'y2', r: 'x3', b: 'y3' },
+	rect: { l: 'l', t: 'y1', r: 'x2', b: 'y2' },
 	pathLst: [
 		{
 			commands: [
-				{ kind: 'moveTo', x: 'l', y: 'y2' },
-				{ kind: 'lnTo', x: 'x1', y: 'y2' },
+				{ kind: 'moveTo', x: 'l', y: 'y1' },
+				{ kind: 'lnTo', x: 'x1', y: 'y1' },
 				{ kind: 'lnTo', x: 'x1', y: 't' },
 				{ kind: 'lnTo', x: 'r', y: 'vc' },
 				{ kind: 'lnTo', x: 'x1', y: 'b' },
-				{ kind: 'lnTo', x: 'x1', y: 'y3' },
-				{ kind: 'lnTo', x: 'l', y: 'y3' },
+				{ kind: 'lnTo', x: 'x1', y: 'y2' },
+				{ kind: 'lnTo', x: 'l', y: 'y2' },
 				{ kind: 'close' },
 			],
 		},
@@ -749,26 +847,28 @@ const leftArrow: PresetShapeGeometryDefinition = {
 	name: 'leftArrow',
 	avLst: { adj1: 50000, adj2: 50000 },
 	gdLst: [
+		gd('maxAdj2', '*/ 100000 w ss'),
 		gd('a1', 'pin 0 adj1 100000'),
-		gd('a2', 'pin 0 adj2 100000'),
-		gd('y1', '*/ hd2 a1 100000'),
-		gd('y2', '+- vc 0 y1'),
-		gd('y3', '+- vc y1 0'),
-		gd('x1', '*/ w a2 100000'),
-		gd('dx2', '*/ hd2 x1 wd2'),
+		gd('a2', 'pin 0 adj2 maxAdj2'),
+		gd('dx2', '*/ ss a2 100000'),
 		gd('x2', '+- l dx2 0'),
+		gd('dy1', '*/ h a1 200000'),
+		gd('y1', '+- vc 0 dy1'),
+		gd('y2', '+- vc dy1 0'),
+		gd('dx1', '*/ y1 dx2 hd2'),
+		gd('x1', '+- dx2 0 dx1'),
 	],
-	rect: { l: 'x2', t: 'y2', r: 'r', b: 'y3' },
+	rect: { l: 'x1', t: 'y1', r: 'r', b: 'y2' },
 	pathLst: [
 		{
 			commands: [
 				{ kind: 'moveTo', x: 'l', y: 'vc' },
-				{ kind: 'lnTo', x: 'x1', y: 't' },
-				{ kind: 'lnTo', x: 'x1', y: 'y2' },
+				{ kind: 'lnTo', x: 'x2', y: 't' },
+				{ kind: 'lnTo', x: 'x2', y: 'y1' },
+				{ kind: 'lnTo', x: 'r', y: 'y1' },
 				{ kind: 'lnTo', x: 'r', y: 'y2' },
-				{ kind: 'lnTo', x: 'r', y: 'y3' },
-				{ kind: 'lnTo', x: 'x1', y: 'y3' },
-				{ kind: 'lnTo', x: 'x1', y: 'b' },
+				{ kind: 'lnTo', x: 'x2', y: 'y2' },
+				{ kind: 'lnTo', x: 'x2', y: 'b' },
 				{ kind: 'close' },
 			],
 		},
@@ -779,26 +879,28 @@ const upArrow: PresetShapeGeometryDefinition = {
 	name: 'upArrow',
 	avLst: { adj1: 50000, adj2: 50000 },
 	gdLst: [
+		gd('maxAdj2', '*/ 100000 h ss'),
 		gd('a1', 'pin 0 adj1 100000'),
-		gd('a2', 'pin 0 adj2 100000'),
-		gd('x1', '*/ wd2 a1 100000'),
-		gd('x2', '+- hc 0 x1'),
-		gd('x3', '+- hc x1 0'),
-		gd('y2', '*/ h a2 100000'),
-		gd('dy2', '*/ wd2 y2 hd2'),
-		gd('y1', '+- t dy2 0'),
+		gd('a2', 'pin 0 adj2 maxAdj2'),
+		gd('dy2', '*/ ss a2 100000'),
+		gd('y2', '+- t dy2 0'),
+		gd('dx1', '*/ w a1 200000'),
+		gd('x1', '+- hc 0 dx1'),
+		gd('x2', '+- hc dx1 0'),
+		gd('dy1', '*/ x1 dy2 wd2'),
+		gd('y1', '+- y2 0 dy1'),
 	],
-	rect: { l: 'x2', t: 'y1', r: 'x3', b: 'b' },
+	rect: { l: 'x1', t: 'y1', r: 'x2', b: 'b' },
 	pathLst: [
 		{
 			commands: [
-				{ kind: 'moveTo', x: 'hc', y: 't' },
+				{ kind: 'moveTo', x: 'l', y: 'y2' },
+				{ kind: 'lnTo', x: 'hc', y: 't' },
 				{ kind: 'lnTo', x: 'r', y: 'y2' },
-				{ kind: 'lnTo', x: 'x3', y: 'y2' },
-				{ kind: 'lnTo', x: 'x3', y: 'b' },
-				{ kind: 'lnTo', x: 'x2', y: 'b' },
 				{ kind: 'lnTo', x: 'x2', y: 'y2' },
-				{ kind: 'lnTo', x: 'l', y: 'y2' },
+				{ kind: 'lnTo', x: 'x2', y: 'b' },
+				{ kind: 'lnTo', x: 'x1', y: 'b' },
+				{ kind: 'lnTo', x: 'x1', y: 'y2' },
 				{ kind: 'close' },
 			],
 		},
@@ -809,26 +911,27 @@ const downArrow: PresetShapeGeometryDefinition = {
 	name: 'downArrow',
 	avLst: { adj1: 50000, adj2: 50000 },
 	gdLst: [
+		gd('maxAdj2', '*/ 100000 h ss'),
 		gd('a1', 'pin 0 adj1 100000'),
-		gd('a2', 'pin 0 adj2 100000'),
-		gd('x1', '*/ wd2 a1 100000'),
-		gd('x2', '+- hc 0 x1'),
-		gd('x3', '+- hc x1 0'),
-		gd('y1', '*/ h a2 100000'),
-		gd('y2', '+- b 0 y1'),
-		gd('dy2', '*/ wd2 y1 hd2'),
-		gd('y3', '+- b 0 dy2'),
+		gd('a2', 'pin 0 adj2 maxAdj2'),
+		gd('dy1', '*/ ss a2 100000'),
+		gd('y1', '+- b 0 dy1'),
+		gd('dx1', '*/ w a1 200000'),
+		gd('x1', '+- hc 0 dx1'),
+		gd('x2', '+- hc dx1 0'),
+		gd('dy2', '*/ x1 dy1 wd2'),
+		gd('y2', '+- b 0 dy2'),
 	],
-	rect: { l: 'x2', t: 't', r: 'x3', b: 'y3' },
+	rect: { l: 'x1', t: 't', r: 'x2', b: 'y2' },
 	pathLst: [
 		{
 			commands: [
-				{ kind: 'moveTo', x: 'l', y: 'y2' },
-				{ kind: 'lnTo', x: 'x2', y: 'y2' },
+				{ kind: 'moveTo', x: 'l', y: 'y1' },
+				{ kind: 'lnTo', x: 'x1', y: 'y1' },
+				{ kind: 'lnTo', x: 'x1', y: 't' },
 				{ kind: 'lnTo', x: 'x2', y: 't' },
-				{ kind: 'lnTo', x: 'x3', y: 't' },
-				{ kind: 'lnTo', x: 'x3', y: 'y2' },
-				{ kind: 'lnTo', x: 'r', y: 'y2' },
+				{ kind: 'lnTo', x: 'x2', y: 'y1' },
+				{ kind: 'lnTo', x: 'r', y: 'y1' },
 				{ kind: 'lnTo', x: 'hc', y: 'b' },
 				{ kind: 'close' },
 			],
@@ -1110,6 +1213,12 @@ export const PRESET_SHAPE_GEOMETRY_TABLE: Record<string, PresetShapeGeometryDefi
 	...TABS_DECORATIONS_PRESET_DEFINITIONS,
 	...SCROLLS_ACCENT_CALLOUTS_PRESET_DEFINITIONS,
 	...ACTION_BUTTON_PRESET_DEFINITIONS,
+	// The last six ST_ShapeType names to be transcribed: `chartX` / `chartStar`
+	// / `chartPlus` here, `cloudCallout` below, and `flowChartInputOutput` /
+	// `flowChartOfflineStorage` inside FLOWCHART_PRESET_DEFINITIONS. Together
+	// they take spec coverage to 187/187.
+	...CHART_MARK_PRESET_DEFINITIONS,
+	...CLOUD_CALLOUT_PRESET_DEFINITIONS,
 	// Refined arrows MUST come last so its full-spec versions override the
 	// simplified entries from ARROW_PRESET_DEFINITIONS.
 	...REFINED_ARROW_PRESET_DEFINITIONS,

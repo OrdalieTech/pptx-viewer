@@ -27,11 +27,11 @@ export function createImageSection(
 	const el = section(t('pptx.inspector.image'));
 	const replace = doc.createElement('button');
 	replace.type = 'button';
-	replace.textContent = t('pptx.image.replace');
+	replace.textContent = t('pptx.image.replaceImage');
 	replace.addEventListener('click', handlers.replaceImage);
 	const reset = doc.createElement('button');
 	reset.type = 'button';
-	reset.textContent = t('pptx.image.reset');
+	reset.textContent = t('pptx.image.resetImage');
 	reset.addEventListener('click', handlers.resetImage);
 	el.append(replace, reset);
 
@@ -63,6 +63,9 @@ export function createImageSection(
 	const artisticLabel = doc.createElement('label');
 	artisticLabel.textContent = t('pptx.image.artisticEffects');
 	const artistic = doc.createElement('select');
+	// Named explicitly: the wrapping `<label>` would otherwise lend the select
+	// its whole text content, which includes every effect name.
+	artistic.setAttribute('aria-label', t('pptx.image.artisticEffects'));
 	for (const [value, labelKey] of ARTISTIC_EFFECTS) {
 		const option = doc.createElement('option');
 		option.value = value;
@@ -112,6 +115,10 @@ export function createImageSection(
 	const color2 = duoField(t('pptx.image.duotoneLight'), 'color2');
 	colorInputs.color1 = color1;
 	colorInputs.color2 = color2;
+	// B6: push into the "Recent colours" MRU list once each picker commits.
+	for (const input of [color1, color2]) {
+		input.addEventListener('change', () => handlers.pushRecentColor(input.value));
+	}
 	el.append(artisticLabel, transparency.el, biLevel.el, duotone);
 	const wash = doc.createElement('input');
 	wash.type = 'checkbox';
@@ -138,6 +145,8 @@ export function createImageSection(
 			colorWash: { color: washColor.value, opacity: washOpacityValue },
 		}),
 	);
+	// B6: push into the "Recent colours" MRU list once the wash picker commits.
+	washColor.addEventListener('change', () => handlers.pushRecentColor(washColor.value));
 	el.append(wash, washColor, washOpacity.el);
 
 	const cropGrid = createEl(doc, 'div', 'pptxv-inspector-grid');
@@ -160,6 +169,24 @@ export function createImageSection(
 	const cropRight = cropField(t('pptx.image.cropRight'), 'right');
 	const cropBottom = cropField(t('pptx.image.cropBottom'), 'bottom');
 
+	// Alt text (React's `ElementTransformControls`, Vue's `ImagePanel`,
+	// Angular's `image-properties-panel`): the accessibility description screen
+	// readers announce, and the field the Accessibility checker complains about
+	// when it is empty. Committed on change, not per keystroke, so typing a
+	// sentence is one history step.
+	const altLabel = createEl(doc, 'label', 'pptxv-field pptxv-image-alt');
+	const altCaption = createEl(doc, 'span', 'pptxv-field-label');
+	altCaption.textContent = t('pptx.image.altText');
+	const alt = doc.createElement('textarea');
+	alt.rows = 2;
+	alt.className = 'pptxv-image-alt-input';
+	alt.placeholder = t('pptx.imageTransform.altTextPlaceholder');
+	alt.setAttribute('aria-label', t('pptx.image.altText'));
+	alt.addEventListener('keydown', (event) => event.stopPropagation());
+	alt.addEventListener('change', () => handlers.setAltText(alt.value));
+	altLabel.append(altCaption, alt);
+	el.appendChild(altLabel);
+
 	const sliders: RangeFieldHandle[] = [brightness, contrast, saturation];
 	const cropFields = [cropLeft, cropTop, cropRight, cropBottom];
 
@@ -179,6 +206,10 @@ export function createImageSection(
 			washColor.value = state.imageColorWash?.color ?? '#0066cc';
 			washOpacity.setValue(state.imageColorWash?.opacity ?? 40);
 			washOpacityValue = state.imageColorWash?.opacity ?? 40;
+			if (doc.activeElement !== alt) {
+				alt.value = state.altText;
+			}
+			alt.disabled = !state.isImage;
 			cropLeft.setValue(state.cropLeft * 100);
 			cropTop.setValue(state.cropTop * 100);
 			cropRight.setValue(state.cropRight * 100);
@@ -194,8 +225,10 @@ export function createImageSection(
 			wash.disabled = !state.isImage;
 			washColor.disabled = !state.isImage;
 			washOpacity.setDisabled(!state.isImage);
+			// G7: `a:picLocks/@noCrop` forbids cropping this specific picture,
+			// even on an otherwise-editable image.
 			for (const c of cropFields) {
-				c.setDisabled(!state.isImage);
+				c.setDisabled(!state.isImage || !state.croppable);
 			}
 		},
 	};

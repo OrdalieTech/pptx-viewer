@@ -13,6 +13,7 @@ import type {
 	PlaceholderDefaults,
 	PlaceholderTextLevelStyle,
 } from '../../types';
+import type { AutoNumberSequence } from './auto-number-sequence';
 
 /**
  * Identifies a placeholder shape inside a slide layout or master.
@@ -79,6 +80,26 @@ export interface ShapeTextParsingContext {
 	readonly slidePath: string | undefined;
 	/** Per-level text style overrides from the placeholder defaults or presentation default text style. */
 	readonly effectiveLevelStyles: Record<number, PlaceholderTextLevelStyle> | undefined;
+	/**
+	 * Text colour resolved from the shape's `<p:style><a:fontRef>` style
+	 * reference, when it declares one.
+	 *
+	 * This is the shape-level default run colour and it outranks the
+	 * presentation-wide `p:defaultTextStyle`, so it has to reach the run
+	 * merge rather than only seeding the element's `textStyle`. A themed
+	 * button (`<a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>`)
+	 * whose runs carry no `a:solidFill` otherwise inherits `tx1` (black)
+	 * from `p:defaultTextStyle` and renders black-on-accent instead of white.
+	 */
+	readonly styleFontRefColor: string | undefined;
+	/** Latin typeface resolved from `<p:style><a:fontRef>`, same precedence as {@link styleFontRefColor}. */
+	readonly styleFontRefTypeface: string | undefined;
+	/**
+	 * Running `a:buAutoNum` ordinals for this text body, advanced as its
+	 * paragraphs are walked in document order. Numbered paragraphs count from
+	 * the start of their own list, not from the top of the text body.
+	 */
+	readonly autoNumbering: AutoNumberSequence;
 }
 
 /**

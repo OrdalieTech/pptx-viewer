@@ -4,10 +4,83 @@
  */
 import type { InkPptxElement } from 'pptx-viewer-core';
 
+import { hasPressureVariation } from './ink-rendering';
+
 /** A 2D point in stage-local coordinates. */
 export interface InkPoint {
 	x: number;
 	y: number;
+	/**
+	 * Pointer pressure at this point, from `PointerEvent.pressure` (0..1).
+	 * Optional: a binding that has not wired pressure capture simply omits
+	 * it, and {@link strokeToInkElement} falls back to
+	 * {@link DEFAULT_POINTER_PRESSURE}, the constant value mice and other
+	 * non-pressure-aware devices report, which reads as "no real pressure
+	 * data".
+	 */
+	pressure?: number;
+	/**
+	 * Pen-tilt lean, in degrees, from `PointerEvent.tiltX`/`tiltY` on
+	 * supporting hardware (a mouse, or a stylus with no tilt sensor, reports a
+	 * constant 0). Optional and always captured as a pair: a binding that has
+	 * not wired tilt capture simply omits both, and {@link strokeToInkElement}
+	 * treats a constant `(0, 0)` reading the same way it treats a constant
+	 * pressure, i.e. as "no real tilt data" rather than authoring a channel
+	 * for it.
+	 */
+	tiltX?: number;
+	tiltY?: number;
+}
+
+/**
+ * Minimal shape of the browser `PointerEvent` fields {@link pointFromPointerEvent}
+ * reads. Kept duck-typed (not `PointerEvent` itself) so this module has no DOM
+ * lib dependency and is trivially unit-testable with a plain object.
+ */
+export interface PointerEventLike {
+	pressure?: number;
+	tiltX?: number;
+	tiltY?: number;
+}
+
+/**
+ * Attach a pointer event's pressure and tilt reading to an already
+ * stage-mapped `{x, y}` position, producing the {@link InkPoint} every
+ * binding's Draw-tab pointerdown/pointermove handler feeds into
+ * {@link strokeToInkElement} (directly, or via an accumulated points array).
+ *
+ * Each binding computes `{x, y}` differently (its own stage rect + zoom
+ * scale), which is why this only takes the already-local position rather than
+ * a raw client-coordinate event; extracting `pressure`/`tiltX`/`tiltY`
+ * verbatim onto that point is the one part every binding must do identically,
+ * so it lives here instead of being re-typed out five times.
+ */
+export function pointFromPointerEvent(x: number, y: number, event: PointerEventLike): InkPoint {
+	return { x, y, pressure: event.pressure, tiltX: event.tiltX, tiltY: event.tiltY };
+}
+
+/**
+ * `PointerEvent.pressure` reported by a mouse (or any device with no real
+ * pressure sensor) while a button is held: a constant 0.5. Used as the
+ * fallback for points a binding captured without a `pressure` field, and as
+ * the baseline {@link strokeToInkElement} compares against to decide whether
+ * a stroke carries genuine stylus pressure variation.
+ */
+export const DEFAULT_POINTER_PRESSURE = 0.5;
+
+/**
+ * Whether a stroke's raw per-point `(tiltX, tiltY)` readings carry any
+ * genuine lean, i.e. at least one point differs from the constant `(0, 0)`
+ * every mouse (and any stylus with no tilt sensor) reports.
+ *
+ * Unlike {@link hasPressureVariation}, this is NOT a "does it vary across
+ * points" test: a flat pen held at a constant lean the whole stroke still has
+ * real tilt data (every point non-zero), so it must still author the
+ * channel. `(0, 0)` specifically is the "not captured" baseline, the same
+ * role {@link DEFAULT_POINTER_PRESSURE} plays for pressure.
+ */
+export function hasTiltData(tiltXs: readonly number[], tiltYs: readonly number[]): boolean {
+	return tiltXs.some((x) => x !== 0) || tiltYs.some((y) => y !== 0);
 }
 
 /**
@@ -45,6 +118,16 @@ export interface StrokeToInkElementOpts {
  *   translates point coordinates to be relative to the bounding box origin.
  * - `freeform` is treated identically to `pen` (stored as inkTool: 'pen').
  * - `highlighter` gets `inkOpacities: [0.4]`; pen/freeform get `[1]`.
+ * - When at least two points carry a `pressure` reading that actually varies
+ *   (mirroring {@link DEFAULT_POINTER_PRESSURE}'s "no real data" baseline),
+ *   the per-point pressure channel is attached as `inkPointPressures: [[...]]`
+ *   so every binding's shared ink renderer (`ink-rendering.ts`) draws the
+ *   stroke at variable width, identically to a stroke authored in React.
+ * - When any point carries a genuinely non-zero `tiltX`/`tiltY` reading, the
+ *   raw per-point tilt channel is attached as `inkPointTiltX`/`inkPointTiltY`
+ *   so every binding's shared ink renderer (`ink-group-strokes.ts`) draws the
+ *   calligraphic nib lean, and the core save pipeline authors it as InkML
+ *   `OTx`/`OTy`.
  */
 export function strokeToInkElement(opts: StrokeToInkElementOpts): InkPptxElement | null {
 	const { points, color, width, tool } = opts;
@@ -92,6 +175,18 @@ export function strokeToInkElement(opts: StrokeToInkElementOpts): InkPptxElement
 	const isHighlighter = tool === 'highlighter';
 	const inkTool: 'pen' | 'highlighter' = isHighlighter ? 'highlighter' : 'pen';
 
+	// A stroke only carries genuine pressure data when at least two points
+	// report a value that actually differs from the constant every mouse (and
+	// any non-pressure device) reports; a uniform reading is indistinguishable
+	// from "not captured" and must not force every mouse-drawn stroke to a
+	// wobbly variable width.
+	const pressures = points.map((pt) => pt.pressure ?? DEFAULT_POINTER_PRESSURE);
+	const hasPressure = hasPressureVariation(pressures);
+
+	const tiltXs = points.map((pt) => pt.tiltX ?? 0);
+	const tiltYs = points.map((pt) => pt.tiltY ?? 0);
+	const hasTilt = hasTiltData(tiltXs, tiltYs);
+
 	const ink: InkPptxElement = {
 		id: `ink-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 		type: 'ink',
@@ -104,6 +199,8 @@ export function strokeToInkElement(opts: StrokeToInkElementOpts): InkPptxElement
 		inkWidths: [width],
 		inkOpacities: [isHighlighter ? 0.4 : 1],
 		inkTool,
+		...(hasPressure ? { inkPointPressures: [pressures] } : {}),
+		...(hasTilt ? { inkPointTiltX: [tiltXs], inkPointTiltY: [tiltYs] } : {}),
 	};
 
 	return ink;

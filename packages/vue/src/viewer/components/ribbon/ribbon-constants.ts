@@ -14,7 +14,6 @@ import {
 	Database,
 	Download,
 	FileText,
-	FolderOpen,
 	Image,
 	Info,
 	Italic,
@@ -121,7 +120,6 @@ export const OV: Array<{ labelKey: string; icon: Component | null; k: string }> 
 	{ k: 'pdf', labelKey: 'pptx.ribbon.exportPdf', icon: FileText },
 	{ k: 'video', labelKey: 'pptx.ribbon.exportVideo', icon: Video },
 	{ k: 'gif', labelKey: 'pptx.ribbon.exportGif', icon: Image },
-	{ k: 'package', labelKey: 'pptx.file.packageTooltip', icon: FolderOpen },
 	{ k: 'pptx', labelKey: 'pptx.file.saveAsPptxTooltip', icon: Download },
 	{ k: 'ppsx', labelKey: 'pptx.file.saveAsPpsxTooltip', icon: Play },
 	{ k: 'pptm', labelKey: 'pptx.file.saveAsPptmTooltip', icon: Database },
@@ -156,21 +154,29 @@ export const ATXT: Array<{ id: string; icon: Component; labelKey: string }> = [
 	{ id: 'justify', icon: AlignJustify, labelKey: 'pptx.ribbon.justify' },
 ];
 
-export const COMMON_FONTS = [
-	'Arial',
-	'Calibri',
-	'Cambria',
-	'Comic Sans MS',
-	'Courier New',
-	'Georgia',
-	'Helvetica',
-	'Impact',
-	'Segoe UI',
-	'Tahoma',
-	'Times New Roman',
-	'Trebuchet MS',
-	'Verdana',
+/**
+ * Start-mode options of the Animations tab's Timing group.
+ *
+ * The preset gallery that used to live beside this table now sources its
+ * effects from `pptx-viewer-shared` (see `AnimationPresetGallery.vue`), so a
+ * preset added to the catalogue reaches every binding without a per-binding
+ * table to forget to update.
+ */
+export const ANIMATION_START_MODES = [
+	'pptx.animations.onClick',
+	'pptx.animations.withPrevious',
+	'pptx.animations.afterPrevious',
 ];
+
+/**
+ * Re-exported from `pptx-viewer-shared` rather than declared here.
+ *
+ * This binding kept its own copy of the family list, which is exactly how the
+ * five bindings end up offering different fonts. The grouped Home-tab dropdown
+ * now builds itself from `buildFontCatalog`, so nothing in this package should
+ * need the flat list at all; the alias remains only for external importers.
+ */
+export { COMMON_FONT_FAMILIES as COMMON_FONTS } from 'pptx-viewer-shared';
 
 export const COMMON_SIZES = [
 	8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 72, 96,

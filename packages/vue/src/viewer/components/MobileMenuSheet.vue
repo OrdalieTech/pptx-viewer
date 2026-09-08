@@ -25,6 +25,7 @@ import { useToolbarVisibility } from '../composables/useToolbarVisibility';
 import MobileSheet from './MobileSheet.vue';
 import AnimationsSection from './ribbon/AnimationsSection.vue';
 import ArrangeSection from './ribbon/ArrangeSection.vue';
+import { toCustomShowsControlsProps } from './ribbon/custom-show-controls-props';
 import DesignSection from './ribbon/DesignSection.vue';
 import DrawSection from './ribbon/DrawSection.vue';
 import FileSection from './ribbon/FileSection.vue';
@@ -109,6 +110,8 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 						:on-toggle-format-painter="props.onToggleFormatPainter"
 						:layout-options="props.layoutOptions"
 						:on-insert-slide-from-layout="props.onInsertSlideFromLayout"
+						:on-insert-slide-from-template="props.onInsertSlideFromTemplate"
+						:template-scheme="props.templateScheme"
 						:selected-element="props.selectedElement"
 						:on-update-text-style="props.onUpdateTextStyle"
 					/>
@@ -129,6 +132,8 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 						:on-insert-field="props.onInsertField"
 						:on-open-image-picker="props.onOpenImagePicker"
 						:on-open-media-picker="props.onOpenMediaPicker"
+						:has-selection="Boolean(props.selectedElement)"
+						:on-open-hyperlink-dialog="props.onOpenHyperlinkDialog"
 					/>
 				</div>
 
@@ -157,16 +162,17 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 					<ArrangeSection
 						:can-edit="props.canEdit"
 						:selected-element="props.selectedElement"
-						:clipboard-payload="props.clipboardPayload"
+						:selected-count="props.selectedCount"
+						:selection-groupable="props.selectionGroupable"
 						:on-align-elements="props.onAlignElements"
 						:on-distribute-elements="props.onDistributeElements"
 						:can-distribute="props.canDistribute"
-						:on-copy="props.onCopy"
-						:on-cut="props.onCut"
-						:on-paste="props.onPaste"
 						:on-flip="props.onFlip"
 						:on-move-layer="props.onMoveLayer"
 						:on-move-layer-to-edge="props.onMoveLayerToEdge"
+						:on-group-elements="props.onGroupElements"
+						:on-ungroup-element="props.onUngroupElement"
+						:on-update-element-style="props.onUpdateElementStyle"
 						:on-duplicate="props.onDuplicate"
 						:on-delete="props.onDelete"
 						:format-painter-active="props.formatPainterActive"
@@ -183,6 +189,7 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 						:on-toggle-theme-editor="props.onToggleThemeEditor"
 						:is-theme-editor-open="props.isThemeEditorOpen"
 						:on-open-document-properties="props.onOpenDocumentProperties"
+						:on-open-slide-size="props.onOpenSlideSize"
 						:on-toggle-inspector="props.onToggleInspector"
 						:is-inspector-pane-open="props.isInspectorPaneOpen"
 					/>
@@ -192,6 +199,10 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 					<TransitionsSection
 						:is-inspector-pane-open="props.isInspectorPaneOpen"
 						:on-toggle-inspector="props.onToggleInspector"
+						:can-edit="props.canEdit"
+						:active-slide="props.activeSlide"
+						:on-transition-change="props.onTransitionChange"
+						:on-apply-transition-to-all="props.onApplyTransitionToAll"
 					/>
 				</div>
 
@@ -210,13 +221,16 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 				<div v-else-if="active === 'slideShow'" :class="WRAP">
 					<SlideShowSection
 						:on-present="() => props.onSetMode('present')"
+						:on-present-from-beginning="props.onPresentFromBeginning"
 						:on-enter-presenter-view="props.onEnterPresenterView ?? (() => {})"
 						:on-enter-rehearsal-mode="props.onEnterRehearsalMode ?? (() => {})"
 						:on-open-set-up-slide-show="props.onOpenSetUpSlideShow ?? (() => {})"
+						:on-toggle-hide-slide="props.onToggleHideSlide ?? (() => {})"
+						:active-slide-hidden="props.activeSlideHidden ?? false"
 						:on-open-broadcast-dialog="props.onOpenBroadcastDialog ?? (() => {})"
 						:on-toggle-subtitles="props.onToggleSubtitles ?? (() => {})"
 						:show-subtitles="props.showSubtitles ?? false"
-						:on-set-mode="props.onSetMode"
+						:custom-show-controls="toCustomShowsControlsProps(props)"
 						:hidden-actions="props.hiddenActions"
 					/>
 				</div>
@@ -244,10 +258,12 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 						:on-set-spell-check-enabled="props.onSetSpellCheckEnabled"
 						:show-grid="props.showGrid"
 						:show-rulers="props.showRulers"
+						:show-guides="props.showGuides"
 						:snap-to-grid="props.snapToGrid"
 						:snap-to-shape="props.snapToShape"
 						:on-set-show-grid="props.onSetShowGrid"
 						:on-set-show-rulers="props.onSetShowRulers"
+						:on-set-show-guides="props.onSetShowGuides"
 						:on-set-snap-to-grid="props.onSetSnapToGrid"
 						:on-set-snap-to-shape="props.onSetSnapToShape"
 						:on-add-guide="props.onAddGuide"
@@ -257,6 +273,7 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 						:on-toggle-selection-pane="props.onToggleSelectionPane"
 						:eyedropper-active="props.eyedropperActive"
 						:on-toggle-eyedropper="props.onToggleEyedropper"
+						:on-open-reading-view="props.onOpenReadingView"
 					/>
 				</div>
 
@@ -271,7 +288,7 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 						:on-export-pdf="props.onExportPdf"
 						:on-export-video="props.onExportVideo"
 						:on-export-gif="props.onExportGif"
-						:on-package-for-sharing="props.onPackageForSharing"
+						:on-export-json="props.onExportJson"
 						:on-save-as-pptx="props.onSaveAsPptx"
 						:on-save-as-ppsx="props.onSaveAsPpsx"
 						:on-save-as-pptm="props.onSaveAsPptm"
@@ -284,7 +301,9 @@ const WRAP = 'flex flex-wrap items-center gap-2';
 						:on-open-password-protection="props.onOpenPasswordProtection"
 						:on-open-font-embedding="props.onOpenFontEmbedding"
 						:on-open-digital-signatures="props.onOpenDigitalSignatures"
+						:on-open-version-history="props.onToggleVersionHistory"
 						:hidden-actions="props.hiddenActions"
+						:recent-presentations-count="props.recentPresentationsCount"
 					/>
 				</div>
 

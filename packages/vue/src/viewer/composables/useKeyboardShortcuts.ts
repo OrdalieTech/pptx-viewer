@@ -29,6 +29,12 @@
  *  - `Delete`/`Backspace`, the `Ctrl/Cmd` combos, arrow-nudge, and slide
  *    navigation map to the same actions and selection guards as React.
  */
+import {
+	isEditorTextInputTarget,
+	mapEditorKey,
+	NUDGE_LARGE,
+	NUDGE_SMALL,
+} from 'pptx-viewer-shared';
 import { onMounted, onScopeDispose, toValue } from 'vue';
 import type { MaybeRefOrGetter } from 'vue';
 
@@ -36,10 +42,10 @@ import type { MaybeRefOrGetter } from 'vue';
 /*  Constants                                                         */
 /* ------------------------------------------------------------------ */
 
-/** Small nudge step in EMU-equivalent pixels (matches React `NUDGE_SMALL`). */
-export const NUDGE_SMALL = 2;
-/** Large nudge step (Shift+Arrow) (matches React `NUDGE_LARGE`). */
-export const NUDGE_LARGE = 20;
+// Re-exported, not redeclared: the nudge step is part of the shared keymap.
+// Vue used to declare its own 2/20 "to match React", which is how it ended up
+// moving elements twice as far as Angular, Vanilla and Svelte.
+export { NUDGE_LARGE, NUDGE_SMALL };
 
 /* ------------------------------------------------------------------ */
 /*  Public types                                                      */
@@ -58,10 +64,14 @@ export type ShortcutActionName =
 	| 'duplicate'
 	| 'delete'
 	| 'selectAll'
+	| 'group'
+	| 'ungroup'
+	| 'toggleShortcuts'
 	| 'nudge'
 	| 'prevSlide'
 	| 'nextSlide'
-	| 'escape';
+	| 'escape'
+	| 'find';
 
 /**
  * Action callbacks the registry dispatches to. All are optional; a missing
@@ -85,6 +95,12 @@ export interface ShortcutActions {
 	delete?: () => void;
 	/** Select all elements on the active slide (Ctrl/Cmd+A). */
 	selectAll?: () => void;
+	/** Group the selection into one group element (Ctrl/Cmd+G). */
+	group?: () => void;
+	/** Ungroup the selected group (Ctrl/Cmd+Shift+G). */
+	ungroup?: () => void;
+	/** Show or hide the keyboard-shortcut reference ("?"). */
+	toggleShortcuts?: () => void;
 	/** Nudge the selection by (dx, dy) pixels (Arrow keys / Shift+Arrow). */
 	nudge?: (dx: number, dy: number) => void;
 	/** Navigate to the previous slide (ArrowLeft, no selection). */
@@ -93,6 +109,8 @@ export interface ShortcutActions {
 	nextSlide?: () => void;
 	/** Escape: clear selection / close menus / cancel inline edit. */
 	escape?: () => void;
+	/** Open or close the find bar (Ctrl/Cmd+F). */
+	find?: () => void;
 }
 
 /**
@@ -219,6 +237,13 @@ export const SHORTCUT_CATALOG: readonly ShortcutDefinition[] = [
 		group: 'editing',
 		descriptionKey: 'pptx.shortcuts.action.selectAll',
 	},
+	{ id: 'group', combo: 'Mod+G', group: 'editing', descriptionKey: 'pptx.ribbon.group' },
+	{
+		id: 'ungroup',
+		combo: 'Mod+Shift+G',
+		group: 'editing',
+		descriptionKey: 'pptx.ribbon.ungroup',
+	},
 	{
 		id: 'nudge',
 		combo: 'ArrowKeys',
@@ -248,6 +273,23 @@ export const SHORTCUT_CATALOG: readonly ShortcutDefinition[] = [
 		combo: 'Escape',
 		group: 'general',
 		descriptionKey: 'pptx.shortcuts.action.clearSelection',
+	},
+	{ id: 'find', combo: 'Mod+F', group: 'general', descriptionKey: 'pptx.findReplace.title' },
+	{ id: 'shortcuts', combo: '?', group: 'general', descriptionKey: 'pptx.shortcuts.title' },
+	// F5 / Shift+F5 are matched by `mapSlideShowStartKey` (pptx-viewer-shared),
+	// not by this file's `mapEditorKey` catalog - see `dispatchSlideShowStartKey`
+	// in `useEditorKeyboard.ts`. Listed here only so the help panel shows them.
+	{
+		id: 'present-from-beginning',
+		combo: 'F5',
+		group: 'general',
+		descriptionKey: 'pptx.slideShow.fromBeginning',
+	},
+	{
+		id: 'present-from-current',
+		combo: 'Shift+F5',
+		group: 'general',
+		descriptionKey: 'pptx.slideShow.fromCurrent',
 	},
 ] as const;
 
@@ -297,9 +339,13 @@ export interface ShortcutGuardState {
 }
 
 /**
- * Pure dispatch logic: mirrors the React `handleKeyDown` closure (and the
- * `resolveShortcutAction` test helper) exactly. DOM-free and side-effect-free,
- * so it can be unit-tested with synthetic inputs.
+ * Pure dispatch logic: a thin translation of Vue's guard shape onto the shared
+ * `mapEditorKey`, which is the one keymap every binding resolves against. DOM-
+ * free and side-effect-free, so it can be unit-tested with synthetic inputs.
+ *
+ * Keeping the signature (rather than exposing `mapEditorKey` directly) means the
+ * existing shell wiring and tests carry on working while the decision table has
+ * only one copy left in the repo.
  */
 export function resolveShortcutAction(
 	key: string,
@@ -307,102 +353,22 @@ export function resolveShortcutAction(
 	shiftKey: boolean,
 	guard: ShortcutGuardState,
 ): MatchedShortcut {
-	const {
-		canEdit,
-		isPresenting,
-		hasSelection,
-		inlineEditingElementId,
-		tableEditorIsEditing,
-		activeTool,
-		isTextInput,
-	} = guard;
-
-	// Only active in edit mode (React: `mode !== 'edit' || !canEdit`).
-	if (isPresenting || !canEdit) {
-		return { action: null };
-	}
-
-	// Escape: always handled.
-	if (key === 'Escape') {
-		return { action: 'escape' };
-	}
-
-	// Suppress when inline-editing text, editing a table cell, or drawing.
-	if (inlineEditingElementId || tableEditorIsEditing || activeTool !== 'select') {
-		return { action: null };
-	}
-
-	// Suppress when focus is in a text input.
-	if (isTextInput) {
-		return { action: null };
-	}
-
-	// Delete / Backspace.
-	if ((key === 'Delete' || key === 'Backspace') && hasSelection) {
-		return { action: 'delete' };
-	}
-
-	// Ctrl/Cmd combos.
-	if (mod) {
-		switch (key.toLowerCase()) {
-			case 'z':
-				return { action: shiftKey ? 'redo' : 'undo' };
-			case 'y':
-				return { action: 'redo' };
-			case 'c':
-				return hasSelection ? { action: 'copy' } : { action: null };
-			case 'x':
-				return hasSelection ? { action: 'cut' } : { action: null };
-			case 'v':
-				return { action: 'paste' };
-			case 'd':
-				return hasSelection ? { action: 'duplicate' } : { action: null };
-			case 'a':
-				return { action: 'selectAll' };
-		}
-	}
-
-	// Arrow-key nudge (with selection).
-	if (
-		hasSelection &&
-		(key === 'ArrowUp' || key === 'ArrowDown' || key === 'ArrowLeft' || key === 'ArrowRight')
-	) {
-		const step = shiftKey ? NUDGE_LARGE : NUDGE_SMALL;
-		let dx = 0;
-		let dy = 0;
-		switch (key) {
-			case 'ArrowUp':
-				dy = -step;
-				break;
-			case 'ArrowDown':
-				dy = step;
-				break;
-			case 'ArrowLeft':
-				dx = -step;
-				break;
-			case 'ArrowRight':
-				dx = step;
-				break;
-		}
-		return { action: 'nudge', dx, dy };
-	}
-
-	// Slide navigation (no selection).
-	if (!hasSelection && (key === 'ArrowLeft' || key === 'ArrowRight')) {
-		return { action: key === 'ArrowLeft' ? 'prevSlide' : 'nextSlide' };
-	}
-
-	return { action: null };
+	return mapEditorKey(
+		{ key, ctrlKey: mod, shiftKey },
+		{
+			canEdit: guard.canEdit,
+			isPresenting: guard.isPresenting,
+			hasSelection: guard.hasSelection,
+			isEditingText: Boolean(guard.inlineEditingElementId || guard.tableEditorIsEditing),
+			isDrawing: guard.activeTool !== 'select',
+			isTextInputTarget: guard.isTextInput,
+		},
+	);
 }
 
 /** Detect whether a keyboard event originated from an editable text target. */
 function eventTargetIsTextInput(event: KeyboardEvent): boolean {
-	const target = event.target as HTMLElement | null;
-	return (
-		target?.tagName === 'INPUT' ||
-		target?.tagName === 'TEXTAREA' ||
-		target?.isContentEditable === true
-	);
+	return isEditorTextInputTarget(event.target);
 }
 
 /* ------------------------------------------------------------------ */
@@ -460,6 +426,18 @@ export function useKeyboardShortcuts(
 				break;
 			case 'selectAll':
 				actions.selectAll?.();
+				break;
+			case 'group':
+				actions.group?.();
+				break;
+			case 'ungroup':
+				actions.ungroup?.();
+				break;
+			case 'find':
+				actions.find?.();
+				break;
+			case 'toggleShortcuts':
+				actions.toggleShortcuts?.();
 				break;
 			case 'nudge':
 				actions.nudge?.(result.dx ?? 0, result.dy ?? 0);

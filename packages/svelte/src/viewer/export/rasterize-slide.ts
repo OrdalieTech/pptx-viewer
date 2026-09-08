@@ -1,11 +1,17 @@
 import type { PptxSlide } from 'pptx-viewer-core';
-import type { CanvasSize } from 'pptx-viewer-shared';
+import type { CanvasSize, FieldSubstitutionContext } from 'pptx-viewer-shared';
 import { mount, unmount } from 'svelte';
 
 import { I18N_CONTEXT_KEY } from '../../i18n/context';
 import type { Translator } from '../../i18n/translator';
 import SlideStage from '../components/SlideStage.svelte';
+import { AreaChart3DContextKey } from '../state/area-chart-3d-context';
+import { BarChart3DContextKey } from '../state/bar-chart-3d-context';
+import { FieldContextKey } from '../state/field-context';
+import { LineChart3DContextKey } from '../state/line-chart-3d-context';
+import { PieChart3DContextKey } from '../state/pie-chart-3d-context';
 import { SmartArt3DContextKey } from '../state/smart-art-3d-context';
+import { SurfaceChart3DContextKey } from '../state/surface-chart-3d-context';
 import { renderToCanvas } from './render-to-canvas';
 
 export interface RasterizeSlideDeps {
@@ -19,6 +25,46 @@ export interface RasterizeSlideDeps {
 	/** Opt-in WebGL SmartArt renderer flag; see `PowerPointViewerProps.smartArt3D`. */
 	smartArt3D: boolean;
 	/**
+	 * Opt-in WebGL surface-chart renderer flag; see
+	 * `PowerPointViewerProps.surfaceChart3D`.
+	 */
+	surfaceChart3D: boolean;
+	/**
+	 * Opt-in WebGL bar3D-chart renderer flag; see
+	 * `PowerPointViewerProps.barChart3D`.
+	 */
+	barChart3D: boolean;
+	/**
+	 * Opt-in WebGL line3D-chart renderer flag; see
+	 * `PowerPointViewerProps.lineChart3D`.
+	 */
+	lineChart3D: boolean;
+	/**
+	 * Opt-in WebGL area3D-chart renderer flag; see
+	 * `PowerPointViewerProps.areaChart3D`.
+	 */
+	areaChart3D: boolean;
+	/**
+	 * Opt-in WebGL pie3D-chart renderer flag; see
+	 * `PowerPointViewerProps.pieChart3D`.
+	 */
+	pieChart3D: boolean;
+	/**
+	 * Options > Advanced > "Default resolution" / "Do not compress images"
+	 * raster-scale multiplier (see `resolveImageResolutionScale` in
+	 * `pptx-viewer-shared`), applied on top of the baseline capture scale so
+	 * the option has real effect without changing the default (highFidelity)
+	 * export quality.
+	 */
+	getImageResolutionScale(): number;
+	/**
+	 * Deck-level OOXML field-substitution context. The capture stage is mounted
+	 * outside the viewer tree, so without this an exported PNG/PDF would print
+	 * the authored "Slide #" placeholder while the screen shows "Slide 1".
+	 * `SlideStage` re-points its per-slide fields at the slide being captured.
+	 */
+	getFieldContext?: () => FieldSubstitutionContext | undefined;
+	/**
 	 * Overridable frame-wait before capture (test seam: the real
 	 * `requestAnimationFrame` double-wait is not worth driving through fake
 	 * timers). Defaults to {@link nextFrame}.
@@ -27,8 +73,15 @@ export interface RasterizeSlideDeps {
 }
 
 export interface RasterizeSlideController {
-	/** Render slide `index` off-screen at scale 1 and capture it with html2canvas-pro. */
-	rasterizeSlide(index: number): Promise<HTMLCanvasElement>;
+	/**
+	 * Render slide `index` off-screen at scale 1 and capture it with
+	 * html2canvas-pro. `scaleMultiplier` (default 1) is an extra factor on top
+	 * of the baseline 2x * Options > Advanced > Image Size/Quality scale; the
+	 * Print dialog's notes/handouts raster path passes a higher value when
+	 * Options > Advanced > "High quality" is on, without changing plain
+	 * PNG/PDF export.
+	 */
+	rasterizeSlide(index: number, scaleMultiplier?: number): Promise<HTMLCanvasElement>;
 	/** Remove the off-screen capture stage from the DOM. */
 	destroy(): void;
 }
@@ -95,7 +148,7 @@ export function createRasterizeSlide(deps: RasterizeSlideDeps): RasterizeSlideCo
 		host.replaceChildren();
 	}
 
-	async function rasterizeSlide(index: number): Promise<HTMLCanvasElement> {
+	async function rasterizeSlide(index: number, scaleMultiplier = 1): Promise<HTMLCanvasElement> {
 		const slide: PptxSlide | undefined = deps.getSlides()[index];
 		if (!slide) {
 			throw new Error(`Export failed: no slide at index ${index}`);
@@ -114,6 +167,12 @@ export function createRasterizeSlide(deps: RasterizeSlideDeps): RasterizeSlideCo
 			context: new Map<unknown, unknown>([
 				[I18N_CONTEXT_KEY, deps.getTranslator()],
 				[SmartArt3DContextKey, () => deps.smartArt3D],
+				[SurfaceChart3DContextKey, () => deps.surfaceChart3D],
+				[BarChart3DContextKey, () => deps.barChart3D],
+				[LineChart3DContextKey, () => deps.lineChart3D],
+				[AreaChart3DContextKey, () => deps.areaChart3D],
+				[PieChart3DContextKey, () => deps.pieChart3D],
+				[FieldContextKey, () => deps.getFieldContext?.()],
 			]),
 		});
 		await waitForFrame();
@@ -123,7 +182,7 @@ export function createRasterizeSlide(deps: RasterizeSlideDeps): RasterizeSlideCo
 		}
 		return renderToCanvas(stageEl, {
 			backgroundColor: '#ffffff',
-			scale: 2,
+			scale: 2 * deps.getImageResolutionScale() * scaleMultiplier,
 			width: canvasSize.width,
 			height: canvasSize.height,
 			logging: false,

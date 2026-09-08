@@ -3,6 +3,8 @@ import type { ChartPartRef, ChartViewModel } from 'pptx-viewer-shared';
 import {
 	buildChartViewModel,
 	chartPartToAttrs,
+	chartPlaceholderLabel,
+	computeChartLegendLayout,
 	getChartStylePalette,
 	resolveChartKind,
 } from 'pptx-viewer-shared';
@@ -14,8 +16,6 @@ import {
  * this module only resolves the palette / aspect ratio and lays out the
  * legend so the `ChartView` SFC template stays declarative.
  */
-
-const LEGEND_ITEM_WIDTH = 80;
 
 /** Resolved chart view: a renderable view model, or a labelled placeholder. */
 export type ChartView =
@@ -34,20 +34,36 @@ export function resolveChartPalette(chartData: PptxChartData): string[] {
 	return [...getChartStylePalette(chartData.style?.styleId)];
 }
 
-/** Build the renderable view (or placeholder) for a chart element. */
-export function buildChartView(element: ChartPptxElement): ChartView {
+/**
+ * Build the renderable view (or placeholder) for a chart element.
+ *
+ * @param translate - The binding's translator, used for the placeholder
+ *   caption. It is optional so the pure unit tests can call this without an
+ *   i18n context; a viewer always passes one.
+ */
+export function buildChartView(
+	element: ChartPptxElement,
+	translate?: (key: string, params?: Record<string, string>) => string,
+): ChartView {
 	const chartData = element.chartData;
+	// eslint-disable-next-line one-var -- pre-existing, unrelated to this change
+	const placeholder = (chartType: string | undefined): ChartView => ({
+		kind: 'placeholder',
+		label: translate ? chartPlaceholderLabel(chartType, translate) : `Chart: ${chartType ?? 'bar'}`,
+	});
 	if (!chartData || chartData.series.length === 0) {
-		return { kind: 'placeholder', label: `Chart: ${chartData?.chartType ?? 'bar'}` };
+		return placeholder(chartData?.chartType ?? 'bar');
 	}
 
+	// eslint-disable-next-line one-var -- pre-existing, unrelated to this change
 	const kind = resolveChartKind(chartData.chartType ?? 'bar');
 	if (kind === 'unsupported') {
-		return { kind: 'placeholder', label: `Chart: ${chartData.chartType}` };
+		return placeholder(chartData.chartType);
 	}
 
 	// Thread the resolved palette into the shared engine (non-destructively)
 	// so `seriesColor` / `paletteColor` produce the binding's colours.
+	// eslint-disable-next-line one-var -- pre-existing, unrelated to this change
 	const themedElement: ChartPptxElement = {
 		...element,
 		chartData: { ...chartData, colorPalette: resolveChartPalette(chartData) },
@@ -55,6 +71,7 @@ export function buildChartView(element: ChartPptxElement): ChartView {
 
 	// Square chart kinds stay circular regardless of the element's aspect;
 	// cartesian charts stretch to fill the element box.
+	// eslint-disable-next-line one-var -- pre-existing, unrelated to this change
 	const preserveAspectRatio: 'none' | 'xMidYMid meet' =
 		kind === 'pie' || kind === 'doughnut' || kind === 'radar' || kind === 'regionMap'
 			? 'xMidYMid meet'
@@ -69,23 +86,26 @@ export interface ChartLegendItem {
 	transform: string;
 	color: string;
 	label: string;
+	fontSize: number;
+	fill: string;
+	fontWeight: 'normal' | 'bold';
+	fontStyle: 'normal' | 'italic';
+	fontFamily?: string;
 }
 
 /** Legend layout: a horizontal row, or a vertical stack on the side. */
 export function buildLegendItems(vm: ChartViewModel): ChartLegendItem[] {
-	const vertical = vm.legendAnchor === 'start';
-	return vm.legend.map((entry, i) => {
-		const x = vertical
-			? vm.legendX
-			: vm.legendX - (vm.legend.length * LEGEND_ITEM_WIDTH) / 2 + i * LEGEND_ITEM_WIDTH;
-		const y = vertical ? vm.legendY + i * 14 : vm.legendY;
-		return {
-			key: `lg${i}`,
-			transform: `translate(${x.toFixed(1)},${y.toFixed(1)})`,
-			color: entry.color,
-			label: entry.label,
-		};
-	});
+	return computeChartLegendLayout(vm).map((item, i) => ({
+		key: `lg${i}`,
+		transform: `translate(${item.x.toFixed(1)},${item.y.toFixed(1)})`,
+		color: item.color,
+		label: item.label,
+		fontSize: item.fontSize,
+		fill: item.fill,
+		fontWeight: item.fontWeight,
+		fontStyle: item.fontStyle,
+		fontFamily: item.fontFamily,
+	}));
 }
 
 /**

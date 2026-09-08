@@ -7,6 +7,8 @@
 
 import type { PptxElement } from 'pptx-viewer-core';
 
+import { canInteractWithElement } from '../internal/shared';
+import { resolveTopLevelElementId } from '../internal/shared-src/render/element-hit-test';
 import { handleAnchor, handleCursor, RESIZE_HANDLES } from './drag-resize';
 import type { Box, ResizeHandle } from './drag-resize';
 import { isElementInteractive } from './template-mode';
@@ -82,6 +84,28 @@ export function computeHandleBoxes(
 }
 
 /**
+ * Resize-handle boxes for the single selection, suppressed entirely when the
+ * element's authored `a:spLocks` forbids resizing.
+ *
+ * The lock question is asked HERE rather than in the component so the rule is
+ * unit-testable without Angular, and so the render gate and the pointer-down
+ * gate ({@link canInteractWithElement}) can never disagree: a handle the user
+ * cannot see is also a handle the pointer path refuses.
+ */
+export function computeResizeHandleBoxes(
+	element: PptxElement | null | undefined,
+	box: (Box & { id: string }) | null,
+	editable: boolean,
+	handleScreenPx: number,
+	zoom: number,
+): HandleBox[] {
+	if (!canInteractWithElement(element, 'resize')) {
+		return [];
+	}
+	return computeHandleBoxes(box, editable, handleScreenPx, zoom);
+}
+
+/**
  * A corner handle box (rotate or shape-adjust) offset above/outside the
  * single selection's box by `offsetPx` (screen pixels, scaled by zoom).
  */
@@ -106,19 +130,47 @@ export function computeCornerHandle(
 }
 
 /**
+ * The rotate-knob box for the single selection, or null when the element's
+ * authored `a:spLocks/@noRotation` forbids the gesture. Companion to
+ * {@link computeResizeHandleBoxes}; see that function for why the lock check
+ * lives in this module.
+ */
+export function computeRotateHandleBox(
+	element: PptxElement | null | undefined,
+	box: (Box & { id: string }) | null,
+	editable: boolean,
+	handleScreenPx: number,
+	offsetPx: number,
+	zoom: number,
+): CornerHandleBox | null {
+	if (!canInteractWithElement(element, 'rotate')) {
+		return null;
+	}
+	return computeCornerHandle(box, editable, handleScreenPx, offsetPx, zoom, 'top-center');
+}
+
+/**
  * Resolve the id of the interactive element under a pointer target, or null.
- * An element host carries `data-element-id`, but template (master/layout)
- * elements are only interactive while `editTemplateMode` is on; when off they
- * are reported as null so the canvas treats them as background (no
- * select/drag/context-menu/inline-edit).
+ *
+ * Resolution goes through the shared hit-test, which answers with the TOP-LEVEL
+ * element rather than the innermost `data-element-id` node. That distinction is
+ * the whole point here: a group renders its children's nodes inside its own, so
+ * the innermost node under a click is usually a grouped CHILD, whose id is not
+ * in `allElements`. This function used to look that child id up, find nothing,
+ * and report "no element", which CLEARED the selection: Ungroup was then only
+ * reachable by hitting a gap inside the group's box that missed every child.
+ * PowerPoint (and React, Vanilla and Svelte) select the group instead.
+ *
+ * Template (master/layout) elements are only interactive while
+ * `editTemplateMode` is on; when off they are reported as null so the canvas
+ * treats them as background (no select/drag/context-menu/inline-edit).
  */
 export function resolveInteractiveElementId(
 	target: EventTarget | null,
 	allElements: readonly PptxElement[],
 	editTemplateMode: boolean,
 ): string | null {
-	const host = (target as HTMLElement | null)?.closest('[data-element-id]') as HTMLElement | null;
-	const id = host?.getAttribute('data-element-id');
+	const id = resolveTopLevelElementId(target);
 	if (!id) {
 		return null;
 	}

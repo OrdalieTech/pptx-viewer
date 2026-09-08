@@ -1,5 +1,5 @@
 import type { PptxTableCellStyle, XmlObject } from '../../types';
-import { serializeColorChoice } from '../../utils/color-xml-preservation';
+import { serializeColorChoiceWithRef } from '../../utils/color-xml-preservation';
 
 /**
  * Optional callback to resolve a preserved colour-choice XML node back to a
@@ -21,6 +21,7 @@ export function writeCellFill(
 	) {
 		delete tcPr['a:solidFill'];
 		delete tcPr['a:pattFill'];
+		delete tcPr['a:blipFill'];
 		const stops = style.gradientFillStops.map((stop) => {
 			const posRaw = typeof stop.position === 'number' ? stop.position : 0;
 			const position = Math.round(Math.max(0, Math.min(1, posRaw / 100)) * 100000);
@@ -71,6 +72,7 @@ export function writeCellFill(
 	} else if (style.fillMode === 'pattern' && style.patternFillPreset) {
 		delete tcPr['a:solidFill'];
 		delete tcPr['a:gradFill'];
+		delete tcPr['a:blipFill'];
 		const pattXml: XmlObject = {
 			'@_prst': style.patternFillPreset,
 		};
@@ -93,14 +95,24 @@ export function writeCellFill(
 		delete tcPr['a:solidFill'];
 		delete tcPr['a:gradFill'];
 		delete tcPr['a:pattFill'];
-	} else if (style.backgroundColor) {
+		delete tcPr['a:blipFill'];
+	} else if (style.fillMode !== 'image' && style.backgroundColor) {
+		// Guarded against `fillMode === 'image'`: an image-filled cell may
+		// still carry a fallback `backgroundColor` (e.g. for renderers that
+		// cannot display the image), and without this guard that fallback
+		// colour would make this branch fire and write a spurious
+		// `a:solidFill` alongside the still-untouched `a:blipFill`, producing
+		// two mutually exclusive fill children in the same `a:tcPr` even
+		// though the cell's fill was never edited.
 		delete tcPr['a:gradFill'];
 		delete tcPr['a:pattFill'];
+		delete tcPr['a:blipFill'];
 		const resolvedOriginal =
 			style.backgroundColorXml && resolveColorXml
 				? resolveColorXml(style.backgroundColorXml)
 				: undefined;
-		tcPr['a:solidFill'] = serializeColorChoice(
+		tcPr['a:solidFill'] = serializeColorChoiceWithRef(
+			style.backgroundColorRef,
 			style.backgroundColorXml,
 			resolvedOriginal,
 			style.backgroundColor,
@@ -193,7 +205,7 @@ export function writeCellTextFormatting(
 				rPr['@_u'] = style.underline ? 'sng' : 'none';
 			}
 			if (style.fontSize !== undefined) {
-				rPr['@_sz'] = String(style.fontSize * 100);
+				rPr['@_sz'] = String(Math.round(style.fontSize * 100));
 			}
 			if (style.color) {
 				rPr['a:solidFill'] = {

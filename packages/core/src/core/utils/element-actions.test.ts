@@ -97,6 +97,81 @@ describe('pptxActionToElementAction', () => {
 		const result = pptxActionToElementAction(pptxAction, 'click');
 		expect(result).toStrictEqual({ trigger: 'click', type: 'slide', slideIndex: 0 });
 	});
+
+	it('returns lastViewed for hlinkshowjump?jump=lastslideviewed, not lastSlide', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://hlinkshowjump?jump=lastslideviewed' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({ trigger: 'click', type: 'lastViewed' });
+	});
+
+	it('returns customShow with id and returnAfter for customshow?id=N&return=true', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://customshow?id=3&return=true' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({
+			trigger: 'click',
+			type: 'customShow',
+			customShowId: '3',
+			returnAfter: true,
+		});
+	});
+
+	it('returns customShow without returnAfter when &return is absent', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://customshow?id=7' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({
+			trigger: 'click',
+			type: 'customShow',
+			customShowId: '7',
+			returnAfter: false,
+		});
+	});
+
+	it('returns openFile with the resolved url for hlinkfile', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://hlinkfile', url: 'report.docx' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({ trigger: 'click', type: 'openFile', url: 'report.docx' });
+	});
+
+	it('returns openPresentation with the resolved url for hlinkpres', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://hlinkpres', url: 'other.pptx' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({
+			trigger: 'click',
+			type: 'openPresentation',
+			url: 'other.pptx',
+		});
+	});
+
+	it('returns playMedia for ppaction://media', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://media' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({ trigger: 'click', type: 'playMedia' });
+	});
+
+	it('returns oleVerb with the parsed verb number for ppaction://ole?verb=N', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://ole?verb=-1' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({ trigger: 'click', type: 'oleVerb', oleVerb: -1 });
+	});
+
+	// issue G15: ppaction://program ("Run program:") had no branch and fell
+	// through to the generic external-URL case, mis-reporting a Run-Program
+	// action as a plain hyperlink.
+	it('returns runProgram with the resolved url for ppaction://program', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://program', url: 'C:\\tools\\launch.exe' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({
+			trigger: 'click',
+			type: 'runProgram',
+			url: 'C:\\tools\\launch.exe',
+		});
+	});
+
+	it('returns runProgram with no url when the relationship did not resolve', () => {
+		const pptxAction: PptxAction = { action: 'ppaction://program' };
+		const result = pptxActionToElementAction(pptxAction, 'click');
+		expect(result).toStrictEqual({ trigger: 'click', type: 'runProgram' });
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -170,6 +245,93 @@ describe('elementActionToPptxAction', () => {
 		expect(result).toStrictEqual({
 			action: 'ppaction://hlinkshowjump?jump=endshow',
 		});
+	});
+
+	it('returns lastViewed PptxAction', () => {
+		const ea: ElementAction = { trigger: 'click', type: 'lastViewed' };
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://hlinkshowjump?jump=lastslideviewed' });
+	});
+
+	it('returns customShow PptxAction with id and return=true', () => {
+		const ea: ElementAction = {
+			trigger: 'click',
+			type: 'customShow',
+			customShowId: '3',
+			returnAfter: true,
+		};
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://customshow?id=3&return=true' });
+	});
+
+	it('omits &return for customShow when returnAfter is falsy', () => {
+		const ea: ElementAction = { trigger: 'click', type: 'customShow', customShowId: '3' };
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://customshow?id=3' });
+	});
+
+	it('returns openFile PptxAction carrying the url for relationship resolution', () => {
+		const ea: ElementAction = { trigger: 'click', type: 'openFile', url: 'report.docx' };
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://hlinkfile', url: 'report.docx' });
+	});
+
+	it('returns openPresentation PptxAction carrying the url for relationship resolution', () => {
+		const ea: ElementAction = { trigger: 'click', type: 'openPresentation', url: 'other.pptx' };
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://hlinkpres', url: 'other.pptx' });
+	});
+
+	it('returns playMedia PptxAction', () => {
+		const ea: ElementAction = { trigger: 'click', type: 'playMedia' };
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://media' });
+	});
+
+	it('returns oleVerb PptxAction', () => {
+		const ea: ElementAction = { trigger: 'click', type: 'oleVerb', oleVerb: -1 };
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://ole?verb=-1' });
+	});
+
+	it('defaults oleVerb to 0 when unset', () => {
+		const ea: ElementAction = { trigger: 'click', type: 'oleVerb' };
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://ole?verb=0' });
+	});
+
+	it('returns runProgram PptxAction carrying the url for relationship resolution (issue G15)', () => {
+		const ea: ElementAction = { trigger: 'click', type: 'runProgram', url: 'launch.exe' };
+		const result = elementActionToPptxAction(ea);
+		expect(result).toStrictEqual({ action: 'ppaction://program', url: 'launch.exe' });
+	});
+
+	it('does NOT corrupt a Run-Program action into a plain url on an unchanged round-trip (issue G15)', () => {
+		// Reproduces the exact regression: open the Action Settings inspector
+		// on a ppaction://program shape and click OK without changing
+		// anything. Before the fix this fell through to the generic 'url'
+		// ElementActionType and the write-back case dropped the action string.
+		const original: PptxAction = { rId: 'rId5', action: 'ppaction://program', url: 'run.bat' };
+		const elementAction = pptxActionToElementAction(original, 'click');
+		expect(elementAction.type).toBe('runProgram');
+		const roundTripped = elementActionToPptxAction(elementAction);
+		expect(roundTripped?.action).toBe('ppaction://program');
+	});
+
+	it('round-trips every new verb through parse then serialize', () => {
+		const cases: PptxAction[] = [
+			{ action: 'ppaction://hlinkshowjump?jump=lastslideviewed' },
+			{ action: 'ppaction://customshow?id=3&return=true' },
+			{ action: 'ppaction://customshow?id=7' },
+			{ action: 'ppaction://media' },
+			{ action: 'ppaction://ole?verb=2' },
+			{ action: 'ppaction://program' },
+		];
+		for (const original of cases) {
+			const elementAction = pptxActionToElementAction(original, 'click');
+			const roundTripped = elementActionToPptxAction(elementAction);
+			expect(roundTripped?.action).toBe(original.action);
+		}
 	});
 });
 

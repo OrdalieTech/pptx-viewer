@@ -1,9 +1,21 @@
-import type { PptxChartType, PptxElement, PptxHandler, SmartArtLayout } from 'pptx-viewer-core';
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per action); merging them isn't a
+   style choice here. */
+import type { PptxElement, PptxHandler, SmartArtLayout } from 'pptx-viewer-core';
 import { MIN_ELEMENT_SIZE } from 'pptx-viewer-core';
-import { createGuide } from 'pptx-viewer-shared';
-import type { Guide, ShapePresetType } from 'pptx-viewer-shared';
+import {
+	appendElementOnSlide,
+	createGuide,
+	DEFAULT_INSERT_CHART_KIND,
+	isElementIdInteractive,
+	shapeFillChange,
+	shapeOutlineChange,
+} from 'pptx-viewer-shared';
+import type { Guide, InsertChartKind, ShapePresetType } from 'pptx-viewer-shared';
 
+import type { Translator } from '../i18n';
 import type { Store, ViewerState } from '../state';
+import { getActiveElements } from './editor-active-elements';
 import type { AnimationActions } from './editor-animation-actions';
 import { createAnimationActions } from './editor-animation-actions';
 import { createApplyToSelected } from './editor-apply-to-selected';
@@ -33,8 +45,10 @@ import {
 } from './editor-insert-structured';
 import type { InspectorActions } from './editor-inspector-actions';
 import { createInspectorActions } from './editor-inspector-actions';
-import { appendElementOnSlide } from './editor-mutations';
+import type { MasterViewCrudActions } from './editor-master-view-crud-actions';
+import { createMasterViewCrudActions } from './editor-master-view-crud-actions';
 import type { EditorOps } from './editor-operations';
+import { recordRecentColor } from './editor-recent-colors';
 import type { SectionActions } from './editor-section-actions';
 import { createSectionActions } from './editor-section-actions';
 import type { SlideActions } from './editor-slide-actions';
@@ -43,6 +57,7 @@ import type { TextActions } from './editor-text-actions';
 import { createTextActions } from './editor-text-actions';
 import type { TransitionActions } from './editor-transition-actions';
 import { createTransitionActions } from './editor-transition-actions';
+import { isDeckViewToggleOption, patchViewPropertiesForToggle } from './editor-view-preferences';
 
 /** A geometry patch from the inspector (all fields optional). */
 export interface GeometryPatch {
@@ -76,20 +91,25 @@ export interface EditActions
 		DeckActions {
 	/** Slide section CRUD and ordering actions. */
 	sections: SectionActions;
+	/** Slide Master view sidebar CRUD (Insert/Duplicate/Delete/Rename Layout/Master). */
+	masterView: MasterViewCrudActions;
 	// Slide-level review comments, shared by desktop and mobile chrome.
 	comments: CommentActions;
 	toggleFormatPainter(): void;
-	setShapeFill(color: string): void;
-	setShapeStroke(color: string): void;
+	setShapeFill(color: string, ref?: import('pptx-viewer-core').PptxThemeColorRef): void;
+	setShapeStroke(color: string, ref?: import('pptx-viewer-core').PptxThemeColorRef): void;
 	setShapeStrokeWidth(width: number): void;
 	setShapeStyle(patch: Partial<import('pptx-viewer-core').ShapeStyle>): void;
 	setShapeType(shapeType: string): void;
+	/** B6: fold a colour into the deck's "Recent colours" MRU list; see `InspectorHandlers.pushRecentColor`. */
+	pushRecentColor(hex: string): void;
 	/** Commit an inspector geometry edit (X/Y/W/H/rotation). */
 	setGeometry(patch: GeometryPatch): void;
 	insert(kind: InsertKind, shapeType?: ShapePresetType): void;
 	insertImage(): Promise<void>;
 	insertMedia(): Promise<void>;
-	insertChart(chartType: PptxChartType): void;
+	/** Insert a default chart for the given dropdown entry (defaults to Column). */
+	insertChart(chartKind?: InsertChartKind): void;
 	insertSmartArt(layout: SmartArtLayout, defaultItems: string[]): void;
 	insertEquation(omml: Record<string, unknown>): void;
 	updateEquation(id: string, omml: Record<string, unknown>): void;
@@ -97,8 +117,17 @@ export interface EditActions
 	insertField(fieldType: string, value?: string): void;
 	duplicateSelected(): void;
 	deleteSelected(): void;
-	toggleViewOption(option: 'showGrid' | 'showRulers' | 'snapToGrid' | 'snapToShape'): void;
-	addGuide(axis: Guide['axis']): void;
+	/** Select every interactive element on the active slide (Home > Select > Select All). */
+	selectAll(): void;
+	toggleViewOption(
+		option: 'showGrid' | 'showRulers' | 'showGuides' | 'snapToGrid' | 'snapToShape',
+	): void;
+	/**
+	 * Add an alignment guide. Centred by default (View > H/V Guide); `position`
+	 * is supplied when the guide was dragged off a ruler strip, where the shared
+	 * `rulerDragToGuidePosition` already resolved the drop point.
+	 */
+	addGuide(axis: Guide['axis'], position?: number): void;
 	activateEyedropper(): void;
 	toggleSpellCheck(): void;
 	replaceSelectedImage(): Promise<void>;
@@ -107,10 +136,16 @@ export interface EditActions
 
 export interface EditActionsDeps {
 	doc: Document;
+	/** Live getter: a `setLocale` switch must reach the master-view CRUD actions. */
+	getTranslator(): Translator;
 	store: Store<ViewerState>;
 	ops: EditorOps;
 	/** Live handler getter (deck-level theme apply); null before a load. */
 	getHandler(): PptxHandler | null;
+	/** See `MasterViewCrudActionsDeps.setHandler`. */
+	setHandler(handler: PptxHandler): void;
+	/** Options > General > "User name" override for new comment/reply authorship. */
+	getUserName?: () => string | undefined;
 }
 
 /**
@@ -141,7 +176,7 @@ export function createEditActions(deps: EditActionsDeps): EditActions {
 	};
 
 	return {
-		...createTextActions(applyToSelected),
+		...createTextActions(store, applyToSelected),
 		...createArrangeActions({ store, ops, applyToSelected }),
 		...createClipboardActions({ store, ops }),
 		...createSlideActions({ store, ops, getHandler: deps.getHandler }),
@@ -152,7 +187,15 @@ export function createEditActions(deps: EditActionsDeps): EditActions {
 		...createInkActions({ store, ops }),
 		...createDeckActions({ store, ops, getHandler: deps.getHandler }),
 		sections: createSectionActions(store, ops),
-		comments: createCommentActions({ store, ops }),
+		masterView: createMasterViewCrudActions({
+			doc,
+			getTranslator: deps.getTranslator,
+			store,
+			ops,
+			getHandler: deps.getHandler,
+			setHandler: deps.setHandler,
+		}),
+		comments: createCommentActions({ store, ops, getUserName: deps.getUserName }),
 		toggleFormatPainter() {
 			const state = store.get();
 			store.set({
@@ -162,14 +205,22 @@ export function createEditActions(deps: EditActionsDeps): EditActions {
 
 		// Picking a flat colour swatch implies solid fill, so it also clears any
 		// active gradient/pattern mode (mirrors the React/Vue "Fill & Stroke" panel).
-		setShapeFill: (color) =>
-			applyToSelected((el) => patchShapeStyle(el, { fillColor: color, fillMode: 'solid' })),
-		setShapeStroke: (color) => applyToSelected((el) => patchShapeStyle(el, { strokeColor: color })),
+		// The patch itself comes from the shared `shapeFillChange`/`shapeOutlineChange`
+		// decision functions so the two keys can't drift from the other bindings.
+		setShapeFill: (color, ref) => {
+			recordRecentColor(store, color);
+			applyToSelected((el) => patchShapeStyle(el, shapeFillChange(color, ref)));
+		},
+		setShapeStroke: (color, ref) => {
+			recordRecentColor(store, color);
+			applyToSelected((el) => patchShapeStyle(el, shapeOutlineChange(color, ref)));
+		},
 		setShapeStrokeWidth: (width) =>
 			applyToSelected((el) => patchShapeStyle(el, { strokeWidth: Math.max(0, width) })),
 		setShapeStyle: (patch) => applyToSelected((el) => patchShapeStyle(el, patch)),
 		setShapeType: (shapeType) =>
 			applyToSelected((el) => (el.type === 'shape' ? { shapeType } : {})),
+		pushRecentColor: (hex) => recordRecentColor(store, hex),
 
 		setGeometry(patch) {
 			applyToSelected(() => {
@@ -215,12 +266,12 @@ export function createEditActions(deps: EditActionsDeps): EditActions {
 			insertElement(await pickMediaElement(doc, state.canvasSize));
 		},
 
-		insertChart(chartType) {
+		insertChart(chartKind = DEFAULT_INSERT_CHART_KIND) {
 			const state = store.get();
 			if (!state.slides[state.currentSlide]) {
 				return;
 			}
-			insertElement(buildChartInsertElement(chartType, state.canvasSize));
+			insertElement(buildChartInsertElement(chartKind, state.canvasSize));
 		},
 		insertSmartArt(layout, defaultItems) {
 			const state = store.get();
@@ -256,17 +307,43 @@ export function createEditActions(deps: EditActionsDeps): EditActions {
 
 		duplicateSelected: () => void ops.duplicateSelected(),
 		deleteSelected: () => ops.deleteSelected(),
-		toggleViewOption(option) {
+		selectAll() {
 			const state = store.get();
-			store.set({ [option]: !state[option] });
-			for (const root of doc.querySelectorAll('.pptxv')) {
-				root.classList.toggle(`pptxv-${option}`, !state[option]);
+			// Template-owned elements are only selectable while edit-template mode
+			// is on, so the same interactivity rule the pointer uses applies here.
+			const ids = getActiveElements(state)
+				.filter((element) => isElementIdInteractive(element.id, state.editTemplateMode))
+				.map((element) => element.id);
+			if (ids.length > 0) {
+				ops.select(ids.at(-1) ?? null, ids);
 			}
 		},
-		addGuide(axis) {
+		toggleViewOption(option) {
 			const state = store.get();
+			const nextValue = !state[option];
+			// PowerPoint round-trips snap-to-grid, snap-to-shape (`snapToObjects`)
+			// and show-guides through `ppt/viewProps.xml`'s `p:viewPr`; write the
+			// flip back into `viewProperties` (outside history: view toggles are
+			// not undoable) so a save persists it, mirroring the shared
+			// `viewer-preferences` decision every binding uses to seed the same
+			// three toggles on load.
+			store.set(
+				isDeckViewToggleOption(option)
+					? {
+							[option]: nextValue,
+							viewProperties: patchViewPropertiesForToggle(state, option, nextValue),
+						}
+					: { [option]: nextValue },
+			);
+			for (const root of doc.querySelectorAll('.pptxv')) {
+				root.classList.toggle(`pptxv-${option}`, nextValue);
+			}
+		},
+		addGuide(axis, position) {
+			const state = store.get();
+			const guide = createGuide(`guide-${Date.now()}`, axis, state.canvasSize);
 			store.set({
-				guides: [...state.guides, createGuide(`guide-${Date.now()}`, axis, state.canvasSize)],
+				guides: [...state.guides, position === undefined ? guide : { ...guide, position }],
 			});
 		},
 		activateEyedropper: () => store.set({ eyedropperActive: true }),

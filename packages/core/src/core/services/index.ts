@@ -37,6 +37,7 @@ export {
 } from './PptxEditorAnimationService';
 export { reconcileAnimationTargets } from './animation-target-reconcile';
 export { remapEditorAnimationsToShapeIds } from './animation-shape-id-assign';
+export { mergeNativeSoundIntoEditorAnimations } from './animation-sound-merge';
 export {
 	PptxNativeAnimationService,
 	type IPptxNativeAnimationService,
@@ -57,7 +58,9 @@ export {
 	OOXML_TO_PRESET_EMPH,
 	ooxmlToPresetName,
 } from './animation-write-mappings';
-export { buildSingleEffectNode } from './animation-write-node-builders';
+export { buildSingleEffectNode, applySoundToEffectCTn } from './animation-write-node-builders';
+export { applyAfterAnimationBehavior } from './animation-after-effect-write';
+export { extractAfterAnimationFromSubTnLst } from './native-animation-after-effect';
 export {
 	parseCondition,
 	parseConditionList,
@@ -71,3 +74,4 @@ export {
 	serializeGraphicBuild,
 	type PptxGraphicBuildEntry,
 } from './animation-target-build-helpers';
+export { parseAnimEffectFilter, parseFilterToken } from './animation-effect-filter-parsing';

@@ -17,18 +17,21 @@
 import type { PptxNativeAnimation } from 'pptx-viewer-core';
 
 import { buildColorAnimationKeyframes } from './animation-color';
-import { parseMotionPathPoints } from './animation-motion-path';
+import { resolveFilterEffect } from './animation-filter-effects';
 import {
 	emphasisFilterKeyframeCss,
 	FLY_SUBTYPE_TO_EDGE,
 	PRESET_ID_TO_EFFECT,
 } from './animation-presets';
+import type { AnimationElementBox, AnimationRenderContext } from './animation-render-context';
+import { resolveAnimationTargetId } from './animation-target-id';
 import type {
 	AnimationStep,
 	EffectName,
 	TimelineStep,
 	TimelineClickGroup,
 } from './animation-timeline-types';
+import { buildTransformKeyframes } from './animation-transform-keyframes';
 
 // ==========================================================================
 // Effect name resolution
@@ -38,24 +41,42 @@ import type {
  * Resolve the static {@link EffectName} for a native animation from its
  * `presetClass` + `presetId`. Returns `undefined` for path/motion/rotation/scale
  * animations (which are handled dynamically) and for unknown ids.
+ *
+ * `presetId` is the PRIMARY selector. When it is absent, or present but not
+ * in {@link PRESET_ID_TO_EFFECT} (a preset a tool other than PowerPoint wrote,
+ * or one this catalogue does not yet cover), the animation's parsed
+ * `p:animEffect/@filter` (`anim.effectFilter`) is consulted as a FALLBACK via
+ * `resolveFilterEffect`, so a deck whose only description of the effect is
+ * the filter string (no recognisable `presetId`) still resolves to a real
+ * effect instead of falling straight to the neutral safety net. `path`-class
+ * animations (motion path) never consult the filter: `p:animEffect` filters
+ * describe reveal/conceal transitions, not motion.
  */
 export function resolveEffect(anim: PptxNativeAnimation): EffectName | undefined {
 	const cls = anim.presetClass;
 	const id = anim.presetId;
-	if (cls === undefined || id === undefined) {
-		return undefined;
+	if (cls !== undefined && id !== undefined) {
+		if (cls === 'entr') {
+			const effect = applyFlyDirection(PRESET_ID_TO_EFFECT.entr[id], anim.presetSubtype);
+			if (effect) {
+				return effect;
+			}
+		} else if (cls === 'exit') {
+			const effect = applyFlyDirection(PRESET_ID_TO_EFFECT.exit[id], anim.presetSubtype);
+			if (effect) {
+				return effect;
+			}
+		} else if (cls === 'emph') {
+			const effect = PRESET_ID_TO_EFFECT.emph[id];
+			if (effect) {
+				return effect;
+			}
+		} else {
+			// path/motion/rotation/scale: handled dynamically, never via filter.
+			return undefined;
+		}
 	}
-	if (cls === 'entr') {
-		return applyFlyDirection(PRESET_ID_TO_EFFECT.entr[id], anim.presetSubtype);
-	}
-	if (cls === 'exit') {
-		return applyFlyDirection(PRESET_ID_TO_EFFECT.exit[id], anim.presetSubtype);
-	}
-	if (cls === 'emph') {
-		return PRESET_ID_TO_EFFECT.emph[id];
-	}
-	// For path/motion/rotation/scale, return undefined — handled dynamically.
-	return undefined;
+	return resolveFilterEffect(anim);
 }
 
 /**
@@ -89,6 +110,55 @@ function applyFlyDirection(
 // ==========================================================================
 
 /**
+ * Express one motion-path coordinate as a CSS length measured against the SLIDE.
+ *
+ * OOXML motion-path numbers are fractions of the slide, but a CSS
+ * `translate(%)` resolves against the ELEMENT's own box, so every parsed path
+ * used to under-travel by the ratio between the two (a small shape barely
+ * moved). The offset is therefore emitted as `calc(var(--pptx-slide-w) * f)`;
+ * a binding sets those custom properties on its slide stage, and the fallback
+ * is the default canvas size so an unset stage still travels a sane distance.
+ *
+ * @param percent - Sampled coordinate in percent-of-slide units (path * 100).
+ * @param axis - `w` for the horizontal offset, `h` for the vertical one.
+ */
+const FLAT_TRANSFORM_PREFIXES = {
+	motion: 'pptx-motionPath',
+	rotationAbsolute: 'pptx-rotateAbs',
+	rotationRelative: 'pptx-rotateBy',
+	scaleAbsolute: 'pptx-scaleAbs',
+	scaleRelative: 'pptx-scaleBy',
+	transform: 'pptx-transform',
+} as const;
+
+const TIMELINE_TRANSFORM_PREFIXES = {
+	motion: 'pptx-tl-motion',
+	rotationAbsolute: 'pptx-tl-rotateAbs',
+	rotationRelative: 'pptx-tl-rotate',
+	scaleAbsolute: 'pptx-tl-scaleAbs',
+	scaleRelative: 'pptx-tl-scale',
+	transform: 'pptx-tl-transform',
+} as const;
+
+/**
+ * The animated element's real box + the deck's theme colour map, when the
+ * caller built one (see `animation-render-context.ts`). Resolves cross-axis
+ * `p:anim` geometry formulas (Grow And Turn's `-#ppt_w/2` fly-in) and
+ * scheme-colour (`a:schemeClr`) ramp stops that would otherwise fall back to
+ * canned timing / be dropped.
+ */
+export function boxForAnimation(
+	anim: PptxNativeAnimation,
+	renderContext: AnimationRenderContext | undefined,
+): AnimationElementBox | undefined {
+	if (!renderContext) {
+		return undefined;
+	}
+	const targetId = resolveAnimationTargetId(anim);
+	return targetId ? renderContext.getElementBox(targetId) : undefined;
+}
+
+/**
  * Build a dynamic CSS `@keyframes` block for motion path, rotation, scale, or
  * colour animations that don't map to a static effect preset. Uses the
  * `pptx-motionPath-*` / `pptx-rotateBy-*` / `pptx-scaleBy-*` / `pptx-color-*`
@@ -97,52 +167,27 @@ function applyFlyDirection(
 export function buildDynamicKeyframes(
 	anim: PptxNativeAnimation,
 	uid: number,
+	renderContext?: AnimationRenderContext,
 ): { keyframeName: string; css: string } | undefined {
-	// Motion path animation
-	if (anim.motionPath) {
-		const name = `pptx-motionPath-${uid}`;
-		const points = parseMotionPathPoints(anim.motionPath);
-		if (points.length < 2) {
-			return undefined;
-		}
-		const kfLines: string[] = [];
-		for (let i = 0; i < points.length; i++) {
-			const pct = Math.round((i / (points.length - 1)) * 100);
-			kfLines.push(
-				`\t${pct}% { transform: translate(${points[i].x.toFixed(2)}%, ${points[i].y.toFixed(2)}%); }`,
-			);
-		}
-		return {
-			keyframeName: name,
-			css: `@keyframes ${name} {\n${kfLines.join('\n')}\n}`,
-		};
-	}
-
-	// Rotation animation
-	if (anim.rotationBy !== undefined) {
-		const name = `pptx-rotateBy-${uid}`;
-		const deg = anim.rotationBy;
-		return {
-			keyframeName: name,
-			css: `@keyframes ${name} {\n\tfrom { transform: rotate(0deg); }\n\tto { transform: rotate(${deg}deg); }\n}`,
-		};
-	}
-
-	// Scale animation
-	if (anim.scaleByX !== undefined || anim.scaleByY !== undefined) {
-		const name = `pptx-scaleBy-${uid}`;
-		const sx = anim.scaleByX ?? 1;
-		const sy = anim.scaleByY ?? 1;
-		return {
-			keyframeName: name,
-			css: `@keyframes ${name} {\n\tfrom { transform: scale(1); }\n\tto { transform: scale(${sx}, ${sy}); }\n}`,
-		};
+	const transform = buildTransformKeyframes(
+		anim,
+		uid,
+		FLAT_TRANSFORM_PREFIXES,
+		boxForAnimation(anim, renderContext),
+	);
+	if (transform) {
+		return transform;
 	}
 
 	// Color animation (p:animClr)
 	if (anim.colorAnimation) {
 		const name = `pptx-color-${uid}`;
-		const css = buildColorAnimationKeyframes(anim.colorAnimation, name);
+		const css = buildColorAnimationKeyframes(
+			anim.colorAnimation,
+			name,
+			undefined,
+			renderContext?.themeColorMap,
+		);
 		if (css) {
 			return { keyframeName: name, css };
 		}
@@ -168,59 +213,26 @@ export function buildDynamicKeyframes(
 export function buildDynamicKeyframe(
 	anim: PptxNativeAnimation,
 	uid: number,
+	renderContext?: AnimationRenderContext,
 ): { keyframeName: string; css: string } | undefined {
-	if (anim.motionPath) {
-		const name = `pptx-tl-motion-${uid}`;
-		const points = parseMotionPathPoints(anim.motionPath);
-		if (points.length < 2) {
-			return undefined;
-		}
-		const lines: string[] = [];
-		for (let i = 0; i < points.length; i++) {
-			const pct = Math.round((i / (points.length - 1)) * 100);
-			const tx = points[i].x.toFixed(2);
-			const ty = points[i].y.toFixed(2);
-
-			if (anim.motionPathRotateAuto) {
-				// Compute the tangent angle at this point using the direction
-				// to the next point (or from the previous point for the last one).
-				const next = i < points.length - 1 ? points[i + 1] : points[i];
-				const prev = i > 0 ? points[i - 1] : points[i];
-				const dx = i < points.length - 1 ? next.x - points[i].x : points[i].x - prev.x;
-				const dy = i < points.length - 1 ? next.y - points[i].y : points[i].y - prev.y;
-				const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
-				lines.push(
-					`\t${pct}% { transform: translate(${tx}%, ${ty}%) rotate(${angleDeg.toFixed(2)}deg); }`,
-				);
-			} else {
-				lines.push(`\t${pct}% { transform: translate(${tx}%, ${ty}%); }`);
-			}
-		}
-		return {
-			keyframeName: name,
-			css: `@keyframes ${name} {\n${lines.join('\n')}\n}`,
-		};
-	}
-	if (anim.rotationBy !== undefined) {
-		const name = `pptx-tl-rotate-${uid}`;
-		return {
-			keyframeName: name,
-			css: `@keyframes ${name} {\n\tfrom { transform: rotate(0deg); }\n\tto { transform: rotate(${anim.rotationBy}deg); }\n}`,
-		};
-	}
-	if (anim.scaleByX !== undefined || anim.scaleByY !== undefined) {
-		const name = `pptx-tl-scale-${uid}`;
-		const sx = anim.scaleByX ?? 1;
-		const sy = anim.scaleByY ?? 1;
-		return {
-			keyframeName: name,
-			css: `@keyframes ${name} {\n\tfrom { transform: scale(1); }\n\tto { transform: scale(${sx}, ${sy}); }\n}`,
-		};
+	const transform = buildTransformKeyframes(
+		anim,
+		uid,
+		TIMELINE_TRANSFORM_PREFIXES,
+		boxForAnimation(anim, renderContext),
+	);
+	if (transform) {
+		return transform;
 	}
 	// Color animation (p:animClr)
 	if (anim.colorAnimation) {
 		const name = `pptx-tl-color-${uid}`;
-		const css = buildColorAnimationKeyframes(anim.colorAnimation, name);
+		const css = buildColorAnimationKeyframes(
+			anim.colorAnimation,
+			name,
+			undefined,
+			renderContext?.themeColorMap,
+		);
 		if (css) {
 			return { keyframeName: name, css };
 		}
@@ -289,6 +301,20 @@ export function finalizeClickGroup(
 	if (options?.autoAdvance) {
 		group.autoAdvance = true;
 		group.autoAdvanceDelayMs = options.autoAdvanceDelayMs ?? 0;
+	}
+	// `@concurrent`/`@nextAc`/`@prevAc` are constant across every step governed
+	// by the same enclosing `p:seq` (ECMA-376 S19.5.60), so the first step that
+	// carries one speaks for the whole group.
+	for (const step of steps) {
+		if (group.seqConcurrent === undefined && step.seqConcurrent !== undefined) {
+			group.seqConcurrent = step.seqConcurrent;
+		}
+		if (group.seqNextAction === undefined && step.seqNextAction !== undefined) {
+			group.seqNextAction = step.seqNextAction;
+		}
+		if (group.seqPrevAction === undefined && step.seqPrevAction !== undefined) {
+			group.seqPrevAction = step.seqPrevAction;
+		}
 	}
 	return group;
 }

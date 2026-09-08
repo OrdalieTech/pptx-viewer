@@ -59,4 +59,296 @@ describe('chartML data label parsing', () => {
 			showLeaderLines: false,
 		});
 	});
+
+	// C2-G16: c:dLbls/c:numFmt and c:dLbl/c:numFmt (label-specific number format,
+	// distinct from the series' own cell format).
+	it('parses c:dLbls/c:numFmt into the group-level numberFormat (C2-G16)', () => {
+		const group: XmlObject = {
+			'c:numFmt': { '@_formatCode': '$#,##0,,"M"', '@_sourceLinked': '0' },
+			'c:showVal': { '@_val': '1' },
+		};
+		expect(parseChartDataLabelOptions(group, lookup).numberFormat).toBe('$#,##0,,"M"');
+	});
+
+	it('parses c:dLbl/c:numFmt into the per-point numberFormat (C2-G16)', () => {
+		const series: XmlObject = {
+			'c:dLbls': {
+				'c:dLbl': {
+					'c:idx': { '@_val': '0' },
+					'c:numFmt': { '@_formatCode': '0%', '@_sourceLinked': '0' },
+					'c:showVal': { '@_val': '1' },
+				},
+			},
+		};
+		const [label] = parseSeriesDataLabels(series, lookup);
+		expect(label.numberFormat).toBe('0%');
+	});
+
+	// C2-G15: c:dLbl/c:layout/c:manualLayout (a data label dragged off its
+	// automatic position), using the same parseChartManualLayout helper as
+	// title/legend/plotArea.
+	it('parses c:dLbl/c:layout/c:manualLayout into the per-point layout (C2-G15)', () => {
+		const series: XmlObject = {
+			'c:dLbls': {
+				'c:dLbl': {
+					'c:idx': { '@_val': '2' },
+					'c:layout': {
+						'c:manualLayout': {
+							'c:x': { '@_val': '0.05' },
+							'c:y': { '@_val': '-0.1' },
+						},
+					},
+					'c:showVal': { '@_val': '1' },
+				},
+			},
+		};
+		const [label] = parseSeriesDataLabels(series, lookup);
+		expect(label.layout).toStrictEqual({ x: 0.05, y: -0.1 });
+	});
+
+	// C2-G13: PowerPoint 2013+ "Value From Cells" data labels
+	// (c15:dlblFieldTable cached text, gated per-point by
+	// c15:showDataLabelsRange), distinct from a literal c:tx/c:rich override.
+	describe('"Value From Cells" data labels (C2-G13)', () => {
+		const fieldTableExtLst: XmlObject = {
+			'c:ext': {
+				'@_uri': '{CE6537A1-D6FC-4f65-9D91-7224C49458BB}',
+				'c15:dlblFieldTable': {
+					'c15:dlblFieldTableEntry': {
+						'c15:f': 'Sheet1!$B$2:$B$4',
+						'c15:dlblFieldTableCache': {
+							'c:ptCount': { '@_val': '3' },
+							'c:pt': [
+								{ '@_idx': '0', 'c:v': 'Alpha' },
+								{ '@_idx': '1', 'c:v': 'Beta' },
+							],
+						},
+					},
+				},
+			},
+		};
+
+		it('resolves the cached cell text when c15:showDataLabelsRange is set', () => {
+			const series: XmlObject = {
+				'c:dLbls': {
+					'c:extLst': fieldTableExtLst,
+					'c:dLbl': {
+						'c:idx': { '@_val': '0' },
+						'c:extLst': { 'c:ext': { 'c15:showDataLabelsRange': { '@_val': '1' } } },
+					},
+				},
+			};
+			const [label] = parseSeriesDataLabels(series, lookup);
+			expect(label.text).toBe('Alpha');
+		});
+
+		it('leaves text unset when showDataLabelsRange is absent even if a field table exists', () => {
+			const series: XmlObject = {
+				'c:dLbls': {
+					'c:extLst': fieldTableExtLst,
+					'c:dLbl': { 'c:idx': { '@_val': '1' } },
+				},
+			};
+			const [label] = parseSeriesDataLabels(series, lookup);
+			expect(label.text).toBeUndefined();
+		});
+
+		it('prefers a literal c:tx/c:rich override over the cell-range cache', () => {
+			const series: XmlObject = {
+				'c:dLbls': {
+					'c:extLst': fieldTableExtLst,
+					'c:dLbl': {
+						'c:idx': { '@_val': '1' },
+						'c:extLst': { 'c:ext': { 'c15:showDataLabelsRange': { '@_val': '1' } } },
+						'c:tx': { 'c:rich': { 'a:p': { 'a:r': { 'a:t': 'Manual override' } } } },
+					},
+				},
+			};
+			const [label] = parseSeriesDataLabels(series, lookup);
+			expect(label.text).toBe('Manual override');
+		});
+	});
+
+	// C2-G1 (data-label half): c:dLbls/c:txPr and c:dLbl/c:txPr font, theme-resolved
+	// the same way axis/title/legend text already is.
+	describe('c:txPr font (theme resolution)', () => {
+		const colorParser = {
+			parseColor: (node: XmlObject | undefined) => {
+				const srgb = node?.['a:srgbClr'] as XmlObject | undefined;
+				return srgb?.['@_val'] ? `#${srgb['@_val']}` : undefined;
+			},
+		};
+		const txPr: XmlObject = {
+			'a:p': {
+				'a:pPr': {
+					'a:defRPr': {
+						'@_sz': '900',
+						'@_b': '1',
+						'a:latin': { '@_typeface': 'Calibri' },
+						'a:solidFill': { 'a:srgbClr': { '@_val': '112233' } },
+					},
+				},
+			},
+		};
+
+		it('is absent when no colorParser is given, so untouched charts round-trip byte-identical', () => {
+			expect(parseChartDataLabelOptions({ 'c:txPr': txPr }, lookup).txPr).toBeUndefined();
+		});
+
+		it('parses c:dLbls/c:txPr into the group-level options.txPr', () => {
+			const result = parseChartDataLabelOptions({ 'c:txPr': txPr }, lookup, colorParser);
+			expect(result.txPr).toStrictEqual({
+				fontSize: 9,
+				bold: true,
+				fontFamily: 'Calibri',
+				color: '#112233',
+			});
+		});
+
+		it('resolves a theme-font placeholder via resolveTypeface', () => {
+			const placeholderTxPr: XmlObject = {
+				'a:p': { 'a:pPr': { 'a:defRPr': { 'a:latin': { '@_typeface': '+mn-lt' } } } },
+			};
+			const result = parseChartDataLabelOptions(
+				{ 'c:txPr': placeholderTxPr },
+				lookup,
+				colorParser,
+				() => 'Bahnschrift',
+			);
+			expect(result.txPr).toStrictEqual({ fontFamily: 'Bahnschrift' });
+		});
+
+		it("parses a per-point c:dLbl/c:txPr into that label's own txPr", () => {
+			const series: XmlObject = {
+				'c:dLbls': { 'c:dLbl': { 'c:idx': { '@_val': '0' }, 'c:txPr': txPr } },
+			};
+			const [label] = parseSeriesDataLabels(series, lookup, colorParser);
+			expect(label.txPr).toStrictEqual({
+				fontSize: 9,
+				bold: true,
+				fontFamily: 'Calibri',
+				color: '#112233',
+			});
+		});
+
+		it("parses a per-point c:dLbl/c:spPr into that label's own spPr", () => {
+			const series: XmlObject = {
+				'c:dLbls': {
+					'c:dLbl': {
+						'c:idx': { '@_val': '0' },
+						'c:spPr': {
+							'a:solidFill': { 'a:srgbClr': { '@_val': 'AABBCC' } },
+							'a:ln': {
+								'@_w': '12700',
+								'a:solidFill': { 'a:srgbClr': { '@_val': '445566' } },
+								'a:prstDash': { '@_val': 'dash' },
+							},
+						},
+					},
+				},
+			};
+			const [label] = parseSeriesDataLabels(series, lookup, colorParser);
+			expect(label.spPr).toStrictEqual({
+				fillColor: '#AABBCC',
+				strokeColor: '#445566',
+				strokeWidth: 1,
+				strokeDashStyle: 'dash',
+			});
+		});
+	});
+
+	// Leader-line stroke styling: c:dLbls/c:leaderLines/c:spPr (base) and its
+	// chart15-extension mirror, c:extLst/c:ext/c15:leaderLines/c:spPr, confirmed
+	// against real corpus markup (e2e/fixtures/issue-132-gradient-fill.pptx,
+	// e2e/fixtures/issue-132-hr-deck.pptx), which write only the extension form.
+	describe('leaderLineStyle', () => {
+		const colorParser = {
+			parseColor: (node: XmlObject | undefined) => {
+				const srgb = node?.['a:srgbClr'] as XmlObject | undefined;
+				return srgb?.['@_val'] ? `#${srgb['@_val']}` : undefined;
+			},
+		};
+
+		it('is absent when no colorParser is given, so untouched charts round-trip byte-identical', () => {
+			const group: XmlObject = {
+				'c:extLst': {
+					'c:ext': {
+						'@_uri': '{CE6537A1-D6FC-4f65-9D91-7224C49458BB}',
+						'c15:leaderLines': {
+							'c:spPr': {
+								'a:ln': { '@_w': '9525', 'a:solidFill': { 'a:srgbClr': { '@_val': '808080' } } },
+							},
+						},
+					},
+				},
+			};
+			expect(parseChartDataLabelOptions(group, lookup).leaderLineStyle).toBeUndefined();
+		});
+
+		// Real corpus shape: c15:layout / c15:showLeaderLines / c15:leaderLines
+		// wrapped in one c:ext, matching issue-132-gradient-fill.pptx chart1.xml.
+		it('parses the chart15-extension leaderLines/spPr stroke (real corpus shape)', () => {
+			const group: XmlObject = {
+				'c:showVal': { '@_val': '1' },
+				'c:showLeaderLines': { '@_val': '0' },
+				'c:extLst': {
+					'c:ext': {
+						'@_uri': '{CE6537A1-D6FC-4f65-9D91-7224C49458BB}',
+						'@_xmlns:c15': 'http://schemas.microsoft.com/office/drawing/2012/chart',
+						'c15:layout': {},
+						'c15:showLeaderLines': { '@_val': '1' },
+						'c15:leaderLines': {
+							'c:spPr': {
+								'a:ln': {
+									'@_w': '9525',
+									'@_cap': 'flat',
+									'a:solidFill': { 'a:srgbClr': { '@_val': '808080' } },
+								},
+							},
+						},
+					},
+				},
+			};
+			const result = parseChartDataLabelOptions(group, lookup, colorParser);
+			expect(result.leaderLineStyle).toStrictEqual({ strokeColor: '#808080', strokeWidth: 0.75 });
+		});
+
+		it('falls back to the base c:leaderLines/c:spPr when no extension is present', () => {
+			const group: XmlObject = {
+				'c:showLeaderLines': { '@_val': '1' },
+				'c:leaderLines': {
+					'c:spPr': {
+						'a:ln': { '@_w': '19050', 'a:solidFill': { 'a:srgbClr': { '@_val': 'FF0000' } } },
+					},
+				},
+			};
+			const result = parseChartDataLabelOptions(group, lookup, colorParser);
+			expect(result.leaderLineStyle).toStrictEqual({ strokeColor: '#FF0000', strokeWidth: 1.5 });
+		});
+
+		it('prefers the extension form over the base element when both are present', () => {
+			const group: XmlObject = {
+				'c:leaderLines': {
+					'c:spPr': { 'a:ln': { 'a:solidFill': { 'a:srgbClr': { '@_val': 'FF0000' } } } },
+				},
+				'c:extLst': {
+					'c:ext': {
+						'@_uri': '{CE6537A1-D6FC-4f65-9D91-7224C49458BB}',
+						'c15:leaderLines': {
+							'c:spPr': { 'a:ln': { 'a:solidFill': { 'a:srgbClr': { '@_val': '00FF00' } } } },
+						},
+					},
+				},
+			};
+			const result = parseChartDataLabelOptions(group, lookup, colorParser);
+			expect(result.leaderLineStyle?.strokeColor).toBe('#00FF00');
+		});
+
+		it('is undefined when neither the base element nor the extension is present', () => {
+			const group: XmlObject = { 'c:showVal': { '@_val': '1' } };
+			expect(
+				parseChartDataLabelOptions(group, lookup, colorParser).leaderLineStyle,
+			).toBeUndefined();
+		});
+	});
 });

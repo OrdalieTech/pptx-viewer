@@ -31,8 +31,16 @@ export type {
 	DrawModeStageInteractions,
 } from './editor-draw-mode';
 export { createDrawModeController } from './editor-draw-mode';
+export type { InkLivePreviewOverlay } from './ink-live-preview-overlay';
+export { createInkLivePreviewOverlay } from './ink-live-preview-overlay';
 export type { EditActions, EditActionsDeps, GeometryPatch } from './editor-edit-ops';
 export { createEditActions } from './editor-edit-ops';
+export type { DeckViewToggleOption } from './editor-view-preferences';
+export {
+	isDeckViewToggleOption,
+	patchViewPropertiesForToggle,
+	seedDeckViewPreferences,
+} from './editor-view-preferences';
 export type { SectionActions } from './editor-section-actions';
 export { createSectionActions } from './editor-section-actions';
 export type { InkActions, InkActionsDeps } from './editor-ink-actions';
@@ -84,27 +92,24 @@ export { createTextActions } from './editor-text-actions';
 export type { TransitionActions, TransitionActionsDeps } from './editor-transition-actions';
 export { createTransitionActions } from './editor-transition-actions';
 export type {
+	ElementBoxPatch,
 	GestureController,
 	GestureDeps,
 	GestureKind,
 	GestureTransform,
-} from './editor-gestures';
-export { createGestureController } from './editor-gestures';
+	PointerLike,
+} from 'pptx-viewer-shared';
 export {
+	appendElementOnSlide,
+	cloneSlides,
+	createGestureController,
+	duplicateElementOnSlide,
+	findSlideElement,
 	isCornerHandle,
 	lockResizeAspect,
 	NUDGE_STEP,
 	NUDGE_STEP_LARGE,
 	nudgeDelta,
-} from './editor-geometry';
-export type { EditorKeyboardDeps } from './editor-keyboard';
-export { createEditorKeydownHandler } from './editor-keyboard';
-export type { ElementBoxPatch } from './editor-mutations';
-export {
-	appendElementOnSlide,
-	cloneSlides,
-	duplicateElementOnSlide,
-	findSlideElement,
 	patchElementGeometry,
 	removeElement,
 	reorderElementOnSlide,
@@ -112,7 +117,10 @@ export {
 	updateElement,
 	updateSlide,
 	updateSlideNotes,
-} from './editor-mutations';
+} from 'pptx-viewer-shared';
+
+export type { EditorKeyboardDeps } from './editor-keyboard';
+export { createEditorKeydownHandler } from './editor-keyboard';
 export type { EditorOps, EditorOpsDeps } from './editor-operations';
 export { createEditorOps } from './editor-operations';
 export { resolveTopLevelElementId } from './element-hit';

@@ -1,5 +1,6 @@
 import type { PptxElement, PptxTableCell, PptxTableData } from 'pptx-viewer-core';
 import type { CellTextRun } from 'pptx-viewer-shared';
+import { DEFAULT_FONT_FAMILY } from 'pptx-viewer-shared';
 import { describe, expect, it } from 'vitest';
 
 import { createTranslator } from '../../i18n';
@@ -19,6 +20,11 @@ function buildContext(): ElementRenderContext {
 		mediaDataUrls: new Map<string, string>(),
 		t: createTranslator(),
 		smartArt3D: false,
+		surfaceChart3D: false,
+		barChart3D: false,
+		lineChart3D: false,
+		areaChart3D: false,
+		pieChart3D: false,
 		presenting: false,
 		registry,
 		renderElement(element, zIndex) {
@@ -163,9 +169,60 @@ describe('renderTableElement', () => {
 		expect(plainTd.querySelector('span')?.textContent).toBe('Q1');
 	});
 
+	it('declares the shared default font family on the table root', () => {
+		// Without it an unstyled cell inherits the HOST chrome's font stack, and
+		// the same deck measured different type metrics in every binding.
+		const table = renderTable().querySelector<HTMLElement>('table');
+		expect(table?.style.fontFamily).toBe(DEFAULT_FONT_FAMILY);
+	});
+
 	it('is dispatched through the registry via registerTableChartRenderers', () => {
 		const context = buildContext();
 		const node = context.renderElement(buildTableElement(), 0);
 		expect((node as HTMLElement).querySelector('table')).toBeTruthy();
+	});
+
+	it('renders a resolved cell image fill as a cover background', () => {
+		const tableData: PptxTableData = {
+			columnWidths: [1],
+			rows: [
+				{
+					cells: [
+						{
+							text: 'Photo',
+							style: {
+								fillMode: 'image',
+								backgroundImageFillData: 'data:image/png;base64,AAAA',
+							},
+						},
+					],
+				},
+			],
+		};
+		const td = renderTable(buildTableElement(tableData)).querySelector('td') as HTMLElement;
+		expect(td.style.backgroundImage).toBe('url("data:image/png;base64,AAAA")');
+		expect(td.style.backgroundSize).toBe('cover');
+	});
+
+	it('renders fractional cell font sizes in PowerPoint points', () => {
+		const tableData: PptxTableData = {
+			columnWidths: [1],
+			rows: [{ cells: [{ text: 'Sized', style: { fontSize: 14.5 } }] }],
+		};
+		const td = renderTable(buildTableElement(tableData)).querySelector('td') as HTMLElement;
+		expect(td.style.fontSize).toBe('14.5pt');
+	});
+
+	it('renders an explicit zero cell margin as zero padding, not the base default', () => {
+		// A binding could clobber the shared padding by spreading its own base
+		// style AFTER the computed cell CSS; asserting the exact 0px value (not
+		// merely "not the default") catches that class of regression.
+		const tableData: PptxTableData = {
+			columnWidths: [1],
+			rows: [{ cells: [{ text: 'Dense', style: { marginLeft: 0, marginTop: 0 } }] }],
+		};
+		const td = renderTable(buildTableElement(tableData)).querySelector('td') as HTMLElement;
+		expect(td.style.paddingLeft).toBe('0px');
+		expect(td.style.paddingTop).toBe('0px');
 	});
 });

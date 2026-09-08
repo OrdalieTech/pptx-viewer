@@ -1,9 +1,11 @@
 import type { PptxElement, PptxTableCell, PptxTableData } from 'pptx-viewer-core';
 import type { CellTextRun } from 'pptx-viewer-shared';
+import { DEFAULT_FONT_FAMILY } from 'pptx-viewer-shared';
 import { flushSync, mount, unmount } from 'svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import ElementRenderer from './ElementRenderer.svelte';
+import type { ElementRendererProps } from './props';
 
 /**
  * TableView tests: mount the dispatcher with fabricated table elements and
@@ -14,12 +16,12 @@ import ElementRenderer from './ElementRenderer.svelte';
 
 let cleanup: (() => void) | undefined;
 
-function mountEl(element: PptxElement): HTMLElement {
+function mountEl(element: PptxElement, extra: Partial<ElementRendererProps> = {}): HTMLElement {
 	const target = document.createElement('div');
 	document.body.appendChild(target);
 	const instance = mount(ElementRenderer, {
 		target,
-		props: { element, mediaDataUrls: new Map<string, string>(), zIndex: 3 },
+		props: { element, mediaDataUrls: new Map<string, string>(), zIndex: 3, ...extra },
 	});
 	flushSync();
 	cleanup = () => {
@@ -161,5 +163,88 @@ describe('tableView', () => {
 			.querySelectorAll('tbody tr')[0]
 			.querySelectorAll('td')[1];
 		expect(plainTd.querySelector('span')?.textContent).toBe('Q1');
+	});
+
+	it('puts no whitespace between cells in the table text', () => {
+		// Svelte keeps a text node for the indentation between `<td>` and its
+		// content, so a pretty-printed cell used to contribute a stray space and
+		// this binding alone read "Name Q1 Q2" where the other four read
+		// "NameQ1Q2". Anything that compares a table element's text (the
+		// cross-binding parity harness does) saw that as a content difference.
+		const table = mountEl(buildTableElement()).querySelector('table');
+		const headerRow = table?.querySelectorAll('tbody tr')[0];
+		expect(headerRow?.textContent).toBe('NameQ1Q2');
+	});
+
+	it('declares the shared default font family on the table root', () => {
+		// Without it an unstyled cell inherits the HOST chrome's font stack, and
+		// the same deck measured different type metrics in every binding.
+		const table = mountEl(buildTableElement()).querySelector<HTMLElement>('table');
+		expect(table?.style.fontFamily).toBe(DEFAULT_FONT_FAMILY);
+	});
+
+	it('renders a resolved cell image fill as a cover background', () => {
+		const tableData: PptxTableData = {
+			columnWidths: [1],
+			rows: [
+				{
+					cells: [
+						{
+							text: 'Photo',
+							style: {
+								fillMode: 'image',
+								backgroundImageFillData: 'data:image/png;base64,AAAA',
+							},
+						},
+					],
+				},
+			],
+		};
+		const td = mountEl(buildTableElement(tableData)).querySelector('td') as HTMLElement;
+		expect(td.style.backgroundImage).toBe('url("data:image/png;base64,AAAA")');
+		expect(td.style.backgroundSize).toBe('cover');
+	});
+
+	it('renders fractional cell font sizes in PowerPoint points', () => {
+		const tableData: PptxTableData = {
+			columnWidths: [1],
+			rows: [{ cells: [{ text: 'Sized', style: { fontSize: 14.5 } }] }],
+		};
+		const td = mountEl(buildTableElement(tableData)).querySelector('td') as HTMLElement;
+		expect(td.style.fontSize).toBe('14.5pt');
+	});
+
+	it('renders an explicit zero cell margin as zero padding, not the base default', () => {
+		const tableData: PptxTableData = {
+			columnWidths: [1],
+			rows: [{ cells: [{ text: 'Dense', style: { marginLeft: 0, marginTop: 0 } }] }],
+		};
+		const td = mountEl(buildTableElement(tableData)).querySelector('td') as HTMLElement;
+		expect(td.style.paddingLeft).toBe('0px');
+		expect(td.style.paddingTop).toBe('0px');
+	});
+
+	// G8 (OpenXML parity audit, D3): a:graphicFrameLocks/@noDrilldown was
+	// parsed but never enforced - a cell was still double-click editable on a
+	// locked table.
+	describe('cell drilldown with a:graphicFrameLocks/@noDrilldown', () => {
+		it('does not enter cell-edit mode on double-click when noDrilldown is set', () => {
+			const ontablecellcommit = vi.fn();
+			const element = { ...buildTableElement(), locks: { noDrilldown: true } } as PptxElement;
+			const target = mountEl(element, { interactive: true, ontablecellcommit });
+			const td = target.querySelector('td')!;
+			td.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+			flushSync();
+			expect(target.querySelector('input')).toBeNull();
+		});
+
+		it('enters cell-edit mode on double-click on an unlocked table', () => {
+			const ontablecellcommit = vi.fn();
+			const target = mountEl(buildTableElement(), { interactive: true, ontablecellcommit });
+			const td = target.querySelector('td')!;
+			td.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+			flushSync();
+			expect(target.querySelector('input')).not.toBeNull();
+		});
 	});
 });

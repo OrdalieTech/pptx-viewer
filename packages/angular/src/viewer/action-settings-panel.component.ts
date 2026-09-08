@@ -1,23 +1,79 @@
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import {
+	ChangeDetectionStrategy,
+	Component,
+	computed,
+	inject,
+	input,
+	output,
+	signal,
+} from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
-import type { ElementAction, ElementActionType, PptxElement } from 'pptx-viewer-core';
+import type {
+	ElementAction,
+	ElementActionType,
+	PptxCustomShow,
+	PptxElement,
+} from 'pptx-viewer-core';
 import { elementActionToPptxAction, pptxActionToElementAction } from 'pptx-viewer-core';
 
-const ACTION_TYPES: ReadonlyArray<{ value: ElementActionType; key: string }> = [
-	{ value: 'none', key: 'pptx.hyperlink.actionNone' },
-	{ value: 'url', key: 'pptx.action.gotoUrl' },
-	{ value: 'slide', key: 'pptx.action.gotoSlide' },
-	{ value: 'firstSlide', key: 'pptx.hyperlink.actionFirstSlide' },
-	{ value: 'lastSlide', key: 'pptx.hyperlink.actionLastSlide' },
-	{ value: 'prevSlide', key: 'pptx.hyperlink.actionPrevSlide' },
-	{ value: 'nextSlide', key: 'pptx.hyperlink.actionNextSlide' },
-	{ value: 'endShow', key: 'pptx.hyperlink.actionEndShow' },
-];
+import {
+	canCommitActionType,
+	ELEMENT_ACTION_TYPE_OPTIONS,
+	resolveActionType,
+	toSlideIndex,
+} from '../internal/shared';
+import { ActionTargetFieldsComponent } from './action-target-fields.component';
+import { LoadContentService } from './load-content.service';
+
+type Trigger = 'click' | 'hover';
+
+/** A type the user picked, remembered against the element it was picked on. */
+export interface PendingActionType {
+	elementId: string;
+	types: Partial<Record<Trigger, ElementActionType>>;
+}
+
+/** Nothing picked yet. */
+export const NO_PENDING_ACTION_TYPE: PendingActionType = { elementId: '', types: {} };
+
+/**
+ * Record the type the user just picked for one trigger.
+ *
+ * A pick belongs to the element it was made on, so a pick for a different
+ * element replaces the whole record instead of merging: otherwise selecting
+ * another shape would show it a half-made choice it never had.
+ */
+export function withPendingActionType(
+	previous: PendingActionType,
+	elementId: string,
+	trigger: Trigger,
+	type: ElementActionType,
+): PendingActionType {
+	const types = previous.elementId === elementId ? previous.types : {};
+	return { elementId, types: { ...types, [trigger]: type } };
+}
+
+/**
+ * The action type a trigger's controls should render, which is also the
+ * predicate deciding whether the URL / slide input exists.
+ *
+ * Exported (and pure) so it can be unit-tested without a TestBed, matching the
+ * rest of this package; see `inspector-panel.component.ts` for the convention.
+ */
+export function displayedActionType(
+	pending: PendingActionType,
+	elementId: string,
+	trigger: Trigger,
+	committedType: ElementActionType | undefined,
+): ElementActionType {
+	const picked = pending.elementId === elementId ? pending.types[trigger] : undefined;
+	return resolveActionType(picked, committedType);
+}
 
 @Component({
 	selector: 'pptx-action-settings-panel',
 	standalone: true,
-	imports: [TranslatePipe],
+	imports: [TranslatePipe, ActionTargetFieldsComponent],
 	changeDetection: ChangeDetectionStrategy.OnPush,
 	template: `
 		<section class="pptx-ng-action">
@@ -30,32 +86,26 @@ const ACTION_TYPES: ReadonlyArray<{ value: ElementActionType; key: string }> = [
 					<select
 						[id]="'action-' + trigger"
 						class="pptx-ng-action__input"
-						[value]="actionFor(trigger)?.type ?? 'none'"
+						[value]="typeFor(trigger)"
 						(change)="onType($event, trigger)"
 					>
 						@for (option of actionTypes; track option.value) {
-							<option [value]="option.value">{{ option.key | translate }}</option>
+							<option [value]="option.value" [selected]="option.value === typeFor(trigger)">
+								{{ option.labelKey | translate }}
+							</option>
 						}
 					</select>
-					@if (actionFor(trigger)?.type === 'url') {
-						<input
-							type="url"
-							class="pptx-ng-action__input"
-							[value]="actionFor(trigger)?.url ?? ''"
-							placeholder="https://..."
-							(input)="onUrl($event, trigger)"
-						/>
-					}
-					@if (actionFor(trigger)?.type === 'slide') {
-						<input
-							type="number"
-							class="pptx-ng-action__input"
-							min="1"
-							[max]="slideCount()"
-							[value]="(actionFor(trigger)?.slideIndex ?? 0) + 1"
-							(change)="onSlide($event, trigger)"
-						/>
-					}
+					<pptx-action-target-fields
+						[type]="typeFor(trigger)"
+						[action]="actionFor(trigger)"
+						[slideCount]="slideCount()"
+						[customShows]="customShows()"
+						[idPrefix]="'action-' + trigger"
+						(urlChange)="onUrl($event, trigger)"
+						(slideChange)="onSlide($event, trigger)"
+						(customShowChange)="onCustomShow($event, trigger)"
+						(returnAfterChange)="onReturnAfter($event, trigger)"
+					/>
 				</div>
 			}
 		</section>
@@ -99,7 +149,17 @@ export class ActionSettingsPanelComponent {
 	readonly patch = output<Partial<PptxElement>>();
 
 	protected readonly triggers = ['click', 'hover'] as const;
-	protected readonly actionTypes = ACTION_TYPES;
+	protected readonly actionTypes = ELEMENT_ACTION_TYPE_OPTIONS;
+	/**
+	 * The type the user just picked, per trigger.
+	 *
+	 * WHY it exists: "Go to URL" / "Go to Slide" only become a stored action once
+	 * they carry a target, so controls driven purely by the committed element
+	 * never revealed the input needed to supply that target, leaving both kinds
+	 * unreachable. The pick is tagged with its element id so moving the inspector
+	 * to another shape does not carry a half-made choice across.
+	 */
+	private readonly pending = signal<PendingActionType>(NO_PENDING_ACTION_TYPE);
 	private readonly clickAction = computed(() =>
 		this.element().actionClick
 			? pptxActionToElementAction(this.element().actionClick!, 'click')
@@ -111,17 +171,34 @@ export class ActionSettingsPanelComponent {
 			: undefined,
 	);
 
-	protected actionFor(trigger: 'click' | 'hover'): ElementAction | undefined {
+	protected actionFor(trigger: Trigger): ElementAction | undefined {
 		return trigger === 'click' ? this.clickAction() : this.hoverAction();
 	}
 
-	private update(
-		trigger: 'click' | 'hover',
-		type: ElementActionType,
-		url?: string,
-		slideIndex?: number,
-	): void {
-		const action = elementActionToPptxAction({ trigger, type, url, slideIndex });
+	/** The action type this trigger's controls should render right now. */
+	protected typeFor(trigger: Trigger): ElementActionType {
+		return displayedActionType(
+			this.pending(),
+			this.element().id,
+			trigger,
+			this.actionFor(trigger)?.type,
+		);
+	}
+
+	/** `data.customShows`, for the `customShow` type's target `<select>`. */
+	private readonly loader = inject(LoadContentService, { optional: true });
+	protected readonly customShows = computed<readonly PptxCustomShow[]>(
+		() => this.loader?.customShows() ?? [],
+	);
+
+	private update(trigger: Trigger, next: Partial<ElementAction>): void {
+		const type = next.type ?? this.typeFor(trigger);
+		const action = elementActionToPptxAction({
+			trigger,
+			...this.actionFor(trigger),
+			...next,
+			type,
+		});
 		this.patch.emit(
 			(trigger === 'click'
 				? { actionClick: action }
@@ -129,24 +206,45 @@ export class ActionSettingsPanelComponent {
 		);
 	}
 
-	protected onType(event: Event, trigger: 'click' | 'hover'): void {
+	protected onType(event: Event, trigger: Trigger): void {
+		const type = (event.target as HTMLSelectElement).value as ElementActionType;
+		const elementId = this.element().id;
+		this.pending.update((previous) => withPendingActionType(previous, elementId, trigger, type));
 		const current = this.actionFor(trigger);
-		this.update(
-			trigger,
-			(event.target as HTMLSelectElement).value as ElementActionType,
-			current?.url,
-			current?.slideIndex,
-		);
-	}
-
-	protected onUrl(event: Event, trigger: 'click' | 'hover'): void {
-		this.update(trigger, 'url', (event.target as HTMLInputElement).value);
-	}
-
-	protected onSlide(event: Event, trigger: 'click' | 'hover'): void {
-		const value = Number((event.target as HTMLInputElement).value);
-		if (Number.isFinite(value)) {
-			this.update(trigger, 'slide', undefined, Math.max(0, value - 1));
+		const target = {
+			url: current?.url,
+			slideIndex: current?.slideIndex,
+			customShowId: current?.customShowId,
+		};
+		// `typeFor(trigger)` (fed by `pending` above) is what makes the target
+		// control (URL / slide number / custom-show select) appear at all, the
+		// same set `actionTypeNeedsTarget` names; `canCommitActionType` is the
+		// separate question of whether THIS pick may be written yet (it already
+		// carries a target, or needs none).
+		if (canCommitActionType(type, target)) {
+			this.update(trigger, { type });
 		}
+	}
+
+	protected onUrl(url: string, trigger: Trigger): void {
+		this.update(trigger, { url });
+	}
+
+	protected onSlide(oneBasedSlide: number, trigger: Trigger): void {
+		const index = toSlideIndex(oneBasedSlide, this.slideCount());
+		if (index !== undefined) {
+			this.update(trigger, { slideIndex: index });
+		}
+	}
+
+	protected onCustomShow(customShowId: string, trigger: Trigger): void {
+		if (!customShowId) {
+			return;
+		}
+		this.update(trigger, { customShowId });
+	}
+
+	protected onReturnAfter(returnAfter: boolean, trigger: Trigger): void {
+		this.update(trigger, { returnAfter });
 	}
 }

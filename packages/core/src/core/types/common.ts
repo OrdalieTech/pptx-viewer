@@ -39,6 +39,10 @@ export type UnderlineStyle =
 	| 'wavy'
 	| 'wavyHeavy'
 	| 'wavyDbl'
+	// D2-G3: underlines only the non-whitespace characters of the run, leaving
+	// inter-word spaces unmarked. Already parsed into this field (via a raw
+	// `as UnderlineStyle` cast) before this literal was declared here.
+	| 'words'
 	| 'none';
 
 /**
@@ -175,39 +179,17 @@ export interface XmlObject {
 }
 
 /**
- * Discriminant values for the `type` field on {@link PptxElement}.
- *
- * Narrow on this type to access variant-specific properties.
- *
- * @example
- * ```ts
- * function isImage(el: PptxElement): el is ImagePptxElement {
- *   return el.type === "image";
- * }
- * // => type guard narrowing PptxElement to ImagePptxElement
- * ```
- */
-export type PptxElementType =
-	| 'text'
-	| 'shape'
-	| 'connector'
-	| 'image'
-	| 'picture'
-	| 'chart'
-	| 'table'
-	| 'smartArt'
-	| 'ole'
-	| 'media'
-	| 'group'
-	| 'ink'
-	| 'zoom'
-	| 'unknown';
-
-/**
- * Shape lock attributes from `p:cNvSpPr / a:spLocks`.
+ * Lock attributes from an element's non-visual properties node.
  *
  * When a flag is `true` the corresponding user interaction is disabled
  * in the editor (e.g. `noRotation` prevents free rotation of the shape).
+ *
+ * One bag covers every family, but the families are NOT interchangeable in
+ * the file: `a:spLocks` (`CT_ShapeLocking`), `a:picLocks`, `a:cxnSpLocks`,
+ * `a:grpSpLocks` (`CT_GroupLocking`) and `a:graphicFrameLocks`
+ * (`CT_GraphicalObjectFrameLocking`) each declare their own attribute subset.
+ * `runtime/shape-lock-containers` holds that table and is what decides which
+ * of these fields may be written for a given element.
  *
  * @example
  * ```ts
@@ -227,6 +209,20 @@ export interface PptxShapeLocks {
 	noAdjustHandles?: boolean;
 	noChangeArrowheads?: boolean;
 	noChangeShapeType?: boolean;
+	/**
+	 * `a:graphicFrameLocks/@noDrilldown`: forbids selecting the individual
+	 * parts inside a graphic frame (a chart series, a SmartArt node). Declared
+	 * ONLY by `CT_GraphicalObjectFrameLocking`, so it is written for tables,
+	 * charts, SmartArt, OLE objects and graphic-frame media, and never onto
+	 * `a:spLocks` / `a:picLocks` / `a:cxnSpLocks` / `a:grpSpLocks`.
+	 */
+	noDrilldown?: boolean;
+	/**
+	 * `a:picLocks/@noCrop`: forbids cropping the picture. Declared ONLY by
+	 * `CT_PictureLocking`, so it is written for pictures (and media authored as
+	 * a `p:pic`) and never onto the other lock elements.
+	 */
+	noCrop?: boolean;
 	/**
 	 * Text-box flag from `p:cNvSpPr/@txBox`. Not a lock in the strict sense,
 	 * but it lives on the same non-visual-properties node as `a:spLocks`, so

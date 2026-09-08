@@ -53,6 +53,21 @@
  * instead of leaving them on the hardcoded dark fallbacks. When no theme is
  * supplied the `--pptx-*` vars are unset and the second fallback keeps the
  * default dark look unchanged.
+ *
+ * WHERE THIS BELONGS: shared `theme/css-vars.ts` already derives two of these
+ * fifteen (`inspector-active` from `primary`, `inspector-border` from `border`,
+ * see `DERIVED_COLOR_TOKENS`) and emits them INLINE on this same element, so
+ * for those two the theme's value wins over the rule below and the two
+ * derivations agree by construction. The remaining thirteen are derived here
+ * only because shared does not derive them yet; they are pure functions of base
+ * tokens (`card`, `card-foreground`, `border`, `muted`, `muted-foreground`,
+ * `accent`, `primary`, `foreground`, `destructive`) plus `color-mix`, i.e.
+ * exactly the shape `DERIVED_COLOR_TOKENS` models, and moving them there would
+ * give all five bindings the family and delete this block.
+ *
+ * That every entry stays a `var(--pptx-<base>, …)` of a base token (rather than
+ * growing hardcoded colours of its own) is what keeps the move mechanical, and
+ * is pinned by `theme-tokens.test.ts`.
  */
 .pptx-ng-viewer {
 	--pptx-inspector-bg: var(--pptx-card, #1e1e1e);
@@ -129,6 +144,34 @@
 	animation-iteration-count: 1 !important;
 	transition-duration: 0.01ms !important;
 	scroll-behavior: auto !important;
+}
+
+/* ── Hardware acceleration (Options > Advanced > "Disable hardware
+ * graphics acceleration"). Strips the GPU-compositing hints (will-change,
+ * backface-visibility, perspective) transitions/3D effects rely on, for
+ * users on underpowered/unstable graphics drivers. See
+ * `resolveOptionRootClasses` in pptx-viewer-shared.
+ */
+.pptx-ng-viewer.pptx-ng-no-hw-accel *,
+.pptx-ng-viewer.pptx-ng-no-hw-accel *::before,
+.pptx-ng-viewer.pptx-ng-no-hw-accel *::after {
+	will-change: auto !important;
+	backface-visibility: visible !important;
+	perspective: none !important;
+}
+
+/* ── Display optimization (Options > General > "Optimize for compatibility")
+ * Drops shadow/blur/blend-mode effects across the viewer, mirroring
+ * PowerPoint's own degraded-effects mode for older/weaker hardware. See
+ * `resolveOptionRootClasses` in pptx-viewer-shared.
+ */
+.pptx-ng-viewer.pptx-ng-compat-display *,
+.pptx-ng-viewer.pptx-ng-compat-display *::before,
+.pptx-ng-viewer.pptx-ng-compat-display *::after {
+	box-shadow: none !important;
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+	mix-blend-mode: normal !important;
 }
 
 :where(.pptx-ng-viewer) :where(button, a, input, select, textarea, [tabindex]):focus-visible {

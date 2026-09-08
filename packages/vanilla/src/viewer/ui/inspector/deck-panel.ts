@@ -1,10 +1,14 @@
 import type { Translator } from '../../i18n';
 import { createEl } from '../../render';
-import { makeNumberField } from '../controls';
 import type { DeckCard } from './deck-card-helpers';
 import { makeDeckButton, makeRow, makeSection } from './deck-card-helpers';
 import { createDeckPresentationCard } from './deck-presentation-card';
+import { createSlideSizeCard } from './deck-slide-size-card';
 import { createThemeCard, createThemeOverrideCard } from './deck-theme-cards';
+import { createSlideBackgroundCard } from './slide-background-card';
+import { createSlideTransitionCard } from './slide-transition-card';
+import { createTagsCard } from './tags-card';
+import { createThemeEditorCard } from './theme-editor-card';
 import type { InspectorDeckState, InspectorHandlers } from './types';
 
 export interface DeckPanel {
@@ -18,43 +22,16 @@ export type DeckPanelHandlers = Pick<
 	| 'openDocumentProperties'
 	| 'updatePresentationSettings'
 	| 'applyThemeByPath'
+	| 'applyThemeEdit'
 	| 'updateActiveSlide'
 	| 'updateCanvasSize'
+	| 'updateSlideSize'
+	| 'applySlideSizeRescale'
+	| 'updateTagCollections'
+	| 'setTemplateBackground'
+	| 'getTemplateBackgroundColor'
+	| 'pushRecentColor'
 >;
-
-/** The editable SLIDE SIZE card (W/H numeric fields, React's `SlideSizeCard`). */
-function createSlideSizeCard(
-	doc: Document,
-	t: Translator,
-	handlers: Pick<InspectorHandlers, 'updateCanvasSize'>,
-): DeckCard {
-	const { el, body } = makeSection(doc, t('pptx.slideSize.title'));
-	const grid = createEl(doc, 'div', 'pptxv-inspector-grid');
-	body.appendChild(grid);
-	let size = { width: 0, height: 0 };
-	// React's `SlideSizeCard` labels the fields with the bare letters "W"/"H".
-	const wField = makeNumberField(doc, {
-		label: 'W',
-		min: 1,
-		onCommit: (value) => handlers.updateCanvasSize({ width: value, height: size.height }),
-	});
-	const hField = makeNumberField(doc, {
-		label: 'H',
-		min: 1,
-		onCommit: (value) => handlers.updateCanvasSize({ width: size.width, height: value }),
-	});
-	grid.append(wField.el, hField.el);
-	return {
-		el,
-		update(state) {
-			size = state.canvasSize;
-			wField.setValue(state.canvasSize.width);
-			hField.setValue(state.canvasSize.height);
-			wField.setDisabled(!state.editable);
-			hField.setDisabled(!state.editable);
-		},
-	};
-}
 
 /** The read-only NOTES & HANDOUT card (React's `NotesHandoutCard`). */
 function createNotesHandoutCard(doc: Document, t: Translator): DeckCard {
@@ -105,7 +82,8 @@ function createDocumentCard(
 /**
  * The no-selection Properties view, mirroring React's
  * `PresentationPropertiesPanel` section order: PRESENTATION, THEME, THEME
- * OVERRIDE, SLIDE SIZE, NOTES & HANDOUT, DOCUMENT.
+ * EDITOR, THEME OVERRIDE, SLIDE BACKGROUND, SLIDE TRANSITION, SLIDE SIZE,
+ * NOTES & HANDOUT, DOCUMENT, TAGS.
  */
 export function createDeckPanel(
 	doc: Document,
@@ -117,10 +95,14 @@ export function createDeckPanel(
 	const cards: DeckCard[] = [
 		createDeckPresentationCard(doc, t, handlers),
 		createThemeCard(doc, t, handlers),
+		createThemeEditorCard(doc, t, handlers),
 		createThemeOverrideCard(doc, t, handlers),
+		createSlideBackgroundCard(doc, t, handlers),
+		createSlideTransitionCard(doc, t, handlers),
 		createSlideSizeCard(doc, t, handlers),
 		createNotesHandoutCard(doc, t),
 		createDocumentCard(doc, t, handlers),
+		createTagsCard(doc, t, handlers),
 	];
 	el.append(...cards.map((card) => card.el));
 

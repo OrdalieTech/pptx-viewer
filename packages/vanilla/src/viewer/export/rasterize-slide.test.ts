@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createTranslator } from '../i18n';
 import { createElementRendererRegistry } from '../render';
+import { createDefaultRegistry } from '../render/elements';
 import { createInitialViewerState, createStore } from '../state';
 import { createRasterizeSlide } from './rasterize-slide';
 
@@ -37,7 +38,13 @@ describe('createRasterizeSlide', () => {
 			store: createStore(createInitialViewerState()),
 			registry: createElementRendererRegistry(),
 			getTranslator: () => createTranslator(),
-			smartArt3D: false,
+			getSmartArt3D: () => false,
+			getSurfaceChart3D: () => false,
+			getBarChart3D: () => false,
+			getLineChart3D: () => false,
+			getAreaChart3D: () => false,
+			getPieChart3D: () => false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 
@@ -62,7 +69,13 @@ describe('createRasterizeSlide', () => {
 			store,
 			registry: createElementRendererRegistry(),
 			getTranslator: () => createTranslator(),
-			smartArt3D: false,
+			getSmartArt3D: () => false,
+			getSurfaceChart3D: () => false,
+			getBarChart3D: () => false,
+			getLineChart3D: () => false,
+			getAreaChart3D: () => false,
+			getPieChart3D: () => false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 
@@ -93,12 +106,94 @@ describe('createRasterizeSlide', () => {
 			store: createStore(createInitialViewerState()),
 			registry: createElementRendererRegistry(),
 			getTranslator: () => createTranslator(),
-			smartArt3D: false,
+			getSmartArt3D: () => false,
+			getSurfaceChart3D: () => false,
+			getBarChart3D: () => false,
+			getLineChart3D: () => false,
+			getAreaChart3D: () => false,
+			getPieChart3D: () => false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 
 		await expect(ctl.rasterizeSlide(0)).rejects.toThrow(/no slide at index 0/);
 		expect(renderToCanvas).not.toHaveBeenCalled();
+		ctl.destroy();
+	});
+
+	// The capture stage renders outside the live render controller, so it has to
+	// build its own field context; without it an exported PNG/PDF printed the
+	// authored "Slide #" placeholder while the screen showed "Slide 1".
+	it('substitutes field runs on the capture stage from the store state', async () => {
+		renderToCanvas.mockResolvedValue(fakeCanvas());
+		const container = makeContainer();
+		const store = createStore(createInitialViewerState());
+		store.set({
+			slides: [
+				{
+					...slide(),
+					slideNumber: 2,
+					elements: [
+						{
+							id: 'f1',
+							type: 'text',
+							x: 0,
+							y: 0,
+							width: 200,
+							height: 40,
+							textSegments: [{ text: 'Slide #', style: {}, fieldType: 'slidenum' }],
+						},
+						{
+							id: 'f2',
+							type: 'text',
+							x: 0,
+							y: 60,
+							width: 200,
+							height: 40,
+							textSegments: [{ text: '<title>', style: {}, fieldType: 'slidetitle' }],
+						},
+						{
+							id: 't1',
+							type: 'text',
+							x: 0,
+							y: 120,
+							width: 200,
+							height: 40,
+							text: 'Results',
+							placeholderType: 'title',
+						},
+					],
+				} as unknown as PptxSlide,
+			],
+			canvasSize: { width: 960, height: 540 },
+			headerFooter: { footerText: 'Confidential' },
+		});
+
+		const ctl = createRasterizeSlide({
+			doc: document,
+			container,
+			store,
+			// The real renderers (not the bare registry the other cases use): this
+			// case asserts on rendered text, so the text renderer must be present.
+			registry: createDefaultRegistry(),
+			getTranslator: () => createTranslator(),
+			getSmartArt3D: () => false,
+			getSurfaceChart3D: () => false,
+			getBarChart3D: () => false,
+			getLineChart3D: () => false,
+			getAreaChart3D: () => false,
+			getPieChart3D: () => false,
+			getImageResolutionScale: () => 1,
+			waitForFrame: () => Promise.resolve(),
+		});
+
+		await ctl.rasterizeSlide(0);
+		const [stageEl] = renderToCanvas.mock.calls[0] as [HTMLElement];
+		expect(stageEl.textContent).toContain('2');
+		expect(stageEl.textContent).not.toContain('Slide #');
+		expect(stageEl.textContent).toContain('Results');
+		expect(stageEl.textContent).not.toContain('<title>');
+
 		ctl.destroy();
 	});
 
@@ -117,7 +212,13 @@ describe('createRasterizeSlide', () => {
 			store,
 			registry: createElementRendererRegistry(),
 			getTranslator: () => createTranslator(),
-			smartArt3D: false,
+			getSmartArt3D: () => false,
+			getSurfaceChart3D: () => false,
+			getBarChart3D: () => false,
+			getLineChart3D: () => false,
+			getAreaChart3D: () => false,
+			getPieChart3D: () => false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 

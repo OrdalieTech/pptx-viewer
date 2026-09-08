@@ -1,6 +1,13 @@
-import type { PptxAction, PptxElement, PptxSlide } from 'pptx-viewer-core';
+import type { PptxAction, PptxElement, PptxElementAnimation, PptxSlide } from 'pptx-viewer-core';
 import type { ToolbarActionId } from 'pptx-viewer-shared';
-import { shouldConfirmExternalHyperlink } from 'pptx-viewer-shared';
+import {
+	buildFieldSubstitutionContext,
+	isPresentationAdvanceClick,
+	PRESENT_TOOLBAR_CLASSES,
+	resolvePresentationAction,
+	shouldConfirmExternalHyperlink,
+	toggleBlackboard,
+} from 'pptx-viewer-shared';
 /**
  * ViewerCanvasArea: The `<main>` element containing the slide canvas,
  * find/replace panel, and presentation annotation / toolbar overlays.
@@ -98,6 +105,8 @@ export interface ViewerCanvasAreaProps {
 	aiHighlightOverlay?: React.ReactNode;
 	/** True while AI activity should tween element colour changes on the canvas. */
 	aiCanvasActive?: boolean;
+	/** Commits the slide's animation list after an on-canvas motion-path drag. */
+	onUpdateSlideAnimations?: (animations: PptxElementAnimation[]) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,39 +145,27 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 	const viewerOptions = useViewerOptionsContext();
 
 	const effectiveSlide = mode === 'master' ? masterPseudoSlide : activeSlide;
-	const effectiveTemplateElements =
-		mode === 'master' ? (s.activeLayout ? (s.activeMaster?.elements ?? []) : []) : templateElements;
+	// In master mode the pseudo-slide already carries the master's artwork
+	// behind the selected layout's (see `masterViewPseudoSlide` in
+	// `pptx-viewer-shared`), so passing it again here would paint it twice and
+	// leave the duplicate un-editable.
+	const effectiveTemplateElements = mode === 'master' ? [] : templateElements;
 
 	// ── Field substitution context ──────────────────────────────────────
-	const fieldContext = useMemo<FieldSubstitutionContext>(() => {
-		const hf = s.headerFooter;
-		// Extract slide title from first title/ctrTitle placeholder
-		let slideTitle: string | undefined;
-		if (activeSlide) {
-			for (const el of activeSlide.elements) {
-				const phType = (el as unknown as { placeholderType?: string }).placeholderType;
-				if (phType === 'title' || phType === 'ctrTitle') {
-					const txt = (el as unknown as { text?: string }).text;
-					if (txt) {
-						slideTitle = txt;
-						break;
-					}
-				}
-			}
-		}
-		return {
-			slideNumber: activeSlide?.slideNumber,
-			dateTimeText: hf.dateTimeText,
-			dateFormat: hf.dateFormat,
-			footerText: hf.footerText,
-			headerText: hf.headerText,
-			slideTitle,
-			customProperties: s.customProperties.map((p) => ({
-				name: p.name,
-				value: p.value,
-			})),
-		};
-	}, [s.headerFooter, s.customProperties, activeSlide]);
+	// Assembled by `pptx-viewer-shared` so all five bindings resolve fields
+	// identically. In particular the slide title now comes from core's
+	// `deriveSlideTitle`: the `placeholderType` property this used to scan for
+	// is never set on a parsed deck, so `slidetitle` fields silently kept their
+	// cached literal ("Title") on every real `.pptx`.
+	const fieldContext = useMemo<FieldSubstitutionContext>(
+		() =>
+			buildFieldSubstitutionContext({
+				headerFooter: s.headerFooter,
+				customProperties: s.customProperties,
+				slide: activeSlide,
+			}),
+		[s.headerFooter, s.customProperties, activeSlide],
+	);
 
 	// ── Table style context (theme + table style map for band colours) ──
 	const tableStyleContext = useMemo<TableStyleContext | undefined>(() => {
@@ -195,16 +192,26 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 	);
 
 	const handleActionClick = useCallback(
-		(_elementId: string, action: PptxAction) => {
+		(elementId: string, action: PptxAction) => {
 			if (mode === 'present') {
-				presentation.handlePresentationAction(action);
+				// `runPresentationAction` (inside `handlePresentationAction`) opens an
+				// action's own external hyperlink unconditionally: it has no host hook
+				// for the Trust Center gate. Resolve the action here first so an
+				// `openUrl` intent goes through `openExternalUrl`'s confirm check
+				// instead, same as an on-slide `<a>` hyperlink click already does.
+				const resolved = resolvePresentationAction(action, { slideCount: slides.length });
+				if (resolved.intent.kind === 'openUrl') {
+					openExternalUrl(resolved.intent.url);
+					return;
+				}
+				presentation.handlePresentationAction(action, elementId);
 			} else if (action.url) {
 				// In editing/view mode, only open external URLs (Ctrl+Click).
 				// Slide-internal jumps are not meaningful outside presentation mode.
 				openExternalUrl(action.url);
 			}
 		},
-		[mode, presentation, openExternalUrl],
+		[mode, presentation, openExternalUrl, slides.length],
 	);
 
 	const handleHyperlinkClick = useCallback(
@@ -250,6 +257,53 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 		[mode, viewerOptions.advanced.slideShowShowMenuOnRightClick],
 	);
 
+	// ── Slide-show click-to-advance ────────────────────────────────────
+	// PowerPoint's "On Mouse Click". The dedicated presentation stage shipped
+	// without it, so a running show could only be driven from the keyboard:
+	// every click anywhere on the slide did nothing at all, which reads as a
+	// slide show that is simply broken.
+	//
+	// Live slide content keeps its own clicks (hyperlinks, action buttons, zoom
+	// tiles, media transport), a drawing tool owns the click while it is armed,
+	// and the advance itself is `movePresentationSlide(1, 'click')` so the
+	// current slide's `advanceOnClick` gate and pending animation builds are
+	// honoured exactly as they are for a tap or swipe.
+	const swipeHandledAtRef = useRef(0);
+	const handleStageClick = useCallback(
+		(e: React.MouseEvent) => {
+			if (mode !== 'present') {
+				return;
+			}
+			// A swipe fires its own advance on touchend and then still emits a
+			// synthetic click; without this a single swipe would skip two slides.
+			if (Date.now() - swipeHandledAtRef.current < 700) {
+				return;
+			}
+			if (annotations.presentationTool !== 'none') {
+				return;
+			}
+			if (!isPresentationAdvanceClick(e.target)) {
+				return;
+			}
+			presentation.movePresentationSlide(1, 'click');
+		},
+		[annotations.presentationTool, mode, presentation],
+	);
+
+	// ── Blackboard toggle: black screen + pen armed / disarmed as a pair ──
+	// `setPresentationTool` toggles a re-selected tool off, so the tool setter
+	// is only invoked when the target differs from what is already armed.
+	const handleToggleBlackboard = useCallback(() => {
+		const next = toggleBlackboard(
+			presentation.presenterSnapshot.blackout,
+			annotations.presentationTool,
+		);
+		presentation.setPresenterBlackout(next.blackout);
+		if (next.tool !== annotations.presentationTool) {
+			annotations.setPresentationTool(next.tool);
+		}
+	}, [annotations, presentation]);
+
 	// ── Toolbar hover handling: keep toolbar visible while hovering ────
 	const toolbarHoveringRef = useRef(false);
 
@@ -272,6 +326,7 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 		if (mode === 'present') {
 			// A swipe/tap on the slide is PowerPoint's "on mouse click" advance, so
 			// it is gated by the current slide's advanceOnClick transition flag.
+			swipeHandledAtRef.current = Date.now();
 			presentation.movePresentationSlide(1, 'click');
 		} else {
 			s.setActiveSlideIndex((i) => Math.min(slides.length - 1, i + 1));
@@ -279,6 +334,7 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 	}, [mode, presentation, s, slides.length]);
 	const handleSwipePrev = useCallback(() => {
 		if (mode === 'present') {
+			swipeHandledAtRef.current = Date.now();
 			presentation.movePresentationSlide(-1);
 		} else {
 			s.setActiveSlideIndex((i) => Math.max(0, i - 1));
@@ -350,6 +406,7 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 					sourceSlideIndex={activeSlideIndex}
 					fieldContext={fieldContext}
 					tableStyleContext={tableStyleContext}
+					onStageClick={handleStageClick}
 					screenOverlay={
 						// Blackout/whiteout, audience ink, laser and captions. Rendered on
 						// the stage rather than beside the viewer, because the fullscreen
@@ -375,6 +432,8 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 										transition={presentation.transitionOverlay.transition}
 										durationMs={presentation.transitionOverlay.durationMs}
 										scale={stageScale}
+										morphPlan={presentation.morphPlan}
+										incomingSlide={slides[presentation.transitionOverlay.incomingSlideIndex]}
 										onComplete={presentation.handleTransitionOverlayComplete}
 									/>
 								)}
@@ -388,6 +447,7 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 									canvasSize={canvasSize}
 									editorScale={stageScale}
 									presentationTool={annotations.presentationTool}
+									blackout={presentation.presenterSnapshot.blackout}
 									annotationStrokes={annotations.annotationStrokes}
 									currentStroke={annotations.currentStroke}
 									laserPosition={annotations.laserPosition}
@@ -416,6 +476,7 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 				/>
 			) : (
 				<SlideCanvas
+					onUpdateSlideAnimations={props.onUpdateSlideAnimations}
 					activeSlide={effectiveSlide}
 					templateElements={effectiveTemplateElements}
 					canvasSize={canvasSize}
@@ -580,7 +641,7 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 			{/* Presentation floating toolbar with auto-hide */}
 			{mode === 'present' && (
 				<div
-					className='absolute bottom-6 left-1/2 -translate-x-1/2 z-[80] transition-opacity duration-300'
+					className={PRESENT_TOOLBAR_CLASSES.wrapper}
 					style={{
 						opacity: annotations.toolbarVisible ? 1 : 0,
 						pointerEvents: annotations.toolbarVisible ? 'auto' : 'none',
@@ -597,6 +658,8 @@ export function ViewerCanvasArea(props: ViewerCanvasAreaProps) {
 						onSetPenColor={annotations.setPenColor}
 						onSetHighlighterColor={annotations.setHighlighterColor}
 						onClearAnnotations={annotations.clearAnnotations}
+						blackout={presentation.presenterSnapshot.blackout}
+						onToggleBlackboard={handleToggleBlackboard}
 						currentSlideIndex={presentation.presentationSlideIndex}
 						totalSlides={slides.length}
 						onMovePresentationSlide={presentation.movePresentationSlide}

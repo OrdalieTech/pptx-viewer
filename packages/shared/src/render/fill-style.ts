@@ -18,10 +18,12 @@
  * §20.1.8.49 (pathFill). Pattern presets follow §20.1.10.33
  * (ST_PresetPatternVal).
  */
-import type { PptxElement, ShapeStyle } from 'pptx-viewer-core';
+import type { PptxElement, PptxThemeColorRef, ShapeStyle } from 'pptx-viewer-core';
 import { hasShapeProperties, ooxmlGradientAngleToCssDegrees } from 'pptx-viewer-core';
 
 import { DEFAULT_FILL_COLOR, DEFAULT_TEXT_COLOR } from '../constants';
+import { buildRectPathGradientImage } from './path-gradient-rect';
+import { suppressesCssFill } from './subpath-fill-overlay';
 
 // ---------------------------------------------------------------------------
 // Color primitives (inlined from React `color-core.ts`)
@@ -81,15 +83,22 @@ export function colorWithOpacity(color: string, opacity: number | undefined): st
 }
 
 /**
- * Clamps an image crop value (fractional 0-1) to a safe range. Returns 0 for
- * non-finite or missing values, and caps at 0.95 to prevent the image from
- * being fully cropped away.
+ * Clamps an image crop value (fractional, roughly -1..1) to a safe magnitude
+ * while preserving sign. Returns 0 for non-finite or missing values, and caps
+ * the magnitude at 0.95 to prevent the image from being fully cropped away.
+ *
+ * A negative value is a legitimate `a:srcRect` outward crop (PowerPoint pads
+ * the image inside its frame rather than cropping it, e.g. a photo smaller
+ * than its placeholder), so the sign must survive here the same way it does
+ * for the sibling `a:fillRect` insets (issue #132); dropping it via
+ * `Math.max(0, ...)` silently turned every negative inset into "no crop".
  */
 export function clampCropValue(value: number | undefined): number {
 	if (typeof value !== 'number' || !Number.isFinite(value)) {
 		return 0;
 	}
-	return Math.max(0, Math.min(0.95, value));
+	const magnitude = Math.min(0.95, Math.abs(value));
+	return value < 0 ? -magnitude : magnitude;
 }
 
 /**
@@ -107,7 +116,18 @@ export function createArrayBufferCopy(bytes: Uint8Array): ArrayBuffer {
 // ---------------------------------------------------------------------------
 
 type GradientStop = NonNullable<ShapeStyle['fillGradientStops']>[number];
-type SanitizedStop = { color: string; position: number; opacity?: number };
+/**
+ * `colorRef` carries the stop's theme identity through sanitisation (see
+ * {@link ShapeStyle.fillGradientStops}'s own `colorRef` field) so a gradient
+ * stop picker can highlight the matching theme swatch and a theme swap can
+ * re-resolve the stop, same as the shape's own {@link ShapeStyle.fillColorRef}.
+ */
+type SanitizedStop = {
+	color: string;
+	position: number;
+	opacity?: number;
+	colorRef?: PptxThemeColorRef;
+};
 
 /**
  * Validates, normalizes, and sorts an array of gradient stops. Filters out
@@ -135,6 +155,7 @@ export function sanitizeGradientStops(
 				typeof stop.opacity === 'number' && Number.isFinite(stop.opacity)
 					? clampUnitInterval(stop.opacity)
 					: undefined,
+			colorRef: stop.colorRef,
 		}))
 		.sort((left, right) => left.position - right.position);
 }
@@ -198,7 +219,17 @@ export function computeGradientCenter(
 	return { cx: 50, cy: 50 };
 }
 
-/** Builds a CSS radial-gradient for `path="circle"` gradients. */
+/**
+ * Builds a CSS radial-gradient for `path="circle"` gradients.
+ *
+ * The explicit-size form is written as `ellipse R% R%`, never `circle R%`: CSS
+ * only accepts a **length** as a circle's radius, so `radial-gradient(circle
+ * 100% at 0% 0%, …)` is invalid and the browser drops the entire declaration -
+ * the shape then renders with no fill at all. `ellipse R% R%` is also the more
+ * faithful reading: OOXML measures a path gradient in the shape's own unit
+ * square, so a "circle" is stretched to a non-square box exactly the way
+ * percentage semi-axes are (identical to a circle when the shape is square).
+ */
 export function buildCirclePathGradient(
 	stops: SanitizedStop[],
 	focalPoint?: ShapeStyle['fillGradientFocalPoint'],
@@ -213,44 +244,32 @@ export function buildCirclePathGradient(
 		Math.round(cy) === 50 && !focalPoint && !fillToRect ? 'center' : `${Math.round(cy)}%`;
 
 	if (fillToRect) {
-		const radius = Math.max(cx, 100 - cx, cy, 100 - cy);
-		return `radial-gradient(circle ${Math.round(radius)}% at ${posX} ${posY}, ${stopStr})`;
+		const radius = Math.round(Math.max(cx, 100 - cx, cy, 100 - cy));
+		return `radial-gradient(ellipse ${radius}% ${radius}% at ${posX} ${posY}, ${stopStr})`;
 	}
 	return `radial-gradient(circle at ${posX} ${posY}, ${stopStr})`;
 }
 
-/** Builds a CSS radial-gradient for `path="rect"` gradients. */
+/**
+ * Builds the CSS `background-image` value for `path="rect"` gradients.
+ *
+ * PowerPoint shades a rect path gradient toward the shape's own bounding
+ * rectangle: its isolines are concentric rectangles with square corners (a
+ * Chebyshev distance field), not circles or ellipses. SVG/CSS have no native
+ * "rectangular radial gradient" primitive, so this renders the true field
+ * directly as a small stack of nested `<rect>` bands inside a self-contained
+ * SVG data URI (see `path-gradient-rect.ts` for the full reasoning), rather
+ * than approximating it as a single ellipse. Pair the result with
+ * `background-size: 100% 100%` and `background-repeat: no-repeat` so the
+ * normalised markup stretches to the shape's real box (done for callers by
+ * `resolveComputedFill` below).
+ */
 export function buildRectPathGradient(
 	stops: SanitizedStop[],
 	focalPoint?: ShapeStyle['fillGradientFocalPoint'],
 	fillToRect?: ShapeStyle['fillGradientFillToRect'],
 ): string {
-	const stopStr = stops.map(toCssGradientStop).join(', ');
-
-	if (fillToRect) {
-		const { l, t, r, b } = fillToRect;
-		const { cx, cy } = computeGradientCenter(fillToRect, focalPoint);
-
-		const semiX = Math.max(cx, 100 - cx);
-		const semiY = Math.max(cy, 100 - cy);
-		const posX = `${Math.round(cx)}%`;
-		const posY = `${Math.round(cy)}%`;
-
-		const innerHalfW = ((1 - l - r) / 2) * 100;
-		const innerHalfH = ((1 - t - b) / 2) * 100;
-
-		if (innerHalfW > 0.5 && innerHalfH > 0.5 && Math.abs(semiX - semiY) > 1) {
-			const aspect = innerHalfW / innerHalfH;
-			const adjustedSemiX = Math.round(semiY * aspect);
-			const adjustedSemiY = Math.round(semiY);
-			return `radial-gradient(${adjustedSemiX}% ${adjustedSemiY}% at ${posX} ${posY}, ${stopStr})`;
-		}
-		return `radial-gradient(${Math.round(semiX)}% ${Math.round(semiY)}% at ${posX} ${posY}, ${stopStr})`;
-	}
-
-	const posX = focalPoint ? `${Math.round(focalPoint.x * 100)}%` : 'center';
-	const posY = focalPoint ? `${Math.round(focalPoint.y * 100)}%` : 'center';
-	return `radial-gradient(ellipse at ${posX} ${posY}, ${stopStr})`;
+	return buildRectPathGradientImage(stops, focalPoint, fillToRect);
 }
 
 /** Builds a CSS gradient approximation for `path="shape"` gradients. */
@@ -343,6 +362,17 @@ export function getGradientTileFlipCss(
  * `(1 - l - r)` x `(1 - t - b)` of the shape, offset by `l`/`t`. Returns
  * `undefined` when the rect is missing, degenerate, or effectively full-bleed
  * (no meaningful inset), so callers fall through to the plain gradient.
+ *
+ * Insets may be NEGATIVE, which makes the tile LARGER than the shape: PowerPoint's
+ * stock "radial gradient from a corner" preset writes
+ * `<a:tileRect l="-100000" t="-100000"/>` so the gradient's focal corner sits a
+ * full shape-width outside the box. The percentage-position formula already
+ * covers that case (a CSS background position of `100%` pins an oversized
+ * image's right/bottom edge to the container's), so the guard tests the
+ * MAGNITUDE of `1 - size`: an early `> 0.001` comparison was false for every
+ * oversized tile and silently dropped the offset, dragging the focal point back
+ * to the shape's own corner and painting a hard blob where PowerPoint renders a
+ * soft wash.
  */
 export function getGradientTileRectCss(
 	tileRect: ShapeStyle['fillGradientTileRect'] | undefined,
@@ -359,8 +389,8 @@ export function getGradientTileRectCss(
 	if (Math.abs(sizeW - 1) < 0.001 && Math.abs(sizeH - 1) < 0.001) {
 		return undefined;
 	}
-	const posX = 1 - sizeW > 0.001 ? (l / (1 - sizeW)) * 100 : 0;
-	const posY = 1 - sizeH > 0.001 ? (t / (1 - sizeH)) * 100 : 0;
+	const posX = Math.abs(1 - sizeW) > 0.001 ? (l / (1 - sizeW)) * 100 : 0;
+	const posY = Math.abs(1 - sizeH) > 0.001 ? (t / (1 - sizeH)) * 100 : 0;
 	return {
 		backgroundSize: `${Math.round(sizeW * 100)}% ${Math.round(sizeH * 100)}%`,
 		backgroundPosition: `${Math.round(posX)}% ${Math.round(posY)}%`,
@@ -541,18 +571,30 @@ export const buildCssGradientFromShapeStyle = buildGradientCss;
 // Pattern fills (from React `color-patterns.ts`)
 // ---------------------------------------------------------------------------
 
+/** One tile of a preset pattern: its size plus the primitives that fill it. */
+export interface PatternTile {
+	/** Tile width in px. */
+	w: number;
+	/** Tile height in px. */
+	h: number;
+	/** SVG primitives that paint the tile, with no wrapping element. */
+	inner: string;
+}
+
 /**
- * Generates a tiled inline SVG markup string approximating an OOXML preset
- * pattern (ST_PresetPatternVal). Patterns paint a foreground (`fg`) on a
- * background (`bg`) fill. Returns `null` for unknown presets.
+ * Builds one tile of an OOXML preset pattern (ST_PresetPatternVal), painting a
+ * foreground (`fg`) on a background (`bg`). Returns `null` for unknown presets.
+ *
+ * Kept separate from {@link getPatternSvg} because the tile is needed in two
+ * different wrappers: a standalone `<svg>` document for the data-URI background
+ * a CSS fill uses, and an SVG `<pattern>` paint server for a patterned OUTLINE,
+ * which cannot go through `background-image` at all.
  *
  * Reference: ECMA-376 Part 1, §20.1.10.33.
  */
-export function getPatternSvg(preset: string, fg: string, bg: string): string | null {
+export function getPatternTile(preset: string, fg: string, bg: string): PatternTile | null {
 	const s = 8;
-	const xmlns = 'http://www.w3.org/2000/svg';
-	const svg = (w: number, h: number, inner: string) =>
-		`<svg xmlns="${xmlns}" width="${w}" height="${h}">${inner}</svg>`;
+	const svg = (w: number, h: number, inner: string): PatternTile => ({ w, h, inner });
 	const rect = (x: number, y: number, w: number, h: number, fill: string) =>
 		`<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}"/>`;
 	const bgRect = (w: number, h: number) => rect(0, 0, w, h, bg);
@@ -939,6 +981,19 @@ export function getPatternSvg(preset: string, fg: string, bg: string): string | 
 	}
 }
 
+/**
+ * Serialises one pattern tile into a standalone inline `<svg>` document, the
+ * form a CSS `background-image` data-URI needs. Returns `null` for unknown
+ * presets.
+ */
+export function getPatternSvg(preset: string, fg: string, bg: string): string | null {
+	const tile = getPatternTile(preset, fg, bg);
+	if (!tile) {
+		return null;
+	}
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="${tile.w}" height="${tile.h}">${tile.inner}</svg>`;
+}
+
 /** Result of {@link buildPatternFill}. */
 export interface PatternFillResult {
 	/** CSS `background-image` value (inline SVG data-URI). */
@@ -1142,6 +1197,16 @@ export function getComputedFillStyle(
 		return {};
 	}
 
+	// A multi-sub-path preset (e.g. `smileyFace`, `actionButtonBlank`) or custom
+	// geometry whose sub-paths carry their own `@fill` mode is painted by the
+	// per-sub-path SVG overlay instead (`buildSubpathFillOverlay`): a single flat
+	// `background-color` here would show through underneath it, and for a
+	// `fill="none"` sub-path (the smiley's eyes) it would paint a solid dot
+	// where PowerPoint draws nothing.
+	if (suppressesCssFill(element)) {
+		return { backgroundColor: 'transparent' };
+	}
+
 	// grpFill inheritance: paint the parent group's resolved fill in this
 	// child's box. Without a parent fill there is nothing to inherit.
 	if (ss.fillMode === 'group') {
@@ -1204,6 +1269,23 @@ function resolveComputedFill(ss: ShapeStyle, element: PptxElement): ComputedFill
 				backgroundSize: tileRect.backgroundSize,
 				backgroundPosition: tileRect.backgroundPosition,
 				backgroundRepeat: tileRect.backgroundRepeat,
+			};
+		}
+		// A `path="rect"` gradient is rendered as an SVG data-URI image (see
+		// `buildRectPathGradient`), not a CSS `<gradient>` function: unlike a CSS
+		// gradient (which auto-sizes to the background box), an `url(...)` image
+		// defaults to its own intrinsic size and to `repeat`, which would tile the
+		// normalised 0-100 artwork instead of stretching it across the shape.
+		const isRectPathImage =
+			ss.fillMode === 'gradient' &&
+			(ss.fillGradientType || 'linear') === 'radial' &&
+			(ss.fillGradientPathType || 'circle') === 'rect' &&
+			sanitizeGradientStops(ss.fillGradientStops).length > 0;
+		if (isRectPathImage) {
+			return {
+				backgroundImage: gradient,
+				backgroundSize: '100% 100%',
+				backgroundRepeat: 'no-repeat',
 			};
 		}
 		return { backgroundImage: gradient };

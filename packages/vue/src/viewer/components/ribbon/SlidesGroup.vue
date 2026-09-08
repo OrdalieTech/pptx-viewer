@@ -1,21 +1,40 @@
 <script setup lang="ts">
 /**
- * SlidesGroup: New Slide split button, Layout (apply to current), Reset, and
- * Section controls. Extracted from HomeSection to keep it under 300 LOC.
- * Vue port of React's `toolbar/SlidesGroup.tsx`.
+ * SlidesGroup: New Slide split button, Slide Templates gallery, Layout (apply
+ * to current), Reset, and Section controls. Extracted from HomeSection to keep
+ * it under 300 LOC. Vue port of React's `toolbar/SlidesGroup.tsx`.
  */
-import { ChevronDown, FolderPlus, LayoutGrid, Plus, RotateCcw } from 'lucide-vue-next';
+import {
+	ChevronDown,
+	FolderPlus,
+	LayoutGrid,
+	LayoutTemplate,
+	Plus,
+	RotateCcw,
+} from 'lucide-vue-next';
+import type { PptxLayoutOption, PptxLayoutPreview } from 'pptx-viewer-core';
+import type { SlideTemplateId } from 'pptx-viewer-shared';
+import { ref, watchEffect } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { cn } from '../../../utils';
-import { ic, MENU_ITEM, MENU_PANEL, pill } from './ribbon-constants';
+import SlideTemplateGalleryDialog from '../SlideTemplateGalleryDialog.vue';
+import LayoutGalleryMenu from './LayoutGalleryMenu.vue';
+import { ic, pill } from './ribbon-constants';
 import type { LayoutOption } from './ribbon-types';
 import { useDropdown } from './use-dropdown';
 
 interface Props {
 	canEdit: boolean;
 	layoutOptions: LayoutOption[];
+	/** Marks the active tile in the Layout menu. */
+	currentLayoutPath?: string;
+	/** Supplies gallery artwork; without it the menus stay name-only. */
+	loadLayoutPreviews?: () => Promise<PptxLayoutPreview[]>;
 	onInsertSlideFromLayout: (path: string, name?: string) => void;
+	onInsertSlideFromTemplate?: (templateId: SlideTemplateId) => void;
+	/** Deck scheme map so template previews show the deck's theme colours. */
+	templateScheme?: Record<string, string>;
 	onApplyLayout?: (path: string) => void;
 	onResetSlide?: () => void;
 	onAddSection?: () => void;
@@ -26,6 +45,36 @@ const { t } = useI18n();
 
 const layoutMenu = useDropdown();
 const layoutApplyMenu = useDropdown();
+const templateGalleryOpen = ref(false);
+
+/**
+ * Layout artwork, fetched the first time either gallery opens.
+ *
+ * Parsing every layout part is only worth doing once the user asks to see the
+ * thumbnails; core memoises the result, so reopening a menu costs nothing.
+ */
+const previews = ref<ReadonlyMap<string, PptxLayoutPreview>>(new Map());
+watchEffect(() => {
+	if (!layoutMenu.open.value && !layoutApplyMenu.open.value) {
+		return;
+	}
+	const load = props.loadLayoutPreviews;
+	if (!load) {
+		return;
+	}
+	void load()
+		.then((loaded) => {
+			previews.value = new Map(loaded.map((preview) => [preview.path, preview]));
+			return undefined;
+		})
+		// A layout that will not parse costs the user a name-only tile, not a
+		// broken menu.
+		.catch(() => undefined);
+});
+
+function handleInsertTemplate(templateId: SlideTemplateId): void {
+	props.onInsertSlideFromTemplate?.(templateId);
+}
 
 function handleNewSlide(): void {
 	if (props.layoutOptions.length > 0) {
@@ -34,12 +83,12 @@ function handleNewSlide(): void {
 	}
 }
 
-function handlePickLayout(lo: LayoutOption): void {
+function handlePickLayout(lo: PptxLayoutOption | LayoutOption): void {
 	props.onInsertSlideFromLayout(lo.path, lo.name);
 	layoutMenu.close();
 }
 
-function handleApplyLayout(lo: LayoutOption): void {
+function handleApplyLayout(lo: PptxLayoutOption | LayoutOption): void {
 	props.onApplyLayout?.(lo.path);
 	layoutApplyMenu.close();
 }
@@ -72,23 +121,27 @@ function handleApplyLayout(lo: LayoutOption): void {
 				>
 					<ChevronDown class="w-3 h-3" />
 				</button>
-				<div
+				<LayoutGalleryMenu
 					v-if="layoutMenu.open.value"
-					class="absolute left-0 top-full z-50 flex flex-col w-48 pt-1"
-				>
-					<div :class="MENU_PANEL">
-						<button
-							v-for="lo in props.layoutOptions"
-							:key="lo.path"
-							type="button"
-							:class="MENU_ITEM"
-							@click="handlePickLayout(lo)"
-						>
-							{{ lo.name }}
-						</button>
-					</div>
-				</div>
+					:anchor="layoutMenu.root.value"
+					:layout-options="props.layoutOptions"
+					:previews="previews"
+					@select="handlePickLayout"
+				/>
 			</div>
+
+			<!-- Slide Templates gallery button -->
+			<button
+				v-if="props.onInsertSlideFromTemplate"
+				type="button"
+				:disabled="!props.canEdit"
+				:class="pill"
+				:title="t('pptx.home.slideTemplates')"
+				@click="templateGalleryOpen = true"
+			>
+				<LayoutTemplate :class="ic" />
+				{{ t('pptx.home.slideTemplates') }}
+			</button>
 
 			<!-- Layout (apply to current slide) -->
 			<div :ref="layoutApplyMenu.root" class="relative inline-flex items-center">
@@ -102,22 +155,14 @@ function handleApplyLayout(lo: LayoutOption): void {
 					<LayoutGrid :class="ic" />
 					{{ t('pptx.master.layout') }}
 				</button>
-				<div
+				<LayoutGalleryMenu
 					v-if="layoutApplyMenu.open.value"
-					class="absolute left-0 top-full z-50 flex flex-col w-48 pt-1"
-				>
-					<div :class="MENU_PANEL">
-						<button
-							v-for="lo in props.layoutOptions"
-							:key="lo.path"
-							type="button"
-							:class="MENU_ITEM"
-							@click="handleApplyLayout(lo)"
-						>
-							{{ lo.name }}
-						</button>
-					</div>
-				</div>
+					:anchor="layoutApplyMenu.root.value"
+					:layout-options="props.layoutOptions"
+					:previews="previews"
+					:current-layout-path="props.currentLayoutPath"
+					@select="handleApplyLayout"
+				/>
 			</div>
 
 			<!-- Reset -->
@@ -148,4 +193,12 @@ function handleApplyLayout(lo: LayoutOption): void {
 			t('pptx.sections.slides')
 		}}</span>
 	</div>
+
+	<SlideTemplateGalleryDialog
+		v-if="props.onInsertSlideFromTemplate"
+		:open="templateGalleryOpen"
+		:scheme="props.templateScheme"
+		@insert="handleInsertTemplate"
+		@close="templateGalleryOpen = false"
+	/>
 </template>

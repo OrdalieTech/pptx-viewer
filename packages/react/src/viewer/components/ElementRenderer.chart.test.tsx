@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file:
+   independent handler-local `const`s, not one statement */
 import type { ChartPptxElement, PptxChartData, PptxElement } from 'pptx-viewer-core';
 import React, { act } from 'react';
 /**
@@ -14,6 +16,7 @@ import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+import { ChartPartSelectionProvider } from './chart-part-selection';
 import { ElementRenderer } from './ElementRenderer';
 import type { ElementRendererProps } from './elements/element-renderer-types';
 
@@ -73,7 +76,7 @@ function makeProps(overrides: Partial<ElementRendererProps>): ElementRendererPro
 		showResizeHandles: false,
 		renderInk: true,
 		renderGroups: true,
-		adjustmentHandleDescriptor: null,
+		adjustmentHandles: [],
 		onResizePointerDown: vi.fn<() => void>(),
 		onAdjustmentPointerDown: vi.fn<() => void>(),
 		onInlineEditChange: vi.fn<() => void>(),
@@ -156,6 +159,28 @@ describe('elementRenderer - on-canvas chart editing wiring', () => {
 		expect(onUpdateSmartArtElement).not.toHaveBeenCalled();
 	});
 
+	it('highlights exactly the pressed mark via the shared selected-part class', () => {
+		// Real (non-no-op) selection state requires the provider ElementRenderer's
+		// callers normally sit under (ViewerMainContent); the bare mount() helper
+		// above renders against the inert default context, where selection never
+		// actually changes.
+		act(() => {
+			root.render(
+				<ChartPartSelectionProvider>
+					<ElementRenderer {...makeProps({ onUpdateSmartArtElement: vi.fn() })} />
+				</ChartPartSelectionProvider>,
+			);
+		});
+		stubSvgRect();
+
+		const bar = queryBar(0, 1);
+		pointer('pointerdown', bar, 200);
+		pointer('pointerup', bar, 200);
+
+		expect(bar.classList.contains('pptx-chart-part-selected')).toBeTruthy();
+		expect(container.querySelectorAll('.pptx-chart-part-selected')).toHaveLength(1);
+	});
+
 	it('edits the title in place on double-click', () => {
 		const onUpdateSmartArtElement = vi.fn<(id: string, updates: Partial<PptxElement>) => void>();
 		mount(makeProps({ onUpdateSmartArtElement }));
@@ -202,5 +227,21 @@ describe('elementRenderer - on-canvas chart editing wiring', () => {
 	it('is inert without an update handler', () => {
 		mount(makeProps({ onUpdateSmartArtElement: undefined }));
 		expect(container.querySelector('.pptx-chart-interactive')).toBeNull();
+	});
+
+	// G8 (OpenXML parity audit, D3): a:graphicFrameLocks/@noDrilldown was
+	// parsed but never enforced - double-clicking the title still opened the
+	// inline editor on a locked chart.
+	it('does not open the title editor on double-click when noDrilldown is set', () => {
+		const onUpdateSmartArtElement = vi.fn<(id: string, updates: Partial<PptxElement>) => void>();
+		const locked = { ...makeChartElement(), locks: { noDrilldown: true } } as ChartPptxElement;
+		mount(makeProps({ element: locked, onUpdateSmartArtElement }));
+
+		const title = container.querySelector("[data-chart-part='title']")!;
+		act(() => {
+			title.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+		});
+
+		expect(container.querySelector('input[type="text"]')).toBeNull();
 	});
 });

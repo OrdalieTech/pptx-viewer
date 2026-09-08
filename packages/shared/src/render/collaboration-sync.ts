@@ -100,6 +100,10 @@ export const SCALAR_ELEMENT_KEYS: ReadonlySet<string> = new Set([
 	'y',
 	'width',
 	'height',
+	'xEmu',
+	'yEmu',
+	'widthEmu',
+	'heightEmu',
 	'rotation',
 	'shapeId',
 	'skewX',
@@ -111,6 +115,10 @@ export const SCALAR_ELEMENT_KEYS: ReadonlySet<string> = new Set([
 	'text',
 	'name',
 	'altText',
+	'title',
+	'isDecorative',
+	'preferRelativeResize',
+	'oleUpdateAutomatic',
 	'shapeType',
 	'imagePath',
 	'imageData',
@@ -120,12 +128,17 @@ export const SCALAR_ELEMENT_KEYS: ReadonlySet<string> = new Set([
 	'cropTop',
 	'cropRight',
 	'cropBottom',
+	'fillRectLeft',
+	'fillRectTop',
+	'fillRectRight',
+	'fillRectBottom',
 	'tileOffsetX',
 	'tileOffsetY',
 	'tileScaleX',
 	'tileScaleY',
 	'tileFlip',
 	'tileAlignment',
+	'dpi',
 	'pathData',
 	'pathWidth',
 	'pathHeight',
@@ -164,6 +177,14 @@ export const SCALAR_ELEMENT_KEYS: ReadonlySet<string> = new Set([
 	'oleEmbeddedFileName',
 	'oleEmbeddedMimeType',
 	'oleEmbeddedByteSize',
+	'oleFollowColorScheme',
+	// GroupPptxElement: exact EMU for the group's own `a:chOff`/`a:chExt`
+	// (child coordinate space). See `group-xfrm-preservation.ts` in
+	// `pptx-viewer-core`.
+	'chOffXEmu',
+	'chOffYEmu',
+	'chExtWidthEmu',
+	'chExtHeightEmu',
 	'inkPaths',
 	'inkColors',
 	'inkWidths',
@@ -180,6 +201,14 @@ export const SCALAR_ELEMENT_KEYS: ReadonlySet<string> = new Set([
 	'linkedTxbxId',
 	'linkedTxbxSeq',
 	'promptText',
+	'placeholderType',
+	'placeholderSz',
+	'placeholderOrient',
+	// Resolved from the slide master rather than authored, but it travels with
+	// `text` on purpose: the two are compared by the save writer to tell an
+	// inherited footer from one edited on this slide. See
+	// `collaboration-field-schema.ts`.
+	'inheritedPlaceholderText',
 ]);
 
 export const COMPLEX_ELEMENT_FIELDS: Readonly<Record<string, string>> = {
@@ -206,7 +235,10 @@ export const COMPLEX_ELEMENT_FIELDS: Readonly<Record<string, string>> = {
 	rawMediaReferenceXml: '_mrx',
 	metadata: '_md',
 	groupFill: '_gf',
+	groupEffectStyle: '_ges',
 	inkPointPressures: '_ipp',
+	inkPointTiltX: '_iptx',
+	inkPointTiltY: '_ipty',
 	inkStrokes: '_cis',
 	inkPartRawXml: '_cirx',
 	summaryTargets: '_zst',
@@ -225,6 +257,9 @@ const REV_COMPLEX_ELEMENT: Record<string, string> = Object.fromEntries(
 export const SCALAR_SLIDE_KEYS: ReadonlySet<string> = new Set([
 	'id',
 	'rId',
+	// The real `p:sldIdLst` id (256+ on a PowerPoint deck). Sections reference
+	// it, so peers must agree on it exactly as they do on `rId`.
+	'slideId',
 	'sourceSlideId',
 	'name',
 	'layoutPath',
@@ -241,12 +276,14 @@ export const SCALAR_SLIDE_KEYS: ReadonlySet<string> = new Set([
 	'notesCSldName',
 	'backgroundShowAnimation',
 	'showMasterShapes',
+	'showMasterPhAnim',
 	'isDirty',
 ]);
 
 export const COMPLEX_SLIDE_FIELDS: Readonly<Record<string, string>> = {
 	transition: '_tr',
 	animations: '_an',
+	animationTimelineAnchors: '_ata',
 	nativeAnimations: '_na',
 	rawTiming: '_rt',
 	notesSegments: '_ns',
@@ -261,6 +298,7 @@ export const COMPLEX_SLIDE_FIELDS: Readonly<Record<string, string>> = {
 	activeXControls: '_ax',
 	legacyVmlElements: '_lvml',
 	backgroundPattern: '_bp',
+	backgroundImageProperties: '_bip',
 	modernCommentPart: '_mc',
 	headerFooterFlags: '_hff',
 	slideSynchronization: '_sync',

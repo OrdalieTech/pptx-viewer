@@ -1,4 +1,5 @@
 import type { PptxElementAnimation } from 'pptx-viewer-core';
+import { animationEffectLabel } from 'pptx-viewer-shared';
 
 import type { AnimationActions } from '../../../editor/editor-animation-actions';
 import type { Translator } from '../../../i18n';
@@ -27,6 +28,9 @@ export function optionSelect(
 	const label = doc.createElement('label');
 	label.textContent = t(labelText);
 	const select = doc.createElement('select');
+	// Named explicitly: the wrapping `<label>` would otherwise lend the select
+	// its whole text content, which includes every option.
+	select.setAttribute('aria-label', t(labelText));
 	for (const value of values) {
 		const option = doc.createElement('option');
 		option.value = value;
@@ -35,6 +39,35 @@ export function optionSelect(
 	}
 	label.appendChild(select);
 	return { label, select };
+}
+
+/**
+ * A read-only row for one of the deck's own effect groups: not draggable and
+ * has no move buttons, but stays a valid drop target (via `dragover`) so an
+ * editor-authored effect can be dragged ahead of or behind it.
+ */
+export function nativeAnimationRow(
+	doc: Document,
+	t: Translator,
+	targetIds: readonly string[],
+	index: number,
+	handlers: Pick<AnimationActions, 'moveAnimation'>,
+): HTMLElement {
+	const row = createEl(doc, 'div', 'pptxv-animation-timeline-row');
+	row.classList.add('is-native');
+	row.title = t('pptx.animation.nativeEffectHint');
+	row.addEventListener('dragover', (event) => event.preventDefault());
+	row.addEventListener('drop', (event) => {
+		event.preventDefault();
+		const source = event.dataTransfer?.getData('text/plain');
+		if (source) {
+			handlers.moveAnimation(source, index);
+		}
+	});
+	const label = createEl(doc, 'span', 'pptxv-animation-timeline-name');
+	label.textContent = `${index + 1}. ${t('pptx.animation.nativeEffect')}: ${targetIds.join(', ')}`;
+	row.append(label);
+	return row;
 }
 
 export function animationRow(
@@ -62,8 +95,9 @@ export function animationRow(
 	});
 	row.classList.toggle('is-selected', animation.elementId === selectedElementId);
 	const label = createEl(doc, 'span', 'pptxv-animation-timeline-name');
-	const effect = animation.entrance ?? animation.emphasis ?? animation.exit ?? 'custom';
-	label.textContent = `${index + 1}. ${effect}`;
+	// Named through the shared resolver: the row used to print the raw preset
+	// token (`fadeIn`) where the effect's name belongs.
+	label.textContent = `${index + 1}. ${animationEffectLabel(animation, t)}`;
 	const up = makeButton(doc, {
 		label: t('pptx.animation.moveUp'),
 		text: '↑',

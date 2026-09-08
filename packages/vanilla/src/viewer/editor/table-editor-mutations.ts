@@ -1,10 +1,16 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (independent short-lived `const`s per operation); merging them isn't a
+   style choice here. */
 import type { PptxTableCellStyle, PptxTableData } from 'pptx-viewer-core';
 import {
+	canMergeCells,
 	computeSplitCell,
 	deleteTableColumn,
 	deleteTableRow,
 	insertTableColumn,
 	insertTableRow,
+	mergeCells,
+	redistributeColumnWidth,
 } from 'pptx-viewer-shared';
 
 export interface TableCellPosition {
@@ -60,6 +66,12 @@ export function mutateTableStructure(
 	}
 }
 
+/**
+ * Set column `column` to `percent` (0-100), proportionally rescaling every
+ * other column to preserve their relative ratios and keep the row summing to
+ * 1. Delegates to `pptx-viewer-shared`'s `redistributeColumnWidth`, the same
+ * formula every binding's column-width control uses.
+ */
 export function setTableColumnWidth(
 	data: PptxTableData,
 	column: number,
@@ -69,14 +81,9 @@ export function setTableColumnWidth(
 		return data;
 	}
 	const requested = Math.min(0.95, Math.max(0.05, percent / 100));
-	const previous = data.columnWidths[column];
-	const remaining = 1 - previous;
-	const nextRemaining = 1 - requested;
 	return {
 		...data,
-		columnWidths: data.columnWidths.map((width, index) =>
-			index === column ? requested : remaining > 0 ? (width / remaining) * nextRemaining : width,
-		),
+		columnWidths: redistributeColumnWidth(data.columnWidths, column, requested),
 	};
 }
 
@@ -93,48 +100,26 @@ export function setTableRowHeight(
 	};
 }
 
+/**
+ * Merge a rectangular selection of cells.
+ *
+ * Delegates to `pptx-viewer-shared`'s `canMergeCells` / `mergeCells`, which
+ * first expand the selection rect to fully cover any merge group it only
+ * partially overlaps before validating and applying the merge. Mirrors
+ * Vue's `applyMergeSelected` / Svelte's `table-merge-selected` command; a
+ * hand-rolled bounding-rect + cell-count check here (as this used to be)
+ * rejects, or incorrectly merges, a selection that partially overlaps an
+ * existing merged cell.
+ */
 export function mergeTableCellRange(
 	data: PptxTableData,
 	cells: TableCellPosition[],
 ): PptxTableData {
-	if (cells.length < 2) {
+	const coords = cells.map(({ row, column }) => ({ row, col: column }));
+	if (!canMergeCells(coords, data)) {
 		return data;
 	}
-	const rows = cells.map(({ row }) => row);
-	const columns = cells.map(({ column }) => column);
-	const top = Math.min(...rows);
-	const bottom = Math.max(...rows);
-	const left = Math.min(...columns);
-	const right = Math.max(...columns);
-	if (cells.length !== (bottom - top + 1) * (right - left + 1)) {
-		return data;
-	}
-	const nextRows = data.rows.map((row, rowIndex) => ({
-		...row,
-		cells: row.cells.map((cell, columnIndex) => {
-			if (rowIndex < top || rowIndex > bottom || columnIndex < left || columnIndex > right) {
-				return cell;
-			}
-			if (rowIndex === top && columnIndex === left) {
-				return {
-					...cell,
-					text: cells
-						.map(({ row: selectedRow, column }) => data.rows[selectedRow]?.cells[column]?.text)
-						.filter(Boolean)
-						.join(' '),
-					gridSpan: right > left ? right - left + 1 : undefined,
-					rowSpan: bottom > top ? bottom - top + 1 : undefined,
-				};
-			}
-			return {
-				...cell,
-				text: '',
-				hMerge: columnIndex > left || undefined,
-				vMerge: rowIndex > top || undefined,
-			};
-		}),
-	}));
-	return { ...data, rows: nextRows };
+	return mergeCells(coords, data);
 }
 
 export function splitTableCell(data: PptxTableData, cell: TableCellPosition): PptxTableData {

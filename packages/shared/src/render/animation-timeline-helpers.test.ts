@@ -171,6 +171,28 @@ describe('buildDynamicKeyframe', () => {
 		expect(result!.css).toContain('scale(1.5, 2)');
 	});
 
+	it('composes motion, rotation, scale, and entrance opacity in one keyframe block', () => {
+		const anim = {
+			motionPath: 'M 0,0 L 0.2,0.1',
+			presetClass: 'entr',
+			rotationFrom: 30,
+			rotationTo: 0,
+			scaleFromX: 2.5,
+			scaleFromY: 2,
+			scaleToX: 1,
+			scaleToY: 1,
+		} as unknown as PptxNativeAnimation;
+		const result = buildDynamicKeyframe(anim, 4);
+
+		expect(result?.keyframeName).toBe('pptx-tl-transform-4');
+		expect(result?.css).toContain('opacity: 0');
+		expect(result?.css).toContain('rotate(30deg)');
+		expect(result?.css).toContain('scale(2.5, 2)');
+		expect(result?.css).toContain('opacity: 1');
+		expect(result?.css).toContain('rotate(0deg)');
+		expect(result?.css).toContain('scale(1, 1)');
+	});
+
 	it('returns undefined when no motion/rotation/scale', () => {
 		const anim = {} as PptxNativeAnimation;
 		expect(buildDynamicKeyframe(anim, 1)).toBeUndefined();
@@ -201,12 +223,19 @@ describe('buildDynamicKeyframe', () => {
 		const result = buildDynamicKeyframe(anim, 10);
 		expect(result).toBeDefined();
 		expect(result!.css).toContain('rotate(');
+		// Offsets are slide-relative calc() lengths, not element-box percentages.
 		// First point (0,0) → next (100,0): angle = 0 degrees (moving right)
-		expect(result!.css).toContain('translate(0.00%, 0.00%) rotate(0.00deg)');
+		expect(result!.css).toContain(
+			'translate(calc(var(--pptx-slide-w, 1280px) * 0.0000), calc(var(--pptx-slide-h, 720px) * 0.0000)) rotate(0.00deg)',
+		);
 		// Second point (100,0) → next (100,100): angle = 90 degrees (moving down)
-		expect(result!.css).toContain('translate(100.00%, 0.00%) rotate(90.00deg)');
+		expect(result!.css).toContain(
+			'translate(calc(var(--pptx-slide-w, 1280px) * 1.0000), calc(var(--pptx-slide-h, 720px) * 0.0000)) rotate(90.00deg)',
+		);
 		// Last point (100,100) uses direction from previous: same as prev→current = 90 degrees
-		expect(result!.css).toContain('translate(100.00%, 100.00%) rotate(90.00deg)');
+		expect(result!.css).toContain(
+			'translate(calc(var(--pptx-slide-w, 1280px) * 1.0000), calc(var(--pptx-slide-h, 720px) * 1.0000)) rotate(90.00deg)',
+		);
 	});
 
 	it('does not add rotate() to motion path keyframes when motionPathRotateAuto is false', () => {
@@ -251,15 +280,15 @@ describe('buildDynamicKeyframe', () => {
 		expect(stops!.length).toBeGreaterThan(2);
 	});
 
-	it('builds a filter-emphasis keyframe for a mapped emphasis preset (darken)', () => {
+	it('returns undefined for emph.4 (Change Font Size, not a filter-based darken preset)', () => {
+		// emph.4 used to be mislabelled 'darken' in EMPH_FILTER_PRESETS; it is
+		// really Change Font Size, which has no dynamic keyframe support yet
+		// and must fall through rather than fabricate a colour filter.
 		const anim = {
 			presetClass: 'emph',
 			presetId: 4,
 		} as unknown as PptxNativeAnimation;
-		const result = buildDynamicKeyframe(anim, 21);
-		expect(result).toBeDefined();
-		expect(result!.keyframeName).toBe('pptx-tl-emph-21');
-		expect(result!.css).toContain('filter: brightness(0.55)');
+		expect(buildDynamicKeyframe(anim, 21)).toBeUndefined();
 	});
 
 	it('returns undefined for an emphasis preset with no filter mapping', () => {

@@ -1,10 +1,41 @@
 import type { MediaCaptionTrack, MediaPptxElement, PptxElement } from 'pptx-viewer-core';
 
+import { mediaFallbackVisual, mediaSurfaceOf, registerCrossSlideAudio } from '../internal/shared';
+import type { MediaFallbackVisual, MediaSurface } from '../internal/shared';
+
+export { registerCrossSlideAudio };
+
 /**
  * Pure helpers for {@link MediaRendererComponent}, mirroring React's
  * `media-render.tsx` / `media-persistent-audio.tsx`. Kept TestBed-free so the
  * source resolution + media-fragment maths can be unit-tested directly.
  */
+
+/** Which surface {@link MediaRendererComponent} is painting on. */
+export function mediaSurfaceFor(interactive: boolean, presenting: boolean): MediaSurface {
+	return mediaSurfaceOf({ interactive, presenting });
+}
+
+/**
+ * What the template paints when no `<video>`/`<audio>` can be mounted.
+ *
+ * A still of a slide - the slide-transition overlay, the presenter console's
+ * panes, the thumbnail rail - gets the poster frame and nothing else: the play
+ * badge and the typed placeholder box are authoring chrome, and issue #147 is
+ * exactly that chrome riding along inside a morph. Factored out of the template
+ * so its `@if`s can be asserted without a TestBed, as this package does
+ * elsewhere (see `action-settings-panel.component.test.ts`).
+ */
+export function mediaFallbackFor(
+	el: PptxElement,
+	hasPoster: boolean,
+	surface: MediaSurface,
+): MediaFallbackVisual {
+	return mediaFallbackVisual(surface, {
+		hasPoster,
+		missing: asMediaElement(el)?.mediaMissing === true,
+	});
+}
 
 /** Narrow a generic element to `MediaPptxElement`, or `undefined`. */
 export function asMediaElement(el: PptxElement): MediaPptxElement | undefined {
@@ -24,26 +55,25 @@ export function resolveMediaSrc(
 }
 
 /**
- * Build a media-fragment URI component (`#t=start,end`) for trimmed media.
- * Times are stored in milliseconds; the fragment uses seconds. Mirrors React's
- * `buildTrimFragment`.
+ * Build a media-fragment URI component (`#t=start`) for a trimmed clip's
+ * start point. Times are stored in milliseconds; the fragment uses seconds.
+ * Mirrors React's `buildTrimFragment`.
+ *
+ * G19/G20: `el.trimEndMs` is `p14:trim/@end`'s own on-the-wire unit, the
+ * DISTANCE in milliseconds from the clip's END (COM-verified; see
+ * `PptxHandlerRuntimeMediaParsingUtils.ts`), not an absolute stop time. The
+ * Media Fragments URI spec only accepts an absolute `end`, which cannot be
+ * computed here (the clip's real duration is unknown before the browser
+ * fetches this very `src`). An earlier version emitted `trimEndMs` directly
+ * as if it already were that absolute position - exactly backwards. Trim-end
+ * enforcement is `scheduleMediaTrimAndFade`'s job, not this fragment's.
  */
 export function buildTrimFragment(el: MediaPptxElement): string {
 	const start = el.trimStartMs;
-	const end = el.trimEndMs;
-	if (start === undefined && end === undefined) {
+	if (start === undefined || start <= 0) {
 		return '';
 	}
-	const parts: string[] = [];
-	if (start !== undefined && start > 0) {
-		parts.push((start / 1000).toFixed(3));
-	} else {
-		parts.push('');
-	}
-	if (end !== undefined && end > 0) {
-		parts.push((end / 1000).toFixed(3));
-	}
-	return parts.length > 0 ? `#t=${parts.join(',')}` : '';
+	return `#t=${(start / 1000).toFixed(3)}`;
 }
 
 /** A caption track resolved to a `<track>`-ready `src`. */

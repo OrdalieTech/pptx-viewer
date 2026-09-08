@@ -46,4 +46,170 @@ describe('renderImageElement source effects', () => {
 		expect(wash.style.backgroundColor).toBe('#112233');
 		expect(wash.style.opacity).toBe('0.35');
 	});
+
+	it('applies a clip-path when the picture has a crop shape', () => {
+		const element: ImagePptxElement = {
+			type: 'image',
+			id: 'image-crop',
+			x: 0,
+			y: 0,
+			width: 100,
+			height: 100,
+			imageData: 'data:image/png;base64,source',
+			cropShape: 'ellipse',
+		};
+		const node = renderImageElement(element, 0, context()) as HTMLElement;
+		// The crop clip rides the stationary FRAME (the img may be transformed
+		// by a source crop, which would scale and shift an img-level clip).
+		expect(node.style.clipPath).toContain('path(');
+	});
+
+	it('applies no clip-path when the picture has no crop shape', () => {
+		const element: ImagePptxElement = {
+			type: 'image',
+			id: 'image-no-crop',
+			x: 0,
+			y: 0,
+			width: 100,
+			height: 100,
+			imageData: 'data:image/png;base64,source',
+		};
+		const node = renderImageElement(element, 0, context()) as HTMLElement;
+		const img = node.querySelector('img') as HTMLImageElement;
+		expect(img.style.clipPath).toBe('');
+	});
+
+	it('renders a picture whose only blip is an SVG extension', () => {
+		// Regression: `<a:blip>` with no `r:embed`, only `asvg:svgBlip`, resolved
+		// to nothing here while React painted it, so icon artwork silently vanished.
+		const element = {
+			type: 'picture',
+			id: 'pic-svg',
+			x: 0,
+			y: 0,
+			width: 40,
+			height: 40,
+			svgData: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=',
+		} as unknown as ImagePptxElement;
+
+		const node = renderImageElement(element, 0, context()) as HTMLElement;
+		const img = node.querySelector('img') as HTMLImageElement | null;
+
+		expect(img?.getAttribute('src')).toBe('data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=');
+	});
+
+	it('applies the authored source crop rather than fitting the whole bitmap', () => {
+		// Regression: a hard-coded `object-fit: contain` ignored `<a:srcRect>`, so
+		// an inset cropped out of a wide composite showed the whole composite.
+		const element = {
+			type: 'picture',
+			id: 'pic-crop',
+			x: 0,
+			y: 0,
+			width: 100,
+			height: 100,
+			imageData: 'data:image/png;base64,source',
+			cropLeft: 0.25,
+			cropRight: 0.25,
+		} as unknown as ImagePptxElement;
+
+		const node = renderImageElement(element, 0, context()) as HTMLElement;
+		const img = node.querySelector('img') as HTMLImageElement;
+
+		expect(img.style.objectFit).toBe('fill');
+		expect(img.style.transform).toBe('translate(-50%, 0%) scale(2, 1)');
+		// The scaled-up source must not paint outside its own frame.
+		expect(node.style.overflow).toBe('hidden');
+	});
+
+	it('renders a mirrored <img> reflection sibling with no -webkit-box-reflect', () => {
+		const element = {
+			type: 'picture',
+			id: 'pic-reflect',
+			x: 0,
+			y: 0,
+			width: 100,
+			height: 100,
+			imageData: 'data:image/png;base64,source',
+			shapeStyle: { reflectionStartOpacity: 0.5, reflectionDistance: 4 },
+		} as unknown as ImagePptxElement;
+
+		const node = renderImageElement(element, 0, context()) as HTMLElement;
+		const layer = node.querySelector('.pptxv-reflection') as HTMLElement | null;
+
+		expect(layer).not.toBeNull();
+		expect(layer?.style.position).toBe('absolute');
+		expect(layer?.style.transform).toBe('scaleY(-1)');
+		expect(node.innerHTML).not.toContain('box-reflect');
+		const reflectedImg = layer?.querySelector('img');
+		expect(reflectedImg?.getAttribute('src')).toBe('data:image/png;base64,source');
+	});
+
+	it('renders no reflection sibling without a:reflection', () => {
+		const element = {
+			type: 'picture',
+			id: 'pic-noreflect',
+			x: 0,
+			y: 0,
+			width: 100,
+			height: 100,
+			imageData: 'data:image/png;base64,source',
+		} as unknown as ImagePptxElement;
+
+		const node = renderImageElement(element, 0, context()) as HTMLElement;
+		expect(node.querySelector('.pptxv-reflection')).toBeNull();
+	});
+
+	it('clips a custGeom oval-cut picture on the FRAME, not the img', () => {
+		// Regression: the picture's own shape geometry (an authored oval
+		// custGeom) must clip the stationary frame. A pixel-space clip on the
+		// `<img>` would be scaled and shifted by the source-crop transform, and
+		// the oval rendered past its frame.
+		const element = {
+			type: 'picture',
+			id: 'pic-oval',
+			x: 0,
+			y: 0,
+			width: 756,
+			height: 427,
+			imageData: 'data:image/png;base64,source',
+			shapeType: 'custom',
+			pathData: 'M 0 0 L 100 0 L 100 100 Z',
+			pathWidth: 100,
+			pathHeight: 100,
+		} as unknown as ImagePptxElement;
+
+		const node = renderImageElement(element, 0, context()) as HTMLElement;
+		const img = node.querySelector('img') as HTMLImageElement;
+
+		expect(node.style.clipPath.startsWith('path(')).toBeTruthy();
+		expect(img.style.clipPath).toBe('');
+	});
+
+	it('prefers the geometry mask over the derived crop shape when both exist', () => {
+		// On load `cropShape` is derived from the picture's own prstGeom, so an
+		// oval custGeom picture carries BOTH a geometry mask and a truthy
+		// cropShape ('ellipse'). The img-level crop clip would be scaled and
+		// shifted by the source-crop transform - the geometry mask wins.
+		const element = {
+			type: 'picture',
+			id: 'pic-both',
+			x: 0,
+			y: 0,
+			width: 756,
+			height: 427,
+			imageData: 'data:image/png;base64,source',
+			shapeType: 'custom',
+			pathData: 'M 0 0 L 100 0 L 100 100 Z',
+			pathWidth: 100,
+			pathHeight: 100,
+			cropShape: 'ellipse',
+		} as unknown as ImagePptxElement;
+
+		const node = renderImageElement(element, 0, context()) as HTMLElement;
+		const img = node.querySelector('img') as HTMLImageElement;
+
+		expect(node.style.clipPath.startsWith('path(')).toBeTruthy();
+		expect(img.style.clipPath).toBe('');
+	});
 });

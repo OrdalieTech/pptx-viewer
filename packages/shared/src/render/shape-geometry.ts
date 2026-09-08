@@ -12,7 +12,7 @@
  * The resolution priority mirrors React exactly:
  *
  *   1. **Adjustment-aware** — when `shapeAdjustments` exist, consult
- *      {@link getAdjustmentAwareShapeClipPath} so `pie`, `arc`, `donut`,
+ *      {@link getAdjustmentAwareClipPath} so `pie`, `arc`, `donut`,
  *      `blockArc`, and wedge callouts respond to their adjustment values.
  *   2. **Spec-correct preset evaluator** — {@link getShapeClipPathFromPreset}
  *      produces a `path('…')` clip-path for any shape in the preset table.
@@ -20,14 +20,28 @@
  *      `cloud` / `cloudCallout`.
  *   4. **Static preset table** — {@link getShapeClipPath} as the final
  *      fallback (core's comprehensive `PRESET_SHAPE_CLIP_PATHS`).
+ *
+ * Step 1 deliberately calls the DYNAMIC-only entry point
+ * ({@link getAdjustmentAwareClipPath}) rather than core's
+ * `getAdjustmentAwareShapeClipPath` wrapper. That wrapper falls back to the
+ * static, adjustment-BLIND polygon table whenever a shape is outside its
+ * 14-shape dynamic set, and returning that at step 1 swallowed the whole rest
+ * of the cascade: every preset carrying an authored `a:avLst` adjustment
+ * (parallelogram, trapezoid, teardrop, notchedRightArrow, round2SameRect, the
+ * arrows…) was clipped with its DEFAULT adjustment instead of its own. A
+ * parallelogram authored at `adj="84929"` — a thin diagonal band — rendered as
+ * the 25000-default polygon covering ~80% of its box and occluded the text
+ * behind it (issue #132).
  */
 import type { PptxElement } from 'pptx-viewer-core';
 import {
-	getAdjustmentAwareShapeClipPath,
+	getAdjustmentAwareClipPath,
 	getCloudPathForRendering,
 	getShapeClipPath,
 	getShapeClipPathFromPreset,
 } from 'pptx-viewer-core';
+
+import { resolveLiveCustomGeometryPath } from './custom-geometry-live-path';
 
 /**
  * Resolve the best available CSS `clip-path` value for a shape type at a given
@@ -54,9 +68,12 @@ export function getResolvedShapeClipPathFor(
 		return getShapeClipPath(shapeType);
 	}
 
-	// 1. Adjustment-aware path — only when adjustments are actually supplied.
+	// 1. Adjustment-aware path — only when adjustments are actually supplied,
+	// and only for the shapes the dynamic builders genuinely model. Anything
+	// else must fall through to the evaluator below, which reads the shape's
+	// own adjustments, rather than to a fixed default-adjustment polygon.
 	if (adjustments && Object.keys(adjustments).length > 0) {
-		const adjusted = getAdjustmentAwareShapeClipPath(shapeType, width, height, adjustments);
+		const adjusted = getAdjustmentAwareClipPath(shapeType, width, height, adjustments);
 		if (adjusted !== undefined) {
 			return adjusted;
 		}
@@ -178,16 +195,16 @@ export function getResolvedShapeClipPath(
 ): string | undefined {
 	const w = typeof width === 'number' ? width : element.width;
 	const h = typeof height === 'number' ? height : element.height;
-	const custom = element as {
-		pathData?: string;
-		pathWidth?: number;
-		pathHeight?: number;
-	};
-	if (custom.pathData && custom.pathWidth && custom.pathHeight) {
+	// Re-evaluated against the element's CURRENT `shapeAdjustments` when raw
+	// geometry XML survived parse, so a drag on an `a:ahXY`/`a:ahPolar` handle
+	// reshapes the clip-path live instead of only after it commits and the
+	// file is saved and reloaded (see `./custom-geometry-live-path`).
+	const live = resolveLiveCustomGeometryPath(element);
+	if (live) {
 		const customClip = buildCustomGeometryClipPath(
-			custom.pathData,
-			custom.pathWidth,
-			custom.pathHeight,
+			live.pathData,
+			live.pathWidth,
+			live.pathHeight,
 			w,
 			h,
 		);
@@ -201,4 +218,35 @@ export function getResolvedShapeClipPath(
 	}
 	const adjustments = (element as { shapeAdjustments?: Record<string, number> }).shapeAdjustments;
 	return getResolvedShapeClipPathFor(shapeType, w, h, adjustments);
+}
+
+/**
+ * Preset geometries whose outline is exactly the element's bounding box.
+ *
+ * Evaluating all 188 presets shows only these two return the unmodified
+ * rectangle, so a CSS `clip-path` for them paints identically and serves only
+ * to hard-clip overflowing children. PowerPoint never clips a shape's TEXT to
+ * its geometry - an overflowing body spills visibly - so stamping this identity
+ * clip on the shape container (which also holds the text layer) slices the
+ * first and last lines of any overflowing text. With `anchor="ctr"` the damage
+ * is symmetric: the top line is cut through the glyphs and the final character
+ * is cut off (issue #132, HR deck slide 26).
+ */
+const IDENTITY_RECT_PRESETS = new Set(['rect', 'flowchartprocess']);
+
+/**
+ * Whether `element`'s resolved clip-path would be its own bounding rectangle,
+ * i.e. a clip that paints identically but suppresses overflow. Custom-geometry
+ * freeforms are never identity clips: their `pathData` outline is the point.
+ *
+ * @param element The element whose clip-path is being resolved.
+ * @returns `true` when the clip can be skipped so overflow stays visible.
+ */
+export function isIdentityRectClip(element: PptxElement): boolean {
+	const custom = element as { pathData?: string; pathWidth?: number; pathHeight?: number };
+	if (custom.pathData && custom.pathWidth && custom.pathHeight) {
+		return false;
+	}
+	const shapeType = (element as { shapeType?: string }).shapeType;
+	return shapeType !== undefined && IDENTITY_RECT_PRESETS.has(shapeType.toLowerCase());
 }

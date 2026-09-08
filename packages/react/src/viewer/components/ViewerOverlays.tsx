@@ -4,10 +4,12 @@
  * Consolidates the three overlay panels that render on top of the viewer
  * so the main orchestrator component stays lean.
  */
-import type { PptxSlide } from 'pptx-viewer-core';
+import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 
 import type { AccessibilityIssue, CanvasSize, SlideSectionGroup } from '../types';
 import { AccessibilityPanel } from './AccessibilityPanel';
+import { OutlineViewOverlay } from './OutlineViewOverlay';
+import { ReadingViewOverlay } from './ReadingViewOverlay';
 import { ShortcutPanel } from './ShortcutPanel';
 import { SlideSorterOverlay } from './SlideSorterOverlay';
 
@@ -19,6 +21,12 @@ export interface ViewerOverlaysProps {
 	isShortcutHelpOpen: boolean;
 	isAccessibilityPanelOpen: boolean;
 	showSlideSorter: boolean;
+	/** PowerPoint's Reading View: the deck full-window, editor chrome minimised. */
+	showReadingView: boolean;
+	/** PowerPoint's Outline view: the deck as editable indented text. */
+	showOutlineView: boolean;
+	/** Master/layout elements drawn beneath the slide's own, in Reading View. */
+	templateElements: PptxElement[];
 	accessibilityIssues: AccessibilityIssue[];
 	slides: PptxSlide[];
 	activeSlideIndex: number;
@@ -33,6 +41,13 @@ export interface ViewerOverlaysProps {
 	onDuplicateSlides: (indexes: number[]) => void;
 	onToggleHideSlides: (indexes: number[]) => void;
 	onCloseSorter: () => void;
+	/** Receives the slide the reader ended Reading View on. */
+	onCloseReadingView: (slideIndex: number) => void;
+	onCloseOutlineView: () => void;
+	/** Applies an outline edit to the deck, through the viewer's own history. */
+	setSlides: (slides: PptxSlide[]) => void;
+	setActiveSlideIndex: (index: number) => void;
+	bumpHistory: () => void;
 	/** Whether reduced motion mode is active. */
 	reducedMotion?: boolean;
 	/** Toggle reduced motion mode on/off. */
@@ -47,6 +62,9 @@ export function ViewerOverlays({
 	isShortcutHelpOpen,
 	isAccessibilityPanelOpen,
 	showSlideSorter,
+	showReadingView,
+	showOutlineView,
+	templateElements,
 	accessibilityIssues,
 	slides,
 	activeSlideIndex,
@@ -61,10 +79,20 @@ export function ViewerOverlays({
 	onDuplicateSlides,
 	onToggleHideSlides,
 	onCloseSorter,
+	onCloseReadingView,
+	onCloseOutlineView,
+	setSlides,
+	setActiveSlideIndex,
+	bumpHistory,
 	reducedMotion,
 	onToggleReducedMotion,
 }: ViewerOverlaysProps): React.ReactElement | null {
-	const hasOverlay = isShortcutHelpOpen || isAccessibilityPanelOpen || showSlideSorter;
+	const hasOverlay =
+		isShortcutHelpOpen ||
+		isAccessibilityPanelOpen ||
+		showSlideSorter ||
+		showReadingView ||
+		showOutlineView;
 	if (!hasOverlay) {
 		return null;
 	}
@@ -96,6 +124,26 @@ export function ViewerOverlays({
 					onDuplicateSlides={onDuplicateSlides}
 					onToggleHideSlides={onToggleHideSlides}
 					onClose={onCloseSorter}
+				/>
+			)}
+			{showReadingView && (
+				<ReadingViewOverlay
+					slides={slides}
+					templateElements={templateElements}
+					canvasSize={canvasSize}
+					activeSlideIndex={activeSlideIndex}
+					onExit={onCloseReadingView}
+				/>
+			)}
+			{showOutlineView && (
+				<OutlineViewOverlay
+					slides={slides}
+					canvasSize={canvasSize}
+					canEdit={canEdit}
+					setSlides={setSlides}
+					setActiveSlideIndex={setActiveSlideIndex}
+					bumpHistory={bumpHistory}
+					onClose={onCloseOutlineView}
 				/>
 			)}
 		</>

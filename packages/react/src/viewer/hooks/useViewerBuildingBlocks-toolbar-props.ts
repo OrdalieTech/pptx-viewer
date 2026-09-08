@@ -1,5 +1,5 @@
-import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
-import { createBackstagePresentation } from 'pptx-viewer-shared';
+import type { PptxElement, PptxLayoutPreview, PptxSlide } from 'pptx-viewer-core';
+import { createBackstagePresentation, templateSchemeFromTheme } from 'pptx-viewer-shared';
 import type { ToolbarActionId } from 'pptx-viewer-shared';
 
 import type { ToolbarProps } from '../components/toolbar/toolbar-types';
@@ -18,6 +18,7 @@ import type { SlideManagementHandlers } from './useSlideManagement';
 import { buildToolbarAnimationHandlers } from './useViewerBuildingBlocks-toolbar-handlers';
 import type { ViewerDialogsResult } from './useViewerDialogs';
 import type { ViewerState } from './useViewerState';
+import type { UseViewPreferencesSyncResult } from './useViewPreferencesSync';
 
 /**
  * Pure mapping function that reproduces the `<Toolbar ... />` prop wiring
@@ -36,6 +37,8 @@ export interface BuildToolbarPropsInput {
 	state: ViewerState;
 	selectedElement: PptxElement | null;
 	activeSlide: PptxSlide | undefined;
+	/** Index of `activeSlide` in the deck, for per-slide ribbon commands. */
+	activeSlideIndex: number;
 	zoom: {
 		scale: number;
 		handleZoomIn: () => void;
@@ -67,6 +70,14 @@ export interface BuildToolbarPropsInput {
 	autosaveStatus?: AutosaveStatus;
 	autosaveEnabled?: boolean;
 	hiddenActions?: readonly ToolbarActionId[];
+	/** Builds the New Slide / Layout gallery artwork on first menu open. */
+	loadLayoutPreviews?: () => Promise<PptxLayoutPreview[]>;
+	/**
+	 * Grid/snap/guides handlers that also write the toggle back into
+	 * `state.viewProperties` (see `useViewPreferencesSync`). Falls back to the
+	 * raw state setter (no write-back) when omitted.
+	 */
+	viewPreferencesSync?: UseViewPreferencesSyncResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +91,7 @@ export function buildToolbarProps(input: BuildToolbarPropsInput): ToolbarProps {
 		state: s,
 		selectedElement,
 		activeSlide,
+		activeSlideIndex,
 		zoom,
 		history,
 		findReplace,
@@ -101,6 +113,7 @@ export function buildToolbarProps(input: BuildToolbarPropsInput): ToolbarProps {
 		onOpenRecentFile,
 		fileName,
 		hiddenActions,
+		viewPreferencesSync,
 	} = input;
 
 	const {
@@ -117,6 +130,10 @@ export function buildToolbarProps(input: BuildToolbarPropsInput): ToolbarProps {
 	});
 
 	const scopedLayoutOptions = scopeLayoutOptionsToActiveSlide(s.layoutOptions, activeSlide);
+
+	// Group needs two elements. A single click leaves `selectedElementIds` empty
+	// and only sets `selectedElementId`, so fall back to counting that one.
+	const selectionSize = selectedElement === null ? 0 : 1;
 
 	return {
 		fileName,
@@ -180,13 +197,15 @@ export function buildToolbarProps(input: BuildToolbarPropsInput): ToolbarProps {
 		spellCheckEnabled: s.spellCheckEnabled,
 		showGrid: s.showGrid,
 		showRulers: s.showRulers,
+		showGuides: s.showGuides,
 		snapToGrid: s.snapToGrid,
 		snapToShape: s.snapToShape,
 		onSetSpellCheckEnabled: s.setSpellCheckEnabled,
 		onSetShowGrid: s.setShowGrid,
 		onSetShowRulers: s.setShowRulers,
-		onSetSnapToGrid: s.setSnapToGrid,
-		onSetSnapToShape: s.setSnapToShape,
+		onSetShowGuides: viewPreferencesSync?.handleSetShowGuides ?? s.setShowGuides,
+		onSetSnapToGrid: viewPreferencesSync?.handleSetSnapToGrid ?? s.setSnapToGrid,
+		onSetSnapToShape: viewPreferencesSync?.handleSetSnapToShape ?? s.setSnapToShape,
 		onAddGuide: dialogs.handleAddGuide,
 		onAlignElements: manipulation.handleAlignElements,
 		onDistributeElements: manipulation.handleDistributeElements,
@@ -197,13 +216,19 @@ export function buildToolbarProps(input: BuildToolbarPropsInput): ToolbarProps {
 		onFlip: manipulation.handleFlip,
 		onMoveLayer: manipulation.handleMoveLayer,
 		onMoveLayerToEdge: manipulation.handleMoveLayerToEdge,
+		onGroupElements: manipulation.handleGroupElements,
+		onUngroupElement: manipulation.handleUngroupElement,
+		onUpdateElementStyle: ops.updateSelectedShapeStyle,
+		selectedCount: s.selectedElementIds.length > 0 ? s.selectedElementIds.length : selectionSize,
+		selectionGroupable: manipulation.selectionGroupable,
+		onOpenHyperlinkDialog: () => dialogs.setIsHyperlinkDialogOpen(true),
 		onDuplicate: manipulation.handleDuplicate,
 		onDelete: manipulation.handleDelete,
 		onExportPng: exportHandlers.handleExportPng,
 		onExportPdf: exportHandlers.handleExportPdf,
 		onExportVideo: exportHandlers.handleExportVideo,
 		onExportGif: exportHandlers.handleExportGif,
-		onPackageForSharing: exportHandlers.handlePackageForSharing,
+		onExportJson: exportHandlers.handleExportJson,
 		onOpenFile,
 		onOpenRecentFile,
 		onCreatePresentation: (templateId: string) => {
@@ -225,12 +250,18 @@ export function buildToolbarProps(input: BuildToolbarPropsInput): ToolbarProps {
 		onOpenSettings,
 		onRunAccessibilityCheck: dialogs.handleRunAccessibilityCheck,
 		onToggleSlideSorter: () => s.setShowSlideSorter((p) => !p),
+		onOpenReadingView: () => s.setShowReadingView(true),
+		onOpenOutlineView: () => s.setShowOutlineView(true),
 		onUpdateTextStyle: ops.updateSelectedTextStyle,
 		onTransformTextCase: ops.updateSelectedTextCase,
 		isOverflowMenuOpen: s.isOverflowMenuOpen,
 		onSetOverflowMenuOpen: s.setIsOverflowMenuOpen,
 		layoutOptions: scopedLayoutOptions,
+		currentLayoutPath: activeSlide?.layoutPath,
+		loadLayoutPreviews: input.loadLayoutPreviews,
 		onInsertSlideFromLayout: slideOps.handleInsertSlideFromLayout,
+		onInsertSlideFromTemplate: slideOps.handleInsertSlideFromTemplate,
+		templateScheme: templateSchemeFromTheme(s.theme?.colorScheme),
 		customShows: s.customShows,
 		activeCustomShowId: s.activeCustomShowId,
 		onSetActiveCustomShowId: s.setActiveCustomShowId,
@@ -244,6 +275,15 @@ export function buildToolbarProps(input: BuildToolbarPropsInput): ToolbarProps {
 		onToggleVersionHistory: () => propertyHandlers.setIsVersionHistoryOpen((p) => !p),
 		onOpenPasswordProtection: () => dialogs.setIsPasswordDialogOpen(true),
 		onOpenDocumentProperties: () => dialogs.setIsDocPropsDialogOpen(true),
+		// Design > Slide Size: the size control is the inspector's SLIDE SIZE
+		// card, which the deck (no-selection) panel renders. Drop the selection so
+		// that panel is what the pane shows, then open it.
+		onOpenSlideSize: () => {
+			s.setSelectedElementId(null);
+			s.setSelectedElementIds([]);
+			s.setSidebarPanelMode('properties');
+			s.setIsInspectorPaneOpen(true);
+		},
 		onOpenFontEmbedding: () => dialogs.setIsFontEmbeddingOpen(true),
 		onOpenDigitalSignatures: () => dialogs.setIsDigitalSigDialogOpen(true),
 		onEnterPresenterView,
@@ -269,12 +309,30 @@ export function buildToolbarProps(input: BuildToolbarPropsInput): ToolbarProps {
 		eyedropperActive: s.eyedropperActive,
 		onToggleEyedropper: () => s.setEyedropperActive((p) => !p),
 		onOpenSetUpSlideShow: () => dialogs.setIsSetUpSlideShowOpen(true),
+		// PowerPoint's Hide Slide: skip the active slide during the show while
+		// leaving it in the deck, the rail and the sorter.
+		onToggleHideSlide: () => slideOps.handleToggleHideSlides([activeSlideIndex]),
+		activeSlideHidden: Boolean(activeSlide?.hidden),
 		onOpenBroadcastDialog: () => dialogs.setIsBroadcastDialogOpen(true),
 		onToggleSubtitles: dialogs.handleToggleSubtitles,
 		showSubtitles: Boolean(s.presentationProperties.showSubtitles),
 		activeSlide,
 		onTransitionChange: handleTransitionChange,
 		onApplyTransitionToAll: handleApplyTransitionToAll,
+		// No `onResetSlide` here: this building-blocks surface supplies no
+		// `onApplyLayout` either, so there is no layout to reset to. The mounted
+		// viewer (`ViewerToolbarSection`) wires both.
+		onSelectAll: () => {
+			const allIds = activeSlide?.elements.map((element) => element.id) ?? [];
+			if (allIds.length > 0) {
+				ops.applySelection(allIds[0], allIds);
+			}
+		},
+		presentationProperties: s.presentationProperties,
+		onPresentationPropertiesChange: (updates) => {
+			s.setPresentationProperties((prev) => ({ ...prev, ...updates }));
+			history.markDirty();
+		},
 		hiddenActions,
 	};
 }

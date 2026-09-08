@@ -12,6 +12,8 @@ import type { PlotLayout, ValueRange } from './chart-view-model';
 import {
 	buildChartViewModel,
 	buildFallbackViewModel,
+	buildLegend,
+	chartPreserveAspectRatio,
 	computeBarRects,
 	computeBubbleRadius,
 	computeLinePoints,
@@ -74,18 +76,24 @@ describe('computeValueRange', () => {
 		expect(computeValueRange([])).toStrictEqual({ min: 0, max: 1, span: 1 });
 	});
 
-	it('always includes zero in the range', () => {
+	// The range is PowerPoint's automatic scale, not the raw data extent: zero
+	// anchored, 5% headroom, then rounded out to whole major units so the
+	// gridlines land on round numbers. See `chart-axis-nice.ts`.
+	it('anchors at zero and rounds out to a whole major unit', () => {
 		const range = computeValueRange([{ name: 'A', values: [5, 10, 15] }]);
 		expect(range.min).toBe(0);
-		expect(range.max).toBe(15);
-		expect(range.span).toBe(15);
+		expect(range.max).toBe(20);
+		expect(range.majorUnit).toBe(5);
 	});
 
 	it('extends below zero when values are negative', () => {
 		const range = computeValueRange([{ name: 'A', values: [-5, -10, 3] }]);
-		expect(range.min).toBe(-10);
-		expect(range.max).toBe(3);
-		expect(range.span).toBe(13);
+		expect(range.min).toBe(-15);
+		expect(range.max).toBe(5);
+		expect(range.majorUnit).toBe(5);
+		// The data still fits inside the rounded bounds.
+		expect(range.min).toBeLessThanOrEqual(-10);
+		expect(range.max).toBeGreaterThanOrEqual(3);
 	});
 
 	it('span is at least 1 when all values equal zero', () => {
@@ -95,11 +103,12 @@ describe('computeValueRange', () => {
 
 	it('handles datasets larger than the JavaScript argument limit', () => {
 		const values = Array.from({ length: 200_000 }, (_, index) => index - 100_000);
-		expect(computeValueRange([{ name: 'Large', values }])).toStrictEqual({
-			min: -100_000,
-			max: 99_999,
-			span: 199_999,
-		});
+		const range = computeValueRange([{ name: 'Large', values }]);
+		// Spread-free min/max scan: the point of the test. The bounds are then
+		// rounded out by the automatic scale like any other range.
+		expect(range.min).toBeLessThanOrEqual(-100_000);
+		expect(range.max).toBeGreaterThanOrEqual(99_999);
+		expect(Number.isFinite(range.span)).toBeTruthy();
 	});
 });
 
@@ -110,8 +119,10 @@ describe('computeStackedValueRange', () => {
 			{ name: 'B', values: [5, 15] },
 		];
 		const range = computeStackedValueRange(series, 2);
-		expect(range.max).toBe(35);
+		// Category sums are 15 and 35; the automatic scale rounds 35 out to 40.
 		expect(range.min).toBe(0);
+		expect(range.max).toBe(40);
+		expect(range.majorUnit).toBe(10);
 	});
 
 	it('tracks negative stacks separately', () => {
@@ -120,8 +131,10 @@ describe('computeStackedValueRange', () => {
 			{ name: 'B', values: [-5, 10] },
 		];
 		const range = computeStackedValueRange(series, 2);
-		expect(range.min).toBe(-15);
-		expect(range.max).toBe(15);
+		// Sums straddle zero (-15 and +15); both ends round outwards.
+		expect(range.min).toBeLessThanOrEqual(-15);
+		expect(range.max).toBeGreaterThanOrEqual(15);
+		expect(range.majorUnit).toBeGreaterThan(0);
 	});
 });
 
@@ -184,10 +197,17 @@ describe('computePlotLayout', () => {
 		series: [],
 	};
 
-	it('produces a minimum SVG size of 320x180', () => {
-		const layout = computePlotLayout(100, 50, baseData, true);
-		expect(layout.svgWidth).toBeGreaterThanOrEqual(320);
-		expect(layout.svgHeight).toBeGreaterThanOrEqual(180);
+	it('matches the element frame box exactly (issue #132: no 320x180 minimum)', () => {
+		// Bindings render the viewBox with preserveAspectRatio="none"; any minimum
+		// makes the chart scale non-uniformly. A 475x174 frame must produce a
+		// 475x174 viewBox (the old 180 floor squeezed y by 174/180).
+		const layout = computePlotLayout(475, 174, baseData, true);
+		expect(layout.svgWidth).toBe(475);
+		expect(layout.svgHeight).toBe(174);
+
+		const small = computePlotLayout(100, 50, baseData, true);
+		expect(small.svgWidth).toBe(100);
+		expect(small.svgHeight).toBe(50);
 	});
 
 	it('reserves left margin when hasAxes = true', () => {
@@ -214,6 +234,34 @@ describe('computePlotLayout', () => {
 		const layout = computePlotLayout(400, 300, baseData, true);
 		expect(layout.plotWidth).toBeGreaterThan(0);
 		expect(layout.plotHeight).toBeGreaterThan(0);
+	});
+
+	it('c:legendPos="tr" overlays the plot (no reserved band), unlike "r"', () => {
+		const withTr = computePlotLayout(
+			400,
+			300,
+			{ ...baseData, style: { hasLegend: true, legendPosition: 'tr' } },
+			true,
+		);
+		const withR = computePlotLayout(
+			400,
+			300,
+			{ ...baseData, style: { hasLegend: true, legendPosition: 'r' } },
+			true,
+		);
+		const withoutLegend = computePlotLayout(400, 300, baseData, true);
+		expect(withTr.plotRight).toBe(withoutLegend.plotRight);
+		expect(withR.plotRight).toBeLessThan(withoutLegend.plotRight);
+	});
+});
+
+describe('buildLegend', () => {
+	it('c:legendPos="tr" positions like "r" (top-right corner, vertical stack)', () => {
+		const series: PptxChartData['series'] = [{ name: 'A', values: [1] }];
+		const tr = buildLegend(series, undefined, 400, 'tr', 300, 20);
+		const r = buildLegend(series, undefined, 400, 'r', 300, 20);
+		expect(tr).toStrictEqual(r);
+		expect(tr.legendAnchor).toBe('start');
 	});
 });
 
@@ -630,10 +678,10 @@ describe('buildFallbackViewModel', () => {
 		expect(vm.legend).toHaveLength(0);
 	});
 
-	it('enforces minimum svg dimensions', () => {
+	it('matches the frame box exactly (no minimum svg dimensions)', () => {
 		const vm = buildFallbackViewModel(10, 10, 'X');
-		expect(vm.svgWidth).toBeGreaterThanOrEqual(100);
-		expect(vm.svgHeight).toBeGreaterThanOrEqual(60);
+		expect(vm.svgWidth).toBe(10);
+		expect(vm.svgHeight).toBe(10);
 	});
 });
 
@@ -773,6 +821,10 @@ describe('buildChartViewModel - scatter chart integration', () => {
 });
 
 describe('buildChartViewModel - bubble chart integration', () => {
+	// CT_BubbleSer carries x, y AND size per series, so each of these is a
+	// complete bubble series. The engine used to treat "the third series" as the
+	// size channel, which drew equal dots for a one-series chart and deleted
+	// every series past the second from a three-series one.
 	const element = {
 		id: 'el-bub',
 		type: 'chart' as const,
@@ -784,24 +836,25 @@ describe('buildChartViewModel - bubble chart integration', () => {
 			chartType: 'bubble' as const,
 			categories: [],
 			series: [
-				{ name: 'X', values: [1, 2, 3] },
-				{ name: 'Y', values: [4, 5, 6] },
-				{ name: 'Size', values: [10, 50, 100] },
+				{ name: 'Alpha', values: [4, 5, 6], xValues: [1, 2, 3], bubbleSizes: [10, 50, 100] },
+				{ name: 'Beta', values: [7, 8, 9], xValues: [1, 2, 3], bubbleSizes: [100, 50, 10] },
 			],
 		} satisfies PptxChartData,
 	};
 
-	it('produces circle primitives only for the first two series (size series excluded)', () => {
+	it('produces one circle per data point of EVERY series', () => {
 		const vm = buildChartViewModel(element);
 		const circles = vm.primitives.filter((p) => p.kind === 'circle');
 		expect(circles).toHaveLength(6);
 	});
 
-	it('scales bubble radius by the third series', () => {
+	it("scales bubble radius by the series' own c:bubbleSize", () => {
 		const vm = buildChartViewModel(element);
 		const circles = vm.primitives.filter((p) => p.kind === 'circle');
-		// First X-series point (size 10) should be smaller than the third (size 100).
+		// Alpha grows (10 -> 100) while Beta shrinks (100 -> 10) over the same
+		// three points, which only holds if each series reads its own sizes.
 		expect(circles[0].r).toBeLessThan(circles[2].r);
+		expect(circles[3].r).toBeGreaterThan(circles[5].r);
 	});
 });
 
@@ -891,5 +944,306 @@ describe('buildChartViewModel - non-chart element', () => {
 	it('returns a fallback view-model without crashing', () => {
 		const vm = buildChartViewModel(element as Parameters<typeof buildChartViewModel>[0]);
 		expect(vm.gridlines).toHaveLength(0);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildChartViewModel - c:dTable data table (gap 1) and c:legendEntry (gap 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildChartViewModel - data table (c:dTable)', () => {
+	const barElement = {
+		id: 'el-dt',
+		type: 'chart' as const,
+		x: 0,
+		y: 0,
+		width: 400,
+		height: 300,
+		chartData: {
+			chartType: 'bar' as const,
+			categories: ['Q1', 'Q2', 'Q3'],
+			series: [{ name: 'Revenue', values: [100, 150, 120] }],
+			dataTable: { showKeys: true, showOutline: true },
+		} satisfies PptxChartData,
+	};
+
+	it('populates vm.dataTable and appends the same primitives to vm.primitives', () => {
+		const vm = buildChartViewModel(barElement);
+		expect(vm.dataTable).toBeDefined();
+		expect(vm.dataTable!.length).toBeGreaterThan(0);
+		for (const prim of vm.dataTable!) {
+			expect(vm.primitives).toContain(prim);
+		}
+	});
+
+	it('renders the series name (the data-table key column) as text', () => {
+		const vm = buildChartViewModel(barElement);
+		const texts = vm.dataTable!.filter((p) => p.kind === 'text').map((p) => p.text);
+		expect(texts).toContain('Revenue');
+	});
+
+	it('honours dataTable.txPr colour/fontFamily on the rendered cells', () => {
+		const styled = {
+			...barElement,
+			chartData: {
+				...barElement.chartData,
+				dataTable: { showKeys: true, txPr: { color: '#123456', fontFamily: 'Georgia' } },
+			},
+		};
+		const vm = buildChartViewModel(styled);
+		const cells = vm.dataTable!.filter((p) => p.kind === 'text');
+		expect(cells.length).toBeGreaterThan(0);
+		for (const cell of cells) {
+			expect(cell.fill).toBe('#123456');
+			expect(cell.fontFamily).toBe('Georgia');
+		}
+	});
+
+	it('leaves vm.dataTable undefined when the chart has no c:dTable', () => {
+		const noTable = {
+			...barElement,
+			chartData: { ...barElement.chartData, dataTable: undefined },
+		};
+		const vm = buildChartViewModel(noTable);
+		expect(vm.dataTable).toBeUndefined();
+	});
+});
+
+describe('buildChartViewModel - legend-entry deletion and text-style (c:legendEntry)', () => {
+	it('drops a deleted series legend entry on a bar chart', () => {
+		const element = {
+			id: 'el-le',
+			type: 'chart' as const,
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			chartData: {
+				chartType: 'bar' as const,
+				categories: ['Q1', 'Q2'],
+				series: [
+					{ name: 'Revenue', values: [100, 150] },
+					{ name: 'Cost', values: [80, 90] },
+				],
+				style: {
+					hasLegend: true,
+					legendPosition: 'b',
+					legendEntries: [{ index: 1, deleted: true }],
+				},
+			} satisfies PptxChartData,
+		};
+		const vm = buildChartViewModel(element);
+		expect(vm.legend).toHaveLength(1);
+		expect(vm.legend[0].label).toBe('Revenue');
+	});
+
+	it('drops a deleted slice legend entry on a pie chart (the 3D/ofPie-adjacent flat path)', () => {
+		const element = {
+			id: 'el-pie-le',
+			type: 'chart' as const,
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			chartData: {
+				chartType: 'pie' as const,
+				categories: ['A', 'B', 'C'],
+				series: [{ name: 'Series 1', values: [10, 20, 30] }],
+				style: { hasLegend: true, legendEntries: [{ index: 0, deleted: true }] },
+			} satisfies PptxChartData,
+		};
+		const vm = buildChartViewModel(element);
+		expect(vm.legend.map((e) => e.label)).toStrictEqual(['B', 'C']);
+	});
+
+	it('drops a deleted legend entry on an ofPie chart', () => {
+		const element = {
+			id: 'el-ofpie-le',
+			type: 'chart' as const,
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			chartData: {
+				chartType: 'ofPie' as const,
+				categories: ['A', 'B', 'C', 'D'],
+				series: [{ name: 'Series 1', values: [10, 20, 5, 4] }],
+				style: { hasLegend: true, legendEntries: [{ index: 0, deleted: true }] },
+			} satisfies PptxChartData,
+		};
+		const vm = buildChartViewModel(element);
+		expect(vm.legend.map((e) => e.label)).not.toContain('A');
+	});
+
+	it('drops a deleted legend entry on a 3D chart (bar3D depth path)', () => {
+		const element = {
+			id: 'el-3d-le',
+			type: 'chart' as const,
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			chartData: {
+				chartType: 'bar3D' as const,
+				categories: ['Q1', 'Q2'],
+				series: [
+					{ name: 'Revenue', values: [100, 150] },
+					{ name: 'Cost', values: [80, 90] },
+				],
+				style: { hasLegend: true, legendEntries: [{ index: 0, deleted: true }] },
+			} satisfies PptxChartData,
+		};
+		const vm = buildChartViewModel(element);
+		expect(vm.legend.map((e) => e.label)).toStrictEqual(['Cost']);
+	});
+
+	it('paints authored c:floor/c:backWall as background panels on a bar3D chart', () => {
+		const element = {
+			id: 'el-3d-walls',
+			type: 'chart' as const,
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			chartData: {
+				chartType: 'bar3D' as const,
+				categories: ['Q1', 'Q2'],
+				series: [{ name: 'Revenue', values: [100, 150] }],
+				floor: { spPr: { fillColor: '#CCCCCC' } },
+				backWall: { spPr: { fillColor: '#DDDDDD' } },
+			} satisfies PptxChartData,
+		};
+		const vm = buildChartViewModel(element);
+		const panelFills = vm.primitives
+			.filter((p) => p.kind === 'polygon' && p.part === undefined)
+			.map((p) => p.fill);
+		expect(panelFills).toContain('#CCCCCC');
+		expect(panelFills).toContain('#DDDDDD');
+	});
+
+	it('foreshortens a pie3D disc into an ellipse driven by rotX (elliptical tilt)', () => {
+		const element = {
+			id: 'el-pie3d-tilt',
+			type: 'chart' as const,
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			chartData: {
+				chartType: 'pie3D' as const,
+				categories: ['A', 'B'],
+				series: [{ name: 'Series 1', values: [60, 40] }],
+				view3D: { rotX: 60 },
+			} satisfies PptxChartData,
+		};
+		const flatElement = {
+			...element,
+			chartData: { ...element.chartData, chartType: 'pie' as const },
+		};
+
+		const tiltedVm = buildChartViewModel(element);
+		const flatVm = buildChartViewModel(flatElement);
+
+		const { cy } = computePieLayout(400, 300, element.chartData, false);
+		const tiltedSlice = tiltedVm.primitives.find(
+			(p) => p.kind === 'path' && p.part?.pointIndex === 0,
+		);
+		const flatSlice = flatVm.primitives.find((p) => p.kind === 'path' && p.part?.pointIndex === 0);
+		expect(tiltedSlice?.d).not.toBe(flatSlice?.d);
+
+		// The arc's ry (2nd radius param) must shrink relative to the untilted
+		// pie's; every A command's ry should now be strictly less than rx.
+		const arcParams = (tiltedSlice?.d.match(/A[-\d.]+,[-\d.]+/gu) ?? []).map((token) =>
+			token.slice(1).split(',').map(Number),
+		);
+		expect(arcParams.length).toBeGreaterThan(0);
+		for (const [rx, ry] of arcParams) {
+			expect(ry).toBeLessThan(rx);
+			expect(ry).toBeCloseTo(rx * Math.cos((60 * Math.PI) / 180), 5);
+		}
+
+		// The centre y is unaffected by the squash (it sits on the tilt axis).
+		expect(cy).toBeGreaterThan(0);
+	});
+
+	it('attaches a per-entry text-style override without deleting it', () => {
+		const element = {
+			id: 'el-le-style',
+			type: 'chart' as const,
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			chartData: {
+				chartType: 'bar' as const,
+				categories: ['Q1'],
+				series: [{ name: 'Revenue', values: [100] }],
+				style: {
+					hasLegend: true,
+					legendEntries: [{ index: 0, textStyle: { bold: true, color: '#ff0000' } }],
+				},
+			} satisfies PptxChartData,
+		};
+		const vm = buildChartViewModel(element);
+		expect(vm.legend).toHaveLength(1);
+		expect(vm.legend[0].textStyle).toStrictEqual({ bold: true, color: '#ff0000' });
+	});
+
+	it('leaves the legend untouched when the chart has no c:legendEntry overrides', () => {
+		const element = {
+			id: 'el-no-le',
+			type: 'chart' as const,
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			chartData: {
+				chartType: 'bar' as const,
+				categories: ['Q1'],
+				series: [{ name: 'Revenue', values: [100] }],
+				style: { hasLegend: true },
+			} satisfies PptxChartData,
+		};
+		const vm = buildChartViewModel(element);
+		expect(vm.legend).toHaveLength(1);
+		expect(vm.legend[0].textStyle).toBeUndefined();
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// chartPreserveAspectRatio
+//
+// Four bindings had each written their own `kind === 'pie' || ...` chain to
+// decide this, and they had drifted: Vue letterboxed sunburst, React stretched
+// the region map. One decision function, five bindings.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('chartPreserveAspectRatio', () => {
+	it('keeps the round and fixed-canvas kinds in proportion', () => {
+		for (const kind of ['pie', 'doughnut', 'radar', 'regionMap'] as const) {
+			expect(chartPreserveAspectRatio(kind)).toBe('xMidYMid meet');
+		}
+	});
+
+	it('stretches every cartesian and hierarchical kind to the element box', () => {
+		for (const kind of [
+			'bar',
+			'line',
+			'area',
+			'scatter',
+			'bubble',
+			'combo',
+			'stock',
+			'surface',
+			'treemap',
+			'waterfall',
+			'funnel',
+			'sunburst',
+			'histogram',
+			'boxWhisker',
+			'unsupported',
+		] as const) {
+			expect(chartPreserveAspectRatio(kind)).toBe('none');
+		}
 	});
 });

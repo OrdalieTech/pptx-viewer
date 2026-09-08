@@ -2,15 +2,16 @@ import type { PptxTableCellStyle } from 'pptx-viewer-core';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useRecentColors } from './RecentColorsContext';
 import {
 	FILL_MODE_OPTIONS,
 	GRADIENT_TYPE_OPTIONS,
 	LBL,
 	NUM,
-	PATTERN_OPTIONS,
 	SECTION_HEADING,
 	SEL,
 } from './table-cell-advanced-fill-constants';
+import { TableCellPatternFill } from './TableCellPatternFill';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -64,6 +65,7 @@ export function TableCellAdvancedFill({
 			<label className='flex flex-col gap-1'>
 				<span className={LBL}>{t('pptx.table.fillMode')}</span>
 				<select
+					aria-label={t('pptx.table.fillMode')}
 					disabled={!canEdit}
 					className={SEL}
 					value={fillMode}
@@ -88,7 +90,7 @@ export function TableCellAdvancedFill({
 
 			{/* Pattern Controls */}
 			{fillMode === 'pattern' && (
-				<PatternControls
+				<TableCellPatternFill
 					cellStyle={cellStyle}
 					canEdit={canEdit}
 					onUpdateCellStyle={onUpdateCellStyle}
@@ -140,6 +142,7 @@ function GradientControls({
 	onUpdateCellStyle,
 }: TableCellAdvancedFillProps): React.ReactElement {
 	const { t } = useTranslation();
+	const { pushColor } = useRecentColors();
 	const stops = cellStyle.gradientFillStops ?? [];
 	const gradType = cellStyle.gradientFillType ?? 'linear';
 
@@ -161,6 +164,7 @@ function GradientControls({
 				<label className='flex flex-col gap-0.5'>
 					<span className={LBL}>{t('pptx.table.gradientType')}</span>
 					<select
+						aria-label={t('pptx.table.gradientType')}
 						disabled={!canEdit}
 						className={SEL}
 						value={gradType}
@@ -206,7 +210,10 @@ function GradientControls({
 						disabled={!canEdit}
 						className='h-6 w-6 rounded border border-border cursor-pointer'
 						value={stop.color}
-						onChange={(e) => updateStop(idx, { color: e.target.value })}
+						onChange={(e) => {
+							updateStop(idx, { color: e.target.value });
+							pushColor(e.target.value);
+						}}
 					/>
 					<input
 						type='number'
@@ -232,72 +239,6 @@ function GradientControls({
 			>
 				{t('pptx.table.gradientAddStop')}
 			</button>
-		</div>
-	);
-}
-
-// ---------------------------------------------------------------------------
-// Pattern sub-controls
-// ---------------------------------------------------------------------------
-
-function PatternControls({
-	cellStyle,
-	canEdit,
-	onUpdateCellStyle,
-}: TableCellAdvancedFillProps): React.ReactElement {
-	const { t } = useTranslation();
-
-	return (
-		<div className='space-y-1.5'>
-			<label className='flex flex-col gap-0.5'>
-				<span className={LBL}>{t('pptx.table.patternPreset')}</span>
-				<select
-					disabled={!canEdit}
-					className={SEL}
-					value={cellStyle.patternFillPreset ?? 'ltDnDiag'}
-					onChange={(e) =>
-						onUpdateCellStyle({
-							patternFillPreset: e.target.value,
-						})
-					}
-				>
-					{PATTERN_OPTIONS.map((p) => (
-						<option key={p} value={p}>
-							{p}
-						</option>
-					))}
-				</select>
-			</label>
-			<div className='grid grid-cols-2 gap-1.5'>
-				<label className='flex flex-col gap-0.5'>
-					<span className={LBL}>{t('pptx.table.patternForeground')}</span>
-					<input
-						type='color'
-						disabled={!canEdit}
-						className='w-full h-7 rounded border border-border bg-transparent cursor-pointer'
-						value={cellStyle.patternFillForeground ?? '#000000'}
-						onChange={(e) =>
-							onUpdateCellStyle({
-								patternFillForeground: e.target.value,
-							})
-						}
-					/>
-				</label>
-				<label className='flex flex-col gap-0.5'>
-					<span className={LBL}>{t('pptx.table.patternBackground')}</span>
-					<input
-						type='color'
-						disabled={!canEdit}
-						className='w-full h-7 rounded border border-border bg-transparent cursor-pointer'
-						value={cellStyle.patternFillBackground ?? '#FFFFFF'}
-						onChange={(e) =>
-							onUpdateCellStyle({
-								patternFillBackground: e.target.value,
-							})
-						}
-					/>
-				</label>
-			</div>
 		</div>
 	);
 }

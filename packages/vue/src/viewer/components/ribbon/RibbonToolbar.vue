@@ -12,10 +12,11 @@
  * renders its own mobile chrome (`MobileBottomBar`) at the host level, so this
  * shell always renders the desktop ribbon (the host hides it on mobile).
  */
-import { computed } from 'vue';
+import { computed, inject } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { useToolbarVisibility } from '../../composables/useToolbarVisibility';
+import { ViewerOptionsKey } from '../../composables/useViewerOptionsStore';
 import AnimationsSection from './AnimationsSection.vue';
 import ArrangeSection from './ArrangeSection.vue';
 import DesignSection from './DesignSection.vue';
@@ -23,18 +24,14 @@ import DrawingGroup from './DrawingGroup.vue';
 import DrawSection from './DrawSection.vue';
 import EditingSection from './EditingSection.vue';
 import FileSection from './FileSection.vue';
-import HelpSection from './HelpSection.vue';
 import HomeSection from './HomeSection.vue';
 import InsertSection from './InsertSection.vue';
-import RecordSection from './RecordSection.vue';
-import ReviewSection from './ReviewSection.vue';
 import type { RibbonProps } from './ribbon-types';
 import RibbonTabBar from './RibbonTabBar.vue';
-import SlideShowSection from './SlideShowSection.vue';
+import RibbonTailSections from './RibbonTailSections.vue';
 import TextSection from './TextSection.vue';
 import ToolbarPrimaryRow from './ToolbarPrimaryRow.vue';
 import TransitionsSection from './TransitionsSection.vue';
-import ViewSection from './ViewSection.vue';
 
 interface Props extends RibbonProps {}
 
@@ -45,8 +42,17 @@ const showRibbon = computed(() => props.mode === 'edit' || props.mode === 'maste
 const s = computed(() => props.toolbarSection);
 /** The Text group shows on both the Home and Text tabs (mirrors React). */
 const showText = computed(() => s.value === 'home' || s.value === 'text');
-/** Tab list + per-button gating, driven by the host's `hiddenActions` prop. */
-const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
+/**
+ * Tab list + per-button gating, driven by the host's `hiddenActions` prop AND
+ * the user's File > Options > Customize Ribbon choice. Injection has a
+ * fallback so a caller that mounts this shell without the options provider
+ * (isolated unit tests, storybook-style fixtures) still renders every tab.
+ */
+const viewerOptions = inject(ViewerOptionsKey, undefined);
+const { visibleTabs } = useToolbarVisibility(
+	() => props.hiddenActions,
+	() => viewerOptions?.value,
+);
 </script>
 
 <template>
@@ -68,7 +74,6 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 			:on-enter-rehearsal-mode="props.onEnterRehearsalMode"
 			:on-set-mode="props.onSetMode"
 			:on-open-share-dialog="props.onOpenShareDialog"
-			:on-package-for-sharing="props.onPackageForSharing"
 			:is-collaborating="props.isCollaborating"
 			:collaborator-count="props.collaboratorCount"
 			:hidden-actions="props.hiddenActions"
@@ -80,7 +85,7 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 		<div
 			v-if="showRibbon"
 			v-show="props.isCompactToolbarOpen"
-			class="flex min-h-[82px] items-stretch gap-0 overflow-x-auto px-1 py-0.5 max-md:min-h-0 max-md:px-1 max-md:py-0.5 flex-nowrap [&>*]:shrink-0"
+			class="flex min-h-[82px] items-center gap-0 overflow-x-auto px-1 py-0.5 max-md:min-h-0 max-md:px-1 max-md:py-0.5 flex-nowrap [&>*]:shrink-0"
 		>
 			<FileSection
 				v-if="s === 'file'"
@@ -93,7 +98,7 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				:on-export-pdf="props.onExportPdf"
 				:on-export-video="props.onExportVideo"
 				:on-export-gif="props.onExportGif"
-				:on-package-for-sharing="props.onPackageForSharing"
+				:on-export-json="props.onExportJson"
 				:on-save-as-pptx="props.onSaveAsPptx"
 				:on-save-as-ppsx="props.onSaveAsPpsx"
 				:on-save-as-pptm="props.onSaveAsPptm"
@@ -106,7 +111,9 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				:on-open-password-protection="props.onOpenPasswordProtection"
 				:on-open-font-embedding="props.onOpenFontEmbedding"
 				:on-open-digital-signatures="props.onOpenDigitalSignatures"
+				:on-open-version-history="props.onToggleVersionHistory"
 				:hidden-actions="props.hiddenActions"
+				:recent-presentations-count="props.recentPresentationsCount"
 			/>
 
 			<HomeSection
@@ -120,7 +127,14 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				:on-paste="props.onPaste"
 				:on-toggle-format-painter="props.onToggleFormatPainter"
 				:layout-options="props.layoutOptions"
+				:current-layout-path="props.currentLayoutPath"
+				:load-layout-previews="props.loadLayoutPreviews"
+				:theme-fonts="props.themeFonts"
+				:embedded-font-families="props.embeddedFontFamilies"
+				:custom-font-families="props.customFontFamilies"
 				:on-insert-slide-from-layout="props.onInsertSlideFromLayout"
+				:on-insert-slide-from-template="props.onInsertSlideFromTemplate"
+				:template-scheme="props.templateScheme"
 				:on-apply-layout="props.onApplyLayout"
 				:on-reset-slide="props.onResetSlide"
 				:on-add-section="props.onAddSection"
@@ -144,6 +158,8 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				:on-open-header-footer="props.onOpenHeaderFooter"
 				:on-open-image-picker="props.onOpenImagePicker"
 				:on-open-media-picker="props.onOpenMediaPicker"
+				:has-selection="Boolean(props.selectedElement)"
+				:on-open-hyperlink-dialog="props.onOpenHyperlinkDialog"
 			/>
 
 			<TextSection
@@ -170,6 +186,7 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				:on-add-shape="props.onAddShape"
 				:on-move-layer="props.onMoveLayer"
 				:on-move-layer-to-edge="props.onMoveLayerToEdge"
+				:on-update-element-style="props.onUpdateElementStyle"
 			/>
 
 			<DrawSection
@@ -186,16 +203,17 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				v-if="s === 'home' || s === 'arrange'"
 				:can-edit="props.canEdit"
 				:selected-element="props.selectedElement"
-				:clipboard-payload="props.clipboardPayload"
+				:selected-count="props.selectedCount"
+				:selection-groupable="props.selectionGroupable"
 				:on-align-elements="props.onAlignElements"
 				:on-distribute-elements="props.onDistributeElements"
 				:can-distribute="props.canDistribute"
-				:on-copy="props.onCopy"
-				:on-cut="props.onCut"
-				:on-paste="props.onPaste"
 				:on-flip="props.onFlip"
 				:on-move-layer="props.onMoveLayer"
 				:on-move-layer-to-edge="props.onMoveLayerToEdge"
+				:on-group-elements="props.onGroupElements"
+				:on-ungroup-element="props.onUngroupElement"
+				:on-update-element-style="props.onUpdateElementStyle"
 				:on-duplicate="props.onDuplicate"
 				:on-delete="props.onDelete"
 				:format-painter-active="props.formatPainterActive"
@@ -211,6 +229,7 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				:on-toggle-theme-editor="props.onToggleThemeEditor"
 				:is-theme-editor-open="props.isThemeEditorOpen"
 				:on-open-document-properties="props.onOpenDocumentProperties"
+				:on-open-slide-size="props.onOpenSlideSize"
 				:on-toggle-inspector="props.onToggleInspector"
 				:is-inspector-pane-open="props.isInspectorPaneOpen"
 			/>
@@ -219,6 +238,10 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				v-if="s === 'transitions'"
 				:is-inspector-pane-open="props.isInspectorPaneOpen"
 				:on-toggle-inspector="props.onToggleInspector"
+				:can-edit="props.canEdit"
+				:active-slide="props.activeSlide"
+				:on-transition-change="props.onTransitionChange"
+				:on-apply-transition-to-all="props.onApplyTransitionToAll"
 			/>
 
 			<AnimationsSection
@@ -232,67 +255,7 @@ const { visibleTabs } = useToolbarVisibility(() => props.hiddenActions);
 				:on-remove-animation="props.onRemoveAnimation"
 			/>
 
-			<SlideShowSection
-				v-if="s === 'slideShow'"
-				:on-present="() => props.onSetMode('present')"
-				:on-enter-presenter-view="props.onEnterPresenterView ?? (() => {})"
-				:on-enter-rehearsal-mode="props.onEnterRehearsalMode ?? (() => {})"
-				:on-open-set-up-slide-show="props.onOpenSetUpSlideShow ?? (() => {})"
-				:on-open-broadcast-dialog="props.onOpenBroadcastDialog ?? (() => {})"
-				:on-toggle-subtitles="props.onToggleSubtitles ?? (() => {})"
-				:show-subtitles="props.showSubtitles ?? false"
-				:on-set-mode="props.onSetMode"
-				:hidden-actions="props.hiddenActions"
-			/>
-
-			<ReviewSection
-				v-if="s === 'review'"
-				:can-edit="props.canEdit"
-				:spell-check-enabled="props.spellCheckEnabled"
-				:on-set-spell-check-enabled="props.onSetSpellCheckEnabled"
-				:on-toggle-comments="props.onToggleComments"
-				:is-comments-panel-open="props.isCommentsPanelOpen"
-				:slide-comment-count="props.slideCommentCount"
-				:on-compare="props.onCompare"
-				:on-set-language="props.onOpenSettings"
-				:on-open-accessibility-check="props.onRunAccessibilityCheck"
-			/>
-
-			<RecordSection
-				v-if="s === 'record'"
-				:on-record-from-beginning="props.onEnterRehearsalMode ?? (() => {})"
-				:on-record-from-current="props.onEnterRehearsalMode ?? (() => {})"
-			/>
-
-			<ViewSection
-				v-if="s === 'view'"
-				:can-edit="props.canEdit"
-				:edit-template-mode="props.editTemplateMode"
-				:on-set-edit-template-mode="props.onSetEditTemplateMode"
-				:spell-check-enabled="props.spellCheckEnabled"
-				:on-set-spell-check-enabled="props.onSetSpellCheckEnabled"
-				:show-grid="props.showGrid"
-				:show-rulers="props.showRulers"
-				:snap-to-grid="props.snapToGrid"
-				:snap-to-shape="props.snapToShape"
-				:on-set-show-grid="props.onSetShowGrid"
-				:on-set-show-rulers="props.onSetShowRulers"
-				:on-set-snap-to-grid="props.onSetSnapToGrid"
-				:on-set-snap-to-shape="props.onSetSnapToShape"
-				:on-add-guide="props.onAddGuide"
-				:on-zoom-to-fit="props.onZoomToFit"
-				:on-enter-master-view="props.onEnterMasterView"
-				:is-selection-pane-open="props.isSelectionPaneOpen"
-				:on-toggle-selection-pane="props.onToggleSelectionPane"
-				:eyedropper-active="props.eyedropperActive"
-				:on-toggle-eyedropper="props.onToggleEyedropper"
-			/>
-
-			<HelpSection
-				v-if="s === 'help'"
-				:on-toggle-shortcuts="props.onToggleShortcuts"
-				:on-run-accessibility-check="props.onRunAccessibilityCheck"
-			/>
+			<RibbonTailSections v-bind="props" />
 		</div>
 	</div>
 </template>

@@ -14,6 +14,7 @@ import {
 
 import type { ListMode } from '../../utils';
 import { normalizeHexColor } from '../../utils';
+import { useRecentColors } from './RecentColorsContext';
 
 export interface TextPropertiesProps {
 	selectedElement: PptxElement;
@@ -115,6 +116,7 @@ export function AdvancedTextFormatting({
 	numChange,
 }: AdvancedTextFormattingProps): React.ReactElement {
 	const { t } = useTranslation();
+	const { pushColor } = useRecentColors();
 	return (
 		<div className='mt-2 rounded border border-border bg-card p-2 space-y-2'>
 			<div className='text-[11px] uppercase tracking-wide text-muted-foreground'>
@@ -145,7 +147,10 @@ export function AdvancedTextFormatting({
 				<input
 					type='color'
 					value={normalizeHexColor(ts?.highlightColor, '#ffff00')}
-					onChange={(e) => onUpdateTextStyle({ highlightColor: e.target.value })}
+					onChange={(e) => {
+						onUpdateTextStyle({ highlightColor: e.target.value });
+						pushColor(e.target.value);
+					}}
 					disabled={!canEdit}
 					className={COLOR_CLS}
 				/>
@@ -156,6 +161,7 @@ export function AdvancedTextFormatting({
 				<label className='flex flex-col gap-1'>
 					<span className='text-muted-foreground'>{t('pptx.textProperties.underlineStyle')}</span>
 					<select
+						aria-label={t('pptx.textProperties.underlineStyle')}
 						value={ts?.underlineStyle || 'sng'}
 						disabled={!canEdit}
 						onChange={(e) =>
@@ -178,7 +184,10 @@ export function AdvancedTextFormatting({
 					<input
 						type='color'
 						value={ts?.underlineColor || ts?.color || '#000000'}
-						onChange={(e) => onUpdateTextStyle({ underlineColor: e.target.value })}
+						onChange={(e) => {
+							onUpdateTextStyle({ underlineColor: e.target.value });
+							pushColor(e.target.value);
+						}}
 						className={COLOR_CLS}
 					/>
 				</label>
@@ -208,7 +217,10 @@ export function AdvancedTextFormatting({
 						<input
 							type='color'
 							value={ts?.textOutlineColor || '#000000'}
-							onChange={(e) => onUpdateTextStyle({ textOutlineColor: e.target.value })}
+							onChange={(e) => {
+								onUpdateTextStyle({ textOutlineColor: e.target.value });
+								pushColor(e.target.value);
+							}}
 							className={COLOR_CLS}
 						/>
 					</label>

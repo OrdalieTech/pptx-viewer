@@ -1,7 +1,8 @@
 import type { PptxSlide } from 'pptx-viewer-core';
-import { strokeToInkElement } from 'pptx-viewer-shared';
+import { annotationOverlayZIndex, strokeToInkElement } from 'pptx-viewer-shared';
 import type {
 	CanvasSize,
+	PresentationBlackout,
 	PresentationInkPoint,
 	PresentationInkStroke,
 	PresentationPointerState,
@@ -19,6 +20,13 @@ export interface PresentationAnnotationsControllerOptions {
 	commitSlides(slides: PptxSlide[]): void;
 	onStrokesChange?(strokes: PresentationInkStroke[]): void;
 	onPointerMove?(point: PresentationInkPoint): void;
+	/**
+	 * File > Options > Advanced > "Prompt to keep ink annotations when
+	 * exiting". Read fresh on every `finishPresentation()` call; defaults to
+	 * `true` (always prompt) when omitted. When it returns `false`, the ink is
+	 * discarded silently, matching real PowerPoint (no dialog).
+	 */
+	shouldPromptKeepAnnotations?(): boolean;
 }
 
 export interface PresentationAnnotationStage {
@@ -27,6 +35,8 @@ export interface PresentationAnnotationStage {
 	slideIndex: number;
 	canvasSize: CanvasSize;
 	pointer?: PresentationPointerState;
+	/** Blackout state; the overlay is raised above the blank sheet while set. */
+	blackout: PresentationBlackout;
 }
 
 export interface PresentationAnnotationsController {
@@ -46,6 +56,23 @@ export function createPresentationAnnotationsController(
 	let strokes: PresentationInkStroke[] = [];
 	let unmount = (): void => undefined;
 	let lastStage: PresentationAnnotationStage | null = null;
+	let lastOverlayKey: string | null = null;
+
+	/**
+	 * Everything about a stage that changes what the overlay element must be.
+	 * The pointer's x/y are deliberately excluded: they change on every mouse
+	 * move, and remounting on one destroyed the SVG mid-gesture (the drag reports
+	 * its position, the report re-synced the stage, the re-sync replaced the
+	 * element that was capturing the pointer), so a pen stroke could never finish
+	 * and the show's Clear button stayed disabled for ever.
+	 */
+	const overlayKey = (stage: PresentationAnnotationStage): string =>
+		[
+			String(stage.active),
+			String(stage.slideIndex),
+			stage.pointer?.tool ?? 'none',
+			stage.pointer?.color ?? '',
+		].join('|');
 
 	const notify = (): void => options.onStrokesChange?.([...strokes]);
 	const mount = (): void => {
@@ -60,6 +87,7 @@ export function createPresentationAnnotationsController(
 			slideIndex: stage.slideIndex,
 			tool,
 			color: stage.pointer?.color ?? '#ef4444',
+			blackout: stage.blackout,
 			strokes,
 			onChange(next) {
 				strokes = next;
@@ -104,8 +132,25 @@ export function createPresentationAnnotationsController(
 	};
 	return {
 		syncStage(stage) {
+			const key = overlayKey(stage);
+			// A stage rebuild empties `stageWrap`, so the overlay is also remounted
+			// whenever it is no longer in the tree, not only when an input changed.
+			const missing = stage.stageWrap.querySelector('.pptxv-presentation-annotations') === null;
+			const changed = stage.stageWrap !== lastStage?.stageWrap || key !== lastOverlayKey;
 			lastStage = stage;
-			mount();
+			lastOverlayKey = key;
+			if (changed || missing) {
+				mount();
+			}
+			// The blackout state moves the overlay's stacking level (above the blank
+			// sheet during a blackout, back down otherwise) without a remount, so a
+			// stroke in progress is never cut off by a B/W toggle.
+			const overlay = stage.stageWrap.querySelector<SVGSVGElement>(
+				'.pptxv-presentation-annotations',
+			);
+			if (overlay) {
+				overlay.style.zIndex = String(annotationOverlayZIndex(stage.blackout));
+			}
 		},
 		getStrokes: () => strokes,
 		setStrokes(next) {
@@ -118,6 +163,10 @@ export function createPresentationAnnotationsController(
 		async finishPresentation() {
 			if (strokes.length === 0) {
 				return 'none';
+			}
+			if (options.shouldPromptKeepAnnotations?.() === false) {
+				clear();
+				return 'discarded';
 			}
 			const slides = new Set(strokes.map((stroke) => stroke.slideIndex)).size;
 			const choice = await promptKeepAnnotations(options.doc, options.t, strokes.length, slides);

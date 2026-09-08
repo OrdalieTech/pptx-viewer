@@ -129,6 +129,92 @@ describe('expandTextBuildAnimations', () => {
 		expect(result[2].trigger).toBe('onClick');
 	});
 
+	it('should group a top-level paragraph with its nested sub-bullets under the default bldLvl (1)', () => {
+		// title(0, level0), sub(1, level1), sub(2, level1), title(3, level0)
+		const nestedCounts = new Map([
+			[
+				'shape1',
+				{
+					paragraphCount: 4,
+					wordCounts: [1, 1, 1, 1],
+					charCounts: [5, 5, 5, 5],
+					paragraphLevels: [0, 1, 1, 0],
+				},
+			],
+		]);
+		const anim = { ...baseAnim, buildType: 'byParagraph' as const };
+		const result = expandTextBuildAnimations([anim], nestedCounts);
+		// Every paragraph still gets its own sub-animation (so each can be
+		// addressed/rendered independently), but only TWO of them open a new
+		// click: {0,1,2} reveal together, {3} is its own step.
+		expect(result).toHaveLength(4);
+		expect(result.map((r) => r.targetId)).toStrictEqual([
+			'shape1::p0',
+			'shape1::p1',
+			'shape1::p2',
+			'shape1::p3',
+		]);
+		expect(result.map((r) => r.trigger)).toStrictEqual([
+			'onClick',
+			'withPrevious',
+			'withPrevious',
+			'onClick',
+		]);
+	});
+
+	it('should reveal sub-bullets WITH their parent paragraph, on the same click (bldLvl=1)', () => {
+		const nestedCounts = new Map([
+			[
+				'shape1',
+				{
+					paragraphCount: 3,
+					wordCounts: [1, 1, 1],
+					charCounts: [5, 5, 5],
+					paragraphLevels: [0, 1, 1],
+				},
+			],
+		]);
+		const anim = { ...baseAnim, buildType: 'byParagraph' as const };
+		const result = expandTextBuildAnimations([anim], nestedCounts);
+		expect(result).toHaveLength(3);
+		expect(result.map((r) => r.targetId)).toStrictEqual(['shape1::p0', 'shape1::p1', 'shape1::p2']);
+		// The opener is the original trigger; the grouped sub-bullets ride along
+		// on the SAME click via withPrevious, not their own onClick.
+		expect(result[0].trigger).toBe('onClick');
+		expect(result[1].trigger).toBe('withPrevious');
+		expect(result[2].trigger).toBe('withPrevious');
+	});
+
+	it('should honour an explicit bldLvl=2 ("By 2nd Level Paragraphs")', () => {
+		// title(0,lvl0), sub(1,lvl1), subsub(2,lvl2), sub(3,lvl1)
+		const nestedCounts = new Map([
+			[
+				'shape1',
+				{
+					paragraphCount: 4,
+					wordCounts: [1, 1, 1, 1],
+					charCounts: [5, 5, 5, 5],
+					paragraphLevels: [0, 1, 2, 1],
+				},
+			],
+		]);
+		const anim = { ...baseAnim, buildType: 'byParagraph' as const, buildLevel: 2 };
+		const result = expandTextBuildAnimations([anim], nestedCounts);
+		// Level-1 paragraphs now ALSO open their own step: {0}, {1,2}, {3}.
+		expect(result.map((r) => r.targetId)).toStrictEqual([
+			'shape1::p0',
+			'shape1::p1',
+			'shape1::p2',
+			'shape1::p3',
+		]);
+		expect(result.map((r) => r.trigger)).toStrictEqual([
+			'onClick',
+			'onClick',
+			'withPrevious',
+			'onClick',
+		]);
+	});
+
 	it('should expand byWord into one animation per word across all paragraphs', () => {
 		const anim = { ...baseAnim, buildType: 'byWord' as const };
 		const result = expandTextBuildAnimations([anim], segmentCounts);
@@ -340,5 +426,82 @@ describe('expandTextBuildAnimations - iterate stagger', () => {
 		const abs = { ...anim, iterate: { type: 'lt', tmAbs: 120 } } as PptxNativeAnimation;
 		const out = expandTextBuildAnimations([abs], new Map([['title', counts]]));
 		expect(out[1].delayMs).toBe(120);
+	});
+
+	// PowerPoint's "by letter, 0% delay between letters" plays every letter
+	// simultaneously. Collapsing the 0 to the sequential fallback chained each
+	// letter after the previous one's FULL duration, so a 30-character line took
+	// many seconds and pushed every later effect in the group out with it: the
+	// issue #132 deck's closing slide queued a pulse at t=27s because of it.
+	it('a zero tmPct interval starts every letter simultaneously', () => {
+		const zero = {
+			...anim,
+			iterate: { type: 'lt', tmPct: 0 },
+		} as unknown as PptxNativeAnimation;
+		const out = expandTextBuildAnimations([zero], new Map([['title', counts]]));
+		expect(out).toHaveLength(3);
+		expect(out[0].delayMs).toBe(1000);
+		// Simultaneous: withPrevious with a 0 interval, full duration kept.
+		expect(out[1].trigger).toBe('withPrevious');
+		expect(out[1].delayMs).toBe(0);
+		expect(out[2].delayMs).toBe(0);
+		expect(out.every((a) => a.durationMs === 400)).toBeTruthy();
+	});
+
+	it('a zero tmAbs interval starts every letter simultaneously', () => {
+		const zero = {
+			...anim,
+			iterate: { type: 'lt', tmAbs: 0 },
+		} as unknown as PptxNativeAnimation;
+		const out = expandTextBuildAnimations([zero], new Map([['title', counts]]));
+		expect(out[1].trigger).toBe('withPrevious');
+		expect(out[1].delayMs).toBe(0);
+	});
+});
+
+describe('by-paragraph builds that also iterate', () => {
+	it('ripples inside each paragraph instead of revealing it as a block', () => {
+		// PowerPoint composes the two: `p:bldP/@build="p"` groups the text into
+		// steps, `p:iterate type="lt"` subdivides each step. Reading only the build
+		// type made a credit line authored to type in appear as one solid block.
+		const anim = {
+			targetId: 'credit',
+			presetClass: 'entr',
+			presetId: 10,
+			trigger: 'withPrevious',
+			durationMs: 400,
+			buildType: 'byParagraph',
+			iterate: { type: 'lt', tmPct: 10000 },
+		} as unknown as PptxNativeAnimation;
+
+		const expanded = expandTextBuildAnimations(
+			[anim],
+			new Map([['credit', { paragraphCount: 1, charCounts: [12], wordCounts: [2] }]]),
+		);
+
+		expect(expanded).toHaveLength(12);
+		expect(expanded.every((step) => step.targetId?.startsWith('credit::c0-'))).toBeTruthy();
+	});
+
+	it('starts each later paragraph on its own click', () => {
+		const anim = {
+			targetId: 'body',
+			presetClass: 'entr',
+			presetId: 10,
+			trigger: 'onClick',
+			durationMs: 400,
+			buildType: 'byParagraph',
+			iterate: { type: 'lt', tmPct: 10000 },
+		} as unknown as PptxNativeAnimation;
+
+		const expanded = expandTextBuildAnimations(
+			[anim],
+			new Map([['body', { paragraphCount: 2, charCounts: [3, 3], wordCounts: [1, 1] }]]),
+		);
+
+		expect(expanded).toHaveLength(6);
+		// Paragraph 1's first letter opens a new click step; its rest ripples.
+		expect(expanded[3].trigger).toBe('onClick');
+		expect(expanded[4].trigger).toBe('withPrevious');
 	});
 });

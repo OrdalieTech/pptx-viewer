@@ -29,7 +29,7 @@
  * @module angular-viewer/smart-art-properties
  */
 
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input, output } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
 import type {
 	PptxSmartArtData,
@@ -40,6 +40,12 @@ import type {
 } from 'pptx-viewer-core';
 
 import { SWITCHABLE_LAYOUT_TYPES } from './editor-insert';
+import { RecentColorsService } from './recent-colors.service';
+import {
+	smartArtColorSchemeLabelKey,
+	smartArtLayoutLabelKey,
+	smartArtStyleLabelKey,
+} from './schema-token-labels';
 import {
 	canAddTopLevelNode,
 	canRemoveTopLevelNode,
@@ -101,7 +107,7 @@ import {
 							[attr.aria-pressed]="activeLayout() === layout"
 							(click)="onLayout(layout)"
 						>
-							{{ layout }}
+							{{ layoutLabelKey(layout) | translate }}
 						</button>
 					}
 				</div>
@@ -119,7 +125,9 @@ import {
 					(change)="onColorScheme($event)"
 				>
 					@for (scheme of colorSchemes; track scheme) {
-						<option [value]="scheme">{{ scheme }}</option>
+						<option [value]="scheme" [selected]="scheme === activeColorScheme()">
+							{{ colorSchemeLabelKey(scheme) | translate }}
+						</option>
 					}
 				</select>
 			</label>
@@ -141,7 +149,7 @@ import {
 							[attr.aria-pressed]="activeStyle() === styleOpt"
 							(click)="onStyle(styleOpt)"
 						>
-							{{ styleOpt }}
+							{{ styleLabelKey(styleOpt) | translate }}
 						</button>
 					}
 				</div>
@@ -356,14 +364,15 @@ import {
 			white-space: nowrap;
 		}
 
-		.pptx-sa-props__layout {
-			flex: 1 0 auto;
-			text-transform: capitalize;
-		}
-
+		/*
+		 * No text-transform: these buttons used to print the raw wire token
+		 * ("list", "flat"), and capitalising it was the only thing that made it
+		 * look like a word. They now render dictionary text, which arrives cased
+		 * for its locale, so capitalising would mangle multi-word translations.
+		 */
+		.pptx-sa-props__layout,
 		.pptx-sa-props__style {
 			flex: 1 0 auto;
-			text-transform: capitalize;
 		}
 
 		.pptx-sa-props__layout.is-active,
@@ -516,6 +525,9 @@ export class SmartArtPropertiesComponent {
 	/** Emits a complete new data model after any edit. */
 	readonly smartArtDataChange = output<PptxSmartArtData>();
 
+	/** Optional: absent in a standalone unit test with no viewer-level DI tree. */
+	private readonly recentColors = inject(RecentColorsService, { optional: true });
+
 	// ── Static option lists (template-bound) ─────────────────────────────────
 	protected readonly layoutTypes: readonly SmartArtLayoutType[] = SWITCHABLE_LAYOUT_TYPES;
 	protected readonly colorSchemes = SMART_ART_COLOR_SCHEMES;
@@ -528,6 +540,13 @@ export class SmartArtPropertiesComponent {
 	protected readonly activeStyle = computed(() => currentStyle(this.smartArtData()));
 
 	protected isChild = isChildNode;
+
+	// ── Wire-token spelling ──────────────────────────────────────────────────
+	// These three controls used to print the `dgm:` schema token itself, so the
+	// picker offered "colorful1" and "bending" as if they were English words.
+	protected layoutLabelKey = smartArtLayoutLabelKey;
+	protected colorSchemeLabelKey = smartArtColorSchemeLabelKey;
+	protected styleLabelKey = smartArtStyleLabelKey;
 
 	// ── Node-count boundary constraints ──────────────────────────────────────
 	/** Count of top-level (parentless) nodes, for boundary checks. */
@@ -612,6 +631,7 @@ export class SmartArtPropertiesComponent {
 			return;
 		}
 		this.commit(setNodeStyle(this.smartArtData(), nodeId, { fillColor: value }));
+		this.recentColors?.push(value);
 	}
 
 	protected onNodeFontColor(event: Event, nodeId: string): void {
@@ -620,6 +640,7 @@ export class SmartArtPropertiesComponent {
 			return;
 		}
 		this.commit(setNodeStyle(this.smartArtData(), nodeId, { fontColor: value }));
+		this.recentColors?.push(value);
 	}
 
 	protected onNodeBold(node: PptxSmartArtNode): void {

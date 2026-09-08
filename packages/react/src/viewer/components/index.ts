@@ -20,6 +20,8 @@ export { MasterViewSidebar } from './MasterViewSidebar';
 export { NotesMasterCanvas } from './NotesMasterCanvas';
 export { HandoutMasterCanvas } from './HandoutMasterCanvas';
 export { SlideSorterOverlay } from './SlideSorterOverlay';
+export { OutlineViewOverlay } from './OutlineViewOverlay';
+export { ReadingViewOverlay } from './ReadingViewOverlay';
 export { SlideNotesPanel } from './SlideNotesPanel';
 export { VersionHistoryPanel } from './VersionHistoryPanel';
 export { ComparePanel } from './ComparePanel';
@@ -48,7 +50,8 @@ export { InspectorPane } from './InspectorPane';
 
 // Presentation annotation tools
 export { PresentationAnnotationOverlay } from './PresentationAnnotationOverlay';
-export { PresentationToolbar, PresentationToolbarWrapper } from './PresentationToolbar';
+export { PresentationToolbar } from './PresentationToolbar';
+export { PresentationToolbarWrapper } from './PresentationToolbarWrapper';
 export { PresentationTouchControls } from './PresentationTouchControls';
 export { PresentationSubtitleBar } from './PresentationSubtitleBar';
 export { PresentationTransitionOverlay } from './PresentationTransitionOverlay';

@@ -35,7 +35,6 @@ export function FillStrokeProperties({
 	selectedShapeStyle,
 	selectedShapeType,
 	selectedGradientStops,
-	recentColors,
 	onUpdateShapeStyle,
 	onSetFillColor,
 	onSetStrokeColor,
@@ -132,6 +131,7 @@ export function FillStrokeProperties({
 					label={t('pptx.fill.fill')}
 					prefix='fill'
 					value={normalizeHexColor(style?.fillColor, DEFAULT_FILL_COLOR)}
+					selectedRef={style?.fillColorRef}
 					disabled={line}
 					onChange={onSetFillColor}
 				/>
@@ -152,7 +152,6 @@ export function FillStrokeProperties({
 				<StrokeEffectsSection
 					style={style}
 					isLine={line}
-					recentColors={recentColors}
 					onUpdateShapeStyle={onUpdateShapeStyle}
 					onSetStrokeColor={onSetStrokeColor}
 				/>

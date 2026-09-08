@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import type { TextStyle, XmlObject } from '../../types';
+import { PptxHandlerRuntime } from './PptxHandlerRuntimeImplementation';
 
 // ---------------------------------------------------------------------------
 // Extracted from PptxHandlerRuntimeTextRunStyleExtraction.extractTextRunStyle
@@ -499,6 +500,148 @@ describe('extractTextRunStyle', () => {
 		it('should parse rtl=0 as false', () => {
 			const result = extractTextRunStyle({ '@_rtl': '0' }, 'left');
 			expect(result.rtl).toBeFalsy();
+		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Regression coverage against the REAL `extractTextRunStyle`. The block above
+// exercises a copy of the logic, which by construction cannot catch a drift
+// between the copy and production - and did not: both `@b`/`@i` parsing and
+// the `a:rtl` read were wrong in production while the copy's tests passed.
+// ---------------------------------------------------------------------------
+
+class RunStyleRuntime extends PptxHandlerRuntime {
+	public extract(runProperties: XmlObject | undefined): TextStyle {
+		return this.extractTextRunStyle(runProperties, 'left');
+	}
+}
+
+describe('extractTextRunStyle (real runtime)', () => {
+	const runtime = new RunStyleRuntime();
+
+	describe('the ST_Boolean spellings of @b / @i', () => {
+		it('accepts the spec-legal "true" spelling', () => {
+			// `@b` / `@i` are xsd:boolean, so "true"/"false" are as legal as
+			// "1"/"0". A literal `=== '1'` test turned `b="true"` into an
+			// EXPLICIT false, which then also suppressed the inherited bold.
+			const style = runtime.extract({ '@_b': 'true', '@_i': 'true' });
+			expect(style.bold).toBeTruthy();
+			expect(style.italic).toBeTruthy();
+		});
+
+		it('accepts the spec-legal "false" spelling as an explicit false', () => {
+			const style = runtime.extract({ '@_b': 'false', '@_i': 'false' });
+			expect(style.bold).toBeFalsy();
+			expect(style.bold).toBeDefined();
+			expect(style.italic).toBeFalsy();
+			expect(style.italic).toBeDefined();
+		});
+
+		it('keeps the "1" / "0" spellings working', () => {
+			expect(runtime.extract({ '@_b': '1' }).bold).toBeTruthy();
+			expect(runtime.extract({ '@_b': '0' }).bold).toBeFalsy();
+			expect(runtime.extract({ '@_b': '0' }).bold).toBeDefined();
+			expect(runtime.extract({ '@_i': '1' }).italic).toBeTruthy();
+			expect(runtime.extract({ '@_i': '0' }).italic).toBeFalsy();
+			expect(runtime.extract({ '@_i': '0' }).italic).toBeDefined();
+		});
+
+		it('leaves bold/italic unset (inherited) when the attribute is absent', () => {
+			const style = runtime.extract({ '@_sz': '1800' });
+			expect(style.bold).toBeUndefined();
+			expect(style.italic).toBeUndefined();
+		});
+	});
+
+	describe('a:rtl child element', () => {
+		it('reads run-level rtl from the child ELEMENT, as the schema declares it', () => {
+			// CT_TextCharacterProperties declares `rtl` as a CT_Boolean CHILD
+			// (`<a:rtl val="1"/>`); the attribute spelling belongs to
+			// CT_TextParagraphProperties. Reading only `@_rtl` meant run-level
+			// RTL never loaded at all.
+			expect(runtime.extract({ 'a:rtl': { '@_val': '1' } }).rtl).toBeTruthy();
+			expect(runtime.extract({ 'a:rtl': { '@_val': 'true' } }).rtl).toBeTruthy();
+			expect(runtime.extract({ 'a:rtl': { '@_val': '0' } }).rtl).toBeFalsy();
+			expect(runtime.extract({ 'a:rtl': { '@_val': '0' } }).rtl).toBeDefined();
+		});
+
+		it('treats a valueless <a:rtl/> as true (CT_Boolean default)', () => {
+			// fast-xml-parser renders an empty element as '' with this config.
+			expect(runtime.extract({ 'a:rtl': '' }).rtl).toBeTruthy();
+		});
+
+		it('still honours the attribute spelling for SDK-built content', () => {
+			expect(runtime.extract({ '@_rtl': '1' }).rtl).toBeTruthy();
+			expect(runtime.extract({ '@_rtl': '0' }).rtl).toBeFalsy();
+			expect(runtime.extract({ '@_rtl': '0' }).rtl).toBeDefined();
+		});
+
+		it('leaves rtl unset when neither spelling is present', () => {
+			expect(runtime.extract({ '@_sz': '1800' }).rtl).toBeUndefined();
+		});
+	});
+
+	it('parses a:noFill into textFillNone (hollow / outline-only text)', () => {
+		expect(runtime.extract({ 'a:noFill': '' }).textFillNone).toBeTruthy();
+		expect(runtime.extract({ '@_sz': '1800' }).textFillNone).toBeUndefined();
+	});
+
+	/**
+	 * `textFillNone` is a THREE-state slot, not a flag that only turns on. Run
+	 * styles are assembled as `{...mergedDefaultRunStyle, ...extractTextRunStyle(rPr)}`,
+	 * and every lower layer (`a:lstStyle` levels, layout / master `a:defRPr`,
+	 * `a:endParaRPr`) is itself an `extractTextRunStyle` result. A run that
+	 * overrides an inherited `<a:noFill/>` with a fill of its own must record
+	 * `false`, or the inherited `true` survives the spread and the run both
+	 * renders hollow and gets re-serialised as `<a:noFill/>` over its real fill.
+	 *
+	 * Latent rather than live: nothing in the fixture corpus inherits a text
+	 * `a:noFill` (1 of 2697 parsed segments is hollow, and that one authors
+	 * `a:noFill` on the run itself).
+	 */
+	describe('textFillNone clears when the run declares its own fill', () => {
+		const RED = { 'a:srgbClr': { '@_val': 'FF0000' } };
+
+		it('records an explicit false for a run-level a:solidFill', () => {
+			// Falsy AND defined. `undefined` is falsy too, and telling the explicit
+			// override apart from the untouched slot IS the regression, so both
+			// halves are load-bearing (the same pairing this file uses for `rtl`).
+			const style = runtime.extract({ 'a:solidFill': RED });
+			expect(style.textFillNone).toBeFalsy();
+			expect(style.textFillNone).toBeDefined();
+		});
+
+		it.each([
+			['a:gradFill', { 'a:gsLst': { 'a:gs': { '@_pos': '0', ...RED } } }],
+			['a:pattFill', { '@_prst': 'dkDnDiag' }],
+			['a:blipFill', { 'a:blip': { '@_r:embed': 'rId2' } }],
+			['a:grpFill', ''],
+		])('records an explicit false for a run-level %s', (element, value) => {
+			const style = runtime.extract({ [element]: value });
+			expect(style.textFillNone).toBeFalsy();
+			expect(style.textFillNone).toBeDefined();
+		});
+
+		it('lets a run fill beat an inherited hollow default through the merge', () => {
+			// Layer 1: the layout / master `a:defRPr` declares hollow text.
+			const inherited = runtime.extract({ 'a:noFill': '' });
+			// Layer 2: the run overrides it with a fill of its own.
+			const run = runtime.extract({ 'a:solidFill': RED });
+			const merged = { ...inherited, ...run };
+			expect(inherited.textFillNone).toBeTruthy();
+			expect(merged.textFillNone).toBeFalsy();
+			expect(merged.textFillNone).toBeDefined();
+		});
+
+		it('keeps true when a:noFill and a fill are both present on the run', () => {
+			// Schema-invalid (EG_FillProperties is a choice). `a:noFill` still wins,
+			// as it did before, rather than the iteration order deciding.
+			expect(runtime.extract({ 'a:noFill': '', 'a:solidFill': RED }).textFillNone).toBeTruthy();
+		});
+
+		it('stays undefined when the run declares no fill at all', () => {
+			expect(runtime.extract({ '@_sz': '1800' }).textFillNone).toBeUndefined();
 		});
 	});
 });

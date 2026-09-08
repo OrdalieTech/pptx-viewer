@@ -1,13 +1,16 @@
-import type { PptxElement, TextSegment } from 'pptx-viewer-core';
-import { cloneElementForPaste } from 'pptx-viewer-shared';
+import type { PptxElement, TextSegment, TextStyle } from 'pptx-viewer-core';
+import type { ElementBoxPatch } from 'pptx-viewer-shared';
+import { cloneElementForPaste, updateSlideNotes } from 'pptx-viewer-shared';
 
 import { appendElement, newElementId } from './editor-insert';
-import type { ElementBoxPatch } from './editor-mutations';
-import { updateSlideNotes } from './editor-mutations';
 import type { EditorState } from './editor-state.svelte';
 import type { ZOrderDirection } from './editor-zorder';
 import { reorderElement } from './editor-zorder';
-import { remapInlineText } from './inline-text';
+import {
+	remapInlineText,
+	resolveInlineTextAutoFitHeight,
+	resolveInlineTextNormAutofitShrink,
+} from './inline-text';
 
 const NUDGE_COALESCE_MS = 800;
 
@@ -128,16 +131,43 @@ export class EditorElementController {
 		this.#editor.commitChange();
 	}
 
-	commitInlineText(id: string, text: string): void {
+	commitInlineText(id: string, rawText: string): void {
 		const target = this.#editor.activeElements.find((element) => element.id === id);
 		if (!target) {
 			return;
 		}
+		const text = this.#editor.transformCommittedText(rawText);
 		this.#editor.pushHistory();
+		// `a:spAutoFit`: grow/shrink the shape to the text's natural content
+		// height, the way PowerPoint does. See `resolveInlineTextAutoFitHeight`
+		// for why the editor DOM node is still resolvable here.
+		const editorEl =
+			typeof document !== 'undefined'
+				? document.querySelector<HTMLElement>('[data-inline-editor]')
+				: null;
+		const newHeight = resolveInlineTextAutoFitHeight(target, editorEl);
+		// `a:normAutofit` ("Shrink text on overflow"): recompute the font
+		// scale/line-spacing reduction so the (possibly now longer or shorter)
+		// text still fits the shape. Mutually exclusive with the `spAutoFit`
+		// resize above (both read `autoFitMode`, only one mode is ever set).
+		const shrink = resolveInlineTextNormAutofitShrink(target, editorEl);
 		this.#editor.replaceActiveElements(
 			this.#editor.activeElements.map((element) =>
 				element.id === id
-					? ({ ...element, ...remapInlineText(target, text) } as PptxElement)
+					? ({
+							...element,
+							...remapInlineText(target, text),
+							...(newHeight !== undefined ? { height: newHeight } : {}),
+							...(shrink !== 'unchanged'
+								? {
+										textStyle: {
+											...(target as { textStyle?: TextStyle }).textStyle,
+											autoFitFontScale: shrink.fontScale,
+											autoFitLineSpacingReduction: shrink.lnSpcReduction,
+										},
+									}
+								: {}),
+						} as PptxElement)
 					: element,
 			),
 		);

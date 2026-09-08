@@ -89,4 +89,59 @@ describe('slideStage', () => {
 		expect(download?.closest('[aria-hidden="true"]')).toBeNull();
 		expect(open?.closest('[aria-hidden="true"]')).toBeNull();
 	});
+
+	/**
+	 * Motion-path keyframes translate by `calc(var(--pptx-slide-w) * fraction)`,
+	 * so a stage that does not publish its own size makes every path travel the
+	 * 1280x720 fallback distance instead of the real one. This one component IS
+	 * both the editing stage and the slide-show stage in this binding, so both
+	 * are covered by asserting it here.
+	 */
+	it('publishes its slide size for motion-path keyframes, at any scale', () => {
+		for (const interactive of [true, false]) {
+			const stage = mountStage(interactive).querySelector<HTMLElement>('.pptx-svelte-stage');
+			expect(stage?.style.getPropertyValue('--pptx-slide-w')).toBe('960px');
+			expect(stage?.style.getPropertyValue('--pptx-slide-h')).toBe('540px');
+			cleanup?.();
+			cleanup = undefined;
+		}
+	});
+
+	it('anchors a shadeToTitle gradient on the title placeholder', () => {
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const gradient = 'linear-gradient(90.00deg, #000000 0%, #ffffff 100%)';
+		const slide: PptxSlide = {
+			id: 'slide-1',
+			rId: 'rId1',
+			slideNumber: 1,
+			backgroundGradient: gradient,
+			backgroundShadeToTitle: true,
+			elements: [
+				{
+					id: 'title-1',
+					type: 'text',
+					x: 0,
+					y: 0,
+					width: 100,
+					height: 50,
+					placeholderType: 'title',
+				},
+			],
+		} as unknown as PptxSlide;
+		const instance = mount(SlideStage, {
+			target,
+			props: {
+				slide,
+				canvasSize: { width: 960, height: 540 },
+				mediaDataUrls: new Map<string, string>(),
+			},
+		});
+		flushSync();
+		const stage = target.querySelector<HTMLElement>('.pptx-svelte-stage');
+		expect(stage?.style.backgroundImage).not.toContain(gradient);
+		expect(stage?.style.backgroundImage).toContain('data:image/svg+xml');
+		unmount(instance);
+		target.remove();
+	});
 });

@@ -1,15 +1,38 @@
-import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
-import { DEFAULT_MASTER_PAGE_SIZE } from 'pptx-viewer-shared';
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per render pass); merging them
+   isn't a style choice here. */
+import type { PptxChartData, PptxElement, PptxSlide } from 'pptx-viewer-core';
+import { buildThemeColorMap } from 'pptx-viewer-core';
+import type {
+	ChartPartRef,
+	MasterViewCrudAction,
+	MasterViewCrudActionId,
+} from 'pptx-viewer-shared';
+import {
+	computeGridSpacingPx,
+	DEFAULT_MASTER_PAGE_SIZE,
+	masterViewCrudActions,
+	masterViewPseudoSlide,
+	visibleTemplateElements,
+} from 'pptx-viewer-shared';
 
 import type { PresentationPlayback } from './animation';
 import { createPresentationPlayback } from './animation';
+import { fullTarget, toPptxData } from './editor/editor-master-view-crud-actions';
 import type { Translator } from './i18n';
 import type { ElementRenderContext, ElementRendererRegistry } from './render';
 import { renderSlideStage, reRenderPresentationElements } from './render';
 import { buildRenderFieldContext } from './render-field-context';
+import { appendCommentMarkers } from './render/comment-markers';
 import type { Store, ViewerState } from './state';
 import type { ViewerChrome } from './ui';
 import { renderHandoutMasterCanvas, renderNotesMasterCanvas } from './ui/master-canvases';
+
+/** The sidebar's action list for the current master-view target, or `[]` when there is none. */
+function currentMasterViewCrudActions(state: ViewerState): MasterViewCrudAction[] {
+	const target = fullTarget(state);
+	return target ? masterViewCrudActions(toPptxData(state), target) : [];
+}
 
 /** Fit-mode breathing room around the stage (viewport padding), in px. */
 const FIT_PADDING_PX = 32;
@@ -18,22 +41,81 @@ export interface RenderControllerDeps {
 	doc: Document;
 	store: Store<ViewerState>;
 	registry: ElementRendererRegistry;
-	/** Getters so chrome/translator swaps (setLocale) are picked up live. */
+	/**
+	 * Getters, not plain booleans, so chrome/translator swaps (setLocale) and
+	 * the six 3D flags below are picked up live.
+	 */
 	getChrome(): ViewerChrome;
 	getTranslator(): Translator;
-	/** Opt-in WebGL SmartArt renderer flag; see `PptxViewerOptions.smartArt3D`. */
-	smartArt3D: boolean;
+	/**
+	 * Opt-in WebGL SmartArt renderer flag; see `PptxViewerOptions.smartArt3D`.
+	 * Already ANDed with Options > Advanced > "Disable 3D rendering" by the
+	 * caller (see `resolve3DRenderingFlags`), so this getter alone decides
+	 * whether the WebGL scene renders.
+	 */
+	getSmartArt3D(): boolean;
+	/**
+	 * Opt-in interactive WebGL surface-chart renderer flag; see
+	 * `PptxViewerOptions.surfaceChart3D`. Same "already ANDed" note as
+	 * `getSmartArt3D`.
+	 */
+	getSurfaceChart3D(): boolean;
+	/**
+	 * Opt-in interactive WebGL bar3D-chart renderer flag; see
+	 * `PptxViewerOptions.barChart3D`. Same "already ANDed" note as
+	 * `getSmartArt3D`.
+	 */
+	getBarChart3D(): boolean;
+	/**
+	 * Opt-in interactive WebGL line3D-chart renderer flag; see
+	 * `PptxViewerOptions.lineChart3D`. Same "already ANDed" note as
+	 * `getSmartArt3D`.
+	 */
+	getLineChart3D(): boolean;
+	/**
+	 * Opt-in interactive WebGL area3D-chart renderer flag; see
+	 * `PptxViewerOptions.areaChart3D`. Same "already ANDed" note as
+	 * `getSmartArt3D`.
+	 */
+	getAreaChart3D(): boolean;
+	/**
+	 * Opt-in interactive WebGL pie3D-chart renderer flag; see
+	 * `PptxViewerOptions.pieChart3D`. Same "already ANDed" note as
+	 * `getSmartArt3D`.
+	 */
+	getPieChart3D(): boolean;
 	/** History-integrated handout master layout mutation. */
 	onHandoutSlidesPerPageChange(count: number): void;
 	onMasterBackgroundColorChange(color: string): void;
+	/** Run a Slide Master view sidebar CRUD command (B4). */
+	onMasterCrudAction(id: MasterViewCrudActionId): void;
 	onSectionToggle(sectionId: string): void;
 	onSectionRename(sectionId: string, name: string): void;
 	onSectionDelete(sectionId: string): void;
 	onSectionMove(sectionId: string, direction: 'up' | 'down'): void;
 	/** Navigate from a presentation Zoom tile. */
 	onZoomClick(targetSlideIndex: number, returnSlideIndex: number): void;
+	/** A canvas comment marker dot was clicked; bring the comments UI on screen. */
+	onCommentMarkerClick?(commentId: string): void;
 	onSmartArtNodeTextChange?(element: PptxElement, nodeId: string, text: string): void;
 	onSmartArtNodeFillChange?(element: PptxElement, nodeId: string, fill: string): void;
+	/**
+	 * Commit a chart data point dragged on the canvas. Gated on `interactive`
+	 * below with the SmartArt hooks, so thumbnails, the presenter console and
+	 * export rasters never arm the chart marks.
+	 */
+	onChartPointChange?(element: PptxElement, chartData: PptxChartData): void;
+	/**
+	 * A table column/row boundary was dragged on the canvas. Gated on
+	 * `interactive` with the other on-canvas edit hooks.
+	 */
+	onTableResizeColumns?(element: PptxElement, widths: number[]): void;
+	onTableResizeRow?(element: PptxElement, rowIndex: number, height: number): void;
+	/**
+	 * A chart part was pressed on the canvas. Gated on `interactive` with the
+	 * other chart/SmartArt hooks. See `ElementRenderContext.onChartPartSelect`.
+	 */
+	onChartPartSelect?(element: PptxElement, part: ChartPartRef): void;
 	/**
 	 * Invoked after every stage render (the stage host is rebuilt with
 	 * `replaceChildren`); the editor re-mounts its overlay layer here.
@@ -48,8 +130,21 @@ export interface RenderController {
 	renderStage(): void;
 	/** Rebuild the thumbnail rail from the current slide list. */
 	renderThumbnails(): void;
+	/**
+	 * Render one slide statically at `scale` (template elements included), for
+	 * surfaces outside the main canvas such as Reading View. Same path the
+	 * thumbnail rail draws through, so no surface grows its own element renderer.
+	 */
+	renderSlideNode(slide: PptxSlide, scale: number): HTMLElement;
 	/** Resolve the requested zoom into a concrete scale factor. */
 	effectiveScale(): number;
+	/**
+	 * Scale at which the slide exactly fits the viewport, i.e. the scale that
+	 * {@link zoomPercent} reports as 100%. The zoom controls need it because the
+	 * stored zoom is an ABSOLUTE scale while the shared zoom step is expressed
+	 * relative to fit, exactly as React's is.
+	 */
+	fitScale(): number;
 	/** Display zoom relative to fit-to-viewport (fit === 100%), like React. */
 	zoomPercent(): number;
 	/**
@@ -85,7 +180,10 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 		canvasSize = store.get().canvasSize,
 	): HTMLElement => {
 		const state = store.get();
-		const template = state.templateElementsBySlideId[slide.id] ?? [];
+		const template = visibleTemplateElements(
+			slide,
+			state.templateElementsBySlideId[slide.id] ?? [],
+		);
 		const renderSlide = template.length
 			? { ...slide, elements: [...template, ...slide.elements] }
 			: slide;
@@ -101,13 +199,28 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 			registry,
 			t: deps.getTranslator(),
 			scale,
-			smartArt3D: deps.smartArt3D,
+			gridSpacingPx: computeGridSpacingPx(state.viewProperties?.gridSpacing, 10),
+			smartArt3D: deps.getSmartArt3D(),
+			surfaceChart3D: deps.getSurfaceChart3D(),
+			barChart3D: deps.getBarChart3D(),
+			lineChart3D: deps.getLineChart3D(),
+			areaChart3D: deps.getAreaChart3D(),
+			pieChart3D: deps.getPieChart3D(),
 			presenting,
 			slides: state.slides,
 			currentSlideIndex: state.currentSlide,
 			onZoomClick: deps.onZoomClick,
 			onSmartArtNodeTextChange: interactive ? deps.onSmartArtNodeTextChange : undefined,
 			onSmartArtNodeFillChange: interactive ? deps.onSmartArtNodeFillChange : undefined,
+			onChartPointChange: interactive ? deps.onChartPointChange : undefined,
+			onTableResizeColumns: interactive ? deps.onTableResizeColumns : undefined,
+			onTableResizeRow: interactive ? deps.onTableResizeRow : undefined,
+			chartPartSelection: state.chartPartSelection,
+			onChartPartSelect: interactive ? deps.onChartPartSelect : undefined,
+			// Only the interactive canvas arms a chart's on-canvas mark hit-testing
+			// (`chart-editable.ts` requires BOTH `interactive` and this to include the
+			// chart's id), so thumbnails and export rasters never see it either way.
+			selectedElementIds: interactive ? new Set(state.selectedElementIds) : undefined,
 			interactive,
 			templateEditing: state.editTemplateMode || state.masterViewTarget !== null,
 			// Native-animation state + context capture only for the live presentation
@@ -142,6 +255,10 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 		return effectiveScaleFor(store.get().canvasSize);
 	};
 
+	const fitScale = (): number => {
+		return fitScaleFor(store.get().canvasSize);
+	};
+
 	const zoomPercent = (): number => {
 		const canvasSize = store.get().canvasSize;
 		return (effectiveScaleFor(canvasSize) / fitScaleFor(canvasSize)) * 100;
@@ -151,22 +268,15 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 		const chrome = deps.getChrome();
 		const state = store.get();
 		const target = state.masterViewTarget;
-		const master = target ? state.slideMasters[target.masterIndex] : undefined;
-		const layout =
-			target?.layoutIndex === null ? undefined : master?.layouts?.[target?.layoutIndex ?? -1];
 		const slide: PptxSlide | undefined = target
-			? master
-				? {
-						id: layout?.path ?? master.path,
-						rId: '',
-						slideNumber: 0,
-						elements: layout
-							? [...(master.elements ?? []), ...(layout.elements ?? [])]
-							: (master.elements ?? []),
-						backgroundColor: layout?.backgroundColor ?? master.backgroundColor,
-						backgroundImage: layout?.backgroundImage ?? master.backgroundImage,
-					}
-				: undefined
+			? masterViewPseudoSlide(
+					{ slideMasters: state.slideMasters },
+					{
+						tab: 'slides',
+						masterIndex: target.masterIndex,
+						layoutIndex: target.layoutIndex,
+					},
+				)
 			: state.slides[state.currentSlide];
 		const specialMaster = target && state.masterViewTab !== 'slides';
 		const pageSize = specialMaster
@@ -205,7 +315,13 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 				const scaledSize = { width: pageSize.width * scale, height: pageSize.height * scale };
 				stageNode =
 					state.masterViewTab === 'notes'
-						? renderNotesMasterCanvas(doc, deps.getTranslator(), state.notesMaster, scaledSize)
+						? renderNotesMasterCanvas(
+								doc,
+								deps.getTranslator(),
+								state.notesMaster,
+								scaledSize,
+								scale,
+							)
 						: renderHandoutMasterCanvas(
 								doc,
 								deps.getTranslator(),
@@ -216,6 +332,19 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 			}
 		} else if (slide) {
 			stageNode = renderStageFor(slide, scale, state.presenting, true, pageSize);
+			// Numbered comment markers, drawn inside the stage whenever an editable
+			// slide has comments (Vue's visibility semantics). The stage is rebuilt
+			// on every store change, so the dots track the comment model live.
+			if (state.editable && !state.presenting) {
+				appendCommentMarkers(
+					doc,
+					stageNode,
+					slide.comments ?? [],
+					pageSize,
+					deps.getTranslator(),
+					deps.onCommentMarkerClick,
+				);
+			}
 		}
 		if (stageNode && slide) {
 			chrome.stageWrap.appendChild(stageNode);
@@ -234,8 +363,19 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 			zoomPercent: stageZoomPercent,
 		});
 		chrome.presentationTouchControls.update(state.currentSlide, state.slides.length);
+		// The phone's Slides sheet paints real thumbnails, so it needs the same
+		// stage renderer the desktop rail is handed.
+		chrome.mobileActionSheets?.setThumbnailRenderer(
+			(thumbSlide, thumbScale) => renderStageFor(thumbSlide, thumbScale),
+			state.canvasSize.width,
+			state.canvasSize.height,
+		);
 		chrome.mobileActionSheets?.update(state.currentSlide, state.slides, slide?.comments ?? []);
-		chrome.notes.update({ slide: specialMaster ? undefined : slide, editable: state.editable });
+		chrome.notes.update({
+			slide: specialMaster ? undefined : slide,
+			editable: state.editable,
+			notesStyle: state.notesMaster?.notesStyle,
+		});
 		deps.onStageRendered?.();
 		// Drive presentation-mode entrance state + slide transitions off the fresh
 		// stage. Guarded on `presenting` inside `syncStage`; a no-op otherwise.
@@ -251,6 +391,14 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 				showWithAnimation: state.presentationProperties.showWithAnimation,
 				mediaDataUrls: state.mediaDataUrls,
 				reRenderElements,
+				// PowerPoint shows a slide you step BACK onto with its builds already
+				// played; the store marks the pending entry as backward.
+				seedCompleted: state.enteringBackward === true,
+				// Lets the controller resolve a `p:anim` formula that needs the
+				// animated shape's real box (Grow And Turn's `-#ppt_w/2` fly-in) and
+				// a scheme-colour ramp stop instead of falling back.
+				canvasSize: state.canvasSize,
+				themeColorMap: state.colorScheme ? buildThemeColorMap(state.colorScheme) : undefined,
 			});
 		} else {
 			presentationStageNode = null;
@@ -277,6 +425,9 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 				handoutPlaceholders: state.handoutMaster?.placeholders,
 				handoutMasterPresent: Boolean(state.handoutMaster),
 				handoutSlidesPerPage: state.handoutSlidesPerPage,
+				editable: state.editable,
+				crudActions: currentMasterViewCrudActions(state),
+				onCrudAction: deps.onMasterCrudAction,
 				renderStage: renderStageFor,
 				onSelect: (masterIndex, layoutIndex) => {
 					store.set({
@@ -336,10 +487,13 @@ export function createRenderController(deps: RenderControllerDeps): RenderContro
 			chrome.ribbon?.setNotesExpanded(state.notesExpanded);
 			chrome.mobileActionSheets?.setNotesExpanded(state.notesExpanded);
 			chrome.ribbon?.setTemplateEditing(state.editTemplateMode);
+			chrome.ribbon?.setViewOptions(state);
 		},
 		renderStage,
 		renderThumbnails,
+		renderSlideNode: (slide, scale) => renderStageFor(slide, scale),
 		effectiveScale,
+		fitScale,
 		zoomPercent,
 		presentationPlayback,
 	};

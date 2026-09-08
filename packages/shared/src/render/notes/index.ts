@@ -26,6 +26,13 @@ export {
 	getCurrentParagraphIndex,
 } from './notes-utils';
 export { segmentsToEditorHtml, parseSegmentsFromRichEditor } from './notes-html';
+export type { NotesLevelStyleDescriptor } from './notes-style-cascade';
+export {
+	DEFAULT_NOTES_FONT_SIZE_PT,
+	resolveNotesLevelStyle,
+	applyNotesLevelDefaults,
+	resolveNotesSchematicBodyFontSizePx,
+} from './notes-style-cascade';
 export type { NotesEditState, NotesParagraphCommand } from './notes-editor';
 export {
 	resolveNotesSegments,

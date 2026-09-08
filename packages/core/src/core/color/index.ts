@@ -11,6 +11,7 @@ export {
 	normalizeHexColor,
 	hexToRgbChannels,
 	colorWithOpacity,
+	parseOoxmlPercent,
 	parseDrawingPercent,
 	parseDrawingFraction,
 	parseDrawingHueDegrees,
@@ -22,6 +23,16 @@ export {
 export type { HslColor } from './color-primitives';
 
 export { applyDrawingColorTransforms } from './color-transforms';
+
+export {
+	isThemeColorSchemeName,
+	themeColorRefToXml,
+	themeColorRefToSolidFill,
+	themeColorRefToSolidFillWithOpacity,
+	themeColorRefFromSchemeClr,
+	themeColorRefFromColorChoice,
+	resolveThemeColorRef,
+} from './theme-color-ref';
 
 export {
 	parseDrawingColorChoice,

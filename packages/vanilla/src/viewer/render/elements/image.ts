@@ -1,22 +1,62 @@
 import {
 	getComputedImageStyle,
 	getContainerStyle,
+	getCropShapeClipPath,
 	getImageColorWashStyle,
+	getImageFitStyle,
+	getImageOverflow,
 	getImageSrc,
+	getImageTilingStyle,
 	resolveColorChangedImageSource,
+	resolveShapeGeometry,
 } from 'pptx-viewer-shared';
 
 import { createEl, createSvgEl, setSvgAttrs } from '../dom';
 import type { ElementRenderer } from '../types';
+import { renderReflectionOverlay } from './shape-filter-defs';
 
 /**
  * Renderer for `image` / `picture` elements: an absolutely positioned box with
- * an `<img>` (object-fit contain), the shared computed CSS filter, and any SVG
- * `<filter>` defs required by duotone / artistic image effects.
+ * an `<img>` under the shared fill/crop fit, the shared computed CSS filter, and
+ * any SVG `<filter>` defs required by duotone / artistic image effects.
  */
 export const renderImageElement: ElementRenderer = (element, zIndex, context) => {
 	const doc = context.document;
-	const el = createEl(doc, 'div', 'pptxv-element pptxv-image', getContainerStyle(element, zIndex));
+	/**
+	 * The mask the picture's own shape geometry (`p:spPr/a:prstGeom` /
+	 * `a:custGeom`) imposes on the stationary frame: `border-radius` for the
+	 * roundRect family and ellipse presets, a rescaled `clip-path` for custGeom
+	 * and other silhouettes. `undefined` for effectively rectangular pictures,
+	 * where the frame's overflow clipping already expresses the geometry.
+	 */
+	const geometry =
+		element.type === 'image' || element.type === 'picture'
+			? resolveShapeGeometry(element)
+			: undefined;
+	const geometryClipPath = geometry?.kind === 'clipPath' ? geometry.clipPath : undefined;
+	// The authored Crop-to-Shape clip: the fallback when the picture's own
+	// geometry resolves to no clip-path (e.g. roundRect, whose border-radius
+	// already rounds the frame).
+	const cropShapeClipPath =
+		element.type === 'image' || element.type === 'picture'
+			? getCropShapeClipPath(element.cropShape, element.width, element.height)
+			: undefined;
+	// The clip is load-bearing, not cosmetic: a cropped picture is rendered by
+	// scaling the source up and translating the cropped-away part out of the
+	// frame, so without it the discarded region paints over its neighbours.
+	const el = createEl(doc, 'div', 'pptxv-element pptxv-image', {
+		...getContainerStyle(element, zIndex),
+		overflow: getImageOverflow(element),
+		// The picture's own shape geometry (prstGeom / custGeom) clips the frame,
+		// not the `<img>` - a pixel-space clip on the img would be scaled and
+		// shifted by the crop transform.
+		...(geometry?.kind === 'borderRadius' ? { borderRadius: geometry.radius } : {}),
+		...(geometryClipPath
+			? { clipPath: geometryClipPath }
+			: cropShapeClipPath
+				? { clipPath: cropShapeClipPath }
+				: {}),
+	});
 	el.dataset.elementId = element.id;
 
 	const src = getImageSrc(element, new Map(context.mediaDataUrls));
@@ -40,10 +80,32 @@ export const renderImageElement: ElementRenderer = (element, zIndex, context) =>
 		el.appendChild(svg);
 	}
 
+	// `a:blipFill/a:tile`: a repeating TEXTURE, which an `<img>` cannot express -
+	// the picture is painted as a repeating background layer instead. Without
+	// this the tile renders as one stretched copy.
+	// Mirrored reflection sibling (`a:reflection`): cross-browser, unlike the
+	// `-webkit-box-reflect` this replaced. Pictures never route through the
+	// shape effect layer (`element-styles.ts`), so this is wired directly here.
+	const reflection = renderReflectionOverlay(doc, element, context.mediaDataUrls);
+
+	const tiling = getImageTilingStyle(element);
+	if (tiling) {
+		const tile = createEl(doc, 'div', 'pptxv-image-tile', tiling);
+		if (fx.filter) {
+			tile.style.filter = fx.filter;
+		}
+		if (fx.opacity !== undefined) {
+			tile.style.opacity = String(fx.opacity);
+		}
+		el.appendChild(tile);
+		if (reflection) {
+			el.appendChild(reflection);
+		}
+		return el;
+	}
+
 	const img = createEl(doc, 'img', undefined, {
-		width: '100%',
-		height: '100%',
-		objectFit: 'contain',
+		...getImageFitStyle(element),
 		display: 'block',
 	});
 	img.src = src;
@@ -77,6 +139,9 @@ export const renderImageElement: ElementRenderer = (element, zIndex, context) =>
 				}),
 			);
 		}
+	}
+	if (reflection) {
+		el.appendChild(reflection);
 	}
 
 	return el;

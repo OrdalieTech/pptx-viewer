@@ -1,6 +1,8 @@
 import type { PptxElement, PptxNativeAnimation, PptxSlide } from 'pptx-viewer-core';
+import { hasPersistentAudio, registerPersistentAudio } from 'pptx-viewer-shared';
 import { describe, expect, it, vi } from 'vitest';
 
+import * as animationSound from './animation-sound';
 import { PresentationController } from './presentation-controller.svelte';
 
 /**
@@ -161,6 +163,21 @@ describe('presentationController (native-timing)', () => {
 		expect(controller.transition).toBeNull();
 	});
 
+	it('onSlideChange replays the leaving slide transition on a backward step', () => {
+		const deck = new Deck();
+		deck.slides = [slide('s1'), slide('s2', { transition: { type: 'morph', durationMs: 500 } })];
+		const controller = new PresentationController({
+			getSlides: () => deck.slides,
+			getCurrentIndex: () => deck.index,
+			navigate: () => {},
+		});
+
+		controller.onSlideChange(1, 0);
+		expect(controller.transition?.transition.type).toBe('morph');
+		expect(controller.transition?.outgoing?.id).toBe('s2');
+		expect(controller.transition?.incoming?.id).toBe('s1');
+	});
+
 	it('endTransition and stop drop the overlay', () => {
 		const deck = new Deck();
 		deck.slides = [slide('s1'), slide('s2', { transition: { type: 'fade', durationMs: 600 } })];
@@ -174,5 +191,233 @@ describe('presentationController (native-timing)', () => {
 		expect(controller.transition).not.toBeNull();
 		controller.endTransition();
 		expect(controller.transition).toBeNull();
+	});
+
+	it('stop() ends cross-slide persistent audio; onSlideChange leaves it playing', () => {
+		const deck = new Deck();
+		deck.slides = [slide('s1'), slide('s2')];
+		const controller = new PresentationController({
+			getSlides: () => deck.slides,
+			getCurrentIndex: () => deck.index,
+			navigate: () => {},
+		});
+		controller.start();
+
+		registerPersistentAudio('bg-track', 'data:audio/mpeg;base64,AAAA', 'audio/mpeg', true, 1, 0);
+		expect(hasPersistentAudio('bg-track')).toBeTruthy();
+
+		// A slide change must NOT kill the track: that is the whole feature.
+		controller.onSlideChange(0, 1);
+		expect(hasPersistentAudio('bg-track')).toBeTruthy();
+
+		// Leaving the show ends it.
+		controller.stop();
+		expect(hasPersistentAudio('bg-track')).toBeFalsy();
+		expect(document.querySelectorAll('[data-pptx-persistent-audio]')).toHaveLength(0);
+	});
+
+	it('stop() also silences a "Loop Until Next Sound" transition sound', () => {
+		// Otherwise a looping p:sndAc/p:stSnd keeps playing on the shared
+		// per-effect singleton behind the editor after the show ends.
+		const stopAnimationSoundSpy = vi.spyOn(animationSound, 'stopAnimationSound');
+		const deck = new Deck();
+		deck.slides = [slide('s1')];
+		const controller = new PresentationController({
+			getSlides: () => deck.slides,
+			getCurrentIndex: () => deck.index,
+			navigate: () => {},
+		});
+		controller.start();
+		controller.stop();
+		expect(stopAnimationSoundSpy).toHaveBeenCalledWith();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Hidden slides ("Hide Slide") and the end of the show
+// ---------------------------------------------------------------------------
+
+/** A deck of `hidden` flags plus the controller driving it. */
+function showHarness(hidden: boolean[], endWithBlackSlide?: boolean, loopContinuously?: boolean) {
+	const deck = new Deck();
+	deck.slides = hidden.map((isHidden, index) =>
+		slide(`s${index + 1}`, { slideNumber: index + 1, hidden: isHidden }),
+	);
+	const exit = vi.fn();
+	const controller = new PresentationController({
+		getSlides: () => deck.slides,
+		getCurrentIndex: () => deck.index,
+		navigate: (i: number) => {
+			deck.index = i;
+		},
+		exit,
+		...(endWithBlackSlide === undefined ? {} : { getEndWithBlackSlide: () => endWithBlackSlide }),
+		...(loopContinuously === undefined ? {} : { getLoopContinuously: () => loopContinuously }),
+	});
+	controller.start();
+	return { deck, controller, exit };
+}
+
+describe('presentationController hidden slides', () => {
+	it('skips a hidden slide advancing forward', () => {
+		const { deck, controller } = showHarness([false, true, false]);
+		controller.advance();
+		expect(deck.index).toBe(2);
+	});
+
+	it('skips a hidden slide going backward', () => {
+		const { deck, controller } = showHarness([false, true, false]);
+		deck.index = 2;
+		controller.previousSlide();
+		expect(deck.index).toBe(0);
+	});
+
+	it('stays on the first show slide on a backward press', () => {
+		const { deck, controller } = showHarness([false, false]);
+		controller.previousSlide();
+		expect(deck.index).toBe(0);
+	});
+
+	it('ends the show at the last VISIBLE slide when trailing slides are hidden', () => {
+		const { deck, controller } = showHarness([false, false, true, true]);
+		deck.index = 1;
+		controller.advance();
+		expect(deck.index).toBe(1);
+		expect(controller.endOfShowVisible).toBeTruthy();
+	});
+
+	it('lands Home / End on the first / last VISIBLE slide', () => {
+		const { deck, controller } = showHarness([true, false, false, true]);
+		controller.lastSlide();
+		expect(deck.index).toBe(2);
+		controller.firstSlide();
+		expect(deck.index).toBe(1);
+	});
+
+	it('escapes forward from a hidden slide reached by a typed number', () => {
+		// `viewer.goTo` (the typed-number jump) is deliberately unfiltered, so the
+		// show can be sitting on a hidden slide when the next advance arrives.
+		const { deck, controller } = showHarness([false, true, false]);
+		deck.index = 1;
+		controller.advance();
+		expect(deck.index).toBe(2);
+	});
+
+	it('presents every slide when the whole deck is hidden', () => {
+		const { deck, controller } = showHarness([true, true]);
+		controller.advance();
+		expect(deck.index).toBe(1);
+	});
+});
+
+describe('presentationController end of show', () => {
+	it('raises the black end screen by default', () => {
+		const { controller, exit } = showHarness([false]);
+		controller.advance();
+		expect(controller.endOfShowVisible).toBeTruthy();
+		expect(exit).not.toHaveBeenCalled();
+	});
+
+	it('exits the show outright when the option is off', () => {
+		const { controller, exit } = showHarness([false], false);
+		controller.advance();
+		expect(controller.endOfShowVisible).toBeFalsy();
+		expect(exit).toHaveBeenCalledOnce();
+	});
+
+	it('exits on a second forward press from the end screen', () => {
+		const { controller, exit } = showHarness([false]);
+		controller.advance();
+		controller.advance();
+		expect(exit).toHaveBeenCalledOnce();
+	});
+
+	it('dismisses the end screen on a backward press without exiting', () => {
+		const { controller, exit } = showHarness([false]);
+		controller.advance();
+		expect(controller.retreat()).toBeTruthy();
+		expect(controller.endOfShowVisible).toBeFalsy();
+		expect(exit).not.toHaveBeenCalled();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Slide Show > Set Up Show > "Loop continuously until 'Esc'"
+// ---------------------------------------------------------------------------
+
+describe('presentationController loop continuously', () => {
+	it('wraps to the first show slide instead of raising the end screen', () => {
+		const { deck, controller, exit } = showHarness([false, false, false], undefined, true);
+		deck.index = 2;
+		controller.advance();
+		expect(deck.index).toBe(0);
+		expect(controller.endOfShowVisible).toBeFalsy();
+		expect(exit).not.toHaveBeenCalled();
+	});
+
+	it('wraps to the first VISIBLE slide when the first is hidden', () => {
+		const { deck, controller } = showHarness([true, false, false], undefined, true);
+		deck.index = 2;
+		controller.advance();
+		expect(deck.index).toBe(1);
+	});
+
+	it('does not loop when the option is off', () => {
+		const { deck, controller } = showHarness([false, false], undefined, false);
+		deck.index = 1;
+		controller.advance();
+		expect(deck.index).toBe(1);
+		expect(controller.endOfShowVisible).toBeTruthy();
+	});
+});
+
+describe('presentationController @highlightClick flash', () => {
+	function actionShape(id: string, highlightClick: boolean): PptxElement {
+		return {
+			type: 'shape',
+			id,
+			x: 0,
+			y: 0,
+			width: 10,
+			height: 10,
+			actionClick: { action: 'ppaction://noaction', highlightClick },
+		} as unknown as PptxElement;
+	}
+
+	function stageTarget(elementId: string): HTMLElement {
+		const el = document.createElement('div');
+		el.dataset.elementId = elementId;
+		document.body.appendChild(el);
+		return el;
+	}
+
+	it('flashes the clicked element and clears it after the duration', () => {
+		vi.useFakeTimers();
+		const deck = new Deck();
+		deck.slides = [slide('s1', { elements: [actionShape('el-1', true)] })];
+		const controller = new PresentationController({
+			getSlides: () => deck.slides,
+			getCurrentIndex: () => deck.index,
+			navigate: () => {},
+		});
+		const target = stageTarget('el-1');
+		controller.handleStageClick(target);
+		expect(target.style.filter).toBe('brightness(1.18)');
+		vi.advanceTimersByTime(320);
+		expect(target.style.filter).toBe('');
+		vi.useRealTimers();
+	});
+
+	it('does not flash when the action carries no highlightClick', () => {
+		const deck = new Deck();
+		deck.slides = [slide('s1', { elements: [actionShape('el-1', false)] })];
+		const controller = new PresentationController({
+			getSlides: () => deck.slides,
+			getCurrentIndex: () => deck.index,
+			navigate: () => {},
+		});
+		const target = stageTarget('el-1');
+		controller.handleStageClick(target);
+		expect(target.style.filter).toBe('');
 	});
 });

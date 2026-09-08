@@ -43,10 +43,17 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	id: 'scalar',
 	shapeId: 'scalar',
 	name: 'scalar',
+	placeholderType: 'scalar',
+	placeholderSz: 'scalar',
+	placeholderOrient: 'scalar',
 	x: 'scalar',
 	y: 'scalar',
 	width: 'scalar',
 	height: 'scalar',
+	xEmu: 'scalar',
+	yEmu: 'scalar',
+	widthEmu: 'scalar',
+	heightEmu: 'scalar',
 	rotation: 'scalar',
 	skewX: 'scalar',
 	skewY: 'scalar',
@@ -67,6 +74,15 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	textSegments: 'text',
 	paragraphIndents: 'complex',
 	promptText: 'scalar',
+	// Resolved at load from the slide master, not authored on the slide - but it
+	// must still travel, because it is the PAIR of `text` that the save writer
+	// compares to tell "still inherited" from "edited on this slide". A peer that
+	// received `text` without it would see an edit where there is none and write
+	// the master's footer into the slide, detaching it from the Header & Footer
+	// dialog. Both peers recompute the same value from the same deck, so the two
+	// only ever disagree if one of them edited the text, which is the case this
+	// pairing is there to detect.
+	inheritedPlaceholderText: 'scalar',
 	linkedTxbxId: 'scalar',
 	linkedTxbxSeq: 'scalar',
 	// PptxShapeProperties
@@ -90,16 +106,27 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	svgData: 'scalar',
 	svgPath: 'scalar',
 	altText: 'scalar',
+	// Graphic-frame accessibility title (table/chart/smartArt/ole/media): see
+	// `PptxGraphicFrameParser.ts`'s `frameTitle`.
+	title: 'scalar',
+	isDecorative: 'scalar',
+	preferRelativeResize: 'scalar',
+	oleUpdateAutomatic: 'scalar',
 	cropLeft: 'scalar',
 	cropTop: 'scalar',
 	cropRight: 'scalar',
 	cropBottom: 'scalar',
+	fillRectLeft: 'scalar',
+	fillRectTop: 'scalar',
+	fillRectRight: 'scalar',
+	fillRectBottom: 'scalar',
 	tileOffsetX: 'scalar',
 	tileOffsetY: 'scalar',
 	tileScaleX: 'scalar',
 	tileScaleY: 'scalar',
 	tileFlip: 'scalar',
 	tileAlignment: 'scalar',
+	dpi: 'scalar',
 	imageEffects: 'complex',
 	cropShape: 'complex',
 	// TablePptxElement / ChartPptxElement / SmartArtPptxElement
@@ -126,6 +153,7 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	oleEmbeddedFileName: 'scalar',
 	oleEmbeddedMimeType: 'scalar',
 	oleEmbeddedByteSize: 'scalar',
+	oleFollowColorScheme: 'scalar',
 	// MediaPptxElement
 	mediaType: 'scalar',
 	mediaPath: 'scalar',
@@ -157,6 +185,11 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	// GroupPptxElement
 	children: 'complex',
 	groupFill: 'complex',
+	groupEffectStyle: 'complex',
+	chOffXEmu: 'scalar',
+	chOffYEmu: 'scalar',
+	chExtWidthEmu: 'scalar',
+	chExtHeightEmu: 'scalar',
 	// InkPptxElement
 	inkPaths: 'scalar',
 	inkColors: 'scalar',
@@ -164,6 +197,8 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 	inkOpacities: 'scalar',
 	inkTool: 'scalar',
 	inkPointPressures: 'complex',
+	inkPointTiltX: 'complex',
+	inkPointTiltY: 'complex',
 	// ContentPartPptxElement
 	inkStrokes: 'complex',
 	inkPartPath: 'scalar',
@@ -184,6 +219,7 @@ export const ELEMENT_FIELD_KIND: Record<AnyElementKey, CollabFieldKind> = {
 export const SLIDE_FIELD_KIND: Record<keyof PptxSlide, CollabFieldKind> = {
 	id: 'scalar',
 	rId: 'scalar',
+	slideId: 'scalar',
 	sourceSlideId: 'scalar',
 	name: 'scalar',
 	layoutPath: 'scalar',
@@ -195,11 +231,13 @@ export const SLIDE_FIELD_KIND: Record<keyof PptxSlide, CollabFieldKind> = {
 	elements: 'nested',
 	backgroundColor: 'scalar',
 	backgroundImage: 'scalar',
+	backgroundImageProperties: 'complex',
 	backgroundGradient: 'scalar',
 	backgroundPattern: 'complex',
 	backgroundShadeToTitle: 'scalar',
 	transition: 'complex',
 	animations: 'complex',
+	animationTimelineAnchors: 'complex',
 	nativeAnimations: 'complex',
 	rawTiming: 'complex',
 	notes: 'scalar',
@@ -214,6 +252,7 @@ export const SLIDE_FIELD_KIND: Record<keyof PptxSlide, CollabFieldKind> = {
 	clrMapOverride: 'complex',
 	backgroundShowAnimation: 'scalar',
 	showMasterShapes: 'scalar',
+	showMasterPhAnim: 'scalar',
 	guides: 'complex',
 	isDirty: 'scalar',
 	customerData: 'complex',

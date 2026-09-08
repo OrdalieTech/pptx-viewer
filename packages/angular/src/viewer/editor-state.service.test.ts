@@ -1,10 +1,24 @@
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 import { describe, expect, it } from 'vitest';
 
+import { SLIDE_TEMPLATES } from '../internal/shared';
 import { EditorStateService } from './editor-state.service';
 
 function element(id: string, x = 0, y = 0): PptxElement {
 	return { type: 'shape', id, name: '', x, y, width: 100, height: 50 } as PptxElement;
+}
+
+function group(id: string, children: PptxElement[]): PptxElement {
+	return {
+		type: 'group',
+		id,
+		name: '',
+		x: 0,
+		y: 0,
+		width: 100,
+		height: 50,
+		children,
+	} as PptxElement;
 }
 
 function slide(id: string, elements: PptxElement[]): PptxSlide {
@@ -160,6 +174,33 @@ describe('editorStateService', () => {
 		expect(svc.slides()).toHaveLength(2);
 	});
 
+	it('inserts a template slide after the given index with elements and undo support', () => {
+		const svc = deck();
+		svc.insertSlideFromTemplate(0, 'title');
+		expect(svc.slides()).toHaveLength(3);
+		// The template slide lands AFTER the given index and carries content.
+		const inserted = svc.slides()[1];
+		expect(inserted.id).not.toBe('s2');
+		expect(inserted.elements.length).toBeGreaterThan(0);
+		expect(inserted.backgroundColor).toBeTruthy();
+		expect(svc.slides().map((s) => s.slideNumber)).toStrictEqual([1, 2, 3]);
+		expect(svc.canUndo()).toBeTruthy();
+		expect(svc.undoLabel()).toBe('Insert slide from template');
+		svc.undo();
+		expect(svc.slides().map((s) => s.id)).toStrictEqual(['s1', 's2']);
+	});
+
+	it('inserts a distinct slide for every catalogued template (12 gallery options)', () => {
+		expect(SLIDE_TEMPLATES).toHaveLength(12);
+		const svc = deck();
+		for (const spec of SLIDE_TEMPLATES) {
+			svc.insertSlideFromTemplate(0, spec.id);
+		}
+		expect(svc.slides()).toHaveLength(2 + SLIDE_TEMPLATES.length);
+		const ids = svc.slides().map((s) => s.id);
+		expect(new Set(ids).size).toBe(ids.length);
+	});
+
 	it('deletes a slide but keeps at least one', () => {
 		const svc = deck();
 		svc.deleteSlide(0);
@@ -193,8 +234,24 @@ describe('editorStateService', () => {
 		expect(els).toHaveLength(4);
 		const pasted = els[3];
 		expect(pasted.id).not.toBe('a');
-		expect(pasted.x).toBe(12); // original a.x (0) + 12 paste offset
+		expect(pasted.x).toBe(20); // original a.x (0) + shared PASTE_OFFSET_PX
 		expect(svc.selectedIds()).toStrictEqual([pasted.id]);
+	});
+
+	it('re-ids every descendant of a pasted group, not just the root', () => {
+		const svc = new EditorStateService();
+		svc.setSlides([slide('s1', [group('g', [element('child-1'), element('child-2')])])]);
+		svc.select(['g']);
+		svc.copySelected(0);
+		svc.paste(0);
+		const els = svc.slides()[0].elements;
+		expect(els).toHaveLength(2);
+		const pastedGroup = els[1] as PptxElement & { children: PptxElement[] };
+		expect(pastedGroup.id).not.toBe('g');
+		const childIds = pastedGroup.children.map((c) => c.id);
+		expect(childIds).not.toContain('child-1');
+		expect(childIds).not.toContain('child-2');
+		expect(new Set(childIds).size).toBe(2);
 	});
 
 	it('cuts elements (copy then delete)', () => {
@@ -204,5 +261,45 @@ describe('editorStateService', () => {
 		expect(svc.slides()[0].elements.map((e) => e.id)).toStrictEqual(['a', 'c']);
 		svc.paste(0);
 		expect(svc.slides()[0].elements).toHaveLength(3);
+	});
+
+	// G10 (OpenXML parity audit, D3): a:spLocks/a:grpSpLocks/@noGrouping was
+	// parsed but never checked by groupSelected/ungroupSelected.
+	it('rejects grouping when a selected shape carries noGrouping', () => {
+		const locked = { ...element('a'), locks: { noGrouping: true } };
+		const svc = new EditorStateService();
+		svc.setSlides([slide('s1', [locked, element('b', 200)])]);
+		svc.select(['a', 'b']);
+		svc.groupSelected(0);
+		expect(svc.slides()[0].elements.map((el) => el.type)).toStrictEqual(['shape', 'shape']);
+		expect(svc.dirty()).toBeFalsy();
+	});
+
+	it('groups an unlocked selection normally', () => {
+		const svc = service();
+		svc.select(['a', 'b']);
+		svc.groupSelected(0);
+		expect(svc.slides()[0].elements.some((el) => el.type === 'group')).toBeTruthy();
+	});
+
+	it('refuses to ungroup a group whose own noGrouping lock is set', () => {
+		const locked = {
+			...group('g', [element('c1'), element('c2', 200)]),
+			locks: { noGrouping: true },
+		};
+		const svc = new EditorStateService();
+		svc.setSlides([slide('s1', [locked])]);
+		svc.select(['g']);
+		svc.ungroupSelected(0);
+		expect(svc.slides()[0].elements).toStrictEqual([locked]);
+		expect(svc.dirty()).toBeFalsy();
+	});
+
+	it('ungroups an unlocked group normally', () => {
+		const svc = new EditorStateService();
+		svc.setSlides([slide('s1', [group('g', [element('c1'), element('c2', 200)])])]);
+		svc.select(['g']);
+		svc.ungroupSelected(0);
+		expect(svc.slides()[0].elements.some((el) => el.type === 'group')).toBeFalsy();
 	});
 });

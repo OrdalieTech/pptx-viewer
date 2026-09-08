@@ -1,5 +1,6 @@
 import type { MasterViewTab, PptxSlide, PptxSlideMaster } from 'pptx-viewer-core';
-import type { CanvasSize } from 'pptx-viewer-shared';
+import { masterViewBackgroundColor, masterViewPseudoSlide } from 'pptx-viewer-shared';
+import type { CanvasSize, MasterViewCrudAction, MasterViewCrudActionId } from 'pptx-viewer-shared';
 
 import type { Translator } from '../i18n';
 import { createEl } from '../render';
@@ -19,6 +20,11 @@ export interface MasterViewSidebarOptions {
 	handoutPlaceholders?: readonly { type: string; idx?: string }[];
 	handoutMasterPresent: boolean;
 	handoutSlidesPerPage: number;
+	/** Editing affordances are offered only on an editable deck. */
+	editable?: boolean;
+	/** B4: the sidebar's CRUD command list for the current target (`[]` when there is none). */
+	crudActions: readonly MasterViewCrudAction[];
+	onCrudAction(id: MasterViewCrudActionId): void;
 	renderStage(slide: PptxSlide, scale: number): HTMLElement;
 	onSelect(masterIndex: number, layoutIndex: number | null): void;
 	onTabChange(tab: MasterViewTab): void;
@@ -55,7 +61,7 @@ function addBackgroundCard(
 	const input = createEl(doc, 'input', 'pptxv-master-background');
 	input.type = 'color';
 	input.value = /^#[\da-f]{6}$/i.test(color) ? color : '#ffffff';
-	input.setAttribute('aria-label', 'Master background color');
+	input.setAttribute('aria-label', t('pptx.master.backgroundColorLabel'));
 	input.addEventListener('input', () => onChange(input.value));
 	card.append(label, input);
 	parent.appendChild(card);
@@ -86,18 +92,41 @@ function addPlaceholderCard(
 	parent.appendChild(card);
 }
 
+/** The same pseudo-slide the master canvas paints, from the shared rule. */
 function slideFromMaster(master: PptxSlideMaster, layoutIndex: number | null): PptxSlide {
-	const layout = layoutIndex === null ? undefined : master.layouts?.[layoutIndex];
-	return {
-		id: layout?.path ?? master.path,
-		rId: '',
-		slideNumber: 0,
-		elements: layout
-			? [...(master.elements ?? []), ...(layout.elements ?? [])]
-			: (master.elements ?? []),
-		backgroundColor: layout?.backgroundColor ?? master.backgroundColor,
-		backgroundImage: layout?.backgroundImage ?? master.backgroundImage,
-	};
+	return (
+		masterViewPseudoSlide(
+			{ slideMasters: [master] },
+			{ tab: 'slides', masterIndex: 0, layoutIndex },
+		) ?? { id: master.path, rId: '', slideNumber: 0, elements: [] }
+	);
+}
+
+/** One CRUD button per {@link MasterViewCrudAction} (Insert/Duplicate/Delete/Rename x2). */
+function addCrudActionsRow(
+	doc: Document,
+	t: Translator,
+	parent: HTMLElement,
+	actions: readonly MasterViewCrudAction[],
+	onAction: (id: MasterViewCrudActionId) => void,
+): void {
+	if (actions.length === 0) {
+		return;
+	}
+	const row = createEl(doc, 'div', 'pptxv-master-crud');
+	for (const action of actions) {
+		const button = createEl(doc, 'button', 'pptxv-master-crud-btn');
+		button.type = 'button';
+		button.dataset.testid = `pptx-master-crud-${action.id}`;
+		button.textContent = t(action.labelKey);
+		button.disabled = !action.enabled;
+		if (action.disabledReasonKey) {
+			button.title = t(action.disabledReasonKey);
+		}
+		button.addEventListener('click', () => onAction(action.id));
+		row.appendChild(button);
+	}
+	parent.appendChild(row);
 }
 
 function renderSlides(
@@ -106,6 +135,22 @@ function renderSlides(
 	body: HTMLElement,
 	o: MasterViewSidebarOptions,
 ): void {
+	// Format Background for the selected master or layout. PowerPoint writes an
+	// explicit `p:bgPr` here, deliberately replacing a themed `p:bgRef`; the
+	// shared rule decides which part the colour lands on.
+	if (o.editable) {
+		addBackgroundCard(
+			doc,
+			t,
+			body,
+			masterViewBackgroundColor(
+				{ slideMasters: o.masters },
+				{ tab: 'slides', masterIndex: o.active.masterIndex, layoutIndex: o.active.layoutIndex },
+			) ?? '#ffffff',
+			o.onMasterBackgroundColorChange,
+		);
+		addCrudActionsRow(doc, t, body, o.crudActions, o.onCrudAction);
+	}
 	const scale = THUMB_WIDTH / Math.max(o.canvasSize.width, 1);
 	for (const [masterIndex, master] of o.masters.entries()) {
 		const entries: Array<{ layoutIndex: number | null; label: string }> = [

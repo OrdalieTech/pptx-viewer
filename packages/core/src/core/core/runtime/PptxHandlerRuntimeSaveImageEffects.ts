@@ -1,52 +1,36 @@
 import { XmlObject, TextStyle, TextSegment, ShapeStyle } from '../../types';
 import type { PptxImageLikeElement, PptxImageEffects } from '../../types';
+import { syncPictureShapeTypeWithCropShape } from '../../utils/crop-shape-geometry';
+import { applyA14ImageExtension } from './image-a14-effects-writer';
 import { applyImageAlphaEffects } from './image-alpha-effects';
 import { applyImageColorEffects } from './image-color-effects';
+import { buildSrcRectXml, clampCropForSave } from './image-crop-save';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveShapeXml';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	protected clampCropForSave(value: unknown): number {
-		if (typeof value !== 'number' || !Number.isFinite(value)) {
-			return 0;
-		}
-		return Math.max(0, Math.min(0.95, value));
+		return clampCropForSave(value);
 	}
 
+	/** See {@link buildSrcRectXml} (issue G2: signed crop insets). */
 	protected applyImageCropToBlipFill(
 		blipFill: XmlObject | undefined,
 		element: PptxImageLikeElement,
 	): void {
+		// Fold a changed "Crop to Shape" into `shapeType` so the geometry writer
+		// (which runs after the blip fill and reads `shapeType`) emits the
+		// matching `a:prstGeom`. Runs before the blipFill guard on purpose: the
+		// crop is geometry, not fill.
+		syncPictureShapeTypeWithCropShape(element);
 		if (!blipFill) {
 			return;
 		}
-
-		const cropLeft = this.clampCropForSave(element.cropLeft);
-		const cropTop = this.clampCropForSave(element.cropTop);
-		const cropRight = this.clampCropForSave(element.cropRight);
-		const cropBottom = this.clampCropForSave(element.cropBottom);
-
-		const horizontalCrop = cropLeft + cropRight;
-		const verticalCrop = cropTop + cropBottom;
-		const hasCrop = horizontalCrop > 0.0001 || verticalCrop > 0.0001;
-
-		if (!hasCrop) {
+		const srcRect = buildSrcRectXml(element);
+		if (!srcRect) {
 			delete blipFill['a:srcRect'];
 			return;
 		}
-
-		const safeHorizontalScale = horizontalCrop >= 0.99 ? 0.99 / horizontalCrop : 1;
-		const safeVerticalScale = verticalCrop >= 0.99 ? 0.99 / verticalCrop : 1;
-		const normalizedLeft = this.clampCropForSave(cropLeft * safeHorizontalScale);
-		const normalizedRight = this.clampCropForSave(cropRight * safeHorizontalScale);
-		const normalizedTop = this.clampCropForSave(cropTop * safeVerticalScale);
-		const normalizedBottom = this.clampCropForSave(cropBottom * safeVerticalScale);
-
-		blipFill['a:srcRect'] = {
-			'@_l': String(Math.round(normalizedLeft * 100000)),
-			'@_t': String(Math.round(normalizedTop * 100000)),
-			'@_r': String(Math.round(normalizedRight * 100000)),
-			'@_b': String(Math.round(normalizedBottom * 100000)),
-		};
+		blipFill['a:srcRect'] = srcRect;
 	}
 
 	protected applyImageEffectsToBlip(
@@ -133,7 +117,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			delete blip['a:tint'];
 		}
 
-		// a:fillOverlay — preserve inner fill XML opaquely
+		// a:fillOverlay: preserve inner fill XML opaquely
 		if (nextEffects.fillOverlay) {
 			const node: XmlObject = {
 				'@_blend': nextEffects.fillOverlay.blend,
@@ -163,6 +147,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		} else {
 			delete blip['a:blur'];
 		}
+
+		// a14 extension: artistic effect, Corrections / Color panel settings and
+		// the background-removal layer. Rebuilt from the model so a gallery pick
+		// actually reaches the file, and removed when everything is cleared.
+		applyA14ImageExtension(blip, nextEffects);
 	}
 
 	protected normalizePresetGeometry(shapeType: string | undefined): string {
@@ -205,6 +194,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		return this.colorStyleCodec.buildBlurXml(shapeStyle);
 	}
 
+	protected buildFillOverlayXml(shapeStyle: ShapeStyle): XmlObject | undefined {
+		return this.colorStyleCodec.buildFillOverlayXml(shapeStyle);
+	}
+
 	protected buildLineEffectListXml(shapeStyle: ShapeStyle): XmlObject | undefined {
 		return this.colorStyleCodec.buildLineEffectListXml(shapeStyle);
 	}
@@ -220,6 +213,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 		if (vAlign === 'bottom') {
 			return 'b';
+		}
+		if (vAlign === 'distributed') {
+			return 'dist';
+		}
+		if (vAlign === 'justified') {
+			return 'just';
 		}
 		return undefined;
 	}

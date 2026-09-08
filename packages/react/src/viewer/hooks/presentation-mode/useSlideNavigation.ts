@@ -1,4 +1,10 @@
 import type { PptxAction, PptxSlide } from 'pptx-viewer-core';
+import {
+	hasShowSlideAfter,
+	nextShowSlideIndex,
+	previousShowSlideIndex,
+	resolveAutoAdvanceDelayMs,
+} from 'pptx-viewer-shared';
 import { useRef, useCallback } from 'react';
 
 import type { ViewerMode } from '../../types';
@@ -39,6 +45,8 @@ export interface UseSlideNavigationInput {
 	onSetMode: (mode: ViewerMode) => void;
 	onSetActiveSlideIndex: (index: number) => void;
 	onPlayActionSound?: (soundPath: string) => void;
+	/** Stop the current transition sound (`p:sndAc/p:endSnd`). See `slide-transition.ts`. */
+	onStopActionSound?: () => void;
 	loopContinuously?: boolean;
 	/** Whether to use rehearsed auto-advance timings. When false, slides advance only on click. */
 	useTimings?: boolean;
@@ -50,17 +58,33 @@ export interface UseSlideNavigationInput {
 	onAdvancePastLastSlide?: () => void;
 	playNextAnimationGroup: () => boolean;
 	clearPresentationTimers: () => void;
-	runPresentationEntranceAnimations: (slideIndex: number) => void;
+	/** Seed the incoming slide's initial animation states (no playback). */
+	seedSlideAnimations: (slideIndex: number, options?: { completed?: boolean }) => void;
+	/** Start the seeded slide's playback (auto-play group + entrance timers). */
+	startSlideAnimations: (slideIndex: number) => void;
 	presentationTimersRef: { current: number[] };
 	rehearsing: boolean;
 	recordCurrentSlideTime: (slideIndex: number) => void;
 	setShowRehearsalSummary: (value: boolean) => void;
+	/** `ppaction://hlinkshowjump?jump=lastslideviewed`. */
+	onLastViewed?: () => void;
+	/** `ppaction://customshow?id=<id>[&return=true]`. */
+	onCustomShow?: (customShowId: string, returnAfter: boolean) => void;
+	/** `ppaction://hlinkfile`. */
+	onOpenFile?: (target: string) => void;
+	/** `ppaction://hlinkpres`. */
+	onOpenPresentation?: (target: string) => void;
+	/** `ppaction://media`. */
+	onPlayMedia?: (elementId: string | undefined) => void;
+	/** `ppaction://ole?verb=<n>`. */
+	onOleVerb?: (verb: number, elementId: string | undefined) => void;
 }
 
 export interface UseSlideNavigationResult {
 	movePresentationSlide: (direction: 1 | -1, trigger?: SlideAdvanceTrigger) => void;
 	navigateToSlide: (slideIndex: number) => void;
-	handlePresentationAction: (action: PptxAction) => void;
+	/** `elementId` is the clicked element, for the verbs that act on it (`playMedia`, `oleVerb`). */
+	handlePresentationAction: (action: PptxAction, elementId?: string) => void;
 	scheduleAutoAdvanceForSlide: (slideIndex: number) => void;
 }
 
@@ -79,16 +103,24 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 		onSetMode,
 		onSetActiveSlideIndex,
 		onPlayActionSound,
+		onStopActionSound,
 		loopContinuously,
 		useTimings,
 		onAdvancePastLastSlide,
 		playNextAnimationGroup,
 		clearPresentationTimers,
-		runPresentationEntranceAnimations,
+		seedSlideAnimations,
+		startSlideAnimations,
 		presentationTimersRef,
 		rehearsing,
 		recordCurrentSlideTime,
 		setShowRehearsalSummary,
+		onLastViewed,
+		onCustomShow,
+		onOpenFile,
+		onOpenPresentation,
+		onPlayMedia,
+		onOleVerb,
 	} = input;
 
 	const movePresentationSlideRef = useRef<(direction: 1 | -1) => void>(() => {});
@@ -99,27 +131,18 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 
 	const scheduleAutoAdvanceForSlide = useCallback(
 		(slideIndex: number) => {
-			// When useTimings is explicitly false (manual advance mode), skip auto-advance
-			if (useTimings === false) {
+			// PowerPoint's "Advance slide: After <n>" (`p:transition/@advTm`),
+			// resolved by the shared helper every binding shares so a deck cannot
+			// advance in one framework and stall in another. `useTimings === false`
+			// is "Advance slides: Manually", which ignores authored timings.
+			const delayMs = resolveAutoAdvanceDelayMs(slides[slideIndex], { useTimings });
+			if (delayMs === undefined) {
 				return;
 			}
 
-			const slide = slides[slideIndex];
-			const advanceAfterMs = slide?.transition?.advanceAfterMs;
-			if (
-				typeof advanceAfterMs !== 'number' ||
-				!Number.isFinite(advanceAfterMs) ||
-				advanceAfterMs < 0
-			) {
-				return;
-			}
-
-			const timer = window.setTimeout(
-				() => {
-					movePresentationSlideRef.current(1);
-				},
-				Math.max(0, advanceAfterMs),
-			);
+			const timer = window.setTimeout(() => {
+				movePresentationSlideRef.current(1);
+			}, delayMs);
 			presentationTimersRef.current.push(timer);
 		},
 		[slides, presentationTimersRef, useTimings],
@@ -141,6 +164,9 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 				return;
 			}
 
+			// The show order (custom-show membership minus hidden slides) is resolved
+			// upstream; the shared helpers below turn it into "what comes next", so
+			// a slide the author hid is skipped in every binding identically.
 			const availableSlideIndexes =
 				visibleSlideIndexes.length > 0
 					? visibleSlideIndexes
@@ -149,12 +175,11 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 				return;
 			}
 
-			const currentVisiblePosition = availableSlideIndexes.indexOf(presentationSlideIndex);
-			const normalizedCurrentPosition = currentVisiblePosition >= 0 ? currentVisiblePosition : 0;
-			const nextPosition = normalizedCurrentPosition + direction;
+			const pastLastSlide =
+				direction === 1 && !hasShowSlideAfter(presentationSlideIndex, availableSlideIndexes);
 
 			// --- Rehearsal: advancing past last slide ends rehearsal ---
-			if (rehearsing && direction === 1 && nextPosition >= availableSlideIndexes.length) {
+			if (rehearsing && pastLastSlide) {
 				recordCurrentSlideTime(presentationSlideIndex);
 				try {
 					if (document.fullscreenElement) {
@@ -172,31 +197,17 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 
 			// Advancing past the last slide (no loop, not rehearsing): let the
 			// presentation hook decide (black end-of-show slide or exit).
-			if (
-				!loopContinuously &&
-				!rehearsing &&
-				direction === 1 &&
-				nextPosition >= availableSlideIndexes.length &&
-				onAdvancePastLastSlide
-			) {
+			if (!loopContinuously && !rehearsing && pastLastSlide && onAdvancePastLastSlide) {
 				onAdvancePastLastSlide();
 				return;
 			}
 
-			// Loop wrap: if advancing past the last slide and loop is enabled,
-			// wrap around to the first slide instead of clamping.
-			let resolvedPosition: number;
-			if (
-				loopContinuously &&
-				!rehearsing &&
-				direction === 1 &&
-				nextPosition >= availableSlideIndexes.length
-			) {
-				resolvedPosition = 0;
-			} else {
-				resolvedPosition = Math.min(availableSlideIndexes.length - 1, Math.max(0, nextPosition));
-			}
-			const nextSlideIndex = availableSlideIndexes[resolvedPosition];
+			const nextSlideIndex =
+				direction === 1
+					? nextShowSlideIndex(presentationSlideIndex, availableSlideIndexes, {
+							loop: Boolean(loopContinuously) && !rehearsing,
+						})
+					: previousShowSlideIndex(presentationSlideIndex, availableSlideIndexes);
 			if (nextSlideIndex === undefined || nextSlideIndex === presentationSlideIndex) {
 				return;
 			}
@@ -210,16 +221,23 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 				slides,
 				currentSlideIndex: presentationSlideIndex,
 				onPlayActionSound,
+				onStopActionSound,
 				setPresentationSlideVisible,
 				clearPresentationTimers,
 				setPresentationSlideIndex,
 				onSetActiveSlideIndex,
-				runPresentationEntranceAnimations,
+				seedSlideAnimations,
+				startSlideAnimations,
 				scheduleAutoAdvanceForSlide: rehearsing ? undefined : scheduleAutoAdvanceForSlide,
 				presentationTimersRef,
 				setTransitionOverlay,
-				// PowerPoint plays a slide's transition only when advancing into it.
-				playTransition: direction === 1,
+				// PowerPoint plays a slide's transition only when advancing into it,
+				// and replays the LEAVING slide's transition in reverse when stepping
+				// back (a morph glides its shapes back to where they came from).
+				playTransition: true,
+				reverse: direction === -1,
+				// Stepping back onto a slide shows it with its builds already played.
+				seedCompleted: direction === -1,
 			});
 		},
 		[
@@ -227,6 +245,7 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 			loopContinuously,
 			onAdvancePastLastSlide,
 			onPlayActionSound,
+			onStopActionSound,
 			onSetActiveSlideIndex,
 			onSetMode,
 			playNextAnimationGroup,
@@ -234,7 +253,8 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 			presentationTimersRef,
 			recordCurrentSlideTime,
 			rehearsing,
-			runPresentationEntranceAnimations,
+			seedSlideAnimations,
+			startSlideAnimations,
 			scheduleAutoAdvanceForSlide,
 			setShowRehearsalSummary,
 			slides,
@@ -266,25 +286,35 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 				slides,
 				currentSlideIndex: presentationSlideIndex,
 				onPlayActionSound,
+				onStopActionSound,
 				setPresentationSlideVisible,
 				clearPresentationTimers,
 				setPresentationSlideIndex,
 				onSetActiveSlideIndex,
-				runPresentationEntranceAnimations,
+				seedSlideAnimations,
+				startSlideAnimations,
 				scheduleAutoAdvanceForSlide,
 				presentationTimersRef,
 				setTransitionOverlay,
-				// Direct jumps (action buttons, zoom tiles) are transition-less.
-				playTransition: false,
+				// A jump ENTERS the target slide, so PowerPoint plays that slide's
+				// transition exactly as it does for a forward advance - hyperlinks,
+				// action buttons, Home/End and "type a number + Enter" all animate.
+				// Suppressing it here is why a deck navigated by clicking its own
+				// on-slide links (this is how the issue #131 reporter drives their
+				// wheel menu) appeared to have no morph at all, while the same
+				// transition played fine on PageDown.
+				playTransition: true,
 			});
 		},
 		[
 			clearPresentationTimers,
 			onPlayActionSound,
+			onStopActionSound,
 			onSetActiveSlideIndex,
 			presentationSlideIndex,
 			presentationTimersRef,
-			runPresentationEntranceAnimations,
+			seedSlideAnimations,
+			startSlideAnimations,
 			scheduleAutoAdvanceForSlide,
 			slides,
 			setPresentationSlideIndex,
@@ -298,16 +328,35 @@ export function useSlideNavigation(input: UseSlideNavigationInput): UseSlideNavi
 	// -----------------------------------------------------------------------
 
 	const handlePresentationAction = useCallback(
-		(action: PptxAction) => {
+		(action: PptxAction, elementId?: string) => {
 			handlePresentationActionImpl(action, {
+				elementId,
 				movePresentationSlide,
 				navigateToSlide,
 				onPlayActionSound,
 				onSetMode,
 				slidesLength: slides.length,
+				onLastViewed,
+				onCustomShow,
+				onOpenFile,
+				onOpenPresentation,
+				onPlayMedia,
+				onOleVerb,
 			});
 		},
-		[movePresentationSlide, navigateToSlide, onPlayActionSound, onSetMode, slides.length],
+		[
+			movePresentationSlide,
+			navigateToSlide,
+			onPlayActionSound,
+			onSetMode,
+			slides.length,
+			onLastViewed,
+			onCustomShow,
+			onOpenFile,
+			onOpenPresentation,
+			onPlayMedia,
+			onOleVerb,
+		],
 	);
 
 	return {

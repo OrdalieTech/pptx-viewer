@@ -15,12 +15,33 @@ import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 import { hasTextProperties, hasShapeProperties } from 'pptx-viewer-core';
 
 import { parseHexColor, lerpColor } from './morph-color';
-import { generateGeometryMorphAnimation } from './morph-geometry-keyframes';
+import { flattenMorphElements } from './morph-flatten';
+import {
+	generateGeometryMorphAnimation,
+	serializeShapeAdjustments,
+} from './morph-geometry-keyframes';
+import {
+	generateImageCropGhostAnimations,
+	generateImageCropMorphAnimations,
+	morphImageCropChanged,
+} from './morph-image-crop';
 import { matchMorphElementsFull } from './morph-matching';
+import type { MorphBox } from './morph-overlay-order';
+import { boxesOverlap, travelledBox } from './morph-overlay-order';
 import { tokenizeText } from './morph-text';
+import { morphTextReplacedInSlot } from './morph-text-slot';
 import { buildTokenMorphAnimations, diffTokens } from './morph-text-tokens';
 import type { MorphAnimationStyle, MorphMode, MorphPair } from './morph-types';
-import { MORPH_EASING } from './morph-types';
+import {
+	MORPH_CROSSFADE_EASING,
+	MORPH_EASING,
+	MORPH_FADE_IN_EASING,
+	MORPH_FADE_IN_START_PERCENT,
+	MORPH_FADE_OUT_END_PERCENT,
+	MORPH_FADE_OUT_HOLD_PERCENT,
+} from './morph-types';
+import type { ZOrderJourney } from './morph-z-order';
+import { computeZOrderSwaps } from './morph-z-order';
 
 // ---------------------------------------------------------------------------
 // Build colour/stroke interpolation keyframes
@@ -103,6 +124,241 @@ export function buildStrokeInterpolationProps(
 }
 
 // ---------------------------------------------------------------------------
+// Appearance comparison (drives the matched-pair crossfade)
+// ---------------------------------------------------------------------------
+
+/** Depth cap for the recursive signature; real decks never nest this far. */
+const SIGNATURE_MAX_DEPTH = 8;
+
+/**
+ * A compact description of everything about an element that is actually
+ * PAINTED, used to decide whether a matched morph pair has to crossfade.
+ *
+ * Two matched shapes that differ only in geometry can simply glide (the
+ * incoming element is already the right colour). Two that differ in fill,
+ * outline, picture or text look like a hard cut if we just swap them, because
+ * the outgoing appearance is never drawn: the incoming element is rendered at
+ * its final appearance from the very first frame.
+ *
+ * A GROUP carries none of that on itself: everything it paints lives in its
+ * children, so the signature recurses. Without that the group holding a
+ * slide's centre content matched its counterpart, compared equal, and its
+ * ghost stayed fully opaque for the whole transition - then vanished with the
+ * overlay, snapping the old text to the new one in a single frame at the very
+ * END of the morph (issue #131).
+ */
+function appearanceSignature(element: PptxElement, depth = 0): string {
+	const parts: string[] = [element.type];
+	if (hasShapeProperties(element)) {
+		const style = element.shapeStyle;
+		parts.push(
+			(element as { shapeType?: string }).shapeType ?? '',
+			// An adjustment handle that moved repaints the outline just as surely as
+			// a different preset does, and `shouldGeometryMorph` already treats the
+			// two the same. Leaving it out let a rounded rectangle whose corner
+			// radius changed read as INERT: its ghost was painted statically at the
+			// old outline (issue #161) while the live half, held invisible beneath
+			// it, tweened its `clip-path` where nobody could see it, and the new
+			// outline appeared in one frame when the overlay came down.
+			serializeShapeAdjustments(element),
+			style?.fillMode ?? '',
+			style?.fillColor ?? '',
+			style?.fillGradient ?? '',
+			String(style?.fillOpacity ?? ''),
+			style?.strokeColor ?? '',
+			String(style?.strokeWidth ?? ''),
+		);
+	}
+	const image = element as { imagePath?: string; svgPath?: string };
+	parts.push(image.imagePath ?? '', image.svgPath ?? '');
+	if (hasTextProperties(element)) {
+		parts.push(element.text ?? '', element.textStyle?.color ?? '');
+	}
+	const children = (element as { children?: PptxElement[] }).children;
+	if (children && depth < SIGNATURE_MAX_DEPTH) {
+		for (const child of children) {
+			parts.push(appearanceSignature(child, depth + 1));
+		}
+	}
+	return parts.join('');
+}
+
+/**
+ * Whether a matched pair needs a crossfade rather than a plain glide.
+ *
+ * PowerPoint's Morph dissolves a shape's appearance into its counterpart's
+ * while it travels. Without this, a deck whose slides are near-duplicates (the
+ * usual Morph authoring pattern: duplicate the slide, then restyle one shape)
+ * appeared to have no transition at all, because every persisting shape was
+ * painted in its FINAL state on frame 1 and only the handful of genuinely new
+ * or departing shapes faded (issue #131).
+ */
+export function morphPairNeedsCrossfade(fromElement: PptxElement, toElement: PptxElement): boolean {
+	return appearanceSignature(fromElement) !== appearanceSignature(toElement);
+}
+
+/** Sub-pixel tolerance for calling a pair's geometry unchanged. */
+const GEOMETRY_EPSILON = 0.5;
+
+/**
+ * Whether a matched pair is INERT: identical appearance, and neither moved,
+ * resized, rotated nor flipped. Its ghost in the overlay is therefore a
+ * pixel-perfect stand-in for the live element underneath.
+ *
+ * Most of a Morph deck is inert - the authoring pattern is to duplicate a slide
+ * and restyle one thing, so 26 of 32 pairs on this deck's transitions are
+ * untouched - which makes what we do with them the dominant visual effect.
+ *
+ * A picture's SOURCE CROP counts here even though it moves no box: PowerPoint's
+ * "Scale Height"/"Scale Width" is an `a:srcRect` crop inside an unchanged frame,
+ * so a picture rescaled between two slides compares equal on every other axis
+ * and would otherwise be skipped entirely (issue #148).
+ */
+export function isInertMorphPair(fromElement: PptxElement, toElement: PptxElement): boolean {
+	return (
+		!morphImageCropChanged(fromElement, toElement) &&
+		Math.abs(fromElement.x - toElement.x) <= GEOMETRY_EPSILON &&
+		Math.abs(fromElement.y - toElement.y) <= GEOMETRY_EPSILON &&
+		Math.abs(fromElement.width - toElement.width) <= GEOMETRY_EPSILON &&
+		Math.abs(fromElement.height - toElement.height) <= GEOMETRY_EPSILON &&
+		(fromElement.rotation ?? 0) === (toElement.rotation ?? 0) &&
+		Boolean(fromElement.flipHorizontal) === Boolean(toElement.flipHorizontal) &&
+		Boolean(fromElement.flipVertical) === Boolean(toElement.flipVertical) &&
+		(fromElement.opacity ?? 1) === (toElement.opacity ?? 1) &&
+		!morphPairNeedsCrossfade(fromElement, toElement)
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Which outgoing shapes the overlay has to paint
+// ---------------------------------------------------------------------------
+
+/**
+ * The outgoing shapes the transition overlay actually has to paint.
+ *
+ * The overlay is one flat layer ABOVE the live stage, so everything it paints
+ * hides whatever the incoming slide is doing underneath - including the shapes
+ * that only exist on the incoming slide and are dissolving IN. A ghost is
+ * therefore only worth that cost when it shows something the live stage cannot:
+ *
+ * - a shape with **no counterpart** has nowhere else to be drawn;
+ * - a pair whose **appearance changed** has to dissolve its old look away, and
+ *   the live element underneath is already wearing the new one;
+ * - a pair that merely moved (or did not move at all) is drawn identically by
+ *   its live counterpart, which travels the very same path - the ghost is a
+ *   duplicate, and an opaque one.
+ *
+ * The last kind is kept in exactly one case: when something painted BELOW it is
+ * itself dissolving, whatever is left out of the overlay would be seen through
+ * that dissolve instead of over it. That is the issue #131 case (a full-slide
+ * backdrop crossfading between two photos, with the wheel drawn over it) and it
+ * still gets a full set of ghosts. When the backdrop is UNCHANGED, as it is on
+ * every jump into this deck's detail slides, nothing needs protecting and the
+ * backdrop ghost is dropped - which is what stopped the incoming callouts from
+ * appearing at all until the overlay was torn down (issue #144).
+ *
+ * @param outgoingElements - The outgoing slide, flattened, in document order.
+ * @param pairs - The matched pairs; anything not in here has no counterpart.
+ * @returns The ids of the outgoing elements to paint, in the same order.
+ */
+export function resolveMorphGhostIds(
+	outgoingElements: PptxElement[],
+	pairs: MorphPair[],
+): Set<string> {
+	const counterparts = new Map(pairs.map((pair) => [pair.fromElement.id, pair.toElement]));
+	const painted = new Set<string>();
+	const paintedBoxes: MorphBox[] = [];
+
+	for (const element of outgoingElements) {
+		const counterpart = counterparts.get(element.id);
+		const box = travelledBox(element, counterpart);
+		const required =
+			!counterpart ||
+			morphPairNeedsCrossfade(element, counterpart) ||
+			paintedBoxes.some((below) => boxesOverlap(below, box));
+		if (required) {
+			painted.add(element.id);
+			paintedBoxes.push(box);
+		}
+	}
+	return painted;
+}
+
+/**
+ * Whether a crossfading pair's INCOMING half may fade in over its ghost.
+ *
+ * Fading both halves of a dissolve leaves the middle of the transition
+ * part-transparent, so a solid object goes see-through and the background shows
+ * through it - the reason the incoming half is otherwise pinned at its final
+ * opacity. That only matters when the element actually paints a body: a text
+ * box over `noFill` has nothing to hollow out, and pinning it means the new
+ * wording is at full strength from frame 1 while the old dissolves off it,
+ * which reads as the new text simply appearing rather than cross-dissolving.
+ *
+ * A GROUP owns no fill of its own, so the question has to be asked of its
+ * children: the wheel deck's centre panel is a group around an opaque disc, and
+ * fading it in while its ghost faded out turned the disc translucent for the
+ * middle of every hub-to-topic morph.
+ */
+/**
+ * Whether a matched pair's INCOMING half dissolves in rather than being painted
+ * at full strength from the first frame.
+ *
+ * Exported because the overlay has to know: a half that dissolves in can be
+ * lifted above a ghost that would otherwise hide it, and a half that is pinned
+ * cannot (lifting that one turns its dissolve into a cut). See
+ * `resolveMorphOverlayArrivals`.
+ *
+ * @param fromElement - The outgoing half of the pair.
+ * @param toElement - The incoming half.
+ * @param ghosted - Whether the overlay paints this pair's ghost at all.
+ */
+export function morphPairIncomingFadesIn(
+	fromElement: PptxElement,
+	toElement: PptxElement,
+	ghosted = true,
+): boolean {
+	return (
+		!(ghosted && isInertMorphPair(fromElement, toElement)) &&
+		morphPairNeedsCrossfade(fromElement, toElement) &&
+		crossfadeIncomingMayFadeIn(toElement)
+	);
+}
+
+function crossfadeIncomingMayFadeIn(element: PptxElement): boolean {
+	const image = element as { imagePath?: string; svgPath?: string };
+	if (image.imagePath || image.svgPath) {
+		return false;
+	}
+	const children = (element as { children?: PptxElement[] }).children;
+	if (children?.length) {
+		return children.every((child) => crossfadeIncomingMayFadeIn(child));
+	}
+	if (!hasShapeProperties(element)) {
+		return true;
+	}
+	const style = element.shapeStyle;
+	if (!style) {
+		return true;
+	}
+	// An explicit `a:noFill`, or a fill turned fully transparent, paints nothing.
+	if (style.fillMode === 'none' || (style.fillOpacity ?? 1) === 0) {
+		return true;
+	}
+	// Otherwise anything that names a paint - solid colour, gradient, pattern or
+	// image fill - is a body that would go see-through if both halves faded.
+	// `fillMode` being absent is NOT on its own evidence of no fill: a style
+	// carrying only `fillColor` still paints.
+	return !(
+		style.fillColor ||
+		style.fillGradient ||
+		style.fillGradientStops?.length ||
+		style.fillPatternPreset ||
+		style.fillImageUrl
+	);
+}
+
+// ---------------------------------------------------------------------------
 // Generate CSS keyframes for morph pairs
 // ---------------------------------------------------------------------------
 
@@ -115,37 +371,153 @@ export function buildStrokeInterpolationProps(
  * @param pairs - Matched element pairs from the morph matching pass.
  * @param durationMs - Animation duration in milliseconds.
  * @param _mode - Morph granularity mode (reserved for future use in this function).
+ * @param ghostIds - Outgoing ids the overlay will paint (see
+ *   {@link resolveMorphGhostIds}). A pair whose ghost is NOT painted has no
+ *   stand-in above it, so this half must stay visible. Defaults to "all", the
+ *   behaviour before the ghost set existed.
+ * @param zSwaps - Incoming id -> z-index journey for stacking-order swaps (see
+ *   {@link computeZOrderSwaps}). The track rides the same shorthand.
  * @returns An array of animation style descriptors for each pair.
  */
 export function generateMorphAnimations(
 	pairs: MorphPair[],
 	durationMs: number,
 	_mode: MorphMode = 'object',
+	ghostIds?: ReadonlySet<string>,
+	zSwaps?: ReadonlyMap<string, ZOrderJourney>,
 ): MorphAnimationStyle[] {
 	const animations: MorphAnimationStyle[] = [];
 
 	for (let index = 0; index < pairs.length; index++) {
 		const { fromElement, toElement } = pairs[index];
+		const ghosted = ghostIds?.has(fromElement.id) ?? true;
+		// Nothing moved, nothing changed, and no ghost is painted over it: the
+		// element already looks exactly as it should, for the whole morph. Leaving
+		// it alone (rather than animating it from itself to itself) also keeps it
+		// out of the binding's animation state, so nothing has to unwind at the end.
+		//
+		// EXCEPT when the pair's stacking order swaps: a z-index journey only
+		// works if BOTH sides of the flip are stepped together. The swapping
+		// counterpart may be this very inert pair - skipping it leaves it at
+		// its static (incoming) layer, and since an omitted z-index loses the
+		// DOM-order tie-break to an animated one, the flip renders as an
+		// immediate swap instead of a mid-flight one. Emit the journey alone.
+		if (!ghosted && isInertMorphPair(fromElement, toElement)) {
+			const inertZSwap = zSwaps?.get(toElement.id);
+			if (!inertZSwap) {
+				continue;
+			}
+			const inertName = `pptx-morph-z-${index}-${toElement.id.replace(/[^a-zA-Z0-9]/gu, '')}`;
+			animations.push({
+				elementId: toElement.id,
+				animation: `${inertName} ${durationMs}ms ${MORPH_EASING} forwards`,
+				keyframes: `
+@keyframes ${inertName} {
+\tfrom {
+\t\tz-index: ${inertZSwap.from};
+\t}
+\tto {
+\t\tz-index: ${inertZSwap.to};
+\t}
+}`,
+			});
+			continue;
+		}
 		const safeName = `pptx-morph-${index}-${toElement.id.replace(/[^a-zA-Z0-9]/gu, '')}`;
 
-		// Position and geometry interpolation
-		const dx = fromElement.x - toElement.x;
-		const dy = fromElement.y - toElement.y;
-		const sx = Math.max(fromElement.width, 1) / Math.max(toElement.width, 1);
-		const sy = Math.max(fromElement.height, 1) / Math.max(toElement.height, 1);
-		const dr = (fromElement.rotation ?? 0) - (toElement.rotation ?? 0);
+		// Position and geometry interpolation. Deltas are CENTRE to centre:
+		// scale/rotate pivot on the element's own centre (`transform-origin:
+		// center`), so a top-left delta would land a resized pair off by half
+		// the size difference.
+		//
+		// A text box that only changed its WORDS stays where it is: its box is a
+		// container PowerPoint re-fits around the new wording, not a shape that
+		// moved, and interpolating it would stretch the type by however much the
+		// text changed length. See {@link morphTextReplacedInSlot}.
+		const inSlot = morphTextReplacedInSlot(fromElement, toElement);
+		const dx = inSlot
+			? 0
+			: fromElement.x + fromElement.width / 2 - (toElement.x + toElement.width / 2);
+		const dy = inSlot
+			? 0
+			: fromElement.y + fromElement.height / 2 - (toElement.y + toElement.height / 2);
+		const sx = inSlot ? 1 : Math.max(fromElement.width, 1) / Math.max(toElement.width, 1);
+		const sy = inSlot ? 1 : Math.max(fromElement.height, 1) / Math.max(toElement.height, 1);
 		const fromOpacity = fromElement.opacity ?? 1;
 		const toOpacity = toElement.opacity ?? 1;
 
-		// Build from/to property blocks
+		// The animation's `transform` REPLACES the element's static transform
+		// (`rotate(θ) scaleX(±1) scaleY(±1)` from the container style), so every
+		// keyframe must restate the element's own rotation/flips or they vanish
+		// for the whole flight and snap back at the end. The issue #131 deck
+		// rotates its ring graphic per slide so the arrow points at the selected
+		// wedge; interpolating only the DELTA played the ring at `rotate(dr)->0`
+		// instead of `rotate(from)->rotate(to)`, sweeping giant arcs across the
+		// slide.
+		//
+		// The ROTATION must sit LEFT of the scale: CSS applies the list
+		// right-to-left, so `scale(sx, sy) rotate(θ)` scales the rotated shape
+		// along the PARENT's axes - a shear for any rotated pair whose sx≠sy
+		// (a rotated sliver widening 11x reads as stretch + skew), while
+		// `rotate(θ) scale(sx, sy)` scales the box along its OWN axes, which is
+		// the resize PowerPoint animates. A picture's crop track transforms
+		// the img inside that same local frame; where the frame scales too the
+		// track is sampled against this scale (see `morph-image-crop`), since
+		// two independently eased tracks would not compose to a plain reveal.
+		//
+		// Flips are stated PER FRAME, each endpoint carrying ITS OWN element's
+		// flags: when they differ (a small mirror-flipped photo growing into an
+		// upright one), CSS interpolates the scale arguments numerically through
+		// zero, exactly the edge-on card flip PowerPoint plays. The factors are
+		// always emitted (even when +1) so both frames share one function list
+		// and interpolate numerically instead of falling back to matrix
+		// decomposition.
+		const toRot = toElement.rotation ?? 0;
+		const fromRot = inSlot ? toRot : shortestRotationTarget(toRot, fromElement.rotation ?? 0);
+		const fromFlips = flipFactors(fromElement);
+		const toFlips = flipFactors(toElement);
+
+		// A GHOSTED inert pair is painted twice: its ghost is a pixel-identical
+		// copy sitting in the overlay directly above it. For an opaque element
+		// that is invisible, but a PART-TRANSPARENT one composites with itself and
+		// reads noticeably more solid for the whole transition, then snaps back
+		// when the overlay is torn down - "opacity animating on elements that
+		// should be unchanged" (issue #131). Hold this half hidden and let the
+		// ghost be the single visible copy; both are removed together when the
+		// plan ends, so the element reappears in the same frame. Where the ghost
+		// was dropped as redundant (see `resolveMorphGhostIds`) this half IS the
+		// single copy and the loop above has already skipped it.
+		const inert = ghosted && isInertMorphPair(fromElement, toElement);
+		// A restyled pair dissolves via its outgoing GHOST, which fades 1 -> 0 in
+		// the overlay above this element. Only a body-less element (a text box on
+		// `noFill`) may fade IN underneath it - see `crossfadeIncomingMayFadeIn`.
+		const crossfadesIn = morphPairIncomingFadesIn(fromElement, toElement, ghosted);
+
+		// Build from/to property blocks. A half that dissolves IN keeps its opacity
+		// out of this block and rides a second animation, so the journey and the
+		// dissolve can follow their own measured curves (see the ghost half).
 		const fromProps: string[] = [
-			`\t\ttransform: translate(${dx}px, ${dy}px) scale(${sx}, ${sy}) rotate(${dr}deg);`,
-			`\t\topacity: ${fromOpacity};`,
+			`\t\ttransform: translate(${dx}px, ${dy}px) rotate(${fromRot}deg) scale(${sx}, ${sy})${fromFlips};`,
 		];
 		const toProps: string[] = [
-			'\t\ttransform: translate(0, 0) scale(1, 1) rotate(0deg);',
-			`\t\topacity: ${toOpacity};`,
+			`\t\ttransform: translate(0, 0) rotate(${toRot}deg) scale(1, 1)${toFlips};`,
 		];
+		// A stacking-order swap rides the same journey: z-index interpolates as
+		// an integer and rounds on the EASED progress, so the browser steps
+		// front <-> behind when the motion is half travelled (about a third of
+		// the way through the wall clock on the morph curve), while both
+		// pictures are mid-flight (PowerPoint interpolates z-order
+		// continuously; a stepped swap synced to the motion is the closest a
+		// discrete layer model gets).
+		const zSwap = zSwaps?.get(toElement.id);
+		if (zSwap) {
+			fromProps.push(`\t\tz-index: ${zSwap.from};`);
+			toProps.push(`\t\tz-index: ${zSwap.to};`);
+		}
+		if (!crossfadesIn) {
+			fromProps.push(`\t\topacity: ${inert ? 0 : fromOpacity};`);
+			toProps.push(`\t\topacity: ${inert ? 0 : toOpacity};`);
+		}
 
 		// Fill color interpolation
 		const colorInterp = buildColorInterpolationProps(fromElement, toElement);
@@ -169,11 +541,25 @@ ${fromProps.join('\n')}
 \tto {
 ${toProps.join('\n')}
 \t}
-}`;
+}${
+			crossfadesIn
+				? `
+@keyframes ${safeName}-fade {
+\tfrom {
+\t\topacity: 0;
+\t}
+\tto {
+\t\topacity: ${toOpacity};
+\t}
+}`
+				: ''
+		}`;
 
 		animations.push({
 			elementId: toElement.id,
-			animation: `${safeName} ${durationMs}ms ${MORPH_EASING} forwards`,
+			animation: `${safeName} ${durationMs}ms ${MORPH_EASING} forwards${
+				crossfadesIn ? `, ${safeName}-fade ${durationMs}ms ${MORPH_CROSSFADE_EASING} forwards` : ''
+			}`,
 			keyframes,
 		});
 	}
@@ -182,7 +568,205 @@ ${toProps.join('\n')}
 }
 
 /**
+ * Generate the OUTGOING half of every matched pair.
+ *
+ * The returned animations target the outgoing element, which a binding paints
+ * in its transition overlay above the live stage. Each ghost travels the same
+ * path as its incoming counterpart - from its own geometry to the pair's final
+ * geometry - so the overlay stays a faithful, moving copy of the outgoing
+ * slide for the whole transition.
+ *
+ * A pair whose APPEARANCE changed fades to nothing on the way, dissolving into
+ * the counterpart rendered underneath. A pair that only moved keeps its opacity
+ * and simply lands on the incoming geometry, where the two are pixel-identical
+ * and the overlay can be torn down without a visible seam. Emitting the second
+ * kind matters because the overlay is a flat layer above the stage: a
+ * full-slide background that IS crossfading would otherwise hide every
+ * unchanged shape until it had faded, making them pop in mid-transition.
+ *
+ * Like every other morph animation, the frames are ELEMENT-LOCAL: they target
+ * the node that carries the element's static transform, restate that transform
+ * (see `generateMorphAnimations`), pivot on the element's own centre, and move
+ * by centre deltas. A binding must therefore attach these to the outgoing
+ * element's positioned container itself, never to a slide-sized wrapper.
+ *
+ * @param pairs - Matched pairs.
+ * @param durationMs - Animation duration in milliseconds.
+ * @param startIndex - Index offset for unique keyframe naming.
+ * @param ghostIds - Outgoing ids the overlay will paint (see
+ *   {@link resolveMorphGhostIds}); pairs outside it get no ghost. Defaults to
+ *   "all", the behaviour before the ghost set existed.
+ * @returns Ghost animation descriptors keyed by the OUTGOING element id.
+ */
+export function generateMorphGhostAnimations(
+	pairs: MorphPair[],
+	durationMs: number,
+	startIndex: number,
+	ghostIds?: ReadonlySet<string>,
+): MorphAnimationStyle[] {
+	const animations: MorphAnimationStyle[] = [];
+	for (let index = 0; index < pairs.length; index++) {
+		const { fromElement, toElement } = pairs[index];
+		if (ghostIds && !ghostIds.has(fromElement.id)) {
+			continue;
+		}
+		// An INERT pair's ghost is a pixel-identical copy of what the live stage
+		// already draws, painted only so a dissolving backdrop below it is not
+		// seen through it. Its keyframes would run from itself to itself, which
+		// changes nothing over time - but a running animation is not free: the
+		// browser gives the shape its own compositing layer and rasterises that
+		// layer on whole device pixels, so a box at a fractional position or size
+		// is painted up to a pixel smaller and offset for the whole morph, then
+		// snaps back the moment the overlay comes down. That is issue #161's
+		// "micro-movements": the centre panel's button measured 1.2px narrower
+		// and 1px shorter while the morph ran. Painting the ghost statically is
+		// both faithful and cheaper; the plan still lists it in
+		// `outgoingElements`, which is derived from the ghost set rather than
+		// from this map.
+		if (isInertMorphPair(fromElement, toElement)) {
+			continue;
+		}
+		const fadesOut = morphPairNeedsCrossfade(fromElement, toElement);
+		const safeName = `pptx-morph-ghost-${startIndex + index}-${fromElement.id.replace(/[^a-zA-Z0-9]/gu, '')}`;
+		// Mirror of the incoming half: a text box that only changed its wording
+		// dissolves where it stands, so its ghost must not travel either or the
+		// two halves would cross-dissolve out of register.
+		const inSlot = morphTextReplacedInSlot(fromElement, toElement);
+		const dx = inSlot
+			? 0
+			: toElement.x + toElement.width / 2 - (fromElement.x + fromElement.width / 2);
+		const dy = inSlot
+			? 0
+			: toElement.y + toElement.height / 2 - (fromElement.y + fromElement.height / 2);
+		const sx = inSlot ? 1 : Math.max(toElement.width, 1) / Math.max(fromElement.width, 1);
+		const sy = inSlot ? 1 : Math.max(toElement.height, 1) / Math.max(fromElement.height, 1);
+		// The ghost starts on its own authored rotation, so the SHORTEST-arc
+		// adjustment goes on the target angle here (mirror of the incoming
+		// half). Flips are per-frame, as in {@link generateMorphAnimations}.
+		const fromRot = fromElement.rotation ?? 0;
+		const toRot = inSlot ? fromRot : shortestRotationTarget(fromRot, toElement.rotation ?? 0);
+		const fromFlips = flipFactors(fromElement);
+		const toFlips = flipFactors(toElement);
+		// A dissolve and a journey are two different curves, so when the ghost does
+		// both they ride two animations: the transform keeps {@link MORPH_EASING},
+		// which its live counterpart also travels on (a single easing for both
+		// halves is what keeps them on the same path), and the opacity gets the
+		// measured {@link MORPH_CROSSFADE_EASING}.
+		const opacity = fromElement.opacity ?? 1;
+		const keyframes = `
+@keyframes ${safeName} {
+\tfrom {
+\t\ttransform-origin: center;
+\t\ttransform: translate(0, 0) rotate(${fromRot}deg) scale(1, 1)${fromFlips};${
+			fadesOut ? '' : `\n\t\topacity: ${opacity};`
+		}
+\t}
+\tto {
+\t\ttransform-origin: center;
+\t\ttransform: translate(${dx}px, ${dy}px) rotate(${toRot}deg) scale(${sx}, ${sy})${toFlips};${
+			fadesOut ? '' : `\n\t\topacity: ${opacity};`
+		}
+\t}
+}${
+			fadesOut
+				? `
+@keyframes ${safeName}-fade {
+\tfrom {
+\t\topacity: ${opacity};
+\t}
+\tto {
+\t\topacity: 0;
+\t}
+}`
+				: ''
+		}`;
+		animations.push({
+			elementId: fromElement.id,
+			animation: `${safeName} ${durationMs}ms ${MORPH_EASING} forwards${
+				fadesOut ? `, ${safeName}-fade ${durationMs}ms ${MORPH_CROSSFADE_EASING} forwards` : ''
+			}`,
+			keyframes,
+		});
+	}
+	return animations;
+}
+
+/**
+ * The target angle to animate TO so the element turns the short way round.
+ *
+ * CSS interpolates `rotate(a)` -> `rotate(b)` numerically, so a pair authored
+ * at 315deg and 0deg spins -315deg (almost a full turn anti-clockwise) when
+ * the shapes are only 45deg apart. PowerPoint always takes the shorter arc.
+ * Returns `fromDeg` plus the delta wrapped into (-180, 180], which is the same
+ * final orientation modulo 360 but the rotation a viewer expects: the issue
+ * #131 deck's wheel points its arrow at the selected wedge by rotating a ring
+ * in 45deg steps, so clicking the neighbouring wedge sent the arrow the long
+ * way around the dial.
+ *
+ * An exact half turn has no shorter arc, and PowerPoint's choice there is not
+ * a fixed sign: it turns CLOCKWISE when the shape starts anywhere in
+ * [90, 270) and ANTI-clockwise otherwise. Measured on PowerPoint 16 by
+ * sampling the rendered frames of a half-turn morph, both on the issue #131
+ * wheel (0->180 anti, 45->225 anti, 90->270 clock, 135->315 clock, 180->360
+ * clock, 270->90 anti) and on a synthetic two-slide deck built for the purpose
+ * (0->180 anti, 45->225 anti, 90->270 clock, 270->90 anti), which agrees on
+ * every case. Always taking +180 sent the wheel's arrow round the wrong side
+ * for the wedge diametrically opposite the one on screen, so one click in
+ * seven looked nothing like the others.
+ */
+export function shortestRotationTarget(fromDeg: number, toDeg: number): number {
+	let delta = (toDeg - fromDeg) % 360;
+	if (delta > 180) {
+		delta -= 360;
+	} else if (delta < -180) {
+		delta += 360;
+	}
+	if (Math.abs(Math.abs(delta) - 180) < 1e-9) {
+		const start = ((fromDeg % 360) + 360) % 360;
+		delta = start >= 90 && start < 270 ? 180 : -180;
+	}
+	return fromDeg + delta;
+}
+
+/**
+ * Restated static transform suffix (`rotate(N) scaleX(-1) scaleY(-1)`) for an
+ * element. Keyframe `transform`s REPLACE the container's static transform, so
+ * every frame must carry this or a rotated/flipped element loses its own
+ * orientation for the duration of the animation and snaps back at the end.
+ */
+function staticTransformSuffix(el: PptxElement): string {
+	const rot = el.rotation ?? 0;
+	return ` rotate(${rot}deg)${el.flipHorizontal ? ' scaleX(-1)' : ''}${
+		el.flipVertical ? ' scaleY(-1)' : ''
+	}`;
+}
+
+/**
+ * The flip factors a journey frame must carry for this element, ALWAYS emitted
+ * (even as +1) so paired keyframes share one transform function list and CSS
+ * interpolates them numerically.
+ *
+ * Interpolating a differing flag then runs the scale argument through zero,
+ * which is precisely the edge-on card flip PowerPoint plays when one slide's
+ * picture is mirrored and its counterpart is not. Stating only one endpoint's
+ * flags (the old behaviour) snapped the mirror at the flight's start instead
+ * of animating it.
+ */
+function flipFactors(el: PptxElement): string {
+	return ` scaleX(${el.flipHorizontal ? -1 : 1}) scaleY(${el.flipVertical ? -1 : 1})`;
+}
+
+/**
  * Generate fade-out animations for elements that only exist on the outgoing slide.
+ *
+ * The shape dissolves in the FIRST quarter of the morph rather than across the
+ * whole of it, and holds at zero from there (see
+ * {@link MORPH_FADE_OUT_END_PERCENT} for the frames that were measured). Fading
+ * it over the full duration left it half-visible at the midpoint, on top of an
+ * incoming replacement that was itself half-visible, so the middle of every
+ * morph read as a double exposure where PowerPoint shows a clean gap.
+ *
+ * Nothing scales: PowerPoint's dissolve keeps the box exactly where it is.
  *
  * @param elements - Unmatched elements from the outgoing slide.
  * @param durationMs - Animation duration in milliseconds.
@@ -196,20 +780,29 @@ export function generateUnmatchedFadeOutAnimations(
 ): MorphAnimationStyle[] {
 	return elements.map((el, i) => {
 		const safeName = `pptx-morph-fadeout-${startIndex + i}-${el.id.replace(/[^a-zA-Z0-9]/gu, '')}`;
+		const transform = `\t\ttransform: scale(1)${staticTransformSuffix(el)};`;
 		const keyframes = `
 @keyframes ${safeName} {
-\tfrom {
+\t0% {
 \t\topacity: ${el.opacity ?? 1};
-\t\ttransform: scale(1);
+${transform}
 \t}
-\tto {
+\t${MORPH_FADE_OUT_HOLD_PERCENT}% {
+\t\topacity: ${el.opacity ?? 1};
+${transform}
+\t}
+\t${MORPH_FADE_OUT_END_PERCENT}% {
 \t\topacity: 0;
-\t\ttransform: scale(0.95);
+${transform}
+\t}
+\t100% {
+\t\topacity: 0;
+${transform}
 \t}
 }`;
 		return {
 			elementId: el.id,
-			animation: `${safeName} ${durationMs}ms ${MORPH_EASING} forwards`,
+			animation: `${safeName} ${durationMs}ms linear forwards`,
 			keyframes,
 		};
 	});
@@ -217,6 +810,12 @@ export function generateUnmatchedFadeOutAnimations(
 
 /**
  * Generate fade-in animations for elements that only exist on the incoming slide.
+ *
+ * The shape stays completely invisible until the morph is
+ * {@link MORPH_FADE_IN_START_PERCENT}% through, then dissolves in on a
+ * decelerating curve. See that constant for the frames that were measured.
+ *
+ * Nothing scales: PowerPoint's dissolve keeps the box exactly where it is.
  *
  * @param elements - Unmatched elements from the incoming slide.
  * @param durationMs - Animation duration in milliseconds.
@@ -230,20 +829,26 @@ export function generateUnmatchedFadeInAnimations(
 ): MorphAnimationStyle[] {
 	return elements.map((el, i) => {
 		const safeName = `pptx-morph-fadein-${startIndex + i}-${el.id.replace(/[^a-zA-Z0-9]/gu, '')}`;
+		const transform = `\t\ttransform: scale(1)${staticTransformSuffix(el)};`;
 		const keyframes = `
 @keyframes ${safeName} {
-\tfrom {
+\t0% {
 \t\topacity: 0;
-\t\ttransform: scale(0.95);
+${transform}
 \t}
-\tto {
+\t${MORPH_FADE_IN_START_PERCENT}% {
+\t\topacity: 0;
+\t\tanimation-timing-function: ${MORPH_FADE_IN_EASING};
+${transform}
+\t}
+\t100% {
 \t\topacity: ${el.opacity ?? 1};
-\t\ttransform: scale(1);
+${transform}
 \t}
 }`;
 		return {
 			elementId: el.id,
-			animation: `${safeName} ${durationMs}ms ${MORPH_EASING} forwards`,
+			animation: `${safeName} ${durationMs}ms linear forwards`,
 			keyframes,
 		};
 	});
@@ -300,6 +905,9 @@ export function generateTextMorphAnimations(
  * @param toSlide - The incoming slide.
  * @param durationMs - Animation duration in milliseconds.
  * @param mode - Morph granularity: "object", "word", or "character".
+ * @param zIndexBase - The z-index the live stage gives the incoming slide's
+ *   first top-level element (see {@link computeZOrderSwaps}); a binding that
+ *   paints master/layout shapes beneath the slide passes their count.
  * @returns A complete array of animation style descriptors for the transition.
  */
 export function generateFullMorphTransition(
@@ -307,12 +915,33 @@ export function generateFullMorphTransition(
 	toSlide: PptxSlide,
 	durationMs: number,
 	mode: MorphMode = 'object',
+	zIndexBase = 0,
 ): MorphAnimationStyle[] {
 	const matchResult = matchMorphElementsFull(fromSlide, toSlide);
 	const allAnimations: MorphAnimationStyle[] = [];
 
+	// Decide up front which outgoing shapes the overlay will paint: both halves
+	// of a pair have to agree on it, since a hidden live element with no ghost
+	// above it is an invisible shape, and a ghost with a visible element under it
+	// is a double exposure.
+	const flattenedFrom = flattenMorphElements(fromSlide.elements, toSlide.elements);
+	const ghostIds = resolveMorphGhostIds(flattenedFrom, matchResult.pairs);
+
+	// Stage-journeyed pairs whose stacking ORDER flips between the slides get a
+	// z-index journey in the stage's own z space, so the pass-behind happens
+	// mid-flight in sync with the motion instead of popping at frame 1: two
+	// same-named full-bleed pictures that swap stacking order must both be
+	// painted in front while they fly, never only at rest.
+	const zSwaps = computeZOrderSwaps(
+		matchResult.pairs,
+		flattenedFrom,
+		toSlide.elements,
+		ghostIds,
+		zIndexBase,
+	);
+
 	// Generate main element morph animations
-	const pairAnims = generateMorphAnimations(matchResult.pairs, durationMs, mode);
+	const pairAnims = generateMorphAnimations(matchResult.pairs, durationMs, mode, ghostIds, zSwaps);
 	allAnimations.push(...pairAnims);
 
 	// Shape-geometry morph: for matched pairs whose shape outline changes
@@ -325,6 +954,12 @@ export function generateFullMorphTransition(
 		}
 	}
 
+	// Picture crop morph: a pair whose `a:srcRect` changed zooms its source
+	// region inside an otherwise unchanged frame (PowerPoint's "Scale
+	// Height"/"Scale Width"). This rides the element's `<img>`, not its
+	// container, so it is additive to whatever the pair does above.
+	allAnimations.push(...generateImageCropMorphAnimations(matchResult.pairs, durationMs));
+
 	// Generate text morph animations for text-bearing matched pairs
 	if (mode === 'word' || mode === 'character') {
 		for (let i = 0; i < matchResult.pairs.length; i++) {
@@ -336,11 +971,24 @@ export function generateFullMorphTransition(
 		}
 	}
 
+	// Outgoing half of every restyled pair's crossfade.
+	const ghosts = generateMorphGhostAnimations(
+		matchResult.pairs,
+		durationMs,
+		pairAnims.length,
+		ghostIds,
+	);
+	allAnimations.push(...ghosts);
+
+	// The same zoom on the painted ghosts, so a crop change that IS crossfading
+	// dissolves from the region the outgoing slide actually showed.
+	allAnimations.push(...generateImageCropGhostAnimations(matchResult.pairs, durationMs, ghostIds));
+
 	// Generate fade-out for unmatched from elements
 	const fadeOuts = generateUnmatchedFadeOutAnimations(
 		matchResult.unmatchedFrom,
 		durationMs,
-		pairAnims.length,
+		pairAnims.length + ghosts.length,
 	);
 	allAnimations.push(...fadeOuts);
 
@@ -348,7 +996,7 @@ export function generateFullMorphTransition(
 	const fadeIns = generateUnmatchedFadeInAnimations(
 		matchResult.unmatchedTo,
 		durationMs,
-		pairAnims.length + fadeOuts.length,
+		pairAnims.length + ghosts.length + fadeOuts.length,
 	);
 	allAnimations.push(...fadeIns);
 

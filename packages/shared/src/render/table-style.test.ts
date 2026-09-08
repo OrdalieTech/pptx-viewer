@@ -12,6 +12,7 @@ import {
 	getDiagonalBorders,
 	getTableCellBandStyle,
 	ooxmlDashToCssBorderStyle,
+	tableContainerCss,
 } from './table-style';
 
 describe('ooxmlDashToCssBorderStyle', () => {
@@ -44,6 +45,12 @@ describe('cellStyleToCss', () => {
 		expect(cellStyleToCss(undefined)).toStrictEqual({});
 	});
 
+	it('should emit the cell font family (a:rPr/a:latin)', () => {
+		// Parsed by core but dropped by this mapper until issue F3: a cell that
+		// named an explicit typeface rendered in the binding default stack.
+		expect(cellStyleToCss({ fontFamily: 'Georgia' }).fontFamily).toBe('Georgia');
+	});
+
 	it('should map font / colour / weight properties', () => {
 		const style: PptxTableCellStyle = {
 			fontSize: 18,
@@ -53,7 +60,7 @@ describe('cellStyleToCss', () => {
 			color: '#FF0000',
 		} as PptxTableCellStyle;
 		const css = cellStyleToCss(style);
-		expect(css.fontSize).toBe('18px');
+		expect(css.fontSize).toBe('18pt');
 		expect(css.fontWeight).toBe('bold');
 		expect(css.fontStyle).toBe('italic');
 		expect(css.textDecorationLine).toBe('underline');
@@ -101,6 +108,75 @@ describe('cellStyleToCss', () => {
 		expect(String(css.boxShadow)).toContain('rgba(255,255,255,0.55)');
 		expect(String(css.boxShadow)).toContain('rgba(0,0,0,0.4)');
 	});
+
+	// An explicitly zeroed cell margin (`<a:marL w="0"/>`) must still render as
+	// `0px` padding, not fall through to the browser default. `!== undefined`
+	// (not a truthy check) is what makes that distinction.
+	describe('cell margins (explicit zero)', () => {
+		it('renders 0px padding for an explicit zero margin on every edge', () => {
+			const css = cellStyleToCss({
+				marginLeft: 0,
+				marginRight: 0,
+				marginTop: 0,
+				marginBottom: 0,
+			});
+			expect(css.paddingLeft).toBe('0px');
+			expect(css.paddingRight).toBe('0px');
+			expect(css.paddingTop).toBe('0px');
+			expect(css.paddingBottom).toBe('0px');
+		});
+
+		it('omits padding entirely when a margin is unset', () => {
+			const css = cellStyleToCss({ marginLeft: 4 });
+			expect(css.paddingLeft).toBe('4px');
+			expect(css.paddingRight).toBeUndefined();
+			expect(css.paddingTop).toBeUndefined();
+			expect(css.paddingBottom).toBeUndefined();
+		});
+	});
+
+	describe('image fill (a:tcPr/a:blipFill)', () => {
+		it('renders a data: URL image fill as a cover background', () => {
+			const css = cellStyleToCss({
+				fillMode: 'image',
+				backgroundImageFillData: 'data:image/png;base64,AAAA',
+			});
+			expect(css.backgroundImage).toBe('url("data:image/png;base64,AAAA")');
+			expect(css.backgroundSize).toBe('cover');
+			expect(css.backgroundPosition).toBe('center');
+			expect(css.backgroundRepeat).toBe('no-repeat');
+		});
+
+		it('prefers resolved backgroundImageFillData over the raw archive path', () => {
+			const css = cellStyleToCss({
+				fillMode: 'image',
+				backgroundImageFillPath: 'ppt/media/image1.png',
+				backgroundImageFillData: 'blob:https://example.test/abc',
+			});
+			expect(css.backgroundImage).toBe('url("blob:https://example.test/abc")');
+		});
+
+		it('renders no background for an unresolved raw archive path', () => {
+			// `backgroundImageFillPath` alone (no `Data`) is a raw archive path -
+			// not a usable CSS url() - until the load pipeline resolves it.
+			const css = cellStyleToCss({
+				fillMode: 'image',
+				backgroundImageFillPath: 'ppt/media/image1.png',
+			});
+			expect(css.backgroundImage).toBeUndefined();
+			expect(css.backgroundColor).toBeUndefined();
+		});
+
+		it('does nothing when fillMode is not "image"', () => {
+			const css = cellStyleToCss({
+				fillMode: 'solid',
+				backgroundColor: '#112233',
+				backgroundImageFillData: 'data:image/png;base64,AAAA',
+			});
+			expect(css.backgroundImage).toBeUndefined();
+			expect(css.backgroundColor).toBe('#112233');
+		});
+	});
 });
 
 describe('getDiagonalBorders', () => {
@@ -140,7 +216,7 @@ describe('getDiagonalBorders', () => {
 	});
 });
 
-describe('getCellDiagonalBorders - style-inherited diagonals (issue: table-style tl2br/bl2tr)', () => {
+describe('getCellDiagonalBorders - style-inherited diagonals (issue: table-style tl2br/tr2bl)', () => {
 	const STYLE_ID = '{TESTSTYLE-0000-0000-0000-0000000000D1}';
 
 	function styledTable(overrides: Partial<PptxTableData> = {}): PptxTableData {
@@ -152,13 +228,13 @@ describe('getCellDiagonalBorders - style-inherited diagonals (issue: table-style
 		} as unknown as PptxTableData;
 	}
 
-	it('renders a whole-table tl2br/bl2tr diagonal for a cell', () => {
+	it('renders a whole-table tl2br/tr2bl diagonal for a cell', () => {
 		const map: ParsedTableStyleMap = {
 			[STYLE_ID]: {
 				styleId: STYLE_ID,
 				wholeTblBorders: {
 					tl2br: { width: 2, color: '#FF0000' },
-					bl2tr: { width: 1, color: '#0000FF' },
+					tr2bl: { width: 1, color: '#0000FF' },
 				},
 			},
 		};
@@ -378,6 +454,45 @@ describe('getTableCellBandStyle - section fill types (issue #95)', () => {
 		expect(css?.backgroundColor).toBe('#FFFFFF');
 	});
 
+	it('resolves an image whole-table fill (once patched to a displayable URL)', () => {
+		const map = mapWith({
+			wholeTblFill: {
+				schemeColor: '',
+				image: { path: 'ppt/media/tex.png', data: 'blob:resolved' },
+			},
+		});
+		const css = getTableCellBandStyle(tableWith({}), 1, 1, 3, 2, { tableStyleMap: map });
+		expect(css?.backgroundImage).toBe('url("blob:resolved")');
+		expect(css?.backgroundSize).toBe('cover');
+	});
+
+	it('falls through to no fill while an image whole-table fill path is unresolved', () => {
+		const map = mapWith({
+			wholeTblFill: { schemeColor: '', image: { path: 'ppt/media/tex.png' } },
+		});
+		const css = getTableCellBandStyle(tableWith({}), 1, 1, 3, 2, { tableStyleMap: map });
+		expect(css?.backgroundImage).toBeUndefined();
+	});
+
+	it('keeps an authored transparent header readable', () => {
+		const map = mapWith({ firstRowFill: { schemeColor: '', noFill: true } });
+		const css = getTableCellBandStyle(tableWith({ firstRowHeader: true }), 0, 0, 3, 2, {
+			tableStyleMap: map,
+		});
+
+		expect(css?.backgroundColor).toBe('transparent');
+		expect(css?.color).toBeUndefined();
+	});
+
+	it('still paints the fallback header band when no fill is authored', () => {
+		const css = getTableCellBandStyle(tableWith({ firstRowHeader: true }), 0, 0, 3, 2, {
+			tableStyleMap: mapWith({}),
+		});
+
+		expect(css?.backgroundColor).toBe('rgba(68, 114, 196, 0.85)');
+		expect(css?.color).toBe('#ffffff');
+	});
+
 	it('renders a:noFill as a transparent background', () => {
 		const map = mapWith({ wholeTblFill: { schemeColor: '', noFill: true } });
 		const css = getTableCellBandStyle(tableWith({}), 1, 1, 3, 2, { tableStyleMap: map });
@@ -416,5 +531,21 @@ describe('getTableCellBandStyle - section fill types (issue #95)', () => {
 		});
 		const css = getTableCellBandStyle(td, 2, 2, 3, 3, { tableStyleMap: map });
 		expect(css?.backgroundColor).toBe('#654321');
+	});
+});
+
+describe('tableContainerCss', () => {
+	it('returns nothing for a left-to-right table', () => {
+		expect(tableContainerCss({ rows: [], columnWidths: [1] })).toStrictEqual({});
+		expect(tableContainerCss(undefined)).toStrictEqual({});
+	});
+
+	it('mirrors the column order for a:tblPr@rtl', () => {
+		// Parsed and round-tripped since forever, rendered by nobody: every table
+		// in an Arabic or Hebrew deck came out with its columns the wrong way
+		// round, and Vanilla shipped an inspector toggle that did nothing.
+		expect(tableContainerCss({ rows: [], columnWidths: [1], rtl: true })).toStrictEqual({
+			direction: 'rtl',
+		});
 	});
 });

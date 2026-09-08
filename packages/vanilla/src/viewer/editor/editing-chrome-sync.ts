@@ -1,9 +1,30 @@
-import type { PptxElement } from 'pptx-viewer-core';
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s building each chrome update payload);
+   merging them isn't a style choice here. */
+import type { PptxElement, PptxLayoutPreview } from 'pptx-viewer-core';
+import { buildThemeColorMap } from 'pptx-viewer-core';
+import { canInteractWithElement } from 'pptx-viewer-shared';
 
 import type { Store, ViewerState } from '../state';
 import type { ViewerChrome } from '../ui';
+import { combineCommentMentionAuthors } from '../ui/comment-mention-typeahead';
 import type { LayoutOption } from '../ui/ribbon/ribbon-types';
+import { getActiveElements } from './editor-active-elements';
+import { currentRecentColors } from './editor-recent-colors';
 import { buildInspectorState } from './inspector-state-builder';
+
+/**
+ * G10: whether `a:spLocks`/`a:grpSpLocks`'s `@noGrp` allows the current
+ * selection to be grouped/ungrouped, mirroring the guard
+ * `editor-arrange-mutations.ts`'s `groupSelection`/`ungroupSelection` already
+ * enforce on the commands themselves.
+ */
+function resolveSelectionGroupable(state: ViewerState): boolean {
+	const active = getActiveElements(state);
+	return state.selectedElementIds.every((id) =>
+		canInteractWithElement(active.find((element) => element.id === id) ?? null, 'group'),
+	);
+}
 
 /**
  * Flatten every slide master's layouts into the `{ path, name }` options the
@@ -38,6 +59,14 @@ export interface EditingChromeSyncDeps {
 	store: Store<ViewerState>;
 	getChrome(): ViewerChrome;
 	selectedElement(state: ViewerState): PptxElement | undefined;
+	/**
+	 * Layout artwork for the New Slide / Layout gallery thumbnails.
+	 *
+	 * A getter rather than part of `ViewerState`: the previews are derived from
+	 * the archive, not editable document content, and they arrive after the
+	 * first sync because parsing them is deferred until a deck is loaded.
+	 */
+	layoutPreviews?(): ReadonlyMap<string, PptxLayoutPreview>;
 }
 
 /** Build the `sync()` function that refreshes the ribbon + inspector. */
@@ -58,18 +87,46 @@ export function createEditingChromeSync(deps: EditingChromeSyncDeps): () => void
 		inspector?.setEditable(editingVisible && state.inspectorOpen);
 		ribbon?.setInspectorOpen(state.inspectorOpen);
 
+		// A running show hides the ribbon and the inspector outright
+		// (`.pptxv-presenting` in the stylesheet), so refreshing their contents
+		// on every slide change is work nobody can see - and it is not small:
+		// the selection refresh walks the layout gallery, the font/size/
+		// transition menus and every inspector section. React has no equivalent
+		// cost because it unmounts the editing chrome for the duration. Leaving
+		// the show flips `presenting`, which runs this sync again in full.
+		if (state.presenting) {
+			return;
+		}
+
 		const el = editingVisible ? deps.selectedElement(state) : undefined;
 
 		ribbon?.updateSelection(el, {
 			hasClipboard: state.clipboardPayload !== null,
 			slideCount: state.slides.length,
 			selectedCount: state.selectedElementIds.length,
+			selectionGroupable: resolveSelectionGroupable(state),
 			formatPainterActive: state.formatPainterSourceId !== null,
 			selectedElementId: state.selectedElementId ?? undefined,
 			animations: state.slides[state.currentSlide]?.animations ?? [],
+			animationTimelineAnchors: state.slides[state.currentSlide]?.animationTimelineAnchors ?? [],
 			layouts: collectLayoutOptions(state),
+			layoutPreviews: deps.layoutPreviews?.(),
+			currentLayoutPath: state.slides[state.currentSlide]?.layoutPath,
+			themeFonts: {
+				heading: state.fontScheme?.majorFont?.latin,
+				body: state.fontScheme?.minorFont?.latin,
+			},
+			embeddedFontFamilies: state.embeddedFonts.map((font) => font.name),
+			customFontFamilies: state.customFontFamilies,
+			recentColors: currentRecentColors(state),
+			themeColorMap: state.colorScheme ? buildThemeColorMap(state.colorScheme) : undefined,
 		});
-		ribbon?.setDrawState({ tool: state.drawTool, color: state.drawColor, width: state.drawWidth });
+		ribbon?.setDrawState({
+			tool: state.drawTool,
+			color: state.drawColor,
+			width: state.drawWidth,
+			recentColors: currentRecentColors(state),
+		});
 
 		inspector?.update(
 			buildInspectorState(
@@ -78,6 +135,9 @@ export function createEditingChromeSync(deps: EditingChromeSyncDeps): () => void
 				state.selectedTableCells,
 				state.selectedTextRange,
 				state.mediaDataUrls,
+				state.chartPartSelection,
+				currentRecentColors(state),
+				state.colorScheme ? buildThemeColorMap(state.colorScheme) : undefined,
 			),
 		);
 		const activeSlide = state.slides[state.currentSlide];
@@ -85,17 +145,31 @@ export function createEditingChromeSync(deps: EditingChromeSyncDeps): () => void
 			slideCount: state.slides.length,
 			currentSlide: state.currentSlide,
 			canvasSize: state.canvasSize,
+			slideSize: state.slideSize,
+			// Design > Slide Size's rescale prompt only applies when the deck has
+			// content to rescale; an empty deck adopts a new size directly.
+			hasDeckElements: state.slides.some((slide) => slide.elements.length > 0),
 			elements: activeSlide?.elements ?? [],
 			selectedIds: state.selectedElementIds,
 			selectedElementId: el?.id,
 			comments: activeSlide?.comments ?? [],
+			commentMentionAuthors: combineCommentMentionAuthors(
+				state.modernCommentAuthors,
+				state.commentAuthors,
+			),
+			customShows: state.customShows,
 			docTitle: state.coreProperties?.title,
 			docAuthor: state.coreProperties?.creator,
 			editable: editingVisible,
 			presentationProperties: state.presentationProperties,
 			themeOptions: state.themeOptions,
 			activeSlide,
+			editTemplateMode: state.editTemplateMode,
+			slideMasters: state.slideMasters,
 			colorScheme: state.colorScheme,
+			fontScheme: state.fontScheme,
+			themeName: state.themeName,
+			tagCollections: state.tagCollections,
 			notesCanvasSize: state.notesCanvasSize,
 			notesPlaceholderCount: state.notesMaster
 				? (state.notesMaster.placeholders?.length ?? 0)

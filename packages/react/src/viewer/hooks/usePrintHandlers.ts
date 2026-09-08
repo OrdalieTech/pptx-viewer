@@ -1,3 +1,6 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per handler); merging them isn't a
+   style choice here. */
 import type { PptxSlide, PptxData } from 'pptx-viewer-core';
 /**
  * usePrintHandlers -- Print dialog and print-with-settings logic for
@@ -18,11 +21,19 @@ import {
 	buildOutlineHtml,
 	buildPrintHtmlDocument,
 	buildSlidesHtml,
+	computeColorFilter,
+	computeSlideIndices,
+	filterHiddenSlideIndices,
+	finishPrintWindow,
+	openPendingPrintWindow,
+	resolveImageResolutionScale,
 } from 'pptx-viewer-shared';
 import { useState } from 'react';
 import type { RefObject } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { PrintSettings } from '../components/print-dialog-types';
+import { useViewerOptionsContext } from '../components/viewer-options-context';
 import { captureAllSlidesAsPngDataUrls } from '../utils/export';
 import { exportAllSlidesToSvg } from '../utils/export-svg';
 import { buildPrintDocument } from '../utils/svg-print-serializer';
@@ -49,63 +60,22 @@ export interface PrintHandlersResult {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Print Window Builder                                               */
-/* ------------------------------------------------------------------ */
-
-/**
- * Open a print window and write a full print document assembled by the
- * shared `buildPrintHtmlDocument` (title/orientation/colour-filter escaping
- * and body sanitisation live there once, reused by every binding).
- */
-function openPrintWindow(
-	title: string,
-	bodyHtml: string,
-	orientation: 'landscape' | 'portrait',
-	colorFilter: string,
-	frameSlides: boolean,
-): boolean {
-	const printWindow = window.open('', '_blank', 'noopener,noreferrer');
-	if (!printWindow) {
-		return false;
-	}
-	printWindow.document.open();
-	printWindow.document.write(
-		buildPrintHtmlDocument({ title, bodyHtml, orientation, colorFilter, frameSlides }),
-	);
-	printWindow.document.close();
-	printWindow.focus();
-	setTimeout(() => {
-		printWindow.print();
-	}, 300);
-	return true;
-}
-
-/**
- * Open a print window with a full HTML document string.
- * Used for the SVG print path which builds its own document.
- */
-function openPrintWindowWithDocument(htmlDocument: string): boolean {
-	const printWindow = window.open('', '_blank', 'noopener,noreferrer');
-	if (!printWindow) {
-		return false;
-	}
-	printWindow.document.open();
-	printWindow.document.write(htmlDocument);
-	printWindow.document.close();
-	printWindow.focus();
-	setTimeout(() => {
-		printWindow.print();
-	}, 300);
-	return true;
-}
-
-/* ------------------------------------------------------------------ */
 /*  Hook                                                               */
 /* ------------------------------------------------------------------ */
 
 export function usePrintHandlers(input: UsePrintHandlersInput): PrintHandlersResult {
 	const { slides, activeSlideIndex, canvasStageRef, setActiveSlideIndex, pptxData } = input;
 	const [isPrintDialogOpen, setIsPrintDialogOpen] = useState(false);
+	const { t } = useTranslation();
+	const viewerOptions = useViewerOptionsContext();
+	// Options > Advanced > "Print hidden slides".
+	const includeHiddenSlides = viewerOptions.advanced.printHiddenSlides;
+	// Options > Advanced > "High quality" raster scale for the print fallback
+	// path (notes/handouts/outline, or slides when the SVG path errors),
+	// composed with Options > Advanced > Image Size/Quality's own resolution
+	// scale so the two settings multiply rather than fight each other.
+	const printRasterScale =
+		(viewerOptions.advanced.printHighQuality ? 4 : 3) * resolveImageResolutionScale(viewerOptions);
 
 	const handlePrint = () => {
 		setIsPrintDialogOpen(true);
@@ -115,36 +85,43 @@ export function usePrintHandlers(input: UsePrintHandlersInput): PrintHandlersRes
 	/*  SVG-based print path (vector, DPI-independent)                   */
 	/* ---------------------------------------------------------------- */
 
+	/**
+	 * Single entry point for the "Print" button inside `PrintDialog`. Opens
+	 * the print window FIRST, synchronously, still within that click's user
+	 * gesture (see `openPendingPrintWindow`), then decides which path fills
+	 * it in: SVG (vector, no DOM/live-state touching at all -- the only path
+	 * with no visible slide-flicker) when printing slides with parsed data
+	 * available, the raster (html2canvas) path otherwise.
+	 */
 	const handlePrintSvg = async (settings: PrintSettings) => {
 		setIsPrintDialogOpen(false);
+		const printWindow = openPendingPrintWindow(t('pptx.print.preparingToPrint'));
+		if (!printWindow) {
+			console.warn(
+				'[PowerPointViewer] Print window was blocked by the browser. Allow popups for this site to print.',
+			);
+			return;
+		}
 
 		if (!pptxData || settings.printWhat !== 'slides') {
 			// SVG path only supports direct slide printing when pptxData is available.
 			// Fall back to raster path for notes/handouts/outline or when no data.
-			return handlePrintWithSettings(settings);
+			return runRasterPrint(printWindow, settings);
 		}
 
-		const colorFilter = (() => {
-			if (settings.colorMode === 'grayscale') {
-				return 'filter: grayscale(1);';
-			}
-			if (settings.colorMode === 'blackAndWhite') {
-				return 'filter: grayscale(1) contrast(2);';
-			}
-			return '';
-		})();
+		const colorFilter = computeColorFilter(settings.colorMode);
 
-		const slideIndices: number[] = (() => {
-			if (settings.slideRange === 'current') {
-				return [activeSlideIndex];
-			}
-			if (settings.slideRange === 'custom') {
-				const from = Math.max(0, settings.customRangeFrom - 1);
-				const to = Math.min(slides.length - 1, settings.customRangeTo - 1);
-				return Array.from({ length: to - from + 1 }, (_, i) => from + i);
-			}
-			return Array.from({ length: slides.length }, (_, i) => i);
-		})();
+		const slideIndices: number[] = filterHiddenSlideIndices(
+			computeSlideIndices(
+				settings.slideRange,
+				activeSlideIndex,
+				slides.length,
+				settings.customRangeFrom,
+				settings.customRangeTo,
+			),
+			slides,
+			includeHiddenSlides,
+		);
 
 		try {
 			// Export slides to SVG using the core SVG exporter
@@ -153,6 +130,7 @@ export function usePrintHandlers(input: UsePrintHandlersInput): PrintHandlersRes
 			});
 
 			if (svgs.length === 0) {
+				printWindow.close();
 				return;
 			}
 
@@ -161,13 +139,14 @@ export function usePrintHandlers(input: UsePrintHandlersInput): PrintHandlersRes
 				title: 'Slides (Vector)',
 				orientation: settings.orientation,
 				colorFilter,
+				scaleToFit: settings.scaleToFit,
 			});
 
-			openPrintWindowWithDocument(printDoc);
+			finishPrintWindow(printWindow, printDoc);
 		} catch (err) {
 			console.warn('[PowerPointViewer] SVG print path failed, falling back to raster:', err);
-			// Fall back to the raster path
-			return handlePrintWithSettings(settings);
+			// Fall back to the raster path, reusing the same already-open window.
+			return runRasterPrint(printWindow, settings);
 		}
 	};
 
@@ -175,43 +154,50 @@ export function usePrintHandlers(input: UsePrintHandlersInput): PrintHandlersRes
 	/*  Raster-based print path (html2canvas, original)                  */
 	/* ---------------------------------------------------------------- */
 
-	const handlePrintWithSettings = async (settings: PrintSettings) => {
-		setIsPrintDialogOpen(false);
-		const colorFilter = (() => {
-			if (settings.colorMode === 'grayscale') {
-				return 'filter: grayscale(1);';
-			}
-			if (settings.colorMode === 'blackAndWhite') {
-				return 'filter: grayscale(1) contrast(2);';
-			}
-			return '';
-		})();
+	/**
+	 * Renders each requested slide via html2canvas and writes the result into
+	 * `printWindow` (already open -- see `handlePrintSvg`). Used directly for
+	 * notes/handouts/outline, and as the SVG path's fallback.
+	 *
+	 * Slides/notes/handouts must each be visible in the live canvas to be
+	 * captured, so this still switches `activeSlideIndex` through every slide
+	 * (the original slide is restored once done) -- unlike the SVG path,
+	 * this is not flicker-free. There is no vector source for a rendered
+	 * notes/handout layout to draw from instead.
+	 */
+	const runRasterPrint = async (printWindow: Window, settings: PrintSettings) => {
+		const colorFilter = computeColorFilter(settings.colorMode);
 
-		const slideIndices: number[] = (() => {
-			if (settings.slideRange === 'current') {
-				return [activeSlideIndex];
-			}
-			if (settings.slideRange === 'custom') {
-				const from = Math.max(0, settings.customRangeFrom - 1);
-				const to = Math.min(slides.length - 1, settings.customRangeTo - 1);
-				return Array.from({ length: to - from + 1 }, (_, i) => from + i);
-			}
-			return Array.from({ length: slides.length }, (_, i) => i);
-		})();
+		const slideIndices: number[] = filterHiddenSlideIndices(
+			computeSlideIndices(
+				settings.slideRange,
+				activeSlideIndex,
+				slides.length,
+				settings.customRangeFrom,
+				settings.customRangeTo,
+			),
+			slides,
+			includeHiddenSlides,
+		);
 
 		if (settings.printWhat === 'outline') {
-			openPrintWindow(
-				'Outline',
-				`<div class="outline-page">${buildOutlineHtml(slideIndices, slides)}</div>`,
-				settings.orientation,
-				colorFilter,
-				settings.frameSlides,
+			finishPrintWindow(
+				printWindow,
+				buildPrintHtmlDocument({
+					title: 'Outline',
+					bodyHtml: `<div class="outline-page">${buildOutlineHtml(slideIndices, slides)}</div>`,
+					orientation: settings.orientation,
+					colorFilter,
+					frameSlides: settings.frameSlides,
+					scaleToFit: settings.scaleToFit,
+				}),
 			);
 			return;
 		}
 
 		try {
 			if (!canvasStageRef.current) {
+				printWindow.close();
 				return;
 			}
 			const allImages = await captureAllSlidesAsPngDataUrls(
@@ -219,48 +205,80 @@ export function usePrintHandlers(input: UsePrintHandlersInput): PrintHandlersRes
 				slides.length,
 				setActiveSlideIndex,
 				activeSlideIndex,
-				{ scale: 3 },
+				{ scale: printRasterScale },
 			);
 			if (allImages.length === 0) {
+				printWindow.close();
 				return;
 			}
 			const slideImages = slideIndices.map((idx) => allImages[idx]).filter(Boolean) as string[];
 
 			if (settings.printWhat === 'slides') {
-				openPrintWindow(
-					'Slides',
-					buildSlidesHtml(slideImages, slideIndices),
-					settings.orientation,
-					colorFilter,
-					settings.frameSlides,
+				finishPrintWindow(
+					printWindow,
+					buildPrintHtmlDocument({
+						title: 'Slides',
+						bodyHtml: buildSlidesHtml(slideImages, slideIndices),
+						orientation: settings.orientation,
+						colorFilter,
+						frameSlides: settings.frameSlides,
+						scaleToFit: settings.scaleToFit,
+					}),
 				);
 				return;
 			}
 
 			if (settings.printWhat === 'notes') {
-				openPrintWindow(
-					'Notes Pages',
-					buildNotesHtml(slideImages, slideIndices, slides),
-					'portrait',
-					colorFilter,
-					settings.frameSlides,
+				finishPrintWindow(
+					printWindow,
+					buildPrintHtmlDocument({
+						title: 'Notes Pages',
+						bodyHtml: buildNotesHtml(slideImages, slideIndices, slides),
+						orientation: 'portrait',
+						colorFilter,
+						frameSlides: settings.frameSlides,
+						scaleToFit: settings.scaleToFit,
+					}),
 				);
 				return;
 			}
 
 			if (settings.printWhat === 'handouts') {
 				const spp = settings.slidesPerPage;
-				openPrintWindow(
-					`Handout ${spp} per page`,
-					buildHandoutsHtml(slideImages, slideIndices, spp),
-					'portrait',
-					colorFilter,
-					settings.frameSlides,
+				finishPrintWindow(
+					printWindow,
+					buildPrintHtmlDocument({
+						title: `Handout ${spp} per page`,
+						bodyHtml: buildHandoutsHtml(slideImages, slideIndices, spp, pptxData?.handoutMaster),
+						orientation: 'portrait',
+						colorFilter,
+						frameSlides: settings.frameSlides,
+						scaleToFit: settings.scaleToFit,
+					}),
 				);
 			}
 		} catch (err) {
 			console.error('[PowerPointViewer] Print layout failed:', err);
 		}
+	};
+
+	/**
+	 * Public entry point for the raster path on its own (kept for API
+	 * back-compat; `PrintDialog` itself goes through `handlePrintSvg`, which
+	 * prefers the flicker-free SVG path and falls back to `runRasterPrint`
+	 * directly, reusing the window it already opened rather than opening a
+	 * second one here).
+	 */
+	const handlePrintWithSettings = async (settings: PrintSettings) => {
+		setIsPrintDialogOpen(false);
+		const printWindow = openPendingPrintWindow(t('pptx.print.preparingToPrint'));
+		if (!printWindow) {
+			console.warn(
+				'[PowerPointViewer] Print window was blocked by the browser. Allow popups for this site to print.',
+			);
+			return;
+		}
+		return runRasterPrint(printWindow, settings);
 	};
 
 	return {

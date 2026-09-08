@@ -1,7 +1,17 @@
+import {
+	mayLeaveSlideShow,
+	resolveAuthoredSlideRange,
+	shouldLoopContinuously,
+} from 'pptx-viewer-shared';
+
+import type { Translator } from '../../i18n/translator';
 import type { EditorController } from '../editor/editor-controller.svelte';
 import type { EditorState } from '../editor/editor-state.svelte';
 import { PresentationController, usePresentationEffects } from '../presentation';
+import type { PresenterSession } from '../presentation';
+import { providePresentationElementStates } from './presentation-element-states-context';
 import type { PresentationLoader } from './presentation-loader.svelte';
+import type { ViewerOptionsState } from './viewer-options.svelte';
 import type { ViewerParityUiState } from './viewer-parity-ui.svelte';
 import type { ViewerState } from './viewer-state.svelte';
 import { createViewportHandlers } from './viewport-handlers';
@@ -13,6 +23,12 @@ export interface PresentationClusterDeps {
 	loader: PresentationLoader;
 	parityUi: ViewerParityUiState;
 	controller: EditorController;
+	/** The audience-display link, driven by the B/W blackout and Ctrl+M ink keys. */
+	presenterSession: PresenterSession;
+	/** File > Options, read for Advanced > "End with black slide" and the Trust Center hyperlink gate. */
+	optionsState: ViewerOptionsState;
+	/** For the Trust Center hyperlink-confirm dialog's message. */
+	t: Translator;
 	getEditingActive(): boolean;
 	getStageHolderEl(): HTMLDivElement | undefined;
 	getRootEl(): HTMLDivElement | undefined;
@@ -31,28 +47,106 @@ export interface PresentationCluster extends ViewportHandlers {
  * not just constructed objects.
  */
 export function usePresentationCluster(deps: PresentationClusterDeps): PresentationCluster {
-	const { editor, viewer, loader, parityUi, controller } = deps;
+	const { editor, viewer, loader, parityUi, controller, presenterSession, optionsState, t } = deps;
 
 	const presentation = new PresentationController({
 		getSlides: () => editor.renderedSlides,
 		getCurrentIndex: () => viewer.current,
 		navigate: (index) => viewer.goTo(index),
 		getShowWithAnimation: () => loader.presentationProperties.showWithAnimation,
+		// Read from the EDITOR (Set Up Slide Show / File > Options commits there),
+		// not the loader's as-parsed snapshot, so a mid-session change reaches a
+		// show already running. Mirrors `getUseTimings` below.
+		getLoopContinuously: () => shouldLoopContinuously(editor.presentationProperties),
+		// Past the last slide the controller raises the black end screen; a further
+		// forward input (or a click on it) ends the show, like PowerPoint.
+		exit: () => {
+			// Never in an audience display: it has no editor to fall back to.
+			if (mayLeaveSlideShow()) {
+				viewer.isFullscreen = false;
+			}
+		},
 		getFrameRoot: () => deps.getStageHolderEl()?.querySelector('.pptx-svelte-stage') ?? null,
+		// Lets the animation controller resolve a `p:anim` formula that needs the
+		// animated shape's real box (Grow And Turn's `-#ppt_w/2` fly-in) and a
+		// scheme-colour ramp stop instead of falling back.
+		getCanvasSize: () => loader.canvasSize,
+		getThemeColorMap: () => editor.themeColorMap,
+		// File > Options > Advanced > "End with black slide". Off means the show
+		// exits straight to the editor instead of raising the black end screen.
+		getEndWithBlackSlide: () => optionsState.options.advanced.slideShowEndWithBlackSlide,
+		// Slide Show > Custom Shows: restrict playback to the selected show's
+		// members. Resolved fresh on every read so a show edited (or deleted) mid
+		// session is honoured without re-creating the controller.
+		getActiveCustomShow: () =>
+			parityUi.activeCustomShowId
+				? (editor.customShows.find(({ id }) => id === parityUi.activeCustomShowId) ?? null)
+				: null,
+		// Wave-4 B7: `ppaction://customshow?id=<id>[&return=true]` reads and
+		// switches the SAME `parityUi.activeCustomShowId` the radio-button UI
+		// (Slide Show > Custom Shows) drives, so an on-slide action and the menu
+		// agree about which show is "active".
+		getCustomShows: () => editor.customShows,
+		getActiveCustomShowId: () => parityUi.activeCustomShowId,
+		setActiveCustomShowId: (id) => {
+			parityUi.activeCustomShowId = id;
+		},
+		// `p:showPr/p:sldRg`: the deck is authored to open into slides
+		// `fromIndex..toIndex` rather than the whole deck. Read from the loader's
+		// as-parsed snapshot (there is no UI to edit this range yet, unlike the
+		// custom-show selection above), resolved fresh on every read.
+		getAuthoredRange: () =>
+			resolveAuthoredSlideRange(loader.presentationProperties, editor.renderedSlides.length),
+		// Trust Center > "Confirm before opening external hyperlinks": gates an
+		// on-slide Action Setting's `openUrl` intent the same way a text-run
+		// hyperlink click already is (`TextRunBase.svelte`).
+		confirmUrl: (url: string) =>
+			optionsState.confirmHyperlink(url, t('pptx.options.trust.confirmHyperlinks')),
+		// Resolve a native-animation `p:stSnd` action sound's archive path to
+		// its pre-resolved Blob/data URL and play it. Without this,
+		// `onPlayActionSound` was never passed at all and every animation
+		// sound was silently dropped.
+		onPlayActionSound: (soundPath: string) => {
+			const url = loader.mediaDataUrls.get(soundPath);
+			if (!url || typeof Audio === 'undefined') {
+				return;
+			}
+			const audio = new Audio(url);
+			void audio.play().catch(() => {
+				/* ignore autoplay restrictions */
+			});
+		},
 	});
+	// Publish the per-element native-animation state map so the chart / SmartArt /
+	// connector / shape renderers can reveal staged builds and relinquish animated
+	// fill / stroke (mirrors Vue's `providePresentationElementStates`).
+	providePresentationElementStates(() => presentation.elementStates);
 	usePresentationEffects({
 		controller: presentation,
 		getPresenting: () => viewer.isFullscreen,
 		getCurrentIndex: () => viewer.current,
 		getActiveSlide: () => editor.renderedSlides[viewer.current],
 		getStageRoot: () => deps.getStageHolderEl()?.querySelector('.pptx-svelte-stage') ?? null,
+		// `p:showPr/@useTimings`: "manual" turns every slide's authored advTm off.
+		// Read from the EDITOR, not the loader: the loader holds the as-parsed
+		// snapshot, so a change made after load (the Slide Show tab's Use Timings
+		// box, or Set Up Slide Show's Advance Slides radios) would never reach
+		// playback. The editor's copy is seeded from the loader's on every load.
+		getUseTimings: () => editor.presentationProperties.advanceMode !== 'manual',
 	});
 
 	let wasPresenting = false;
 	$effect(() => {
 		const presenting = viewer.isFullscreen;
 		if (wasPresenting && !presenting && parityUi.annotations.count > 0) {
-			parityUi.keepAnnotationsOpen = true;
+			// File > Options > Advanced > "Prompt to keep ink annotations when
+			// exiting": off discards the ink silently, no dialog (matches
+			// Vue/Angular; PowerPoint parity).
+			if (optionsState.options.advanced.slideShowPromptKeepInkAnnotations) {
+				parityUi.keepAnnotationsOpen = true;
+			} else {
+				parityUi.annotations.clear();
+			}
 		}
 		wasPresenting = presenting;
 		if (!presenting && parityUi.rehearse.active) {
@@ -70,17 +164,52 @@ export function usePresentationCluster(deps: PresentationClusterDeps): Presentat
 		return () => window.clearInterval(timer);
 	});
 
-	const { onFullscreenToggle, onFullscreenChange, onKeydown } = createViewportHandlers({
+	// `onEndShow` re-enters the toggle these handlers themselves expose; the
+	// closure only runs on a key press, long after this assignment completes.
+	const handlers: ViewportHandlers = createViewportHandlers({
 		getRootEl: deps.getRootEl,
 		viewer,
 		controller,
 		getEditingActive: deps.getEditingActive,
 		presentation,
+		onEndShow: () => handlers.onFullscreenToggle(),
+		// F5 / the ribbon's "From Beginning": same two calls `ViewerChrome`'s
+		// `onfrombeginning` makes, so the key and the button agree.
+		onStartFromBeginning: () => {
+			presentation.firstSlide();
+			handlers.onFullscreenToggle();
+		},
+		// Shift+F5 / the ribbon's "From Current Slide": `onFullscreenToggle` alone
+		// already resolves the show's actual entry slide (wave-4 B1), same as the
+		// ribbon button.
+		onStartFromCurrent: () => handlers.onFullscreenToggle(),
 		setPointerTool: (tool) => {
 			parityUi.annotations.tool = tool;
 		},
 		eraseAnnotations: () => parityUi.annotations.clear(),
+		toggleInkMarkup: () =>
+			presenterSession.updateSnapshot({
+				inkMarkupVisible: presenterSession.snapshot.inkMarkupVisible === false,
+			}),
+		toggleBlank: (value) =>
+			presenterSession.updateSnapshot({
+				blackout: presenterSession.snapshot.blackout === value ? 'none' : value,
+			}),
+		// PowerPoint's bare `J`. The same flag the ribbon's Subtitles command
+		// writes, so the key and the menu entry cannot disagree.
+		toggleSubtitles: () => {
+			parityUi.subtitlesEnabled = !parityUi.subtitlesEnabled;
+		},
+		// PowerPoint's Ctrl+H. Drives the toolbar's own fade flag, the one
+		// auto-hide writes, so the shortcut and the countdown cannot disagree.
+		toggleChrome: () => parityUi.showChrome.toggleVisible(),
+		// PowerPoint's Ctrl+S ("See All Slides"), laid over the show: the point of
+		// the shortcut is reaching a backup slide WITHOUT leaving the show, so it
+		// must not be a door into presenter view.
+		showAllSlides: () => {
+			parityUi.allSlidesOpen = true;
+		},
 	});
 
-	return { presentation, onFullscreenToggle, onFullscreenChange, onKeydown };
+	return { presentation, ...handlers };
 }

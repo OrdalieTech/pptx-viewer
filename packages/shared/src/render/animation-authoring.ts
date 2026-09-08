@@ -30,6 +30,9 @@
  *
  * @module render/animation-authoring
  */
+/* oxlint-disable eslint/one-var -- each exported helper below declares its own
+   independent locals; merging unrelated declarations across the many
+   functions here would hurt readability, not help it. */
 
 import type {
 	PptxAnimationDirection,
@@ -168,14 +171,18 @@ export function animationFor(
 
 /**
  * Returns `true` when the element has at least one active effect (entrance,
- * exit, or emphasis) in the slide's animation list.
+ * exit, emphasis, or a motion path) in the slide's animation list.
+ *
+ * The motion path counts because it is driven by the same entry's timing
+ * fields: without it, a motion-path-only element would hide its own
+ * duration / delay / trigger controls.
  */
 export function hasAnimation(
 	slideAnimations: readonly PptxElementAnimation[],
 	elementId: string,
 ): boolean {
 	const entry = animationFor(slideAnimations, elementId);
-	return Boolean(entry && (entry.entrance || entry.exit || entry.emphasis));
+	return Boolean(entry && (entry.entrance || entry.exit || entry.emphasis || entry.motionPath));
 }
 
 /**
@@ -198,12 +205,14 @@ export function showDirectionPicker(
 // ==========================================================================
 
 /**
- * Internal: upsert an animation entry for `elementId`, calling `updater` to
- * produce the merged record. When `updater` returns `null`, the entry is
- * removed. When no entry exists yet, one is created with sensible defaults
- * before being passed to `updater`.
+ * Upsert an animation entry for `elementId`, calling `updater` to produce the
+ * merged record. When `updater` returns `null`, the entry is removed. When no
+ * entry exists yet, one is created with sensible defaults before being passed
+ * to `updater`. Exported so sibling authoring modules (effect sound, "after
+ * animation") share the exact same create/merge/remove semantics instead of
+ * re-implementing them.
  */
-function upsert(
+export function upsert(
 	anims: readonly PptxElementAnimation[],
 	elementId: string,
 	updater: (current: PptxElementAnimation) => PptxElementAnimation | null,
@@ -239,7 +248,9 @@ function setEffect(
 	const value = preset === 'none' ? undefined : preset;
 	return upsert(anims, elementId, (cur) => {
 		const next: PptxElementAnimation = { ...cur, [group]: value };
-		if (!next.entrance && !next.exit && !next.emphasis) {
+		// A motion path keeps the entry alive: clearing the entrance preset must
+		// not silently delete the path the user drew on the canvas.
+		if (!next.entrance && !next.exit && !next.emphasis && !next.motionPath) {
 			return null;
 		}
 		return next;
@@ -418,6 +429,47 @@ export function reorderAnimationDown(
 	return reorderByDelta(anims, elementId, +1);
 }
 
+/**
+ * Moves one animation entry to an arbitrary position and re-normalises
+ * `order` on the result. This is the drag-and-drop / move-to-index
+ * algorithm shared by every binding's animation timeline: sort by `order`,
+ * splice the moved entry out of its source position, splice it into the
+ * target position, then reassign `order` 0..n-1.
+ *
+ * `source` identifies the entry being moved, either as a resolved index into
+ * the `order`-sorted sequence (row-index drag-and-drop, used by most
+ * bindings) or as `{ elementId }` to resolve that position by id (the
+ * Svelte ribbon tab drags by the element under the pointer rather than a
+ * row index). `targetIndex` is always a resolved index into the sorted
+ * sequence: a caller that only has a target elementId (also the Svelte
+ * ribbon tab) resolves it with `animations.findIndex` first.
+ *
+ * Returns a sorted, re-indexed copy without moving anything when `source`
+ * cannot be resolved, `targetIndex` is out of range, or the entry is
+ * already at `targetIndex`.
+ */
+export function reorderAnimationTo(
+	animations: readonly PptxElementAnimation[],
+	source: number | { elementId: string },
+	targetIndex: number,
+): PptxElementAnimation[] {
+	const sorted = [...animations].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+	const sourceIndex =
+		typeof source === 'number' ? source : sorted.findIndex((a) => a.elementId === source.elementId);
+	if (
+		sourceIndex < 0 ||
+		sourceIndex >= sorted.length ||
+		targetIndex < 0 ||
+		targetIndex >= sorted.length ||
+		sourceIndex === targetIndex
+	) {
+		return reindexOrder(sorted);
+	}
+	const [moved] = sorted.splice(sourceIndex, 1);
+	sorted.splice(targetIndex, 0, moved);
+	return reindexOrder(sorted);
+}
+
 // ==========================================================================
 // Immutable patch builders — coarse group preset apply/remove (Vue model)
 // ==========================================================================
@@ -458,6 +510,51 @@ export function removeElementAnimation(
 	elementId: string,
 ): PptxElementAnimation[] {
 	return animations.filter((a) => a.elementId !== elementId);
+}
+
+// ==========================================================================
+// Timeline-strip bar layout
+// ==========================================================================
+
+/** One proportional bar in the horizontal animation timeline strip. */
+export interface AnimationTimelineBar {
+	elementId: string;
+	leftPercent: number;
+	widthPercent: number;
+}
+
+/**
+ * Floor applied to a timeline bar's `widthPercent` so a very short animation
+ * (a near-zero duration relative to the sequence's total span) still renders
+ * as a visible, clickable sliver instead of effectively disappearing.
+ */
+const MIN_TIMELINE_BAR_WIDTH_PERCENT = 2;
+
+/**
+ * Lays out the proportional timeline-strip bars for a slide's animations:
+ * each bar's `leftPercent`/`widthPercent` express its delay/duration as a
+ * percentage of the longest end time (`delayMs + durationMs`) across every
+ * entry, so the strip always spans the full authored sequence.
+ * `widthPercent` is floored to {@link MIN_TIMELINE_BAR_WIDTH_PERCENT} so a
+ * very short duration stays visible. Returned in `order` order (matching the
+ * reorderable list every binding renders beside the strip).
+ */
+export function buildAnimationTimelineBars(
+	animations: readonly PptxElementAnimation[],
+): AnimationTimelineBar[] {
+	const sorted = [...animations].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+	const total = Math.max(
+		1,
+		...sorted.map((animation) => (animation.delayMs ?? 0) + (animation.durationMs ?? 500)),
+	);
+	return sorted.map((animation) => ({
+		elementId: animation.elementId,
+		leftPercent: ((animation.delayMs ?? 0) / total) * 100,
+		widthPercent: Math.max(
+			((animation.durationMs ?? 500) / total) * 100,
+			MIN_TIMELINE_BAR_WIDTH_PERCENT,
+		),
+	}));
 }
 
 // ==========================================================================

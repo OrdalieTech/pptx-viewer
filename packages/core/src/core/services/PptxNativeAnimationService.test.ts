@@ -218,6 +218,22 @@ describe('pptxNativeAnimationService', () => {
 			expect(result![0].trigger).toBe('afterPrevious');
 		});
 
+		it("extracts trigger from nodeType 'afterEffect' (the real OOXML value)", () => {
+			// PowerPoint itself only ever emits 'afterEffect' for a "Start: After
+			// Previous" effect (ECMA-376 ST_TLTimeNodeType); 'afterPrevious' and
+			// 'afterPrev', covered above, do not occur in real files - they are
+			// this codebase's own internal trigger name, not an XML value. Real
+			// decks (e.g. a staggered wipe-in logo built from several shapes)
+			// fell through to the inherited trigger instead, desyncing the
+			// stagger between siblings and leaving a visible gap mid-animation.
+			const slideXml = buildSimpleEntranceSlide('shape1', {
+				nodeType: 'afterEffect',
+			});
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result).toBeDefined();
+			expect(result![0].trigger).toBe('afterPrevious');
+		});
+
 		it("extracts trigger from nodeType 'mouseOver' as onHover", () => {
 			const slideXml = buildSimpleEntranceSlide('shape1', {
 				nodeType: 'mouseOver',
@@ -770,6 +786,91 @@ describe('pptxNativeAnimationService', () => {
 			expect(result![0].exclusive).toBeTruthy();
 		});
 
+		it('gives siblings of the same p:excl container the same exclGroupId, and a different container a different one', () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_dur': 'indefinite',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:excl': [
+									{
+										'p:cTn': {
+											'@_id': '2',
+											'p:childTnLst': {
+												'p:par': [
+													{
+														'p:cTn': {
+															'@_id': '3',
+															'@_presetID': '10',
+															'@_presetClass': 'entr',
+															'@_dur': '500',
+															'p:childTnLst': {
+																'p:animEffect': {
+																	'p:cBhvr': {
+																		'p:tgtEl': { 'p:spTgt': { '@_spid': 'exclA1' } },
+																	},
+																},
+															},
+														},
+													},
+													{
+														'p:cTn': {
+															'@_id': '4',
+															'@_presetID': '10',
+															'@_presetClass': 'entr',
+															'@_dur': '500',
+															'p:childTnLst': {
+																'p:animEffect': {
+																	'p:cBhvr': {
+																		'p:tgtEl': { 'p:spTgt': { '@_spid': 'exclA2' } },
+																	},
+																},
+															},
+														},
+													},
+												],
+											},
+										},
+									},
+									{
+										'p:cTn': {
+											'@_id': '5',
+											'@_presetID': '10',
+											'@_presetClass': 'entr',
+											'@_dur': '500',
+											'p:childTnLst': {
+												'p:animEffect': {
+													'p:cBhvr': {
+														'p:tgtEl': { 'p:spTgt': { '@_spid': 'exclB1' } },
+													},
+												},
+											},
+										},
+									},
+								],
+							},
+						},
+					},
+				},
+			});
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result).toBeDefined();
+			const byShape = new Map(result!.map((a) => [a.targetId, a]));
+			const a1 = byShape.get('exclA1');
+			const a2 = byShape.get('exclA2');
+			const b1 = byShape.get('exclB1');
+			expect(a1?.exclusive).toBeTruthy();
+			expect(a2?.exclusive).toBeTruthy();
+			expect(b1?.exclusive).toBeTruthy();
+			expect(a1?.exclGroupId).toBeDefined();
+			expect(a1?.exclGroupId).toBe(a2?.exclGroupId);
+			expect(b1?.exclGroupId).toBeDefined();
+			expect(b1?.exclGroupId).not.toBe(a1?.exclGroupId);
+		});
+
 		it('extracts text target from p:animEffect with p:txEl', () => {
 			const slideXml = buildSlideXmlWithTiming({
 				'p:tnLst': {
@@ -875,6 +976,162 @@ describe('pptxNativeAnimationService', () => {
 			expect(result![0].colorAnimation!.direction).toBe('cw');
 			expect(result![0].colorAnimation!.fromColor).toBe('#FF0000');
 			expect(result![0].colorAnimation!.toColor).toBe('#0000FF');
+		});
+
+		// emph.15 "Bold Reveal" (COM-recorded shape: presetId 15, attrName
+		// 'style.fontweight', a single `p:set` child - no `p:anim`/`p:animClr`
+		// at all - see packages/shared/src/render/animation-emphasis-ground-truth-early.ts).
+		it("parses a p:set discrete attribute assignment (emph.15 'Bold Reveal')", () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_dur': 'indefinite',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_id': '2',
+										'@_presetID': '15',
+										'@_presetClass': 'emph',
+										'@_dur': '1',
+										'p:childTnLst': {
+											'p:set': {
+												'p:cBhvr': {
+													'p:cTn': { '@_id': '3', '@_dur': '1' },
+													'p:tgtEl': { 'p:spTgt': { '@_spid': 'boldShape' } },
+													'p:attrNameLst': { 'p:attrName': 'style.fontWeight' },
+												},
+												'p:to': { 'p:strVal': { '@_val': 'bold' } },
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result).toBeDefined();
+			expect(result![0].targetId).toBe('boldShape');
+			expect(result![0].presetClass).toBe('emph');
+			expect(result![0].setAnimations).toStrictEqual([
+				{
+					attrName: 'style.fontweight',
+					value: 'bold',
+					valueType: 'str',
+					durationMs: 1,
+					delayMs: undefined,
+				},
+			]);
+		});
+
+		// emph.18 "Underline" (BrushOnUnderline): the same shape, a boolean
+		// p:to this time, proving the value-type discrimination, not just the
+		// string case.
+		it("parses a boolean p:to value (emph.18 'Underline')", () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_dur': 'indefinite',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_id': '2',
+										'@_presetID': '18',
+										'@_presetClass': 'emph',
+										'@_dur': '1',
+										'p:childTnLst': {
+											'p:set': {
+												'p:cBhvr': {
+													'p:tgtEl': { 'p:spTgt': { '@_spid': 'underlineShape' } },
+													'p:attrNameLst': {
+														'p:attrName': 'style.textDecorationUnderline',
+													},
+												},
+												'p:to': { 'p:boolVal': { '@_val': '1' } },
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result![0].setAnimations).toStrictEqual([
+				{
+					attrName: 'style.textdecorationunderline',
+					value: true,
+					valueType: 'bool',
+					durationMs: undefined,
+					delayMs: undefined,
+				},
+			]);
+		});
+
+		it('preserves signed HSL deltas and every sibling p:animClr behaviour', () => {
+			const colorBehaviour = (targetAttribute: string, h: string, s: string, l: string) => ({
+				'@_clrSpc': 'hsl',
+				'p:by': { 'p:hsl': { '@_h': h, '@_s': s, '@_l': l } },
+				'p:cBhvr': {
+					'p:tgtEl': { 'p:spTgt': { '@_spid': 'clrShape' } },
+					'p:attrNameLst': { 'p:attrName': targetAttribute },
+				},
+			});
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_dur': 'indefinite',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_id': '2',
+										'@_presetID': '1',
+										'@_presetClass': 'emph',
+										'@_dur': '1000',
+										'p:childTnLst': {
+											'p:animClr': [
+												colorBehaviour('style.color', '7200000', '0', '0'),
+												colorBehaviour('fillcolor', '0', '-12549', '-25098'),
+												colorBehaviour('stroke.color', '-3600000', '5000', '10000'),
+											],
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+			const result = service.parseNativeAnimations(slideXml);
+			const color = result?.[0]?.colorAnimation;
+			expect(color?.hslDelta).toStrictEqual({ hue: 120, saturation: 0, lightness: 0 });
+			expect(color?.components).toHaveLength(3);
+			expect(color?.components?.map((component) => component.targetAttribute)).toStrictEqual([
+				'style.color',
+				'fillcolor',
+				'stroke.color',
+			]);
+			expect(color?.components?.[1]?.hslDelta).toStrictEqual({
+				hue: 0,
+				saturation: -12.549,
+				lightness: -25.098,
+			});
+			expect(color?.components?.[2]?.hslDelta).toStrictEqual({
+				hue: -60,
+				saturation: 5,
+				lightness: 10,
+			});
 		});
 
 		it('extracts command from p:cmd in child timing list', () => {
@@ -1034,6 +1291,11 @@ describe('pptxNativeAnimationService', () => {
 													},
 												},
 											},
+											'p:endSync': {
+												'@_evt': 'end',
+												'@_delay': '0',
+												'p:rtn': { '@_val': 'all' },
+											},
 											'p:childTnLst': {
 												'p:par': {
 													'p:cTn': {
@@ -1072,6 +1334,170 @@ describe('pptxNativeAnimationService', () => {
 			expect(interactiveAnim).toBeDefined();
 			expect(interactiveAnim!.triggerShapeId).toBe('triggerButton');
 			expect(interactiveAnim!.targetId).toBe('hiddenShape');
+			expect(interactiveAnim!.interactiveSequence).toBeTruthy();
+			expect(interactiveAnim!.interactiveRestart).toBeTruthy();
+
+			// The interactive effect must appear EXACTLY ONCE. The generic timing
+			// walk used to descend into the interactive `p:seq` as well, emitting a
+			// second copy tagged with the inherited main-sequence `onClick`
+			// trigger. That phantom copy became an extra MAIN-sequence click step,
+			// so pressing Next in a slide show burned a click doing nothing instead
+			// of advancing the slide.
+			const hiddenShapeAnims = result!.filter((a) => a.targetId === 'hiddenShape');
+			expect(hiddenShapeAnims).toHaveLength(1);
+			expect(hiddenShapeAnims[0].trigger).toBe('onShapeClick');
+		});
+
+		it('does not emit an interactive effect as a main-sequence click step', () => {
+			// Shape of `e2e/fixtures/solution-explorer.pptx` slide 2: a mainSeq that
+			// auto-plays a video plus an interactiveSeq that toggles pause when the
+			// video itself is clicked. PowerPoint advances to the next slide on the
+			// first Next press; the duplicated interactive step made it take two.
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:seq': [
+									{
+										'p:cTn': {
+											'@_id': '2',
+											'@_nodeType': 'mainSeq',
+											'p:childTnLst': {
+												'p:par': {
+													'p:cTn': {
+														'@_id': '3',
+														'@_nodeType': 'afterEffect',
+														'@_presetID': '1',
+														'@_presetClass': 'mediacall',
+														'p:childTnLst': {
+															'p:cmd': {
+																'@_type': 'call',
+																'@_cmd': 'playFrom(0.0)',
+																'p:cBhvr': {
+																	'p:tgtEl': { 'p:spTgt': { '@_spid': 'video' } },
+																},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+									{
+										'p:cTn': {
+											'@_id': '8',
+											'@_nodeType': 'interactiveSeq',
+											'p:stCondLst': {
+												'p:cond': {
+													'@_evt': 'onClick',
+													'@_delay': '0',
+													'p:tgtEl': { 'p:spTgt': { '@_spid': 'video' } },
+												},
+											},
+											'p:childTnLst': {
+												'p:par': {
+													'p:cTn': {
+														'@_id': '11',
+														'@_nodeType': 'clickEffect',
+														'@_presetID': '2',
+														'@_presetClass': 'mediacall',
+														'p:childTnLst': {
+															'p:cmd': {
+																'@_type': 'call',
+																'@_cmd': 'togglePause',
+																'p:cBhvr': {
+																	'p:tgtEl': { 'p:spTgt': { '@_spid': 'video' } },
+																},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								],
+							},
+						},
+					},
+				},
+			});
+
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result).toBeDefined();
+
+			const toggles = result!.filter((a) => a.commandString === 'togglePause');
+			expect(toggles).toHaveLength(1);
+			expect(toggles[0].trigger).toBe('onShapeClick');
+			expect(toggles[0].triggerShapeId).toBe('video');
+
+			// The only main-sequence effect is the auto-started playback command.
+			// Its `nodeType="afterEffect"` (PowerPoint's "Start: After Previous")
+			// means it plays automatically once the sequence begins, not on a
+			// click - it must not collide with the interactive `onShapeClick`
+			// trigger asserted above.
+			const mainSeqAnims = result!.filter((a) => a.trigger === 'afterPrevious');
+			expect(mainSeqAnims).toHaveLength(1);
+			expect(mainSeqAnims[0].commandString).toBe('playFrom(0.0)');
+		});
+
+		it('still finds an interactive sequence nested below the root', () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_id': '2',
+										'p:childTnLst': {
+											'p:seq': {
+												'p:cTn': {
+													'@_id': '3',
+													'@_nodeType': 'interactiveSeq',
+													'p:stCondLst': {
+														'p:cond': {
+															'@_evt': 'onClick',
+															'p:tgtEl': { 'p:spTgt': { '@_spid': 'deepTrigger' } },
+														},
+													},
+													'p:childTnLst': {
+														'p:par': {
+															'p:cTn': {
+																'@_id': '4',
+																'@_presetID': '1',
+																'@_presetClass': 'entr',
+																'p:childTnLst': {
+																	'p:set': {
+																		'p:cBhvr': {
+																			'p:tgtEl': { 'p:spTgt': { '@_spid': 'deepTarget' } },
+																		},
+																	},
+																},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result).toBeDefined();
+			const deep = result!.filter((a) => a.targetId === 'deepTarget');
+			expect(deep).toHaveLength(1);
+			expect(deep[0].trigger).toBe('onShapeClick');
+			expect(deep[0].triggerShapeId).toBe('deepTrigger');
 		});
 
 		it('skips mainSeq sequences in interactive parsing', () => {
@@ -1122,6 +1548,271 @@ describe('pptxNativeAnimationService', () => {
 			for (const anim of result!) {
 				expect(anim.trigger).not.toBe('onShapeClick');
 			}
+		});
+	});
+
+	// -----------------------------------------------------------------------
+	// Timing attributes: @fill / @restart / @repeatDur / @spd (effect cTn),
+	// @rev / @advAuto (text p:bldP), @concurrent / @nextAc / @prevAc (p:seq)
+	// -----------------------------------------------------------------------
+	describe('timing attributes (animation-timing-attrs)', () => {
+		it('extracts @fill, @restart, @repeatDur and @spd from the effect cTn', () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_dur': 'indefinite',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:seq': {
+									'@_concurrent': '1',
+									'@_nextAc': 'seek',
+									'@_prevAc': 'skipTimeNode',
+									'p:cTn': {
+										'@_id': '2',
+										'@_dur': 'indefinite',
+										'@_nodeType': 'mainSeq',
+										'p:childTnLst': {
+											'p:par': {
+												'p:cTn': {
+													'@_id': '3',
+													'@_presetID': '10',
+													'@_presetClass': 'emph',
+													'@_dur': '500',
+													'@_fill': 'hold',
+													'@_restart': 'never',
+													'@_repeatDur': '1500',
+													'@_spd': '150000',
+													'p:childTnLst': {
+														'p:animEffect': {
+															'p:cBhvr': {
+																'p:tgtEl': {
+																	'p:spTgt': {
+																		'@_spid': 'timedShape',
+																	},
+																},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result).toBeDefined();
+			const anim = result!.find((a) => a.targetId === 'timedShape');
+			expect(anim).toBeDefined();
+			expect(anim!.fill).toBe('hold');
+			expect(anim!.restart).toBe('never');
+			expect(anim!.repeatDurMs).toBe(1500);
+			expect(anim!.speedPct).toBe(150);
+			expect(anim!.seqConcurrent).toBeTruthy();
+			expect(anim!.seqNextAction).toBe('seek');
+			expect(anim!.seqPrevAction).toBe('skipTimeNode');
+		});
+
+		it('parses @repeatDur="indefinite" as Infinity', () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_dur': 'indefinite',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_id': '2',
+										'@_presetID': '10',
+										'@_presetClass': 'emph',
+										'@_dur': '500',
+										'@_repeatDur': 'indefinite',
+										'p:childTnLst': {
+											'p:animEffect': {
+												'p:cBhvr': {
+													'p:tgtEl': { 'p:spTgt': { '@_spid': 'infShape' } },
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result![0].repeatDurMs).toBe(Infinity);
+		});
+
+		it('leaves fill/restart/repeatDurMs/speedPct undefined when absent', () => {
+			const result = service.parseNativeAnimations(buildSimpleEntranceSlide('plainShape'));
+			expect(result).toBeDefined();
+			expect(result![0].fill).toBeUndefined();
+			expect(result![0].repeatDurMs).toBeUndefined();
+			expect(result![0].speedPct).toBeUndefined();
+		});
+
+		it('extracts @rev and @advAuto from a TEXT p:bldP, distinct from p:bldDgm/@rev', () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'@_id': '1',
+							'@_dur': 'indefinite',
+							'@_nodeType': 'tmRoot',
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_id': '2',
+										'@_presetID': '10',
+										'@_presetClass': 'entr',
+										'@_dur': '500',
+										'p:childTnLst': {
+											'p:animEffect': {
+												'p:cBhvr': {
+													'p:tgtEl': { 'p:spTgt': { '@_spid': 'revShape' } },
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				'p:bldLst': {
+					'p:bldP': {
+						'@_spid': 'revShape',
+						'@_build': 'p',
+						'@_grpId': '0',
+						'@_rev': '1',
+						'@_advAuto': '2000',
+					},
+				},
+			});
+			const result = service.parseNativeAnimations(slideXml);
+			expect(result).toBeDefined();
+			expect(result![0].buildReverse).toBeTruthy();
+			expect(result![0].buildAdvAutoMs).toBe(2000);
+		});
+	});
+
+	describe('sub-shape targeting, cBhvr attrs, calcmode, node id (G1/G4/G5)', () => {
+		it('resolves targetId to the grouped p:subSp shape, not the enclosing group', () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_id': '2',
+										'@_presetClass': 'entr',
+										'@_presetID': '1',
+										'p:childTnLst': {
+											'p:animEffect': {
+												'p:cBhvr': {
+													'p:tgtEl': {
+														'p:spTgt': {
+															'@_spid': '4',
+															'p:subSp': { '@_spid': '3' },
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+			const anim = service.parseNativeAnimations(slideXml)?.[0];
+			expect(anim?.targetId).toBe('3');
+			expect(anim?.target).toMatchObject({ type: 'shape', shapeId: '4', subShapeId: '3' });
+		});
+
+		it('parses p:cBhvr additive/accumulate/xfrmType/override and the effect nodeId', () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_id': '7',
+										'@_presetClass': 'emph',
+										'@_presetID': '1',
+										'p:childTnLst': {
+											'p:animRot': {
+												'@_by': '21600000',
+												'p:cBhvr': {
+													'@_additive': 'sum',
+													'@_accumulate': 'always',
+													'@_xfrmType': 'point',
+													'@_override': 'normal',
+													'p:tgtEl': { 'p:spTgt': { '@_spid': 'spin1' } },
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+			const anim = service.parseNativeAnimations(slideXml)?.[0];
+			expect(anim?.nodeId).toBe(7);
+			expect(anim?.cBhvrAdditive).toBe('sum');
+			expect(anim?.cBhvrAccumulate).toBe('always');
+			expect(anim?.cBhvrXfrmType).toBe('point');
+			expect(anim?.cBhvrOverride).toBe('normal');
+		});
+
+		it('parses p:anim/@_calcmode', () => {
+			const slideXml = buildSlideXmlWithTiming({
+				'p:tnLst': {
+					'p:par': {
+						'p:cTn': {
+							'p:childTnLst': {
+								'p:par': {
+									'p:cTn': {
+										'@_presetClass': 'emph',
+										'@_presetID': '1',
+										'p:childTnLst': {
+											'p:anim': {
+												'@_calcmode': 'discrete',
+												'p:cBhvr': {
+													'p:tgtEl': { 'p:spTgt': { '@_spid': 'toggle1' } },
+													'p:attrNameLst': { 'p:attrName': 'style.visibility' },
+												},
+												'p:tavLst': {
+													'p:tav': [
+														{ '@_tm': '0', 'p:val': { 'p:strVal': { '@_val': 'visible' } } },
+														{ '@_tm': '50000', 'p:val': { 'p:strVal': { '@_val': 'hidden' } } },
+													],
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			});
+			const anim = service.parseNativeAnimations(slideXml)?.[0];
+			expect(anim?.calcMode).toBe('discrete');
 		});
 	});
 

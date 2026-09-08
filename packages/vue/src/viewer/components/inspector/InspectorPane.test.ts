@@ -3,7 +3,9 @@ import { mount } from '@vue/test-utils';
 import type { PptxElement, PptxElementAnimation } from 'pptx-viewer-core';
 import { describe, expect, it } from 'vitest';
 
+import AccessibilityPanel from './AccessibilityPanel.vue';
 import AnimationPanel from './AnimationPanel.vue';
+import ConnectorArrowsPanel from './ConnectorArrowsPanel.vue';
 import InspectorPane from './InspectorPane.vue';
 
 function shape(overrides: Partial<PptxElement> = {}): PptxElement {
@@ -49,5 +51,49 @@ describe('inspectorPane responsive layout', () => {
 		});
 		wrapper.getComponent(AnimationPanel).vm.$emit('updateSlideAnimations', animations);
 		expect(wrapper.emitted('updateSlideAnimations')?.[0]?.[0]).toStrictEqual(animations);
+	});
+});
+
+describe('inspectorPane connector arrowheads', () => {
+	it('offers the arrowhead card for a connector, under a translated heading', () => {
+		const wrapper = mount(InspectorPane, {
+			props: { element: shape({ type: 'connector', shapeType: 'bentConnector3' }) },
+		});
+		expect(wrapper.findComponent(ConnectorArrowsPanel).exists()).toBeTruthy();
+		expect(wrapper.text()).toContain('Connector');
+	});
+
+	it.each(['shape', 'text', 'image', 'table', 'chart'])(
+		'hides the arrowhead card for a %s, which has no a:headEnd',
+		(type) => {
+			const wrapper = mount(InspectorPane, { props: { element: shape({ type } as never) } });
+			expect(wrapper.findComponent(ConnectorArrowsPanel).exists()).toBeFalsy();
+		},
+	);
+
+	it('relays an arrowhead change to the viewer host', () => {
+		const wrapper = mount(InspectorPane, {
+			props: { element: shape({ type: 'connector' }) },
+		});
+		const patch = { shapeStyle: { connectorEndArrow: 'stealth' } };
+		wrapper.getComponent(ConnectorArrowsPanel).vm.$emit('update', patch);
+		expect(wrapper.emitted('update')?.[0]?.[0]).toStrictEqual(patch);
+	});
+});
+
+describe('inspectorPane accessibility section', () => {
+	it.each(['text', 'shape', 'connector', 'table', 'chart', 'smartArt', 'media', 'ole'])(
+		'mounts the accessibility panel for a %s',
+		(type) => {
+			const wrapper = mount(InspectorPane, { props: { element: shape({ type } as never) } });
+			expect(wrapper.findComponent(AccessibilityPanel).exists()).toBeTruthy();
+		},
+	);
+
+	it('does not mount the accessibility panel for a picture (its alt text has its own field)', () => {
+		const wrapper = mount(InspectorPane, {
+			props: { element: shape({ type: 'picture' } as never) },
+		});
+		expect(wrapper.findComponent(AccessibilityPanel).exists()).toBeFalsy();
 	});
 });

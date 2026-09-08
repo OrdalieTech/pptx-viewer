@@ -84,6 +84,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const rEmbed = xmlAttr(blip, 'r:embed');
 			const rLink = xmlAttr(blip, 'r:link');
 			const crop = this.readImageCropFromBlipFill(blipFill);
+			// A shape image fill carries the same blip effects as a regular p:pic.
+			// Dropping these made authored transparency such as
+			// <a:alphaModFix amt="15000"/> render at full opacity.
+			const imageEffects = this.extractImageEffects(blip);
 
 			// Image tiling properties from a:tile
 			const tileNode = blipFill?.['a:tile'] as XmlObject | undefined;
@@ -113,6 +117,13 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				if (algnStr.length > 0) {
 					tileProps.tileAlignment = algnStr;
 				}
+			}
+
+			// Print-resolution hint (`a:blipFill/@dpi`): round-trip only, no
+			// on-screen rendering effect. See `PptxImageProperties.dpi`.
+			const dpiRaw = Number.parseInt(String(blipFill?.['@_dpi'] || ''), 10);
+			if (Number.isFinite(dpiRaw) && dpiRaw > 0) {
+				tileProps.dpi = dpiRaw;
 			}
 
 			this.compatibilityService.inspectPictureCompatibility(blipFill, blip, slidePath, id);
@@ -153,6 +164,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 			// Parse hyperlink / action for the shape-with-image-fill element
 			const sifCNvPr = xmlPath(shape, 'p:nvSpPr', 'p:cNvPr');
+			const sifElementName = xmlAttr(sifCNvPr, 'name')?.trim() || undefined;
 			const sifSlideRels = this.slideRelsMap.get(slidePath);
 			const { actionClick: sifActionClick, actionHover: sifActionHover } = this.parseElementActions(
 				sifCNvPr,
@@ -169,6 +181,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				height,
 				imageData,
 				imagePath,
+				imageEffects: imageEffects || undefined,
 				...crop,
 				...tileProps,
 				shapeType,
@@ -184,6 +197,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				flipHorizontal,
 				flipVertical,
 				rawXml: shape,
+				name: sifElementName,
 				actionClick: sifActionClick,
 				actionHover: sifActionHover,
 			};
@@ -209,8 +223,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		if (normalized === 'b' || normalized === 'bottom') {
 			return 'bottom';
 		}
-		if (normalized === 'dist' || normalized === 'just') {
-			return 'middle';
+		// D1-G5 (D2 audit numbering: text D2-G5): `dist`/`just` are distinct
+		// from true centering (ST_TextAnchoringType, ECMA-376 §20.1.10.2) - keep
+		// them as their own values so save can round-trip the original
+		// attribute instead of silently rewriting it to `ctr`.
+		if (normalized === 'dist') {
+			return 'distributed';
+		}
+		if (normalized === 'just') {
+			return 'justified';
 		}
 		return undefined;
 	}

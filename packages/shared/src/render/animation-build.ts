@@ -94,7 +94,9 @@ export function resolveStepBuildDescriptor(
 	if (graphic && graphic.mode === 'sub') {
 		if (graphic.kind === 'chart') {
 			const mode = resolveChartBuildMode(graphic.build);
-			return mode === 'asOne' ? undefined : { kind: 'chart', mode };
+			return mode === 'asOne'
+				? undefined
+				: { kind: 'chart', mode, animateBackground: graphic.animateBackground };
 		}
 		const mode = resolveDiagramBuildMode(graphic.build);
 		return mode === 'asOne' ? undefined : { kind: 'diagram', mode };
@@ -168,11 +170,12 @@ export function revealedStageCount(progress: number, totalStages: number): numbe
 // ==========================================================================
 
 /**
- * Fold a revealing step's staged-build + colour-target descriptors onto an
- * {@link ElementAnimationState}. Mutates `state` in place, adding `build`
- * (with progress resolved at `options.elapsedMs`), `animatesFill`, and
- * `animatesStroke` only when the step actually carries those descriptors, so a
- * plain whole-element entrance leaves the state untouched.
+ * Fold a revealing step's staged-build + colour-target + text-style
+ * descriptors onto an {@link ElementAnimationState}. Mutates `state` in
+ * place, adding `build` (with progress resolved at `options.elapsedMs`),
+ * `animatesFill`, `animatesStroke`, and `textStyle` only when the step
+ * actually carries those descriptors, so a plain whole-element entrance
+ * leaves the state untouched.
  */
 export function applyStepBuildMetadata(
 	state: ElementAnimationState,
@@ -194,5 +197,8 @@ export function applyStepBuildMetadata(
 		if (step.colorTargets.includes('stroke')) {
 			state.animatesStroke = true;
 		}
+	}
+	if (step.textStyle) {
+		state.textStyle = step.textStyle;
 	}
 }

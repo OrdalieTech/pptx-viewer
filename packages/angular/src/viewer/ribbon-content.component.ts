@@ -18,10 +18,15 @@
  * to it) unchanged.
  */
 import { ChangeDetectionStrategy, Component, input, output, signal } from '@angular/core';
-import type { PptxChartType, PptxElement } from 'pptx-viewer-core';
+import type { PptxElement } from 'pptx-viewer-core';
 
-import { DEFAULT_INSERT_CHART_TYPE } from '../internal/shared';
-import type { AccountAuthConfig, ToolbarActionId } from '../internal/shared';
+import { DEFAULT_INSERT_CHART_KIND } from '../internal/shared';
+import type {
+	AccountAuthConfig,
+	InsertChartKind,
+	ShapePresetType,
+	ToolbarActionId,
+} from '../internal/shared';
 import { RibbonArrangeSectionComponent } from './ribbon-arrange-section.component';
 import { RibbonDrawingGroupComponent } from './ribbon-drawing-group.component';
 import { RibbonFileSectionComponent } from './ribbon-file-section.component';
@@ -60,11 +65,11 @@ import type { RibbonTab } from './ribbon-types';
 					(save)="save.emit()"
 					(savePpsx)="savePpsx.emit()"
 					(savePptm)="savePptm.emit()"
-					(packageForSharing)="packageForSharing.emit()"
 					(exportPng)="exportPng.emit()"
 					(exportPdf)="exportPdf.emit()"
 					(exportGif)="exportGif.emit()"
 					(exportVideo)="exportVideo.emit()"
+					(exportJson)="exportJson.emit()"
 					(copySlideAsImage)="copySlideAsImage.emit()"
 					(print)="print.emit()"
 					(info)="info.emit()"
@@ -82,13 +87,19 @@ import type { RibbonTab } from './ribbon-types';
 				<pptx-ribbon-home-section
 					[slideIndex]="slideIndex()"
 					[selectedElement]="selectedElement()"
+					[canEdit]="canEdit()"
 					[formatPainterActive]="formatPainterActive()"
 					[canActivateFormatPainter]="canActivateFormatPainter()"
 					(toggleFormatPainter)="toggleFormatPainter.emit()"
 					(findReplace)="find.emit()"
+					(openTemplateGallery)="openTemplateGallery.emit()"
 				/>
 				<span class="pptx-rb-sep"></span>
-				<pptx-ribbon-drawing-group [canEdit]="canEdit()" [slideIndex]="slideIndex()" />
+				<pptx-ribbon-drawing-group
+					[canEdit]="canEdit()"
+					[slideIndex]="slideIndex()"
+					[selectedElement]="selectedElement()"
+				/>
 				<span class="pptx-rb-sep"></span>
 				<!--
 					React parity (Toolbar.tsx: sArr = sHome || toolbarSection === 'arrange'):
@@ -97,6 +108,8 @@ import type { RibbonTab } from './ribbon-types';
 				-->
 				<pptx-ribbon-arrange-section
 					[slideIndex]="slideIndex()"
+					[selectedElement]="selectedElement()"
+					[canEdit]="canEdit()"
 					[formatPainterActive]="formatPainterActive()"
 					[canActivateFormatPainter]="canActivateFormatPainter()"
 					(toggleFormatPainter)="toggleFormatPainter.emit()"
@@ -106,9 +119,12 @@ import type { RibbonTab } from './ribbon-types';
 				<pptx-ribbon-insert-section
 					[slideIndex]="slideIndex()"
 					[newChartType]="newChartType()"
+					[newShapeType]="newShapeType()"
 					(chartTypeChange)="newChartType.set($event)"
+					(shapeTypeChange)="newShapeType.set($event)"
 					(openSmartArtDialog)="openSmartArtDialog.emit()"
 					(openEquationDialog)="openEquationDialog.emit()"
+					(openHyperlink)="link.emit()"
 				/>
 			}
 			@case ('text') {
@@ -125,6 +141,8 @@ import type { RibbonTab } from './ribbon-types';
 			@case ('arrange') {
 				<pptx-ribbon-arrange-section
 					[slideIndex]="slideIndex()"
+					[selectedElement]="selectedElement()"
+					[canEdit]="canEdit()"
 					[formatPainterActive]="formatPainterActive()"
 					[canActivateFormatPainter]="canActivateFormatPainter()"
 					(toggleFormatPainter)="toggleFormatPainter.emit()"
@@ -159,7 +177,6 @@ export class RibbonContentComponent {
 	readonly save = output<void>();
 	readonly savePpsx = output<void>();
 	readonly savePptm = output<void>();
-	readonly packageForSharing = output<void>();
 	readonly signatures = output<void>();
 	readonly info = output<void>();
 	readonly print = output<void>();
@@ -168,14 +185,25 @@ export class RibbonContentComponent {
 	readonly exportPdf = output<void>();
 	readonly exportGif = output<void>();
 	readonly exportVideo = output<void>();
+	readonly exportJson = output<void>();
 	readonly copySlideAsImage = output<void>();
 	readonly replace = output<void>();
 	readonly openSmartArtDialog = output<void>();
 	readonly openEquationDialog = output<void>();
+	/** "Slide Templates" in the Home tab's Slides group; the host opens the gallery. */
+	readonly openTemplateGallery = output<void>();
+	/**
+	 * Insert > Hyperlink. Shares the ribbon's existing `link` output with the
+	 * Review tab's Link command: both open the one hyperlink edit dialog the
+	 * viewer already owns, so there is nothing for the host to wire up twice.
+	 */
+	readonly link = output<void>();
 	readonly openPassword = output<void>();
 	readonly openFontEmbedding = output<void>();
 	readonly openVersionHistory = output<void>();
 	readonly openSettings = output<void>();
-	/** The chart type currently chosen in the Insert tab dropdown (survives tab switches). */
-	protected readonly newChartType = signal<PptxChartType>(DEFAULT_INSERT_CHART_TYPE);
+	/** The chart entry currently chosen in the Insert tab dropdown (survives tab switches). */
+	protected readonly newChartType = signal<InsertChartKind>(DEFAULT_INSERT_CHART_KIND);
+	/** The shape geometry currently chosen in the Insert tab dropdown (survives tab switches). */
+	protected readonly newShapeType = signal<ShapePresetType>('rect');
 }

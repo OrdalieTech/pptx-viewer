@@ -44,11 +44,14 @@ import {
 	buildAreaChartXml,
 	buildBarChartXml,
 	buildBubbleChartXml,
+	buildComboChartXml,
 	buildCxChartXml,
 	buildLineChartXml,
 	buildPieChartXml,
 	buildRadarChartXml,
 	buildScatterChartXml,
+	buildStockChartXml,
+	buildSurfaceChartXml,
 } from './chart-xml';
 import type { ChartXmlInput, ChartXmlSeries } from './chart-xml';
 import { writeFixtureDeterministic } from './write-fixture';
@@ -82,6 +85,12 @@ export interface ChartSlideSpec {
 	chartType: PptxChartType;
 	seriesCount: number;
 	categoryCount: number;
+	/**
+	 * Category labels for this slide, when the generic quarter labels will not
+	 * do. The region map has to name real countries or nothing on the choropleth
+	 * matches and every binding falls through to the unmatched-region table.
+	 */
+	categories?: readonly string[];
 }
 
 export const CHART_SLIDES: readonly ChartSlideSpec[] = [
@@ -129,12 +138,52 @@ export const CHART_SLIDES: readonly ChartSlideSpec[] = [
 		seriesCount: 3,
 		categoryCount: 4,
 	},
+	// ── The six kinds React and Vue used to hand-roll ────────────────────────
+	// They were absent from this gallery, which is why `chart-svg-parity.spec.ts`
+	// stayed green while two bindings painted a different chart from the other
+	// three: the spec compares bindings against each other, so a kind that is
+	// not in the corpus cannot be compared at all.
+	{ key: 'combo', title: 'Combo', chartType: 'combo', seriesCount: 3, categoryCount: 4 },
+	{ key: 'stock', title: 'Stock', chartType: 'stock', seriesCount: 4, categoryCount: 4 },
+	{ key: 'surface', title: 'Surface', chartType: 'surface', seriesCount: 3, categoryCount: 4 },
+	{
+		key: 'waterfall',
+		title: 'Waterfall',
+		chartType: 'waterfall',
+		seriesCount: 1,
+		categoryCount: 4,
+	},
+	{ key: 'treemap', title: 'Treemap', chartType: 'treemap', seriesCount: 1, categoryCount: 4 },
+	{
+		key: 'region-map',
+		title: 'Region Map',
+		chartType: 'regionMap',
+		seriesCount: 1,
+		categoryCount: 4,
+		categories: ['United States', 'Germany', 'China', 'Brazil'],
+	},
 ];
 
+/**
+ * OHLC values for the stock slide, in PowerPoint's positional order
+ * (Open / High / Low / Close). The shared engine reads the four series BY SLOT,
+ * so the fixture cannot reuse the generic value bank: `low` has to actually be
+ * the lowest of the four or every candle renders inside-out.
+ */
+const STOCK_VALUE_BANK: readonly number[][] = [
+	[42, 58, 55, 66], // Open
+	[50, 65, 62, 74], // High
+	[38, 52, 51, 61], // Low
+	[47, 61, 53, 71], // Close
+];
+const STOCK_SERIES_NAMES = ['Open', 'High', 'Low', 'Close'] as const;
+
 function seriesFor(slide: ChartSlideSpec): ChartXmlSeries[] {
+	const bank = slide.key === 'stock' ? STOCK_VALUE_BANK : VALUE_BANK;
+	const names = slide.key === 'stock' ? STOCK_SERIES_NAMES : SERIES_NAMES;
 	return Array.from({ length: slide.seriesCount }, (_, i) => ({
-		name: SERIES_NAMES[i] ?? `Series ${i + 1}`,
-		values: [...(VALUE_BANK[i] ?? VALUE_BANK[0])],
+		name: names[i] ?? `Series ${i + 1}`,
+		values: [...(bank[i] ?? bank[0])],
 		colorHex: PALETTE[i % PALETTE.length],
 	}));
 }
@@ -143,7 +192,7 @@ function seriesFor(slide: ChartSlideSpec): ChartXmlSeries[] {
 function chartXmlFor(slide: ChartSlideSpec): string {
 	const input: ChartXmlInput = {
 		title: slide.title,
-		categories: [...CATEGORIES],
+		categories: [...(slide.categories ?? CATEGORIES)],
 		series: seriesFor(slide),
 	};
 	switch (slide.key) {
@@ -175,22 +224,84 @@ function chartXmlFor(slide: ChartSlideSpec): string {
 			return buildCxChartXml(input, 'histogram');
 		case 'box-whisker':
 			return buildCxChartXml(input, 'boxWhisker');
+		case 'combo':
+			return buildComboChartXml(input);
+		case 'stock':
+			return buildStockChartXml(input);
+		case 'surface':
+			return buildSurfaceChartXml(input);
+		case 'waterfall':
+			return buildCxChartXml(input, 'waterfall');
+		case 'treemap':
+			return buildCxChartXml(input, 'treemap');
+		case 'region-map':
+			return buildCxChartXml(input, 'regionMap');
 		default:
 			return buildBarChartXml(input, 'clustered');
 	}
 }
 
-const CHART_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.drawingml.chart+xml';
-const CHART_REL_TYPE = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart';
-const CHART_GRAPHICDATA_URI = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+/**
+ * A chart part comes in two entirely separate flavours, and all three of the
+ * package-level bindings below have to agree with the part's root element.
+ *
+ * The classic 2006 DrawingML chart is `<c:chartSpace>`. The 2014 "chartex"
+ * chart (funnel, sunburst, histogram, box-whisker, treemap, waterfall,
+ * region-map) is `<cx:chartSpace>` in a Microsoft extension namespace, and it
+ * needs its OWN content type, relationship type and `graphicData/@uri`.
+ *
+ * This generator used to declare all fourteen parts as classic charts while
+ * writing `cx:chartSpace` content into four of them, on the theory that the
+ * classic uri kept `parseGraphicFrameType` happy. It did, but it also made the
+ * deck un-openable: PowerPoint validates chart1.xml..chart14.xml against the
+ * `c:` schema, hits `cx:chartSpace` in chart11, and refuses the whole file. The
+ * fixture was the one deck in this repo that PowerPoint would not open even
+ * before we saved it. Core resolves the chartex uri on its own
+ * (`PptxGraphicFrameParser` matches `/2014/chartex`), so the honest wiring
+ * costs nothing.
+ */
+const CHART_BINDINGS = {
+	classic: {
+		contentType: 'application/vnd.openxmlformats-officedocument.drawingml.chart+xml',
+		relType: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart',
+		graphicDataUri: 'http://schemas.openxmlformats.org/drawingml/2006/chart',
+		prefix: 'c',
+		namespace: 'http://schemas.openxmlformats.org/drawingml/2006/chart',
+	},
+	chartex: {
+		contentType: 'application/vnd.ms-office.chartex+xml',
+		relType: 'http://schemas.microsoft.com/office/2014/relationships/chartEx',
+		graphicDataUri: 'http://schemas.microsoft.com/office/drawing/2014/chartex',
+		prefix: 'cx',
+		namespace: 'http://schemas.microsoft.com/office/drawing/2014/chartex',
+	},
+} as const;
+
+/** The chart-slide keys whose part is authored by `buildCxChartXml`. */
+const CHARTEX_KEYS = new Set([
+	'funnel',
+	'sunburst',
+	'histogram',
+	'box-whisker',
+	'waterfall',
+	'treemap',
+	'region-map',
+]);
+
+function bindingFor(slide: ChartSlideSpec): (typeof CHART_BINDINGS)[keyof typeof CHART_BINDINGS] {
+	return CHARTEX_KEYS.has(slide.key) ? CHART_BINDINGS.chartex : CHART_BINDINGS.classic;
+}
 
 /**
- * A chart graphic frame referencing relationship `rId`. The `graphicData` uri
- * is the classic chart uri so the core `parseGraphicFrameType` classifies it as
- * a chart for every chart kind; the referenced part's own content (c: vs cx:)
- * then drives the parsed chart type. Positioned at 60,60 / 840x420 px in EMU.
+ * A chart graphic frame referencing relationship `rId`, bound to the flavour
+ * the referenced part actually is. Positioned at 60,60 / 840x420 px in EMU.
  */
-function chartGraphicFrameXml(rId: string, shapeId: number, name: string): string {
+function chartGraphicFrameXml(
+	binding: (typeof CHART_BINDINGS)[keyof typeof CHART_BINDINGS],
+	rId: string,
+	shapeId: number,
+	name: string,
+): string {
 	const x = 60 * 9525;
 	const y = 60 * 9525;
 	const cx = 840 * 9525;
@@ -199,8 +310,8 @@ function chartGraphicFrameXml(rId: string, shapeId: number, name: string): strin
 		`<p:graphicFrame><p:nvGraphicFramePr>` +
 		`<p:cNvPr id="${shapeId}" name="${name}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>` +
 		`<p:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${cx}" cy="${cy}"/></p:xfrm>` +
-		`<a:graphic><a:graphicData uri="${CHART_GRAPHICDATA_URI}">` +
-		`<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" ` +
+		`<a:graphic><a:graphicData uri="${binding.graphicDataUri}">` +
+		`<${binding.prefix}:chart xmlns:${binding.prefix}="${binding.namespace}" ` +
 		`xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="${rId}"/>` +
 		`</a:graphicData></a:graphic></p:graphicFrame>`
 	);
@@ -217,20 +328,24 @@ function injectGraphicFrame(slideXml: string, frameXml: string): string {
 }
 
 /** Add a chart relationship to a slide `.rels`, returning the new rId. */
-function addChartRel(relsXml: string, target: string): { xml: string; rId: string } {
+function addChartRel(
+	relsXml: string,
+	target: string,
+	relType: string,
+): { xml: string; rId: string } {
 	const ids = [...relsXml.matchAll(/Id="rId(?<n>\d+)"/gu)].map((m) =>
 		Number.parseInt(m.groups?.n ?? '0', 10),
 	);
 	const next = (ids.length > 0 ? Math.max(...ids) : 0) + 1;
 	const rId = `rId${next}`;
-	const rel = `<Relationship Id="${rId}" Type="${CHART_REL_TYPE}" Target="${target}"/>`;
+	const rel = `<Relationship Id="${rId}" Type="${relType}" Target="${target}"/>`;
 	const xml = relsXml.replace('</Relationships>', `${rel}</Relationships>`);
 	return { xml, rId };
 }
 
 /** Append the chart part content-type override to `[Content_Types].xml`. */
-function addContentTypeOverride(ctXml: string, partName: string): string {
-	const override = `<Override PartName="/${partName}" ContentType="${CHART_CONTENT_TYPE}"/>`;
+function addContentTypeOverride(ctXml: string, partName: string, contentType: string): string {
+	const override = `<Override PartName="/${partName}" ContentType="${contentType}"/>`;
 	return ctXml.replace('</Types>', `${override}</Types>`);
 }
 
@@ -268,22 +383,23 @@ export async function generateChartFixture(): Promise<string> {
 		const chartPartName = `ppt/charts/chart${n}.xml`;
 		const slidePath = `ppt/slides/slide${n}.xml`;
 		const relsPath = `ppt/slides/_rels/slide${n}.xml.rels`;
+		const binding = bindingFor(slide);
 
 		// Chart part.
 		zip.file(chartPartName, chartXmlFor(slide));
 
 		// Slide rels → chart (target is relative to ppt/slides/).
 		const relsXml = await zip.file(relsPath)!.async('string');
-		const { xml: newRels, rId } = addChartRel(relsXml, `../charts/chart${n}.xml`);
+		const { xml: newRels, rId } = addChartRel(relsXml, `../charts/chart${n}.xml`, binding.relType);
 		zip.file(relsPath, newRels);
 
 		// Slide spTree ← chart graphic frame.
 		const slideXml = await zip.file(slidePath)!.async('string');
-		const frame = chartGraphicFrameXml(rId, 100 + n, `Chart ${n}`);
+		const frame = chartGraphicFrameXml(binding, rId, 100 + n, `Chart ${n}`);
 		zip.file(slidePath, injectGraphicFrame(slideXml, frame));
 
 		// Content-type override.
-		contentTypes = addContentTypeOverride(contentTypes, chartPartName);
+		contentTypes = addContentTypeOverride(contentTypes, chartPartName, binding.contentType);
 	}
 
 	zip.file('[Content_Types].xml', contentTypes);

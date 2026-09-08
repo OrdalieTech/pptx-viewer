@@ -141,7 +141,7 @@ export function SetUpSlideShowDialog({
 									type='radio'
 									name='advanceMode'
 									value='manual'
-									checked={(draft.advanceMode ?? 'manual') === 'manual'}
+									checked={draft.advanceMode === 'manual'}
 									onChange={() => update({ advanceMode: 'manual' })}
 									className='accent-primary'
 								/>
@@ -152,7 +152,7 @@ export function SetUpSlideShowDialog({
 									type='radio'
 									name='advanceMode'
 									value='useTimings'
-									checked={draft.advanceMode === 'useTimings'}
+									checked={(draft.advanceMode ?? 'useTimings') === 'useTimings'}
 									onChange={() => update({ advanceMode: 'useTimings' })}
 									className='accent-primary'
 								/>
@@ -170,14 +170,14 @@ export function SetUpSlideShowDialog({
 							onClick={onClose}
 							className='px-3 py-1.5 rounded bg-muted hover:bg-accent text-[12px] text-foreground transition-colors'
 						>
-							{t('common.cancel')}
+							{t('pptx.common.cancel')}
 						</button>
 						<button
 							type='button'
 							onClick={handleSave}
 							className='px-3 py-1.5 rounded bg-primary hover:bg-primary/80 text-[12px] text-white transition-colors'
 						>
-							{t('common.ok')}
+							{t('pptx.common.ok')}
 						</button>
 					</div>
 				</div>

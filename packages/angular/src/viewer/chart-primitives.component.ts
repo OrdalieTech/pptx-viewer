@@ -51,7 +51,11 @@ import type {
 						[attr.data-chart-part]="partRole(prim)"
 						[attr.data-chart-series]="partSeries(prim)"
 						[attr.data-chart-point]="partPoint(prim)"
-					/>
+					>
+						@if (asRect(prim).title !== undefined) {
+							<svg:title>{{ asRect(prim).title }}</svg:title>
+						}
+					</svg:rect>
 				}
 				@case ('path') {
 					<svg:path
@@ -59,10 +63,21 @@ import type {
 						[attr.fill]="asPath(prim).fill"
 						[attr.stroke]="asPath(prim).stroke ?? 'none'"
 						[attr.stroke-width]="asPath(prim).strokeWidth ?? 0"
+						[attr.fill-opacity]="asPath(prim).opacity ?? 1"
 						[attr.data-chart-part]="partRole(prim)"
 						[attr.data-chart-series]="partSeries(prim)"
 						[attr.data-chart-point]="partPoint(prim)"
-					/>
+					>
+						<!--
+							The shared descriptor's tooltip, projected as the SVG title
+							element. It is the shape's ACCESSIBLE NAME as well as its hover
+							text, and a choropleth patch carries no label of its own: without
+							it a region map announces nothing and names nothing.
+						-->
+						@if (asPath(prim).title !== undefined) {
+							<svg:title>{{ asPath(prim).title }}</svg:title>
+						}
+					</svg:path>
 				}
 				@case ('polyline') {
 					<svg:polyline
@@ -74,7 +89,11 @@ import type {
 						[attr.data-chart-part]="partRole(prim)"
 						[attr.data-chart-series]="partSeries(prim)"
 						[attr.data-chart-point]="partPoint(prim)"
-					/>
+					>
+						@if (asPolyline(prim).title !== undefined) {
+							<svg:title>{{ asPolyline(prim).title }}</svg:title>
+						}
+					</svg:polyline>
 				}
 				@case ('circle') {
 					<svg:circle
@@ -86,7 +105,11 @@ import type {
 						[attr.data-chart-part]="partRole(prim)"
 						[attr.data-chart-series]="partSeries(prim)"
 						[attr.data-chart-point]="partPoint(prim)"
-					/>
+					>
+						@if (asCircle(prim).title !== undefined) {
+							<svg:title>{{ asCircle(prim).title }}</svg:title>
+						}
+					</svg:circle>
 				}
 				@case ('line') {
 					<svg:line
@@ -96,7 +119,12 @@ import type {
 						[attr.y2]="asLine(prim).y2"
 						[attr.stroke]="asLine(prim).stroke"
 						[attr.stroke-width]="asLine(prim).strokeWidth"
-					/>
+						[attr.transform]="asLine(prim).transform ?? null"
+					>
+						@if (asLine(prim).title !== undefined) {
+							<svg:title>{{ asLine(prim).title }}</svg:title>
+						}
+					</svg:line>
 				}
 				@case ('polygon') {
 					<svg:polygon
@@ -106,10 +134,15 @@ import type {
 						[attr.stroke-width]="asPolygon(prim).strokeWidth"
 						[attr.opacity]="asPolygon(prim).opacity ?? 1"
 						[attr.stroke-dasharray]="asPolygon(prim).dashArray ?? null"
+						[attr.transform]="asPolygon(prim).transform ?? null"
 						[attr.data-chart-part]="partRole(prim)"
 						[attr.data-chart-series]="partSeries(prim)"
 						[attr.data-chart-point]="partPoint(prim)"
-					/>
+					>
+						@if (asPolygon(prim).title !== undefined) {
+							<svg:title>{{ asPolygon(prim).title }}</svg:title>
+						}
+					</svg:polygon>
 				}
 				@case ('text') {
 					<svg:text
@@ -119,6 +152,8 @@ import type {
 						[attr.font-size]="asText(prim).fontSize"
 						[attr.fill]="asText(prim).fill"
 						[attr.font-weight]="asText(prim).fontWeight ?? 'normal'"
+						[attr.font-style]="asText(prim).fontStyle ?? 'normal'"
+						[attr.font-family]="asText(prim).fontFamily ?? null"
 						[attr.dominant-baseline]="asText(prim).dominantBaseline ?? 'auto'"
 						[attr.opacity]="asText(prim).opacity ?? 1"
 						[attr.transform]="asText(prim).transform ?? null"

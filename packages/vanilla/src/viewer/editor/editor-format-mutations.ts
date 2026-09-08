@@ -2,13 +2,21 @@ import type {
 	PptxElement,
 	PptxElementWithShapeStyle,
 	PptxElementWithText,
+	PptxThemeColorRef,
 	ShapeStyle,
 	TextSegment,
 	TextStyle,
 } from 'pptx-viewer-core';
 import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
 import type { ChangeCaseMode } from 'pptx-viewer-shared';
-import { applyCaseTransformToSegments } from 'pptx-viewer-shared';
+import {
+	applyCaseTransformToSegments,
+	remapTextToSegments,
+	textFontSizePtToPx,
+	textFontSizePxToPt,
+} from 'pptx-viewer-shared';
+
+import { currentInlineEditorText } from './inline-text-editor';
 
 /**
  * Pure formatting-patch builders for the vanilla editor.
@@ -42,8 +50,18 @@ export interface TextFormatState {
 	fontSize: number;
 	/** Effective font family, or undefined when unset. */
 	fontFamily: string | undefined;
+	/**
+	 * `p:ph/@type` of the selected element, when it is a placeholder.
+	 *
+	 * Lets the font box fall back to the theme's major font inside a title and
+	 * its minor font elsewhere, instead of a hardcoded family that misreported
+	 * every themed deck.
+	 */
+	placeholderType: string | undefined;
 	/** Effective text colour (hex), or undefined when unset. */
 	color: string | undefined;
+	/** Theme ref for `color`, if any (highlights the matching theme swatch). */
+	colorRef: PptxThemeColorRef | undefined;
 	/** Effective highlight colour (hex), or undefined when unset. */
 	highlightColor: string | undefined;
 	/** Effective character spacing (1/100 pt), defaulting to 0 (normal). */
@@ -82,15 +100,18 @@ export function canFormatShape(el: PptxElement | undefined): el is PptxElementWi
 export function readTextFormatState(el: PptxElement | undefined): TextFormatState {
 	const ts: TextStyle | undefined = canFormatText(el) ? el.textStyle : undefined;
 	const firstRun = canFormatText(el) ? el.textSegments?.find((s) => s.text)?.style : undefined;
+	const fontSizePx = ts?.fontSize ?? firstRun?.fontSize;
 	return {
 		bold: Boolean(ts?.bold ?? firstRun?.bold),
 		italic: Boolean(ts?.italic ?? firstRun?.italic),
 		underline: Boolean(ts?.underline ?? firstRun?.underline),
 		strikethrough: Boolean(ts?.strikethrough ?? firstRun?.strikethrough),
 		hasTextShadow: Boolean(ts?.textShadowColor ?? firstRun?.textShadowColor),
-		fontSize: ts?.fontSize ?? firstRun?.fontSize ?? DEFAULT_FONT_SIZE,
+		fontSize: fontSizePx === undefined ? DEFAULT_FONT_SIZE : textFontSizePxToPt(fontSizePx),
 		fontFamily: ts?.fontFamily ?? firstRun?.fontFamily,
+		placeholderType: (el as { placeholderType?: string } | undefined)?.placeholderType,
 		color: ts?.color ?? firstRun?.color,
+		colorRef: ts?.colorRef ?? firstRun?.colorRef,
 		highlightColor: ts?.highlightColor ?? firstRun?.highlightColor,
 		characterSpacing: ts?.characterSpacing ?? firstRun?.characterSpacing ?? 0,
 		listType: ts?.listType ?? firstRun?.listType,
@@ -121,8 +142,8 @@ export function toggleTextProp(el: PptxElement, key: TextToggleKey): Partial<Ppt
 
 /** Set the font size (pt) element-wide, clamped to sane bounds. */
 export function setFontSize(el: PptxElement, size: number): Partial<PptxElement> {
-	const clamped = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Math.round(size)));
-	return patchTextStyle(el, { fontSize: clamped });
+	const clamped = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, size));
+	return patchTextStyle(el, { fontSize: textFontSizePtToPx(clamped) });
 }
 
 /** Step the font size by `delta` points from the current effective size. */
@@ -130,9 +151,17 @@ export function adjustFontSize(el: PptxElement, delta: number): Partial<PptxElem
 	return setFontSize(el, readTextFormatState(el).fontSize + delta);
 }
 
-/** Set the text colour (hex) element-wide. */
-export function setTextColor(el: PptxElement, color: string): Partial<PptxElement> {
-	return patchTextStyle(el, { color });
+/**
+ * Set the text colour (hex) element-wide. Pass `ref` for a theme-swatch pick
+ * (wins on save, so the colour follows a later theme change); omit it to
+ * clear a previously-stored ref for a plain/custom/recent pick.
+ */
+export function setTextColor(
+	el: PptxElement,
+	color: string,
+	ref?: PptxThemeColorRef,
+): Partial<PptxElement> {
+	return patchTextStyle(el, { color, colorRef: ref });
 }
 
 /** Set the text highlight colour (hex) element-wide. */
@@ -194,7 +223,17 @@ export function changeTextCase(el: PptxElement, mode: ChangeCaseMode): Partial<P
 	if (!canFormatText(el) || !el.textSegments) {
 		return {};
 	}
-	const textSegments = applyCaseTransformToSegments(el.textSegments, null, mode);
+	// Reconcile against the live inline-editor text first (same remap the
+	// commit path uses): the editor is uncontrolled, so `el.textSegments` can
+	// be stale relative to what is on screen, and case-transforming a stale
+	// snapshot leaves whatever the user typed since untransformed once the
+	// edit session commits. See `currentInlineEditorText`.
+	const liveText = currentInlineEditorText();
+	const baseSegments =
+		liveText !== undefined
+			? remapTextToSegments(liveText, el.textSegments, el.textStyle)
+			: el.textSegments;
+	const textSegments = applyCaseTransformToSegments(baseSegments, null, mode);
 	return { textSegments, text: textSegments.map((s) => s.text).join('') } as Partial<PptxElement>;
 }
 

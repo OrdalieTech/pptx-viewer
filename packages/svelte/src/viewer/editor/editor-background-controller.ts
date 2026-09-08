@@ -1,4 +1,5 @@
-import { updateSlide } from './editor-mutations';
+import { updateSlide } from 'pptx-viewer-shared';
+
 import type { EditorState } from './editor-state.svelte';
 
 /**
@@ -43,6 +44,17 @@ export class EditorBackgroundController {
 				backgroundGradient: undefined,
 				backgroundPattern: undefined,
 			}),
+		);
+	}
+
+	/** Toggle PowerPoint's "Hide Background Graphics" (`p:sld/@showMasterSp`). */
+	setHideBackgroundGraphics(hide: boolean): void {
+		const current = this.#editor.currentSlideIndex;
+		if (!this.#editor.editable || !this.#editor.slides[current]) {
+			return;
+		}
+		this.#editor.commitSlides(
+			updateSlide(this.#editor.slides, current, { showMasterShapes: !hide }),
 		);
 	}
 }

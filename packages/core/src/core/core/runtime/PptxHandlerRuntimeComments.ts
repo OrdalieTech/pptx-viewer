@@ -1,4 +1,5 @@
 import { PptxComment, PptxCommentAuthor, XmlObject } from '../../types';
+import { nestLegacyCommentReplies } from '../../utils/legacy-comment-threading';
 import {
 	MODERN_AUTHOR_RELATIONSHIP,
 	MODERN_COMMENT_RELATIONSHIP,
@@ -125,8 +126,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				xmlChild(relsData, 'Relationships')?.Relationship,
 			) as XmlObject[];
 			const commentRelation = rels.find((relation) => {
-				const relationType = String(relation?.['@_Type'] || '').toLowerCase();
-				return relationType.endsWith('/comments');
+				const relationType = String(relation?.['@_Type'] || '');
+				// The modern (2018/10) threaded-comment relationship type also ends
+				// in `/comments`, and `extractModernSlideComments` already owns it.
+				// Matching it here parses the same `p188:cmLst` part a second time
+				// as a legacy list, which surfaces every threaded comment twice.
+				if (relationType === MODERN_COMMENT_RELATIONSHIP) {
+					return false;
+				}
+				return relationType.toLowerCase().endsWith('/comments');
 			});
 			const target = String(commentRelation?.['@_Target'] || '').trim();
 			return target.length > 0 ? target : undefined;
@@ -176,7 +184,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const commentsRoot = this.xmlLookupService.getChildByLocalName(commentsData, 'cmLst');
 			const commentNodes = this.xmlLookupService.getChildrenArrayByLocalName(commentsRoot, 'cm');
 
-			return commentNodes.map((commentNode, index) => {
+			const flatComments = commentNodes.map((commentNode, index) => {
 				const commentId = String(commentNode?.['@_idx'] || commentNode?.['@_id'] || index).trim();
 				const authorId = String(commentNode?.['@_authorId'] || '').trim();
 				const createdAtRaw = String(commentNode?.['@_dt'] || '').trim();
@@ -210,6 +218,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					rawXml: commentNode,
 				};
 			});
+			return nestLegacyCommentReplies(flatComments);
 		} catch (error) {
 			console.warn('Failed to parse slide comments:', error);
 			return [];

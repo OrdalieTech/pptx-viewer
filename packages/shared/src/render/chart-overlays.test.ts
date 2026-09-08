@@ -1,5 +1,5 @@
 /**
- * chart-overlays.test.ts — unit tests for chart-overlays.ts.
+ * chart-overlays.test.ts: unit tests for chart-overlays.ts.
  *
  * Tests are grouped by exported function:
  *   - computeLinearRegression  (regression helpers)
@@ -8,7 +8,9 @@
  *   - computeTrendlinePrimitives
  *   - computeErrorBarPrimitives
  *   - computeAxisTitlePrimitives
- *   - computeDataTablePrimitives
+ *
+ * `computeDataTablePrimitives` moved to `chart-data-table-render.test.ts`
+ * alongside its own module.
  *
  * Ported from:
  *   packages/shared/src/render/chart-trendlines.test.ts
@@ -25,11 +27,7 @@ import type {
 import { describe, expect, it } from 'vitest';
 
 import {
-	DATA_TABLE_HEADER_H,
-	DATA_TABLE_KEY_W,
-	DATA_TABLE_ROW_H,
 	computeAxisTitlePrimitives,
-	computeDataTablePrimitives,
 	computeErrorBarPrimitives,
 	computeLinearRegression,
 	computeRSquared,
@@ -227,6 +225,86 @@ describe('computeTrendlinePrimitives', () => {
 		if (textPrimitive?.kind === 'text') {
 			expect(textPrimitive.text).toContain('R');
 		}
+	});
+
+	it('defaults the R² label to 4-decimal fixed formatting with no numFmt', () => {
+		const trendline: PptxChartTrendline = {
+			trendlineType: 'linear',
+			displayRSq: true,
+			// Perfectly linear series -> rSquared === 1, so the format is easy to
+			// assert exactly: "1.0000" from `.toFixed(4)`.
+		};
+		const chartData = makeChartData({
+			series: [makeSeries({ values: [1, 2, 3, 4], trendlines: [trendline] })],
+		});
+		const result = computeTrendlinePrimitives(chartData, 4, LAYOUT, RANGE);
+		const textPrimitive = result.find((p) => p.kind === 'text');
+		expect(textPrimitive?.kind === 'text' && textPrimitive.text).toBe('R² = 1.0000');
+	});
+
+	it('honours c:trendlineLbl/c:numFmt over the default fixed formatting when sourceLinked is false', () => {
+		const trendline: PptxChartTrendline = {
+			trendlineType: 'linear',
+			displayRSq: true,
+			label: { sourceLinked: false, numberFormatCode: '0%' },
+		};
+		const chartData = makeChartData({
+			series: [makeSeries({ values: [1, 2, 3, 4], trendlines: [trendline] })],
+		});
+		const result = computeTrendlinePrimitives(chartData, 4, LAYOUT, RANGE);
+		const textPrimitive = result.find((p) => p.kind === 'text');
+		expect(textPrimitive?.kind === 'text' && textPrimitive.text).toBe('R² = 100%');
+	});
+
+	it('ignores numFmt when sourceLinked is not explicitly false', () => {
+		const trendline: PptxChartTrendline = {
+			trendlineType: 'linear',
+			displayRSq: true,
+			label: { numberFormatCode: '0%' },
+		};
+		const chartData = makeChartData({
+			series: [makeSeries({ values: [1, 2, 3, 4], trendlines: [trendline] })],
+		});
+		const result = computeTrendlinePrimitives(chartData, 4, LAYOUT, RANGE);
+		const textPrimitive = result.find((p) => p.kind === 'text');
+		expect(textPrimitive?.kind === 'text' && textPrimitive.text).toBe('R² = 1.0000');
+	});
+
+	it('anchors the label at c:trendlineLbl/c:layout/c:manualLayout when the author dragged it', () => {
+		const trendline: PptxChartTrendline = {
+			trendlineType: 'linear',
+			displayRSq: true,
+			label: { layout: { x: 0.1, y: 0.2, xMode: 'edge', yMode: 'edge' } },
+		};
+		const chartData = makeChartData({
+			series: [makeSeries({ values: [1, 2, 3, 4], trendlines: [trendline] })],
+		});
+		const result = computeTrendlinePrimitives(chartData, 4, LAYOUT, RANGE);
+		const textPrimitive = result.find((p) => p.kind === 'text');
+		expect(textPrimitive?.kind === 'text' && textPrimitive.x).toBeCloseTo(0.1 * LAYOUT.svgWidth, 5);
+		expect(textPrimitive?.kind === 'text' && textPrimitive.y).toBeCloseTo(
+			0.2 * LAYOUT.svgHeight,
+			5,
+		);
+	});
+
+	it('keeps the default "hug the last point" anchor with no manual layout', () => {
+		const trendline: PptxChartTrendline = { trendlineType: 'linear', displayRSq: true };
+		const chartData = makeChartData({
+			series: [makeSeries({ values: [1, 2, 3, 4], trendlines: [trendline] })],
+		});
+		const withLayout = computeTrendlinePrimitives(chartData, 4, LAYOUT, RANGE);
+		const trendlineWithManualLayout: PptxChartTrendline = {
+			...trendline,
+			label: { layout: { x: 0.1, y: 0.2, xMode: 'edge', yMode: 'edge' } },
+		};
+		const chartDataManual = makeChartData({
+			series: [makeSeries({ values: [1, 2, 3, 4], trendlines: [trendlineWithManualLayout] })],
+		});
+		const withManual = computeTrendlinePrimitives(chartDataManual, 4, LAYOUT, RANGE);
+		const auto = withLayout.find((p) => p.kind === 'text');
+		const manual = withManual.find((p) => p.kind === 'text');
+		expect(auto?.kind === 'text' && manual?.kind === 'text' && auto.x !== manual.x).toBeTruthy();
 	});
 
 	it('handles exponential trendline without crashing', () => {
@@ -535,132 +613,5 @@ describe('computeAxisTitlePrimitives', () => {
 		];
 		const chartData = makeChartData({ axes, series: [] });
 		expect(computeAxisTitlePrimitives(chartData, LAYOUT)).toHaveLength(0);
-	});
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// computeDataTablePrimitives
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('computeDataTablePrimitives', () => {
-	it('returns empty array when dataTable is absent', () => {
-		const chartData = makeChartData({ series: [makeSeries()] });
-		expect(computeDataTablePrimitives(chartData, LAYOUT)).toHaveLength(0);
-	});
-
-	it('returns empty array when dataTable present but no categories and no series', () => {
-		const chartData = makeChartData({
-			categories: [],
-			series: [],
-			dataTable: {},
-		});
-		expect(computeDataTablePrimitives(chartData, LAYOUT)).toHaveLength(0);
-	});
-
-	it('returns primitives when dataTable is present with data', () => {
-		const chartData = makeChartData({
-			series: [makeSeries()],
-			dataTable: { showHorzBorder: true, showVertBorder: true, showOutline: true, showKeys: true },
-		});
-		const result = computeDataTablePrimitives(chartData, LAYOUT);
-		expect(result.length).toBeGreaterThan(0);
-	});
-
-	it('produces category header text labels', () => {
-		const chartData = makeChartData({
-			series: [makeSeries()],
-			dataTable: {},
-		});
-		const result = computeDataTablePrimitives(chartData, LAYOUT);
-		const texts = result
-			.filter((p) => p.kind === 'text')
-			.map((p) => (p.kind === 'text' ? p.text : ''));
-		expect(texts).toContain('A');
-		expect(texts).toContain('B');
-		expect(texts).toContain('C');
-		expect(texts).toContain('D');
-	});
-
-	it('produces series name text when showKeys is true', () => {
-		const chartData = makeChartData({
-			series: [makeSeries({ name: 'Revenue' })],
-			dataTable: { showKeys: true },
-		});
-		const result = computeDataTablePrimitives(chartData, LAYOUT);
-		const texts = result
-			.filter((p) => p.kind === 'text')
-			.map((p) => (p.kind === 'text' ? p.text : ''));
-		expect(texts).toContain('Revenue');
-	});
-
-	it('does not include series name when showKeys is false', () => {
-		const chartData = makeChartData({
-			series: [makeSeries({ name: 'Revenue' })],
-			dataTable: { showKeys: false },
-		});
-		const result = computeDataTablePrimitives(chartData, LAYOUT);
-		const texts = result
-			.filter((p) => p.kind === 'text')
-			.map((p) => (p.kind === 'text' ? p.text : ''));
-		expect(texts).not.toContain('Revenue');
-	});
-
-	it('places table below plotBottom', () => {
-		const chartData = makeChartData({
-			series: [makeSeries()],
-			dataTable: {},
-		});
-		const result = computeDataTablePrimitives(chartData, LAYOUT);
-		const allY = result
-			.flatMap((p) => {
-				if (p.kind === 'line') {
-					return [p.y1, p.y2];
-				}
-				if (p.kind === 'text') {
-					return [p.y];
-				}
-				if (p.kind === 'rect') {
-					return [p.y];
-				}
-				return [];
-			})
-			.filter((y) => y > 0);
-		expect(allY.every((y) => y >= LAYOUT.plotBottom)).toBeTruthy();
-	});
-
-	it('produces outline border lines when showOutline is true', () => {
-		const chartData = makeChartData({
-			series: [makeSeries()],
-			dataTable: { showOutline: true },
-		});
-		const result = computeDataTablePrimitives(chartData, LAYOUT);
-		const lines = result.filter((p) => p.kind === 'line');
-		// At minimum 4 border lines for the outline
-		expect(lines.length).toBeGreaterThanOrEqual(4);
-	});
-
-	it('produces no outline when showOutline is false', () => {
-		const chartData = makeChartData({
-			series: [makeSeries()],
-			dataTable: { showOutline: false, showHorzBorder: false, showVertBorder: false },
-		});
-		// No border lines at all; only category text + value text + swatch rects
-		const result = computeDataTablePrimitives(chartData, LAYOUT);
-		const lines = result.filter((p) => p.kind === 'line');
-		expect(lines).toHaveLength(0);
-	});
-
-	it('exports DATA_TABLE_ROW_H, DATA_TABLE_HEADER_H, DATA_TABLE_KEY_W as positive numbers', () => {
-		expect(DATA_TABLE_ROW_H).toBeGreaterThan(0);
-		expect(DATA_TABLE_HEADER_H).toBeGreaterThan(0);
-		expect(DATA_TABLE_KEY_W).toBeGreaterThan(0);
-	});
-
-	it('does not crash with multiple series', () => {
-		const chartData = makeChartData({
-			series: [makeSeries({ name: 'S1' }), makeSeries({ name: 'S2', values: [5, 15, 25, 35] })],
-			dataTable: { showKeys: true },
-		});
-		expect(() => computeDataTablePrimitives(chartData, LAYOUT)).not.toThrow();
 	});
 });

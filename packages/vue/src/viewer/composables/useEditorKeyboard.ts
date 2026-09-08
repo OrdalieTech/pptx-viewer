@@ -1,8 +1,10 @@
-import type { PptxSlide } from 'pptx-viewer-core';
-import { isTemplateElementId } from 'pptx-viewer-shared';
+import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
+import { filterInteractableIds, isTemplateElementId } from 'pptx-viewer-shared';
 import { ref } from 'vue';
 import type { ComputedRef, Ref } from 'vue';
 
+import { useConnectorReroute } from './connector-reroute-store';
+import { dispatchSlideShowStartKey } from './slide-show-start-key';
 import { setTemplateElements } from './template-editing';
 import type { TemplateElementMap } from './template-editing';
 import { useKeyboardShortcuts } from './useKeyboardShortcuts';
@@ -11,6 +13,7 @@ import type { UseKeyboardShortcutsResult } from './useKeyboardShortcuts';
 export interface UseEditorKeyboardInput {
 	canEdit: () => boolean;
 	hasSelection: ComputedRef<boolean>;
+	/** A slide show (or rehearsal) is actually running, not merely previewing. */
 	presenting: Ref<boolean>;
 	findOpen: Ref<boolean>;
 	selectedElementIds: Ref<string[]>;
@@ -29,6 +32,14 @@ export interface UseEditorKeyboardInput {
 	goPrev: () => void;
 	goNext: () => void;
 	onEscape: () => void;
+	/** Group the multi-selection into one group element (Ctrl/Cmd+G). */
+	onGroup?: () => void;
+	/** Ungroup the selected group (Ctrl/Cmd+Shift+G). */
+	onUngroup?: () => void;
+	/** F5: start the show from its first slide (same as the ribbon's "From Beginning"). */
+	presentFromBeginning: () => void;
+	/** Shift+F5: start the show from the active slide (same as "From Current Slide"). */
+	startPresenting: () => void;
 }
 
 export interface UseEditorKeyboardResult {
@@ -39,14 +50,16 @@ export interface UseEditorKeyboardResult {
 	copySelected: () => void;
 	/** Cut the first selected element to the in-memory clipboard (also used by the ribbon). */
 	cutSelected: () => void;
+	/** Select every element on the active slide (Ctrl+A, and Home > Editing > Select All). */
+	selectAllElements: () => void;
 }
 
 /**
  * useEditorKeyboard: the root keydown handler plus the config-driven shortcut
  * registry it delegates to (undo/redo/copy/cut/paste/duplicate/delete/select-
  * all/nudge/slide-nav/escape). Find (Ctrl+F) and the shortcut-help overlay
- * (Ctrl+/) are intercepted here before falling through to the registry.
- * Extracted verbatim from `PowerPointViewer.vue`.
+ * ("?" or Ctrl+/) resolve inside the shared keymap, so nothing is intercepted
+ * ahead of the registry any more. Extracted from `PowerPointViewer.vue`.
  */
 export function useEditorKeyboard(input: UseEditorKeyboardInput): UseEditorKeyboardResult {
 	const {
@@ -70,6 +83,10 @@ export function useEditorKeyboard(input: UseEditorKeyboardInput): UseEditorKeybo
 		goPrev,
 		goNext,
 		onEscape,
+		onGroup,
+		onUngroup,
+		presentFromBeginning,
+		startPresenting,
 	} = input;
 
 	const showShortcuts = ref(false);
@@ -92,6 +109,13 @@ export function useEditorKeyboard(input: UseEditorKeyboardInput): UseEditorKeybo
 			cutElement(id);
 		}
 	}
+	/** Recompute the connectors glued to shapes an arrow-key nudge just moved. */
+	const rerouteConnectorsFor = useConnectorReroute({
+		slides,
+		activeSlideIndex,
+		templateElementsBySlideId,
+	});
+
 	/** Nudge every selected element by (dx, dy) px as one history entry. */
 	function nudgeSelected(dx: number, dy: number): void {
 		if (selectedElementIds.value.length === 0) {
@@ -102,7 +126,21 @@ export function useEditorKeyboard(input: UseEditorKeyboardInput): UseEditorKeybo
 		if (!slide) {
 			return;
 		}
-		const ids = new Set(selectedElementIds.value);
+		// `a:spLocks/@noMove` pins a shape, so the arrow keys must skip it exactly as
+		// a drag does, and a multi-selection nudges only its movable members.
+		const lookup = new Map<string, PptxElement>();
+		for (const el of [...(templateElementsBySlideId.value[slide.id] ?? []), ...slide.elements]) {
+			lookup.set(el.id, el);
+		}
+		const movableIds = filterInteractableIds(
+			selectedElementIds.value,
+			(id) => lookup.get(id),
+			'move',
+		);
+		if (movableIds.length === 0) {
+			return;
+		}
+		const ids = new Set(movableIds);
 		// Partition into template ids (master-/layout- prefix) and normal slide ids so
 		// the nudge routes through the correct store for each group. Without this split
 		// a selected template element is silently skipped (it lives in the template
@@ -132,6 +170,9 @@ export function useEditorKeyboard(input: UseEditorKeyboardInput): UseEditorKeybo
 			};
 			slides.value = nextSlides;
 		}
+		// The nudged shapes have landed: connectors glued to them follow, the same
+		// as at the end of a pointer drag.
+		rerouteConnectorsFor(ids);
 	}
 
 	const shortcuts = useKeyboardShortcuts({
@@ -144,31 +185,63 @@ export function useEditorKeyboard(input: UseEditorKeyboardInput): UseEditorKeybo
 			duplicate: duplicateSelected,
 			delete: deleteSelected,
 			selectAll: selectAllElements,
+			group: onGroup,
+			ungroup: onUngroup,
 			nudge: nudgeSelected,
 			prevSlide: goPrev,
 			nextSlide: goNext,
-			escape: onEscape,
+			toggleShortcuts: () => {
+				showShortcuts.value = !showShortcuts.value;
+			},
+			escape: () => {
+				// The help panel goes first: "?" opened it without touching the
+				// selection, so Escape must be able to close it again without also
+				// clearing what the user had selected.
+				if (showShortcuts.value) {
+					showShortcuts.value = false;
+					return;
+				}
+				onEscape();
+			},
+			find: () => {
+				findOpen.value = !findOpen.value;
+			},
 		},
 		canEdit,
 		hasSelection,
 		isPresenting: presenting,
 	});
 
-	/** Root keydown: Find / shortcut-help first, then the shortcut registry. */
+	/**
+	 * Root keydown: everything now goes through the shortcut registry.
+	 *
+	 * Ctrl/Cmd+F and Ctrl/Cmd+/ used to be hand-matched here, above the registry.
+	 * Both are shared-keymap actions now (`find` and `toggleShortcuts`), so
+	 * Angular, Svelte and Vanilla get the same chords instead of Ctrl+F falling
+	 * through to the browser's find bar and Ctrl+/ doing nothing at all.
+	 *
+	 * F5 / Shift+F5 are checked FIRST, ahead of the registry: unlike every other
+	 * shortcut here, they must fire even with editing disabled and even while
+	 * the caret sits in a text input, so they cannot sit behind the registry's
+	 * `canEdit` / text-input gates. See `dispatchSlideShowStartKey`.
+	 */
 	function onEditorKeydown(event: KeyboardEvent): void {
-		const mod = event.ctrlKey || event.metaKey;
-		if (canEdit() && mod && event.key.toLowerCase() === 'f') {
-			event.preventDefault();
-			findOpen.value = !findOpen.value;
-			return;
-		}
-		if (mod && event.key === '/') {
-			event.preventDefault();
-			showShortcuts.value = !showShortcuts.value;
+		if (
+			dispatchSlideShowStartKey(event, presenting.value, { presentFromBeginning, startPresenting })
+		) {
 			return;
 		}
 		shortcuts.handleKeyDown(event);
 	}
 
-	return { showShortcuts, shortcuts, onEditorKeydown, copySelected, cutSelected };
+	return {
+		showShortcuts,
+		shortcuts,
+		onEditorKeydown,
+		copySelected,
+		cutSelected,
+		// Also reachable from Home > Editing > Select > Select All, which had no
+		// producer at all until now.
+		selectAllElements,
+	};
 }

@@ -19,7 +19,7 @@ import type {
 	SmartArtStyle,
 } from 'pptx-viewer-core';
 
-import { computeSmartArtLayout } from './smartart-layout';
+import { computeSmartArtElementLayout } from './smartart-layout';
 import { flattenNodes } from './smartart-layout-helpers';
 import type { BoundingBox, RenderedNode, SmartArtLayoutResult } from './smartart-layout-types';
 
@@ -197,14 +197,19 @@ export function rebuildDrawingShapesIfCleared(
 
 	// shapes is an empty array [] -- a structural edit cleared previously-
 	// populated shapes. Rebuild them from the algorithmic layout engine.
-	const layoutResult = computeSmartArtLayout(
+	//
+	// `computeSmartArtElementLayout` derives the parsed `dgm:layoutDef` /
+	// `dgm:presLayoutVars` / colour-list interpolation from `smartArtData`
+	// itself, so the rebuild runs the real DiagramML interpreter and honours
+	// `colorsDef @meth="span"`, exactly as the fallback renderer would for the
+	// same data.
+	const layoutResult = computeSmartArtElementLayout(
+		{ ...smartArtData, layout },
 		smartArtData.nodes,
 		box,
 		palette,
 		style,
 		elementId,
-		smartArtData.resolvedLayoutType,
-		layout,
 	);
 
 	return {

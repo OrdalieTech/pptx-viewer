@@ -148,6 +148,8 @@ export function ViewerDialogGroup(props: ViewerDialogGroupProps) {
 				embedFontsEnabled={dialogs.embedFontsEnabled}
 				usedFontFamilies={propertyHandlers.usedFontFamilies}
 				embeddedFonts={embeddedFonts.map((f) => f.name)}
+				canEmbedFonts={dialogs.fontEmbedding.interactive}
+				embedUnavailableKey={dialogs.fontEmbedding.disabledReasonKey}
 				onClose={() => dialogs.setIsFontEmbeddingOpen(false)}
 				onToggleEmbedFonts={dialogs.setEmbedFontsEnabled}
 			/>
@@ -218,7 +220,7 @@ export function ViewerDialogGroup(props: ViewerDialogGroupProps) {
 			<PrintDialog
 				open={printHandlers.isPrintDialogOpen}
 				onClose={() => printHandlers.setIsPrintDialogOpen(false)}
-				onPrint={printHandlers.handlePrintWithSettings}
+				onPrint={printHandlers.handlePrintSvg}
 				slides={slides}
 				activeSlideIndex={activeSlideIndex}
 				defaultSlidesPerPage={printPropertiesSlidesPerPage(presentationProperties.printProperties)}

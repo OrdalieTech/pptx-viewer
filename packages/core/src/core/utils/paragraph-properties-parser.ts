@@ -9,7 +9,9 @@
  * @module paragraph-properties-parser
  */
 
+import { parseOoxmlPercent } from '../color';
 import type { BulletInfo, TextStyle, XmlObject } from '../types';
+import { xmlHasChild } from './xml-access';
 
 const EMU_PER_PX = 9525;
 
@@ -57,6 +59,29 @@ export function parseAlignmentAttr(algn: string | undefined): TextStyle['align']
 	return ALIGN_MAP[algn] || undefined;
 }
 
+/**
+ * Resolve a single paragraph's effective alignment: its own `a:pPr/@algn`
+ * wins outright; otherwise the alignment inherited from its OWN placeholder
+ * level (not a sibling paragraph's); otherwise the rtl-based default.
+ *
+ * Callers must look up `placeholderAlignment` per paragraph (the level the
+ * CURRENT paragraph's own `lvl` resolves to) rather than reusing a
+ * shape-level snapshot: a snapshot taken from an earlier paragraph in the
+ * same shape masks this paragraph's own placeholder-level alignment once
+ * that earlier paragraph declared an explicit `algn` (for example a centered
+ * heading followed by left-aligned body bullets).
+ */
+export function resolveParagraphAlignment(
+	authoredAlignment: unknown,
+	placeholderAlignment: TextStyle['align'] | undefined,
+	paragraphRtl: boolean | undefined,
+): TextStyle['align'] {
+	if (authoredAlignment !== undefined && authoredAlignment !== null) {
+		return parseAlignmentAttr(String(authoredAlignment)) ?? 'left';
+	}
+	return placeholderAlignment ?? (paragraphRtl ? 'right' : 'left');
+}
+
 // ---------------------------------------------------------------------------
 // Spacing helpers
 // ---------------------------------------------------------------------------
@@ -80,9 +105,21 @@ export function parseParagraphSpacingPx(spacingNode: XmlObject | undefined): num
 }
 
 /**
+ * Parse `a:buSzPct/@_val` into a bullet size expressed as a percentage of the
+ * run text (so `25000` and `25%` both yield `25`).
+ *
+ * @param buSzPct - The `a:buSzPct` node, when the level declares one.
+ * @returns Percentage of the run size, or `undefined` when absent/unparseable.
+ */
+export function parseBulletSizePercent(buSzPct: XmlObject | undefined): number | undefined {
+	const fraction = parseOoxmlPercent(buSzPct?.['@_val']);
+	return fraction === undefined ? undefined : fraction * 100;
+}
+
+/**
  * Parse proportional line spacing from `a:lnSpc > a:spcPct/@_val`.
  *
- * The OOXML value is in 1/100000ths (i.e. 150000 = 150%).  Returns a
+ * Accepts both lexical forms of the value (`150000` and `150%`). Returns a
  * multiplier clamped to [0.1, 5].
  */
 export function parseLineSpacingMultiplier(
@@ -92,11 +129,11 @@ export function parseLineSpacingMultiplier(
 		return undefined;
 	}
 	const spcPct = lineSpacingNode['a:spcPct'] as XmlObject | undefined;
-	const raw = Number.parseInt(String(spcPct?.['@_val'] || ''), 10);
-	if (Number.isFinite(raw)) {
-		return Math.max(0.1, Math.min(5, raw / 100000));
+	const multiplier = parseOoxmlPercent(spcPct?.['@_val']);
+	if (multiplier === undefined) {
+		return undefined;
 	}
-	return undefined;
+	return Math.max(0.1, Math.min(5, multiplier));
 }
 
 /**
@@ -310,8 +347,13 @@ export function parseBulletInfo(
 		return null;
 	}
 
-	// Explicit none
-	if (pPr['a:buNone']) {
+	// Explicit none. `a:buNone` is a marker element: it has no attributes and no
+	// children, so it is ALWAYS bare in the file and fast-xml-parser always
+	// materialises it as the empty string. A truthiness test therefore never
+	// fired - this branch was dead code, and SmartArt's "no bullet" was read as
+	// "no opinion" and lost on save. `xmlHasChild` is the same presence test the
+	// slide-text path was corrected to use, so both sides now share one answer.
+	if (xmlHasChild(pPr, 'a:buNone')) {
 		return { none: true };
 	}
 
@@ -319,14 +361,7 @@ export function parseBulletInfo(
 	const buFont = pPr['a:buFont'] as XmlObject | undefined;
 	const fontFamily = buFont?.['@_typeface'] ? String(buFont['@_typeface']) : undefined;
 
-	const buSzPct = pPr['a:buSzPct'] as XmlObject | undefined;
-	let sizePercent: number | undefined;
-	if (buSzPct?.['@_val'] !== undefined) {
-		const pctRaw = Number.parseInt(String(buSzPct['@_val']), 10);
-		if (Number.isFinite(pctRaw)) {
-			sizePercent = pctRaw / 1000;
-		}
-	}
+	const sizePercent = parseBulletSizePercent(pPr['a:buSzPct'] as XmlObject | undefined);
 
 	const buSzPts = pPr['a:buSzPts'] as XmlObject | undefined;
 	let sizePts: number | undefined;

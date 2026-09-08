@@ -1,4 +1,11 @@
 import type { PptxSlide } from 'pptx-viewer-core';
+import {
+	HIDDEN_SLIDE_ATTRIBUTE,
+	HIDDEN_SLIDE_LABEL_KEY,
+	hiddenSlideCue,
+	isEditorTextInputTarget,
+	mapSlideSorterKey,
+} from 'pptx-viewer-shared';
 
 import type { Translator } from '../i18n';
 import { createEl } from '../render';
@@ -11,6 +18,8 @@ export interface SlideSorterOptions {
 	onDelete(index: number): void;
 	onDuplicate(index: number): void;
 	onToggleHidden(index: number): void;
+	/** Whether the host allows edits; gates the deck-writing shortcuts. */
+	canEdit?: boolean;
 }
 
 export function openSlideSorterOverlay(
@@ -42,8 +51,21 @@ export function openSlideSorterOverlay(
 		card.classList.toggle('is-hidden', Boolean(slide.hidden));
 		const preview = createEl(doc, 'button');
 		preview.type = 'button';
-		preview.textContent = String(index + 1);
+		// The number lives in its own span so the hidden-slide slash can be drawn
+		// across the number alone rather than the whole preview button.
+		const num = createEl(doc, 'span', 'pptxv-sorter-num');
+		num.textContent = String(index + 1);
+		preview.appendChild(num);
 		preview.setAttribute('aria-label', t('pptx.compare.slideNumber', { number: index + 1 }));
+		const cue = hiddenSlideCue(slide.hidden, 'sorter', index);
+		if (cue.marker && cue.labelId) {
+			card.setAttribute(HIDDEN_SLIDE_ATTRIBUTE, cue.marker);
+			preview.setAttribute('aria-describedby', cue.labelId);
+			const badge = createEl(doc, 'span', 'pptxv-sorter-hidden');
+			badge.id = cue.labelId;
+			badge.textContent = t(HIDDEN_SLIDE_LABEL_KEY);
+			preview.appendChild(badge);
+		}
 		preview.addEventListener('click', () => {
 			options.onSelect(index);
 			overlay.remove();
@@ -82,6 +104,45 @@ export function openSlideSorterOverlay(
 		grid.appendChild(card);
 	});
 	overlay.appendChild(grid);
-	close.addEventListener('click', () => overlay.remove());
+
+	// The sorter keymap is shared (`mapSlideSorterKey`), so this overlay answers
+	// the same keys as the other four bindings' sorters. Vanilla had no sorter
+	// keyboard at all before: Escape did not even close it, which left the
+	// overlay dismissable only by finding its ✕. Only the commands this overlay
+	// can perform are dispatched; it has no slide clipboard, no multi-selection
+	// and no thumbnail zoom, so those chords are left to the host.
+	const dismiss = (): void => {
+		doc.removeEventListener('keydown', onKeyDown);
+		overlay.remove();
+	};
+	const onKeyDown = (event: KeyboardEvent): void => {
+		// The overlay can be torn down by a re-render rather than by its own ✕, so
+		// the listener detaches itself once its overlay has left the document.
+		if (!overlay.isConnected) {
+			doc.removeEventListener('keydown', onKeyDown);
+			return;
+		}
+		const { action } = mapSlideSorterKey(event, {
+			canEdit: options.canEdit !== false,
+			isTextInputTarget: isEditorTextInputTarget(event.target),
+		});
+		if (action === 'close') {
+			event.stopPropagation();
+			dismiss();
+			return;
+		}
+		if (action === 'delete') {
+			event.preventDefault();
+			options.onDelete(options.current);
+			return;
+		}
+		if (action === 'duplicate') {
+			event.preventDefault();
+			options.onDuplicate(options.current);
+		}
+	};
+	doc.addEventListener('keydown', onKeyDown);
+
+	close.addEventListener('click', dismiss);
 	host.appendChild(overlay);
 }

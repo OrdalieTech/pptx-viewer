@@ -32,6 +32,7 @@ export {
 export {
 	addElement,
 	updateElement,
+	renameElement,
 	deleteElements,
 	arrangeElements,
 	cloneElement,
@@ -44,6 +45,7 @@ export type {
 	AddElementParams,
 	AddElementResult,
 	UpdateElementParams,
+	RenameElementParams,
 	DeleteElementsParams,
 	ArrangeElementsParams,
 	CloneElementParams,
@@ -58,6 +60,19 @@ export type {
 
 export { updateTableCells, manageTableStructure } from './table-tools.js';
 export type { UpdateTableCellsParams, ManageTableStructureParams } from './table-tools.js';
+
+export {
+	setTableStyleSection,
+	createTableStyle,
+	deleteTableStyle,
+	assignTableStyle,
+} from './table-style-tools.js';
+export type {
+	SetTableStyleSectionParams,
+	CreateTableStyleParams,
+	DeleteTableStyleParams,
+	AssignTableStyleParams,
+} from './table-style-tools.js';
 
 export { updateElementStyle, runAccessibilityCheck } from './style-tools.js';
 export type {
@@ -111,6 +126,35 @@ export type {
 	CreateChartResult,
 } from './chart-tools.js';
 
+export {
+	formatChartDataPoint,
+	formatChartDataLabel,
+	formatChartSeries,
+	setChartHelperLineT,
+	setChartColorMapOverrideT,
+} from './chart-formatting-tools.js';
+export type {
+	FormatChartDataPointParams,
+	FormatChartDataLabelParams,
+	FormatChartSeriesParams,
+	SetChartHelperLineParams,
+	SetChartColorMapOverrideParams,
+} from './chart-formatting-tools.js';
+
+export {
+	listChartUserShapesT,
+	addChartUserShapeT,
+	updateChartUserShapeT,
+	removeChartUserShapeT,
+} from './chart-user-shape-tools.js';
+export type {
+	ChartUserShapeInput,
+	ListChartUserShapesParams,
+	AddChartUserShapeParams,
+	UpdateChartUserShapeParams,
+	RemoveChartUserShapeParams,
+} from './chart-user-shape-tools.js';
+
 export { manageSmartArt } from './smartart-tools.js';
 export type {
 	ManageSmartArtParams,
@@ -145,6 +189,14 @@ export type {
 	ExportSlideSvgParams,
 	ExportSlideSvgResult,
 } from './export-tools.js';
+
+export { exportToJson, importFromJson } from './json-tools.js';
+export type {
+	ExportToJsonParams,
+	ExportToJsonResult,
+	ImportFromJsonParams,
+	ImportFromJsonResult,
+} from './json-tools.js';
 
 export { manageHyperlinks } from './hyperlink-tools.js';
 export type {

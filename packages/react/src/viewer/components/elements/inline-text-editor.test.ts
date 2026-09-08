@@ -775,8 +775,24 @@ describe('getTextStyleForElement', () => {
 		});
 		const style = getTextStyleForElement(el, DEFAULT_TEXT_COLOR);
 
-		// 1.5 * (1 - 0.2) ≈ 1.2 (floating point)
-		expect(style.lineHeight).toBeCloseTo(1.2, 10);
+		// 1.5 * 1.2 (single-spacing base) * (1 - 0.2) = 1.44
+		expect(style.lineHeight).toBeCloseTo(1.44, 10);
+	});
+
+	it('should never shrink the font for spAutoFit, however much text overflows', () => {
+		// a:spAutoFit resizes the SHAPE to fit the text (ECMA-376), never the
+		// font; a box authored in PowerPoint already has its `a:ext` sized to
+		// fit, so the font must render unshrunk even for a box too small to
+		// hold the text at that size.
+		const el = makeTextElement({
+			width: 50,
+			height: 30,
+			text: 'x'.repeat(2000),
+			textStyle: { autoFit: true, autoFitMode: 'shrink', fontSize: 40 },
+		});
+		const style = getTextStyleForElement(el, DEFAULT_TEXT_COLOR);
+
+		expect(style.fontSize).toBe(40);
 	});
 
 	it('should set overflow visible for autofit text', () => {

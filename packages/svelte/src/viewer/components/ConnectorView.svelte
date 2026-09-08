@@ -13,7 +13,7 @@
 	import type { ElementRendererProps } from './props';
 	import ConnectorLabel from './ConnectorLabel.svelte';
 
-	const { element, zIndex, animationState }: ElementRendererProps = $props();
+	const { element, zIndex, animationState, interactive = false, marked = false }: ElementRendererProps = $props();
 
 	const geometry = $derived(buildConnectorGeometry(element, zIndex));
 	/**
@@ -37,7 +37,7 @@
 	const textElement = $derived(hasTextProperties(element) ? element : undefined);
 </script>
 
-<div class="pptx-svelte-element pptx-svelte-connector" style={wrapperStyle} data-element-id={element.id}>
+<div class="pptx-svelte-element pptx-svelte-connector" style={wrapperStyle} data-element-id={element.id} data-pptx-element={interactive || marked ? 'true' : undefined}>
 	<svg
 		width={geometry.svgW}
 		height={geometry.svgH}
@@ -58,6 +58,8 @@
 				>
 					{#if geometry.startMarker.shape === 'circle'}
 						<circle cx="5" cy="5" r="4" fill={strokeColor} />
+					{:else if geometry.startMarker.strokeOnly}
+						<path d={geometry.startMarker.d} fill="none" stroke={strokeColor} />
 					{:else}
 						<path d={geometry.startMarker.d} fill={strokeColor} />
 					{/if}
@@ -76,6 +78,8 @@
 				>
 					{#if geometry.endMarker.shape === 'circle'}
 						<circle cx="5" cy="5" r="4" fill={strokeColor} />
+					{:else if geometry.endMarker.strokeOnly}
+						<path d={geometry.endMarker.d} fill="none" stroke={strokeColor} />
 					{:else}
 						<path d={geometry.endMarker.d} fill={strokeColor} />
 					{/if}
@@ -93,6 +97,24 @@
 				</filter>
 			{/if}
 		</defs>
+
+		<!--
+			The only pointer-reachable part of a connector: a transparent stroke along
+			the line that opts back into hit testing. The wrapper is
+			pointer-events:none so a connector's mostly-empty bounding box never
+			swallows clicks meant for the shapes it spans, which left the line itself
+			unclickable until this path existed.
+		-->
+		<path
+			class="pptx-svelte-connector-hit"
+			d={geometry.hitPathD}
+			fill="none"
+			stroke="transparent"
+			stroke-width={geometry.hitStrokeWidth}
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			style="pointer-events: stroke"
+		/>
 
 		{#each geometry.compoundOffsets as offset, idx (idx)}
 			{#if geometry.pathD}

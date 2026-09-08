@@ -9,6 +9,7 @@ import { MARKER_SUPPORTED_TYPES, MARKER_SYMBOL_OPTIONS } from 'pptx-viewer-share
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import { injectRecentColors } from '../../composables/recent-colors-context';
 import type { ChartMarkerEdit } from '../../composables/useChartEditing';
 
 /**
@@ -31,6 +32,7 @@ const emit = defineEmits<{
 const SYMBOL_OPTIONS = MARKER_SYMBOL_OPTIONS.filter((o) => o.value !== '');
 
 const { t } = useI18n();
+const recentColors = injectRecentColors();
 
 const seriesIndex = ref(0);
 
@@ -73,6 +75,10 @@ function onFill(event: Event, idx: number): void {
 		fillColor: (event.target as HTMLInputElement).value,
 	});
 }
+
+function onFillCommit(event: Event): void {
+	recentColors?.push((event.target as HTMLInputElement).value);
+}
 </script>
 
 <template>
@@ -87,6 +93,7 @@ function onFill(event: Event, idx: number): void {
 		<label v-if="props.series.length > 1" class="flex items-center gap-2 text-[11px]">
 			<span class="w-12 text-muted-foreground shrink-0">{{ t('pptx.chart.series') }}</span>
 			<select
+				:aria-label="t('pptx.chart.series')"
 				class="pptx-vue-chart-input flex-1 bg-muted border border-border rounded px-1.5 py-0.5 w-full"
 				data-testid="chart-point-marker-series"
 				:value="activeIndex"
@@ -142,6 +149,7 @@ function onFill(event: Event, idx: number): void {
 						:value="pointFor(idx)?.marker?.spPr?.fillColor ?? '#4472c4'"
 						:title="t('pptx.chart.markerFill')"
 						@input="onFill($event, idx)"
+						@change="onFillCommit"
 					/>
 				</div>
 			</div>

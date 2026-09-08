@@ -17,7 +17,18 @@ import { TranslateService } from '@ngx-translate/core';
 import { cloneElement, cloneSlide, cloneTemplateElementsBySlideId } from 'pptx-viewer-core';
 import type { PptxElement, PptxHeaderFooter, PptxSection, PptxSlide } from 'pptx-viewer-core';
 
-import { groupSlidesBySection, isTemplateElement, isTemplateElementId } from '../internal/shared';
+import {
+	applyReroutedConnectors,
+	buildSlideTemplateSlide,
+	cloneElementForPaste,
+	groupSlidesBySection,
+	isTemplateElement,
+	isTemplateElementId,
+	makeCloneId,
+	rerouteConnectorsForMovedElements,
+	templateSchemeFromTheme,
+} from '../internal/shared';
+import type { SlideTemplateId } from '../internal/shared';
 import { translationsEn } from '../internal/shared-src/i18n';
 import { computeAlign, computeDistribute } from './align-distribute';
 import type { AlignMode, DistributeMode } from './align-distribute';
@@ -35,13 +46,12 @@ import {
 	setElementPosition,
 	updateElementById,
 } from './element-operations';
+import { canGroupSelected, canUngroupGroup } from './group-lock-guard';
 import { groupElements, ungroupElements } from './group-ops';
 import { LoadContentService } from './load-content.service';
-import { partitionSlides } from './template-mode';
+import { partitionSlides, slidesWithReappliedLayout } from './template-mode';
 import type { TemplateElementsBySlideId } from './template-mode';
 
-/** Default nudge distance (px) for arrow-key moves. */
-const NUDGE_STEP = 1;
 /** Offset (px) applied to a duplicated element so it is visible. */
 const DUPLICATE_OFFSET = 12;
 
@@ -81,6 +91,14 @@ export class EditorStateService {
 		}
 	})();
 	private readonly history = new EditorHistory<EditorSnapshot>();
+
+	/**
+	 * Apply File > Options > Advanced > "Maximum number of undos" at runtime.
+	 * Trims the past stack immediately if the new limit is smaller.
+	 */
+	setHistoryDepth(depth: number): void {
+		this.history.setMaxDepth(depth);
+	}
 
 	/**
 	 * Resolve a translation. Outside an injection context (see {@link translate})
@@ -287,10 +305,6 @@ export class EditorStateService {
 		);
 	}
 
-	nudgeSelected(slideIndex: number, dirX: number, dirY: number): void {
-		this.moveSelectedBy(slideIndex, dirX * NUDGE_STEP, dirY * NUDGE_STEP);
-	}
-
 	setPosition(slideIndex: number, id: string, x: number, y: number): void {
 		this.commit(this.t('pptx.undoAction.move'), slideIndex, (els) =>
 			setElementPosition(els, id, x, y),
@@ -396,6 +410,108 @@ export class EditorStateService {
 		);
 	}
 
+	/**
+	 * Recompute the endpoints of every connector bound to one of `movedIds` and
+	 * write them back, WITHOUT recording history.
+	 *
+	 * Called at the end of a drag/resize gesture, whose single history snapshot
+	 * was already taken by {@link beginTransform}; routing this through `commit()`
+	 * instead would push a second, spurious undo step so undoing a move would
+	 * take two presses. Both shared helpers no-op on empty input, and
+	 * `applyReroutedConnectors` returns the same array reference when there is
+	 * nothing to apply, so calling this unconditionally at every gesture end is
+	 * free.
+	 */
+	rerouteConnectors(slideIndex: number, movedIds: Iterable<string>): void {
+		const slides = this.slides();
+		const target = slides[slideIndex];
+		if (!target) {
+			return;
+		}
+		const elements = [...target.elements];
+		const rerouted = rerouteConnectorsForMovedElements(elements, new Set(movedIds));
+		if (rerouted.length === 0) {
+			return;
+		}
+		const next = applyReroutedConnectors(elements, rerouted);
+		this.slides.set(
+			slides.map((slide, i) => (i === slideIndex ? { ...slide, elements: next } : slide)),
+		);
+	}
+
+	/**
+	 * Set one `a:avLst` adjustment guide on an element during a live
+	 * shape-adjustment drag. Non-history for the same reason as
+	 * {@link applyTransform}: the gesture's snapshot was taken at its start.
+	 *
+	 * Merges into any existing `shapeAdjustments` rather than replacing the map,
+	 * so a multi-parameter geometry does not lose its other guides to a drag of
+	 * one handle.
+	 */
+	applyShapeAdjustment(slideIndex: number, id: string, key: string, value: number): void {
+		this.applyShapeAdjustments(slideIndex, id, { [key]: value });
+	}
+
+	/**
+	 * Merge a whole `a:avLst` patch. A callout's single diamond drives two
+	 * guides, so the drag emits a MAP rather than one key/value pair.
+	 */
+	applyShapeAdjustments(slideIndex: number, id: string, adjustments: Record<string, number>): void {
+		const target = this.slides()[slideIndex];
+		if (!target) {
+			return;
+		}
+		const source = isTemplateElementId(id) ? this.templatesForSlide(target.id) : target.elements;
+		const current = source.find((el) => el.id === id) as
+			| { shapeAdjustments?: Record<string, number> }
+			| undefined;
+		if (!current) {
+			return;
+		}
+		const patch = {
+			shapeAdjustments: { ...(current.shapeAdjustments ?? {}), ...adjustments },
+		} as Partial<PptxElement>;
+		if (isTemplateElementId(id)) {
+			this.writeTemplatesForSlide(
+				target.id,
+				updateElementById(this.templatesForSlide(target.id), id, patch),
+			);
+			return;
+		}
+		this.slides.set(
+			this.slides().map((slide, i) =>
+				i === slideIndex
+					? { ...slide, elements: updateElementById(slide.elements, id, patch) }
+					: slide,
+			),
+		);
+	}
+
+	/**
+	 * Commit a connector whose endpoint was re-bound (or unbound) on canvas.
+	 *
+	 * The WHOLE element is written, not a patch: a DETACHED end has had its
+	 * `a:stCxn` / `a:endCxn` key deleted, and merging only the surviving keys
+	 * would leave the stale binding behind and the connector would keep chasing
+	 * a shape it no longer touches. Takes a history entry, because unlike the
+	 * live drag branches this fires once, on release.
+	 */
+	applyConnectorEndpoint(slideIndex: number, id: string, element: PptxElement): void {
+		const target = this.slides()[slideIndex];
+		if (!target) {
+			return;
+		}
+		this.beginTransform(this.t('pptx.undoAction.edit'));
+		this.slides.set(
+			this.slides().map((slide, i) =>
+				i === slideIndex
+					? { ...slide, elements: slide.elements.map((el) => (el.id === id ? element : el)) }
+					: slide,
+			),
+		);
+		this.dirty.set(true);
+	}
+
 	// ── Undo / redo ──────────────────────────────────────────────────────────
 
 	undo(): void {
@@ -484,6 +600,11 @@ export class EditorStateService {
 		if (!slide) {
 			return;
 		}
+		// G10: a:spLocks/@noGrouping rejects the whole attempt if it involves a
+		// locked shape, not just that one shape.
+		if (!canGroupSelected(slide.elements, ids)) {
+			return;
+		}
 		const { elements, groupId } = groupElements(slide.elements, ids, this.newId());
 		if (!groupId) {
 			return;
@@ -510,8 +631,20 @@ export class EditorStateService {
 		if (!group || group.type !== 'group') {
 			return;
 		}
-		const childIds = (group.children ?? []).map(() => this.newId());
-		const { elements, childIds: used } = ungroupElements(slide.elements, ids[0], childIds);
+		// G10: a:grpSpLocks/@noGrouping forbids ungrouping this specific group.
+		if (!canUngroupGroup(group)) {
+			return;
+		}
+		// A template group's children must keep a template id prefix or later
+		// edits route to the slide store and are lost on save; the shared op
+		// applies the same rule to a promoted NESTED group's descendants.
+		const intoTemplate = isTemplateElementId(group.id);
+		const childIds = (group.children ?? []).map((child) =>
+			intoTemplate ? makeCloneId(true, child.id || group.id) : this.newId(),
+		);
+		const { elements, childIds: used } = ungroupElements(slide.elements, ids[0], childIds, {
+			intoTemplate,
+		});
 		this.history.record(this.captureSnapshot(), this.t('pptx.undoAction.ungroup'));
 		this.slides.set(slides.map((s, i) => (i === slideIndex ? { ...s, elements } : s)));
 		this.selectedIds.set(used);
@@ -558,9 +691,12 @@ export class EditorStateService {
 		this.history.record(this.captureSnapshot(), this.t('pptx.undoAction.paste'));
 		const newIds: string[] = [];
 		const additions = this.clipboard.map((el) => {
-			const id = this.newId();
-			newIds.push(id);
-			return { ...cloneElement(el), id, x: el.x + 12, y: el.y + 12 };
+			// A template element's id decides which store the paste routes to (see
+			// cloneElementForPaste); its descendants must keep the same prefix or
+			// later edits are silently lost to the slide store.
+			const clone = cloneElementForPaste(el, { intoTemplate: isTemplateElementId(el.id) });
+			newIds.push(clone.id);
+			return clone;
 		});
 		this.slides.set(
 			slides.map((slide, i) =>
@@ -606,14 +742,90 @@ export class EditorStateService {
 		this.syncHistory();
 	}
 
-	/** Insert a blank slide after `afterIndex` (records history). */
-	addSlide(afterIndex: number): void {
+	/**
+	 * Insert a blank slide after `afterIndex` (records history).
+	 *
+	 * @param layoutPath - Package path of the slide layout the new slide should
+	 *   inherit from, as offered by the Home tab's "New Slide" split button.
+	 *   Omitted for a plain blank slide, which is what the button itself does.
+	 */
+	addSlide(afterIndex: number, layoutPath?: string): void {
 		const slides = this.slides();
 		this.history.record(this.captureSnapshot(), this.t('pptx.undoAction.addSlide'));
 		const id = this.newId();
-		const blank = { id, rId: id, slideNumber: 0, elements: [] } as PptxSlide;
+		const blank = {
+			id,
+			rId: id,
+			slideNumber: 0,
+			elements: [],
+			...(layoutPath ? { layoutPath } : {}),
+		} as PptxSlide;
 		const next = [...slides];
 		next.splice(Math.min(afterIndex + 1, next.length), 0, blank);
+		this.slides.set(this.renumber(next));
+		this.selectedIds.set([]);
+		this.dirty.set(true);
+		this.syncHistory();
+	}
+
+	/**
+	 * Re-map the slide at `index` onto `layoutPath`, keeping its content.
+	 *
+	 * Core moves the slide's placeholders onto the target layout's geometry and
+	 * rewrites the layout relationship, so this replaces one slide rather than
+	 * adding one. Does nothing without a loaded deck, since the operation reads
+	 * the target layout out of the package.
+	 *
+	 * @param index - Index of the slide to re-map.
+	 * @param layoutPath - Package path of the target layout.
+	 */
+	async applyLayout(index: number, layoutPath: string): Promise<void> {
+		const handler = this.loader?.getHandler();
+		const slides = this.slides();
+		const target = slides[index];
+		if (!handler || !target) {
+			return;
+		}
+		const updated = await handler
+			.applyLayoutToSlide(index, layoutPath, [...slides])
+			.catch(() => null);
+		if (!updated || this.slides()[index]?.id !== target.id) {
+			return;
+		}
+		const folded = slidesWithReappliedLayout(
+			this.slides(),
+			index,
+			updated,
+			this.templateElementsBySlideId(),
+		);
+		if (!folded) {
+			return;
+		}
+		this.history.record(this.captureSnapshot(), this.t('pptx.master.layout'));
+		this.slides.set(folded.slides);
+		this.templateElementsBySlideId.set(folded.templateElementsBySlideId);
+		this.dirty.set(true);
+		this.syncHistory();
+	}
+
+	/**
+	 * Insert a pre-designed template slide after `afterIndex` (records history).
+	 *
+	 * The slide is built by the shared catalogue (`buildSlideTemplateSlide`) on
+	 * the loaded deck's canvas size and theme scheme, so inserted content matches
+	 * the deck's look; without a loaded deck it falls back to the standard
+	 * 1280x720 canvas and the Office default scheme.
+	 */
+	insertSlideFromTemplate(afterIndex: number, templateId: SlideTemplateId): void {
+		const slides = this.slides();
+		this.history.record(this.captureSnapshot(), this.t('pptx.undoAction.insertTemplateSlide'));
+		const canvas = this.loader?.canvasSize();
+		const draft = buildSlideTemplateSlide(templateId, this.newId(), 0, {
+			...(canvas ? { slideWidth: canvas.width, slideHeight: canvas.height } : {}),
+			scheme: templateSchemeFromTheme(this.loader?.theme()?.colorScheme),
+		});
+		const next = [...slides];
+		next.splice(Math.min(afterIndex + 1, next.length), 0, draft);
 		this.slides.set(this.renumber(next));
 		this.selectedIds.set([]);
 		this.dirty.set(true);

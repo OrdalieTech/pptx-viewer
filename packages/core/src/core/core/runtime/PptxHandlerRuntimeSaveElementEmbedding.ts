@@ -1,4 +1,6 @@
-import { customGeometryPathsToXml } from '../../geometry/custom-geometry';
+import { applyCustomGeometryGuideOverrides } from '../../geometry/custom-geometry-guide-writeback';
+import { buildSaveTimeCustomGeometryXml } from '../../geometry/custom-geometry-live-eval';
+import { filterValidShapeAdjustmentEntries } from '../../geometry/preset-adjustment-validation';
 import { hasShapeProperties } from '../../types';
 import type {
 	XmlObject,
@@ -11,13 +13,16 @@ import type {
 	ShapePptxElement,
 	ImagePptxElement,
 	PicturePptxElement,
+	ShapeStyle,
 } from '../../types';
 import { applyDiagramRelationshipIds } from '../../utils/diagram-relationship-ids';
 import {
 	applyDrawingMediaReference,
 	parseDrawingMediaReference,
 } from '../../utils/drawing-media-reference';
+import { ensureXmlChild } from '../../utils/xml-access';
 import type { PptxSaveState, IPptxSlideRelationshipRegistry } from '../builders';
+import type { GroupChildSpaceOwner } from './group-xfrm-preservation';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveTextWriter';
 
 /** Context passed to per-element save processing. */
@@ -33,6 +38,33 @@ export interface SaveSlideContext {
 	readonly slideMediaRelationshipType: string;
 	readonly slideVideoRelationshipType: string;
 	readonly slideAudioRelationshipType: string;
+	/**
+	 * The fill the enclosing group hands down to an `<a:grpFill/>` child, set
+	 * only while serialising the children of a group (the group writer derives
+	 * it per nesting level). Lets the fill writer re-emit authored `a:grpFill`
+	 * instead of the colour the load pass resolved onto the child. Absent for a
+	 * top-level element.
+	 */
+	readonly inheritedGroupFill?: ShapeStyle;
+	/**
+	 * The ENCLOSING group itself (the immediate parent whose children are
+	 * currently being serialised), which already carries the
+	 * `GroupChildSpaceOwner` shape `group-xfrm-preservation.ts` needs (its
+	 * captured `a:chOff`/`a:chExt` paired with its OWN immutable
+	 * `widthEmu`/`heightEmu`). Set only
+	 * while serialising the direct children of a group (recomputed at each
+	 * nesting level in `buildGroupShapeXml`, never inherited from an outer
+	 * group), so `elementTransformUpdater.applyTransform` can invert this
+	 * element's CURRENT relative-to-group geometry back into that space (its
+	 * exact original child-space `a:off`/`a:ext` EMU verbatim when unchanged,
+	 * otherwise the inverse of the parse-time mapping) instead of
+	 * `resolveXfrmEmu`'s ordinary (parent-space) comparison. Absent for a
+	 * top-level element, where there is no child space to preserve; also
+	 * absent (or with no captured chOff/chExt) for a group with none of its
+	 * own, in which case `invertChildIntoGroupSpace` returns `undefined` and
+	 * the ordinary comparison applies.
+	 */
+	readonly preserveGroupChildSpace?: GroupChildSpaceOwner;
 }
 
 function getMediaReferenceContainer(shape: XmlObject | undefined): XmlObject | undefined {
@@ -89,23 +121,25 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 	/** Apply geometry preset or custom paths to spPr. */
 	protected applyGeometryUpdate(shape: XmlObject, el: PptxElement): void {
-		if (!hasShapeProperties(el) || !shape['p:spPr']) {
+		if (!hasShapeProperties(el)) {
 			return;
 		}
-		const spPr = shape['p:spPr'] as XmlObject;
+		// `<p:spPr/>` parses to the empty STRING, which a truthiness test reads as
+		// absent; the custom-geometry write below then vanished, so a shape edited
+		// into a freeform saved with its original geometry. See `ensureXmlChild`.
+		const spPr = ensureXmlChild(shape, 'p:spPr');
+		if (!spPr) {
+			return;
+		}
 		const elWithPaths = el as ShapePptxElement | ImagePptxElement | PicturePptxElement;
 		if (elWithPaths.customGeometryPaths && elWithPaths.customGeometryPaths.length > 0) {
 			delete spPr['a:prstGeom'];
-			spPr['a:custGeom'] = customGeometryPathsToXml(
-				elWithPaths.customGeometryPaths,
-				elWithPaths.customGeometryRawData,
-				{
-					adjustHandlesXY: elWithPaths.customGeometryAdjustHandlesXY,
-					adjustHandlesPolar: elWithPaths.customGeometryAdjustHandlesPolar,
-					connectionSites: elWithPaths.customGeometryConnectionSites,
-					textRect: elWithPaths.customGeometryTextRect,
-				},
-			);
+			// Re-derives a:pathLst from raw XML at the current shapeAdjustments so
+			// it agrees with the a:avLst write below; see buildSaveTimeCustomGeometryXml.
+			const custGeomXml = buildSaveTimeCustomGeometryXml(elWithPaths, el.shapeAdjustments);
+			// Edited custGeom adjust handles live in `shapeAdjustments`; write them
+			// back into `a:avLst` so the freeform keeps its dragged handle values.
+			spPr['a:custGeom'] = applyCustomGeometryGuideOverrides(custGeomXml, el.shapeAdjustments);
 		} else if (spPr['a:prstGeom']) {
 			const presetGeometry =
 				el.type === 'connector'
@@ -114,9 +148,24 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const prstGeom = spPr['a:prstGeom'] as XmlObject;
 			prstGeom['@_prst'] = presetGeometry;
 			if (el.shapeAdjustments) {
-				const entries = Object.entries(el.shapeAdjustments).filter(
-					([name, value]) => name.trim().length > 0 && Number.isFinite(value),
-				);
+				// A `<a:gd>` name PowerPoint doesn't recognise for the RESOLVED preset
+				// (e.g. `adj1` on `homePlate`, which only defines `adj`) makes the
+				// whole file unopenable ("The file or directory is corrupted and
+				// unreadable", 0x80070570), COM-verified, even though the XML is
+				// otherwise schema-valid. `shapeAdjustments` is caller-supplied
+				// (`ShapeBuilder.adjustments()` takes an arbitrary record with no
+				// guardrails), so it must be filtered to this preset's real guide
+				// names before it reaches the saved file; see
+				// `filterValidShapeAdjustmentEntries` for the COM evidence.
+				const entries = filterValidShapeAdjustmentEntries(presetGeometry, el.shapeAdjustments);
+				if (entries.length < Object.keys(el.shapeAdjustments).length) {
+					this.compatibilityService.reportWarning({
+						code: 'SAVE_SHAPE_ADJUSTMENT_INVALID_GUIDE',
+						message: `Shape '${el.id}' (preset '${presetGeometry}') had one or more shapeAdjustments keys that are not valid adjustment guides for this preset; they were dropped to avoid producing a file PowerPoint cannot open.`,
+						scope: 'element',
+						elementId: el.id,
+					});
+				}
 				if (entries.length > 0) {
 					prstGeom['a:avLst'] = {
 						'a:gd': entries.map(([name, value]) => ({

@@ -16,6 +16,7 @@
 	 */
 	import Play from '@lucide/svelte/icons/play';
 	import type {
+		PptxAfterAnimationAction,
 		PptxAnimationDirection,
 		PptxAnimationPreset,
 		PptxAnimationSequence,
@@ -23,17 +24,24 @@
 	} from 'pptx-viewer-core';
 	import {
 		animationFor,
+		applyMotionPathPreset,
+		clearMotionPath,
+		getEffectSoundState,
 		hasAnimation,
+		setAfterAnimation,
+		setAfterAnimationColor,
 		setAnimationEmphasis,
 		setAnimationEntrance,
 		setAnimationExit,
 		setDirection,
+		setEffectSound,
 		setSequence,
 		showDirectionPicker,
 	} from 'pptx-viewer-shared';
 
 	import { useTranslator } from '../../../i18n/context';
 	import type { EditorState } from '../../editor/editor-state.svelte';
+	import AfterAnimationRow from './AfterAnimationRow.svelte';
 	import { commitSlideAnimations } from './animation-panel-helpers';
 	import {
 		PANEL_DIRECTION_OPTIONS,
@@ -45,6 +53,8 @@
 	import { startAnimationPreview } from './animation-preview-control';
 	import AnimationTimelineSection from './AnimationTimelineSection.svelte';
 	import AnimationTimingFields from './AnimationTimingFields.svelte';
+	import EffectSoundRow from './EffectSoundRow.svelte';
+	import MotionPathRow from './MotionPathRow.svelte';
 
 	const { editor }: { editor: EditorState } = $props();
 	const t = useTranslator();
@@ -56,6 +66,7 @@
 	const hasAnim = $derived(el ? hasAnimation(anims, el.id) : false);
 	const showDirection = $derived(el ? showDirectionPicker(anims, el.id) : false);
 	const canEdit = $derived(editor.editable);
+	const soundState = $derived(el ? getEffectSoundState(anims, el.id) : { hasSound: false });
 
 	function commit(next: PptxElementAnimation[]): void {
 		if (canEdit) {
@@ -82,6 +93,44 @@
 			startAnimationPreview(anim);
 		}
 	}
+
+	/**
+	 * Motion path is geometry, not a preset, so it never routes through
+	 * `onEffect`. `custom` is the read-only marker for a hand-dragged path:
+	 * re-selecting it must not snap the path back to a catalogue entry.
+	 */
+	function onMotionPath(presetId: string): void {
+		if (!el || presetId === 'custom') {
+			return;
+		}
+		commit(
+			presetId === 'none'
+				? clearMotionPath(anims, el.id)
+				: applyMotionPathPreset(anims, el.id, presetId),
+		);
+	}
+
+	function onEffectSoundPick(pick: { dataUrl: string; fileName?: string } | undefined): void {
+		if (!el) {
+			return;
+		}
+		commit(setEffectSound(anims, el.id, pick));
+	}
+
+	function onAfterAnimationChange(action: PptxAfterAnimationAction): void {
+		if (!el) {
+			return;
+		}
+		commit(setAfterAnimation(anims, el.id, action));
+	}
+
+	function onAfterAnimationColorChange(color: string): void {
+		editor.recordRecentColor(color);
+		if (!el) {
+			return;
+		}
+		commit(setAfterAnimationColor(anims, el.id, color));
+	}
 </script>
 
 {#if el && slide}
@@ -97,7 +146,7 @@
 
 		<label>
 			<span>{t('pptx.animation.entrance')}</span>
-			<select class="pptx-svelte-animp-entrance" disabled={!canEdit} value={anim?.entrance ?? 'none'} onchange={(e) => onEffect('entrance', e.currentTarget.value)}>
+			<select aria-label={t('pptx.animation.entrance')} class="pptx-svelte-animp-entrance" disabled={!canEdit} value={anim?.entrance ?? 'none'} onchange={(e) => onEffect('entrance', e.currentTarget.value)}>
 				<option value="none">{t('pptx.animation.none')}</option>
 				{#each PANEL_ENTRANCE_PRESETS as preset (preset)}<option value={preset}>{t(`pptx.animation.preset.${preset}`)}</option>{/each}
 			</select>
@@ -105,7 +154,7 @@
 
 		<label>
 			<span>{t('pptx.animation.emphasis')}</span>
-			<select class="pptx-svelte-animp-emphasis" disabled={!canEdit} value={anim?.emphasis ?? 'none'} onchange={(e) => onEffect('emphasis', e.currentTarget.value)}>
+			<select aria-label={t('pptx.animation.emphasis')} class="pptx-svelte-animp-emphasis" disabled={!canEdit} value={anim?.emphasis ?? 'none'} onchange={(e) => onEffect('emphasis', e.currentTarget.value)}>
 				<option value="none">{t('pptx.animation.none')}</option>
 				{#each PANEL_EMPHASIS_PRESETS as preset (preset)}<option value={preset}>{t(`pptx.animation.preset.${preset}`)}</option>{/each}
 			</select>
@@ -113,11 +162,14 @@
 
 		<label>
 			<span>{t('pptx.animation.exit')}</span>
-			<select class="pptx-svelte-animp-exit" disabled={!canEdit} value={anim?.exit ?? 'none'} onchange={(e) => onEffect('exit', e.currentTarget.value)}>
+			<select aria-label={t('pptx.animation.exit')} class="pptx-svelte-animp-exit" disabled={!canEdit} value={anim?.exit ?? 'none'} onchange={(e) => onEffect('exit', e.currentTarget.value)}>
 				<option value="none">{t('pptx.animation.none')}</option>
 				{#each PANEL_EXIT_PRESETS as preset (preset)}<option value={preset}>{t(`pptx.animation.preset.${preset}`)}</option>{/each}
 			</select>
 		</label>
+
+		<!-- Motion path: geometry, not a preset, so it gets its own row. -->
+		<MotionPathRow motionPath={anim?.motionPath} {canEdit} onchange={onMotionPath} />
 
 		{#if hasAnim}
 			{#if showDirection}
@@ -140,10 +192,19 @@
 
 			<label>
 				<span>{t('pptx.animation.sequence')}</span>
-				<select class="pptx-svelte-animp-sequence" disabled={!canEdit} value={anim?.sequence ?? 'asOne'} onchange={(e) => el && commit(setSequence(anims, el.id, e.currentTarget.value as PptxAnimationSequence))}>
+				<select aria-label={t('pptx.animation.sequence')} class="pptx-svelte-animp-sequence" disabled={!canEdit} value={anim?.sequence ?? 'asOne'} onchange={(e) => el && commit(setSequence(anims, el.id, e.currentTarget.value as PptxAnimationSequence))}>
 					{#each PANEL_SEQUENCE_OPTIONS as option (option.value)}<option value={option.value}>{t(option.labelKey)}</option>{/each}
 				</select>
 			</label>
+
+			<EffectSoundRow {soundState} {canEdit} onpick={onEffectSoundPick} />
+			<AfterAnimationRow
+				action={anim?.afterAnimation ?? 'none'}
+				color={anim?.afterAnimationColor}
+				{canEdit}
+				onaction={onAfterAnimationChange}
+				oncolor={onAfterAnimationColorChange}
+			/>
 
 			<AnimationTimingFields {editor} />
 		{/if}

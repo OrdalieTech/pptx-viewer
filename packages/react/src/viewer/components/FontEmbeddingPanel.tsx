@@ -12,6 +12,15 @@ export interface FontEmbeddingPanelProps {
 	embedFontsEnabled: boolean;
 	usedFontFamilies: string[];
 	embeddedFonts: string[];
+	/**
+	 * False when the deck embeds nothing, in which case the switch is inert and
+	 * says why. The viewer can keep or strip embedded font data on save, but it
+	 * cannot manufacture it: a browser will not hand over the bytes of an
+	 * installed system face.
+	 */
+	canEmbedFonts?: boolean;
+	/** i18n key for the explanation shown when `canEmbedFonts` is false. */
+	embedUnavailableKey?: string;
 	onClose: () => void;
 	onToggleEmbedFonts: (enabled: boolean) => void;
 }
@@ -25,6 +34,8 @@ export function FontEmbeddingPanel({
 	embedFontsEnabled,
 	usedFontFamilies,
 	embeddedFonts,
+	canEmbedFonts = true,
+	embedUnavailableKey,
 	onClose,
 	onToggleEmbedFonts,
 }: FontEmbeddingPanelProps): React.ReactElement | null {
@@ -65,7 +76,7 @@ export function FontEmbeddingPanel({
 				type='button'
 				style={{ zIndex: 1200 }}
 				className='fixed inset-0 bg-black/60'
-				aria-label={t('common.close')}
+				aria-label={t('pptx.common.close')}
 				onClick={onClose}
 			/>
 			{/* Dialog */}
@@ -86,7 +97,7 @@ export function FontEmbeddingPanel({
 							type='button'
 							onClick={onClose}
 							className='p-1 rounded hover:bg-accent transition-colors'
-							aria-label={t('common.close')}
+							aria-label={t('pptx.common.close')}
 						>
 							<LuX className='w-4 h-4 text-muted-foreground' />
 						</button>
@@ -97,12 +108,17 @@ export function FontEmbeddingPanel({
 						<p className='text-xs text-muted-foreground'>{t('pptx.fonts.embedDescription')}</p>
 
 						{/* Toggle */}
-						<label className='flex items-center gap-3 cursor-pointer'>
+						<label
+							className={`flex items-center gap-3 ${
+								canEmbedFonts ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+							}`}
+						>
 							<div className='relative'>
 								<input
 									type='checkbox'
 									className='sr-only'
 									checked={embedFontsEnabled}
+									disabled={!canEmbedFonts}
 									onChange={(e) => onToggleEmbedFonts(e.target.checked)}
 								/>
 								<div
@@ -118,6 +134,17 @@ export function FontEmbeddingPanel({
 							</div>
 							<span className='text-xs text-foreground'>{t('pptx.fonts.enableEmbedding')}</span>
 						</label>
+						{/*
+						 * The switch used to move and change nothing at all. It now decides
+						 * whether save keeps the deck's embedded font data, so it has to
+						 * say which of those two things it is doing - and admit when it can
+						 * do neither.
+						 */}
+						<p className='text-[11px] text-muted-foreground'>
+							{canEmbedFonts
+								? t('pptx.fonts.embedKeepsExisting')
+								: t(embedUnavailableKey ?? 'pptx.fonts.embedUnavailable')}
+						</p>
 
 						{/* Font list */}
 						<div className='space-y-1'>
@@ -177,7 +204,7 @@ export function FontEmbeddingPanel({
 							onClick={onClose}
 							className='px-3 py-1.5 text-xs rounded-lg bg-primary text-white hover:bg-primary/80 transition-colors'
 						>
-							{t('common.done')}
+							{t('pptx.common.done')}
 						</button>
 					</div>
 				</div>

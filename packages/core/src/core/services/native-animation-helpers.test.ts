@@ -218,6 +218,39 @@ describe('extractChildMotionValues', () => {
 		expect(result.motionOrigin).toBe('layout');
 	});
 
+	it('does NOT read rAng="0" as auto-rotate (PowerPoint writes it on every path)', () => {
+		// `p:animMotion/@rAng` is a plain rotation angle (60000ths of a degree)
+		// that PowerPoint stamps as "0" on every authored motion path. Treating
+		// it as "rotate along the path tangent" turned right-pointing arrows 180
+		// degrees on a leftward path (issue #132).
+		const childTnList: XmlObject = {
+			'p:animMotion': {
+				'@_path': 'M 0 0 L -0.08 0',
+				'@_origin': 'layout',
+				'@_rAng': '0',
+			},
+		};
+		const result = extractChildMotionValues(childTnList);
+		expect(result.motionPath).toBe('M 0 0 L -0.08 0');
+		expect(result.motionPathRotateAuto).toBeUndefined();
+		expect(result.motionPathRotationAngle).toBe(0);
+	});
+
+	it('extracts authored path rotation and its centre from p:animMotion', () => {
+		const result = extractChildMotionValues({
+			'p:animMotion': {
+				'@_path': 'M 0 0 L 0.2 0',
+				'@_rAng': '5400000',
+				'p:rCtr': { '@_x': '10000', '@_y': '-25000' },
+			},
+		});
+		expect(result).toMatchObject({
+			motionPathRotationAngle: 90,
+			motionPathRotationCenterX: 10,
+			motionPathRotationCenterY: -25,
+		});
+	});
+
 	it('extracts rotation from p:animRot', () => {
 		const childTnList: XmlObject = {
 			'p:animRot': {
@@ -371,6 +404,24 @@ describe('extractAnimationTargetId', () => {
 		expect(extractAnimationTargetId(cTn)).toBe('nestedShape');
 	});
 
+	it('prefers p:subSp/@_spid (grouped sub-shape) over the enclosing group id', () => {
+		const cTn: XmlObject = {
+			'p:childTnLst': {
+				'p:animEffect': {
+					'p:cBhvr': {
+						'p:tgtEl': {
+							'p:spTgt': {
+								'@_spid': '4',
+								'p:subSp': { '@_spid': '3' },
+							},
+						},
+					},
+				},
+			},
+		};
+		expect(extractAnimationTargetId(cTn)).toBe('3');
+	});
+
 	it('returns undefined when no targets exist anywhere', () => {
 		const cTn: XmlObject = {
 			'p:childTnLst': {
@@ -492,6 +543,37 @@ describe('applyBuildList', () => {
 		applyBuildList(timing, animations);
 		expect(animations[0].buildType).toBe('byParagraph');
 		expect(animations[1].buildType).toBe('byWord');
+	});
+
+	it('attaches p:tmplLst templates from a matching bldP entry', () => {
+		const tnLst: XmlObject = {
+			'p:par': { 'p:cTn': { '@_id': '9', '@_presetClass': 'entr' } },
+		};
+		const timing: XmlObject = {
+			'p:bldLst': {
+				'p:bldP': {
+					'@_spid': 'sp1',
+					'@_build': 'p',
+					'p:tmplLst': {
+						'p:tmpl': { '@_lvl': '1', 'p:tnLst': tnLst },
+					},
+				},
+			},
+		};
+		const animations: PptxNativeAnimation[] = [{ targetId: 'sp1' } as PptxNativeAnimation];
+		applyBuildList(timing, animations);
+		expect(animations[0].buildTemplates).toHaveLength(1);
+		expect(animations[0].buildTemplates?.[0].level).toBe(1);
+		expect(animations[0].buildTemplates?.[0].timeNodeList).toStrictEqual(tnLst);
+	});
+
+	it('leaves buildTemplates undefined when the bldP has no tmplLst', () => {
+		const timing: XmlObject = {
+			'p:bldLst': { 'p:bldP': { '@_spid': 'sp1', '@_build': 'p' } },
+		};
+		const animations: PptxNativeAnimation[] = [{ targetId: 'sp1' } as PptxNativeAnimation];
+		applyBuildList(timing, animations);
+		expect(animations[0].buildTemplates).toBeUndefined();
 	});
 });
 

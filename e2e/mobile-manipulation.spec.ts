@@ -5,9 +5,9 @@
  * Exercises the three core editing interactions end-to-end on a Pixel 7 mobile
  * viewport:
  *
- *   1. Text input — double-tap a shape, type, commit, assert text persisted.
- *   2. Move       — drag a selected shape's body, assert it translated.
- *   3. Resize     — drag the SE corner handle, assert width/height grew.
+ *   1. Text input - double-tap a shape, type, commit, assert text persisted.
+ *   2. Move       - drag a selected shape's body, assert it translated.
+ *   3. Resize     - drag the SE corner handle, assert width/height grew.
  *
  * Touch-path notes (learned the hard way, recorded so the next person doesn't
  * re-derive them):
@@ -34,6 +34,8 @@ import { fileURLToPath } from 'node:url';
 import { test, expect, devices } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 
+import { resetTabSession } from './support/deck';
+
 test.use({ ...devices['Pixel 7'] });
 
 // Every binding emits the selection and inline-editor hooks used here.
@@ -44,6 +46,9 @@ const fixturePath = resolve(
 const shotDir = fileURLToPath(new URL('../test-results/mobile-manipulation/', import.meta.url));
 
 async function open(page: Page): Promise<{ source: Locator; target: Locator; stage: Locator }> {
+	// Forget any restored session first, or the deck reopens and the landing
+	// dropzone (the only place #file-input exists) never mounts.
+	await resetTabSession(page);
 	await page.goto('/');
 	await page.locator('#file-input').setInputFiles(fixturePath);
 	const source = page.locator('[data-pptx-element="true"]').filter({ hasText: 'SOURCE' });
@@ -84,7 +89,7 @@ function geomOf(locator: Locator) {
 }
 
 test.describe('mobile manipulation (Pixel 7 touch)', () => {
-	test('text input (touch): double-tap, type, commit by tapping away — persists', async ({
+	test('text input (touch): double-tap, type, commit by tapping away - persists', async ({
 		page,
 	}) => {
 		const { target, stage } = await open(page);
@@ -160,7 +165,7 @@ test.describe('mobile manipulation (Pixel 7 touch)', () => {
 
 		await target.tap(); // select → rotate handle appears above the top edge
 		await page.waitForTimeout(200);
-		const rotateBtn = page.getByRole('button', { name: 'Rotate' });
+		const rotateBtn = page.getByRole('button', { name: /^rotate element$/iu });
 		await expect(rotateBtn).toBeVisible();
 
 		const elBox = (await target.boundingBox())!;

@@ -1,6 +1,6 @@
 import { NgStyle } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, inject, input } from '@angular/core';
-import { TranslatePipe } from '@ngx-translate/core';
+import { TranslatePipe, TranslateService } from '@ngx-translate/core';
 import type { PptxElement } from 'pptx-viewer-core';
 
 import { buildSummaryZoomView } from '../internal/shared';
@@ -61,6 +61,7 @@ import { ZoomTargetService } from './zoom-target.service';
 			[class.pptx-ng-zoom-interactive]="interactive()"
 			[ngStyle]="containerStyle()"
 			[attr.data-element-id]="element().id"
+			[attr.data-pptx-element]="markElement() ? 'true' : null"
 			[attr.data-zoom-type]="vm().zoomType"
 			[attr.data-zoom-target]="vm().targetSlideIndex"
 			[attr.aria-label]="summaryView()?.ariaLabel ?? vm().ariaLabel"
@@ -99,7 +100,9 @@ import { ZoomTargetService } from './zoom-target.service';
 								}
 							</div>
 						}
-						<div style="position:absolute;right:4px;bottom:4px;font-size:9px">Summary Zoom</div>
+						<div style="position:absolute;right:4px;bottom:4px;font-size:9px">
+							{{ 'pptx.zoom.summaryZoom' | translate }}
+						</div>
 					</div>
 				} @else if (vm().previewSrc) {
 					<img
@@ -135,6 +138,16 @@ export class ZoomRendererComponent {
 	readonly element = input.required<PptxElement>();
 	readonly zIndex = input<number>(0);
 	readonly mediaDataUrls = input<Map<string, string>>(new Map());
+	/**
+	 * Emit the neutral element marker (`data-pptx-element="true"`) on this
+	 * renderer's root, the node that also carries `data-element-id`. Set only by
+	 * the main interactive canvas.
+	 *
+	 * Deliberately NOT called `interactive`: this component already uses that
+	 * word for something else (`interactive()` below means the tile is
+	 * click-to-jump, which only happens inside a running presentation).
+	 */
+	readonly markElement = input<boolean>(false);
 
 	readonly containerStyle = computed<StyleMap>(() =>
 		buildZoomContainerStyle(this.element(), this.zIndex()),
@@ -146,16 +159,28 @@ export class ZoomRendererComponent {
 	 * stays on the neutral grey / index / section-GUID placeholder.
 	 */
 	private readonly zoomTarget = inject(ZoomTargetService, { optional: true });
+	private readonly translate = inject(TranslateService);
+
+	/**
+	 * Adapter onto the shared/pure builders, which take a plain key + params
+	 * function rather than an Angular service.
+	 */
+	private readonly translator = (key: string, params?: Record<string, string>): string =>
+		this.translate.instant(key, params);
 
 	readonly vm = computed<ZoomViewModel>(() => {
 		const element = this.element();
 		const targetSlideIndex = zoomTargetSlideIndex(element);
-		return buildZoomViewModel(element, this.zoomTarget?.lookup(targetSlideIndex));
+		return buildZoomViewModel(element, this.zoomTarget?.lookup(targetSlideIndex), this.translator);
 	});
 	readonly summaryView = computed(() => {
 		const zoom = this.vm().zoom;
 		return zoom
-			? buildSummaryZoomView(zoom, (index: number) => this.zoomTarget?.lookup(index))
+			? buildSummaryZoomView(
+					zoom,
+					(index: number) => this.zoomTarget?.lookup(index),
+					this.translator,
+				)
 			: undefined;
 	});
 

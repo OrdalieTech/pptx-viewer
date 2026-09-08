@@ -1,26 +1,22 @@
+import type { PptxThemeColorRef } from 'pptx-viewer-core';
+import type { ThemeColorPickerCommit } from 'pptx-viewer-shared';
+import { OFFICE_COLOR_SWATCH_HEXES } from 'pptx-viewer-shared';
+
 import type { Translator } from '../i18n';
 import { createEl } from '../render';
+import type { AnchoredPopupHandle } from './anchored-popup';
+import { attachAnchoredPopup } from './anchored-popup';
 import type { IconName } from './icons';
 import { createIcon } from './icons';
+import { createRecentColorsRow } from './recent-colors-row';
+import { createThemeColorSwatchGrid } from './theme-color-swatch-grid';
 
 /**
- * Office theme-colour swatch set: no shared catalogue exists for this yet
- * (see CLAUDE.md context), so this is a reasonable standard 10-colour set
- * mirroring the "Standard Colors" row PowerPoint itself ships. Shared by both
- * the font-colour and highlight-colour pickers.
+ * Office "Standard Colors" swatch set, shared by both the font-colour and
+ * highlight-colour pickers (`pptx-viewer-shared`'s canonical catalogue, so
+ * this binding cannot drift from the others' standard-colour row).
  */
-export const OFFICE_STANDARD_SWATCHES: readonly string[] = [
-	'#000000',
-	'#ffffff',
-	'#ff0000',
-	'#00aa00',
-	'#0000ff',
-	'#ff8800',
-	'#8800cc',
-	'#00cccc',
-	'#ff69b4',
-	'#808080',
-];
+export const OFFICE_STANDARD_SWATCHES: readonly string[] = OFFICE_COLOR_SWATCH_HEXES;
 
 export interface SwatchPickerOptions {
 	/** Accessible label / title for the trigger button. */
@@ -31,12 +27,25 @@ export interface SwatchPickerOptions {
 	/** Fallback colour when no value is set yet. */
 	fallback: string;
 	onSelect(hex: string): void;
+	/**
+	 * Fired ONLY by a theme-swatch click, carrying both the hex and the ref.
+	 * Provide alongside `themeColorMap` to show the deck's real "Theme Colors"
+	 * grid above the standard swatches (font colour only: highlight colour has
+	 * no theme-ref concept on the model).
+	 */
+	onSelectTheme?(commit: ThemeColorPickerCommit): void;
 }
 
 export interface SwatchPickerHandle {
 	el: HTMLElement;
 	setValue(hex: string | undefined): void;
 	setDisabled(disabled: boolean): void;
+	/** B6: refresh the "Recent colours" row (most-recent-first); hidden when empty. */
+	setRecentColors(colors: readonly string[]): void;
+	/** Set the deck's theme colour map; the theme-swatch grid hides itself when `undefined`. */
+	setThemeColorMap(themeColorMap: Record<string, string> | undefined): void;
+	/** Highlight the swatch matching the element's current theme ref, if any. */
+	setSelectedRef(ref: PptxThemeColorRef | undefined): void;
 }
 
 /** Normalise an arbitrary colour string to `#rrggbb`, or the fallback when invalid. */
@@ -76,25 +85,62 @@ export function makeSwatchPicker(
 	menu.hidden = true;
 	el.appendChild(menu);
 
+	// W3-G2: the deck's real "Theme Colors" grid, shown above the standard
+	// swatches only when the caller provided `onSelectTheme` (font colour,
+	// shape fill/outline). A "Standard Colors" label separates it from the
+	// flat swatch row below, matching React/Vue's popovers.
+	let themeGrid: ReturnType<typeof createThemeColorSwatchGrid> | null = null;
+	if (options.onSelectTheme) {
+		const onSelectTheme = options.onSelectTheme;
+		themeGrid = createThemeColorSwatchGrid(doc, t, (commit) => {
+			setOpen(false);
+			onSelectTheme(commit);
+		});
+		menu.appendChild(themeGrid.el);
+		const standardLabel = createEl(doc, 'div', 'pptxv-swatch-standard-label');
+		standardLabel.textContent = t('pptx.colorPicker.standardColors');
+		menu.appendChild(standardLabel);
+	}
+
 	const grid = createEl(doc, 'div', 'pptxv-swatch-grid');
 	menu.appendChild(grid);
 
+	// B6: "Recent colours" - MRU picks, seeded from the deck's `p:clrMru` and
+	// folded forward by every commit (`editor-recent-colors.ts`). Built below
+	// the preset grid, matching React/Vue's ordering, and hidden while empty.
+	const recent = createRecentColorsRow(doc, t, (hex) => {
+		setOpen(false);
+		options.onSelect(hex);
+	});
+	menu.appendChild(recent.el);
+
 	let value = options.fallback;
+	let selectedRef: PptxThemeColorRef | undefined;
 	const swatchButtons = new Map<HTMLButtonElement, string>();
 
 	const applySelected = (): void => {
 		for (const [btn, hex] of swatchButtons) {
 			btn.classList.toggle('is-selected', hex === value);
 		}
+		recent.setSelected(value);
+		themeGrid?.setSelected(selectedRef, value);
 		swab.style.backgroundColor = value;
 	};
 
 	let isOpen = false;
+	let popup: AnchoredPopupHandle | null = null;
 	const setOpen = (open: boolean): void => {
 		isOpen = open;
 		menu.hidden = !open;
 		trigger.setAttribute('aria-expanded', String(open));
 		trigger.classList.toggle('is-active', open);
+		if (open) {
+			popup?.destroy();
+			popup = attachAnchoredPopup(menu, trigger);
+		} else {
+			popup?.destroy();
+			popup = null;
+		}
 	};
 
 	for (const hex of options.swatches) {
@@ -141,9 +187,21 @@ export function makeSwatchPicker(
 		},
 		setDisabled(disabled) {
 			trigger.disabled = disabled;
+			recent.setDisabled(disabled);
+			themeGrid?.setDisabled(disabled);
 			if (disabled) {
 				setOpen(false);
 			}
+		},
+		setRecentColors(colors) {
+			recent.setColors(colors);
+		},
+		setThemeColorMap(themeColorMap) {
+			themeGrid?.setThemeColorMap(themeColorMap);
+		},
+		setSelectedRef(ref) {
+			selectedRef = ref;
+			applySelected();
 		},
 	};
 }

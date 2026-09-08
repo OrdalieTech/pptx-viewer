@@ -16,25 +16,27 @@
 	import { useTranslator } from '../../i18n/context';
 	import {
 		buildSmartArtView,
-		SMARTART_CONNECTOR_STROKE,
 		SMARTART_SVG_STYLE,
 		smartArtAriaLabel,
 		smartArtChromeStyle,
-		svgTextLines,
 	} from '../render';
-	import { computeInlineEditorRect, findSmartArtNodeText, resolvePalette } from 'pptx-viewer-shared';
+	import {
+		canDrillDown,
+		computeInlineEditorRect,
+		findSmartArtNodeText,
+		resolvePalette,
+		smartArtConnectorPaint,
+		smartArtNodeLabel,
+	} from 'pptx-viewer-shared';
+	import type { RenderedNode } from 'pptx-viewer-shared';
 	import { getContainerStyle, styleToString } from '../style';
 	import type { ElementRendererProps } from './props';
 
-	const { element, zIndex, interactive, animationState, onsmartartnodecommit, onsmartartnodefill }: ElementRendererProps = $props();
+	const { element, zIndex, interactive, marked = false, animationState, onsmartartnodecommit, onsmartartnodefill }: ElementRendererProps = $props();
 	const t = useTranslator();
 
 	const smartArt = $derived(element.type === 'smartArt' ? element : undefined);
-	/** Staged diagram-build descriptor, when an active native animation reveals one. */
-	const diagramBuild = $derived(
-		animationState?.build?.kind === 'diagram' ? animationState.build : undefined,
-	);
-	const view = $derived(smartArt ? buildSmartArtView(smartArt, diagramBuild) : undefined);
+	const view = $derived(smartArt ? buildSmartArtView(smartArt, animationState) : undefined);
 	const chromeStyle = $derived(smartArt ? smartArtChromeStyle(smartArt) : '');
 	const ariaLabel = $derived(smartArt ? smartArtAriaLabel(smartArt) : undefined);
 	const containerStyle = $derived(styleToString(getContainerStyle(element, zIndex)));
@@ -53,7 +55,9 @@
 	}
 
 	function openEditor(event: MouseEvent, nodeId: string | undefined): void {
-		if (!nodeId || !smartArt?.smartArtData || !onsmartartnodecommit) {return;}
+		// G8: `a:graphicFrameLocks/@noDrilldown` forbids entering this
+		// SmartArt's individual nodes for editing.
+		if (!nodeId || !smartArt?.smartArtData || !onsmartartnodecommit || !canDrillDown(smartArt)) {return;}
 		const rect = nodeRect(event.currentTarget as SVGGElement);
 		if (!rect) {return;}
 		event.stopPropagation();
@@ -91,13 +95,29 @@
 	}
 </script>
 
-{#snippet centeredText(text: string, x: number, y: number, fill: string, fontSize: number)}
-	<!-- Centred, multi-line label: one <tspan> per line, block centred on y. -->
-	<text {x} text-anchor="middle" dominant-baseline="central" {fill} font-size={fontSize}>
-		{#each svgTextLines(text, fontSize) as line, i (i)}
-			<tspan {x} y={y + line.y}>{line.text}</tspan>
-		{/each}
-	</text>
+{#snippet nodeLabel(node: RenderedNode)}
+	<!--
+		Multi-line node label. Placement, colour, weight and baseline are all
+		decided by the shared `smartArtNodeLabel`, so off-centre captions (target
+		leaders, gear legend rows, timeline captions above / below the axis) land
+		where React puts them instead of on the node centre.
+	-->
+	{@const label = smartArtNodeLabel(node)}
+	{#if label.visible}
+		<text
+			x={label.x}
+			text-anchor={label.textAnchor}
+			dominant-baseline={label.dominantBaseline}
+			fill={label.fill}
+			font-size={label.fontSize}
+			font-weight={label.fontWeight}
+			font-style={label.fontStyle}
+		>
+			{#each label.lines as line, i (i)}
+				<tspan x={label.x} y={line.y}>{line.text}</tspan>
+			{/each}
+		</text>
+	{/if}
 {/snippet}
 
 {#if view}
@@ -105,7 +125,7 @@
 		class="pptx-svelte-element pptx-svelte-smartart"
 		style={containerStyle}
 		data-element-id={element.id}
-		data-pptx-element={interactive ? 'true' : undefined}
+		data-pptx-element={interactive || marked ? 'true' : undefined}
 		data-testid={`smartart-${smartArt?.smartArtData?.layout ?? 'diagram'}`}
 		aria-roledescription="diagram"
 	>
@@ -133,7 +153,53 @@
 							onmouseenter={(event) => showStyle(event, shape.nodeId)}
 						>
 							{#if shape.ariaLabel}<title>{shape.ariaLabel}</title>{/if}
-							{#if shape.isEllipse}
+							{#if shape.gradient}
+								<defs>
+									{#if shape.gradient.kind === 'radial'}
+										<radialGradient
+											id={shape.gradient.id}
+											cx={shape.gradient.cx}
+											cy={shape.gradient.cy}
+											r={shape.gradient.r}
+										>
+											{#each shape.gradient.stops as stop, si (si)}
+												<stop
+													offset={stop.offset}
+													stop-color={stop.color}
+													stop-opacity={stop.opacity}
+												/>
+											{/each}
+										</radialGradient>
+									{:else}
+										<linearGradient
+											id={shape.gradient.id}
+											x1={shape.gradient.x1}
+											y1={shape.gradient.y1}
+											x2={shape.gradient.x2}
+											y2={shape.gradient.y2}
+										>
+											{#each shape.gradient.stops as stop, si (si)}
+												<stop
+													offset={stop.offset}
+													stop-color={stop.color}
+													stop-opacity={stop.opacity}
+												/>
+											{/each}
+										</linearGradient>
+									{/if}
+								</defs>
+							{/if}
+							{#if shape.kind === 'image'}
+								<image
+									x={shape.x}
+									y={shape.y}
+									width={shape.width}
+									height={shape.height}
+									href={shape.imageUrl}
+									preserveAspectRatio="xMidYMid meet"
+									transform={shape.transform}
+								/>
+							{:else if shape.kind === 'ellipse'}
 								<ellipse
 									cx={shape.cx}
 									cy={shape.cy}
@@ -143,6 +209,14 @@
 									stroke={shape.stroke}
 									stroke-width={shape.strokeWidth}
 									transform={shape.transform}
+								/>
+							{:else if shape.kind === 'path'}
+								<path
+									d={shape.pathData}
+									fill={shape.fill}
+									stroke={shape.stroke}
+									stroke-width={shape.strokeWidth}
+									transform={shape.pathTransform}
 								/>
 							{:else}
 								<rect
@@ -157,8 +231,21 @@
 									transform={shape.transform}
 								/>
 							{/if}
-							{#if shape.text}
-								{@render centeredText(shape.text, shape.textX, shape.textY, shape.fontColor, shape.fontSize)}
+							{#if shape.textLines.length > 0}
+								<text
+									x={shape.textX}
+									text-anchor="middle"
+									dominant-baseline="central"
+									fill={shape.fontColor}
+									font-family={shape.fontFamily}
+									font-weight={shape.fontWeight}
+									font-style={shape.fontStyle}
+									font-size={shape.fontSize}
+								>
+									{#each shape.textLines as line, i (i)}
+										<tspan x={shape.textX} y={line.y}>{line.text}</tspan>
+									{/each}
+								</text>
 							{/if}
 						</g>
 					{/each}
@@ -173,7 +260,8 @@
 				>
 					<!-- Connectors render first so they appear behind nodes. -->
 					{#each view.layout.connectors as conn (conn.key)}
-						<path d={conn.d} fill="none" stroke={SMARTART_CONNECTOR_STROKE} stroke-width="1.5" opacity="0.5" />
+						{@const paint = smartArtConnectorPaint(conn)}
+						<path d={paint.d} fill="none" stroke={paint.stroke} stroke-width={paint.strokeWidth} opacity={paint.opacity} stroke-dasharray={paint.dash} />
 					{/each}
 					{#each view.layout.nodes as node (node.key)}
 						<g
@@ -187,14 +275,12 @@
 							{#if node.ariaLabel}<title>{node.ariaLabel}</title>{/if}
 							{#if node.kind === 'circle'}
 								<circle cx={node.cx} cy={node.cy} r={node.r} fill={node.fill} stroke={node.stroke} stroke-width={node.strokeWidth} opacity={node.opacity} />
-								{@render centeredText(node.text, node.cx, node.cy, 'white', node.fontSize)}
 							{:else if node.kind === 'polygon'}
 								<polygon points={node.points} fill={node.fill} stroke={node.stroke} stroke-width={node.strokeWidth} opacity={node.opacity} />
-								{@render centeredText(node.text, node.textX, node.textY, 'white', node.fontSize)}
 							{:else}
 								<rect x={node.x} y={node.y} width={node.width} height={node.height} rx={node.rx} fill={node.fill} stroke={node.stroke} stroke-width={node.strokeWidth} opacity={node.opacity} />
-								{@render centeredText(node.text, node.textX, node.textY, 'white', node.fontSize)}
 							{/if}
+							{@render nodeLabel(node)}
 						</g>
 					{/each}
 				</svg>

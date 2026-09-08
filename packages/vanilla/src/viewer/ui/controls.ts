@@ -43,6 +43,14 @@ export function makeButton(doc: Document, options: ButtonOptions): ButtonHandle 
 	if (options.icon) {
 		btn.appendChild(createIcon(doc, options.icon));
 	} else if (options.text !== undefined) {
+		// `.pptxv-btn` is a FIXED 28x28 icon box with `overflow: visible`, so a
+		// text label wider than 28px is painted (and hit-tested) outside the
+		// button's own border box, over whichever neighbour sits there. The
+		// later sibling wins `elementFromPoint`, which is how a coordinate click
+		// on one ribbon button used to activate the button to its right. Tagging
+		// every text-bearing button lets the stylesheet size the box to its
+		// label, so a button's ink can never leave its own rect.
+		btn.classList.add('pptxv-btn-text');
 		btn.textContent = options.text;
 	}
 	if (options.textLabel !== undefined) {
@@ -68,6 +76,13 @@ export interface ColorControlOptions {
 	label: string;
 	/** Fired on every colour change (native `<input type=color>` input event). */
 	onInput(hex: string): void;
+	/**
+	 * B6: fired once the picker COMMITS (native `change`), separate from the
+	 * continuous `onInput` a drag through the OS colour picker fires. Wired by
+	 * callers to `InspectorHandlers.pushRecentColor` so the "Recent colours"
+	 * MRU list grows once per pick rather than on every drag tick.
+	 */
+	onCommit?(hex: string): void;
 }
 
 export interface ColorControlHandle {
@@ -102,6 +117,9 @@ export function makeColorControl(
 	input.value = fallback;
 	input.setAttribute('aria-label', options.label);
 	input.addEventListener('input', () => options.onInput(input.value));
+	if (options.onCommit) {
+		input.addEventListener('change', () => options.onCommit?.(input.value));
+	}
 	el.appendChild(input);
 	return {
 		el,
@@ -154,11 +172,27 @@ export function makeNumberField(doc: Document, options: NumberFieldOptions): Num
 	input.step = String(options.step ?? 1);
 	el.appendChild(input);
 
+	/**
+	 * The value the model already holds, so a commit that would not change
+	 * anything can be dropped.
+	 *
+	 * Enter fires BOTH handlers below: the `keydown` listener commits, and the
+	 * browser then raises `change` because the value differs from the one the
+	 * field was focused with. Each commit is a separate undo step, so typing one
+	 * number and pressing Enter took two presses of Undo to reverse, the first of
+	 * which appeared to do nothing at all. Re-committing an unchanged value is
+	 * never meaningful, so tracking the last committed value collapses the pair
+	 * and also stops a plain focus-and-leave being recorded as an edit.
+	 */
+	let committedValue = Number.NaN;
+
 	const commit = (): void => {
 		const value = Number.parseFloat(input.value);
-		if (Number.isFinite(value)) {
-			options.onCommit(value);
+		if (!Number.isFinite(value) || value === committedValue) {
+			return;
 		}
+		committedValue = value;
+		options.onCommit(value);
 	};
 	input.addEventListener('change', commit);
 	input.addEventListener('keydown', (event) => {
@@ -171,9 +205,15 @@ export function makeNumberField(doc: Document, options: NumberFieldOptions): Num
 		el,
 		input,
 		setValue(value) {
+			const displayed = Math.round(value * 100) / 100;
+			// Whatever the model says is by definition already committed, even
+			// while the field is focused and therefore not repainted. Store the
+			// DISPLAYED precision: that is what the input parses back, so a model
+			// value of 53.004 shown as 53 must not read as a pending edit.
+			committedValue = displayed;
 			// Never clobber the field while the user is editing it.
 			if (doc.activeElement !== input) {
-				input.value = String(Math.round(value * 100) / 100);
+				input.value = String(displayed);
 			}
 		},
 		setDisabled(disabled) {

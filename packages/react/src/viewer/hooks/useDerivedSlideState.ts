@@ -1,5 +1,17 @@
-import type { PptxSlide, PptxSlideMaster, PptxSlideLayout } from 'pptx-viewer-core';
-import { groupSlidesBySection } from 'pptx-viewer-shared';
+import type {
+	PptxPresentationProperties,
+	PptxSlide,
+	PptxSlideMaster,
+	PptxSlideLayout,
+} from 'pptx-viewer-core';
+import type { AuthoredSlideRange } from 'pptx-viewer-shared';
+import {
+	computeGridSpacingPx as sharedComputeGridSpacingPx,
+	groupSlidesBySection,
+	masterViewPseudoSlide,
+	resolveAuthoredSlideRange,
+	resolveShowSlideIndexes,
+} from 'pptx-viewer-shared';
 /**
  * useDerivedSlideState: Memoised computed values derived from slide and
  * presentation state.  Keeps the orchestrator component slim by hosting
@@ -8,7 +20,7 @@ import { groupSlidesBySection } from 'pptx-viewer-shared';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { EMU_PER_PX, GRID_SIZE, UNGROUPED_SECTION_ID } from '../constants';
+import { DEFAULT_SECTION_GROUP_ID, GRID_SIZE, UNGROUPED_SECTION_ID } from '../constants';
 import type { SlideSectionGroup } from '../types';
 import type { ViewerMode } from '../types-core';
 
@@ -26,10 +38,25 @@ export interface UseDerivedSlideStateInput {
 	}>;
 	customShows: Array<{ id: string; name: string; slideRIds: string[] }>;
 	activeCustomShowId: string | null;
+	/**
+	 * `p:showPr`, read for `resolveAuthoredSlideRange` so a deck authored to
+	 * open into a `p:sldRg` range (`showSlidesMode === 'range'`) presents only
+	 * that range when no custom show is active.
+	 */
+	presentationProperties: Pick<
+		PptxPresentationProperties,
+		'showSlidesMode' | 'showSlidesFrom' | 'showSlidesTo'
+	>;
 	mode: ViewerMode;
 	activeLayout: PptxSlideLayout | undefined;
 	activeMaster: PptxSlideMaster | undefined;
-	presentationGridSpacing: { cx: number } | undefined;
+	/**
+	 * `PptxData.viewProperties.gridSpacing` (from `ppt/viewProps.xml`), NOT
+	 * `presentationProperties.gridSpacing`: `p:gridSpacing` lives under
+	 * `p:viewPr`, and a real PowerPoint file never populates it under
+	 * `p:presentationPr`, so reading the latter always yields the fallback.
+	 */
+	documentGridSpacing: { cx: number } | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -41,40 +68,53 @@ export interface DerivedSlideState {
 	visibleSlideIndexes: number[];
 	slideSectionGroups: SlideSectionGroup[];
 	masterPseudoSlide: PptxSlide | undefined;
+	/**
+	 * The `p:showPr/p:sldRg` range the deck is authored to open into, resolved
+	 * to 0-based indexes (or `undefined` outside range mode). Forwarded to
+	 * `nextPresentedSlide` calls (presenter rail, mobile presenter view) so a
+	 * "coming up next" preview never shows a slide outside the authored range.
+	 */
+	authoredRange: AuthoredSlideRange | undefined;
 }
 
 // ---------------------------------------------------------------------------
 // Pure helper functions (exported for testing)
 // ---------------------------------------------------------------------------
 
-/** Compute grid spacing in pixels from presentation grid spacing in EMU. */
-export function computeGridSpacingPx(presentationGridSpacing: { cx: number } | undefined): number {
-	if (presentationGridSpacing) {
-		const px = Math.round(presentationGridSpacing.cx / EMU_PER_PX);
-		if (px > 0) {
-			return px;
-		}
-	}
-	return GRID_SIZE;
+/**
+ * Compute grid spacing in pixels from the document's authored grid spacing
+ * (EMU, `viewProperties.gridSpacing`). Thin wrapper over the shared pure
+ * decision function so React's default (`GRID_SIZE`) applies without every
+ * call site repeating it.
+ */
+export function computeGridSpacingPx(documentGridSpacing: { cx: number } | undefined): number {
+	return sharedComputeGridSpacingPx(documentGridSpacing, GRID_SIZE);
 }
 
-/** Compute visible slide indexes based on custom show or hidden state. */
+/**
+ * The ordered deck indexes the slide show visits: the active custom show's
+ * membership (or the deck's authored `p:sldRg` range), minus any slide the
+ * author hid.
+ *
+ * The rule itself lives in `pptx-viewer-shared` so React, Vue, Angular, Svelte
+ * and Vanilla cannot answer "what comes next" differently and present a slide
+ * its author hid, or a slide outside a deck authored to open into a range.
+ * This wrapper only adapts React's custom-show shape.
+ */
 export function computeVisibleSlideIndexes(
 	slides: PptxSlide[],
 	activeCustomShowId: string | null,
 	customShows: Array<{ id: string; name: string; slideRIds: string[] }>,
+	presentationProperties?: Pick<
+		PptxPresentationProperties,
+		'showSlidesMode' | 'showSlidesFrom' | 'showSlidesTo'
+	>,
 ): number[] {
-	if (activeCustomShowId) {
-		const show = customShows.find((s) => s.id === activeCustomShowId);
-		if (show) {
-			const rIdToIndex = new Map<string, number>();
-			slides.forEach((s, i) => rIdToIndex.set(s.rId, i));
-			return show.slideRIds
-				.map((rId) => rIdToIndex.get(rId))
-				.filter((i): i is number => i !== undefined);
-		}
-	}
-	return slides.map((_, i) => i).filter((i) => !slides[i]?.hidden);
+	const activeShow = activeCustomShowId
+		? customShows.find((show) => show.id === activeCustomShowId)
+		: undefined;
+	const authoredRange = resolveAuthoredSlideRange(presentationProperties, slides.length);
+	return resolveShowSlideIndexes(slides, activeShow, authoredRange);
 }
 
 /** Compute slide section groups for the slides pane sidebar. */
@@ -88,7 +128,8 @@ export function computeSlideSectionGroups(
 	}>,
 ): SlideSectionGroup[] {
 	return groupSlidesBySection(sections, slides).map((group) => ({
-		id: group.section?.id ?? (sections.length > 0 ? UNGROUPED_SECTION_ID : 'default'),
+		id:
+			group.section?.id ?? (sections.length > 0 ? UNGROUPED_SECTION_ID : DEFAULT_SECTION_GROUP_ID),
 		label: group.section?.name ?? (sections.length > 0 ? 'Ungrouped Slides' : 'Slides'),
 		slideIndexes: group.slideIndexes,
 		...(group.section?.color !== undefined ? { color: group.section.color } : {}),
@@ -98,36 +139,32 @@ export function computeSlideSectionGroups(
 	}));
 }
 
-/** Compute a pseudo-slide for master / layout canvas rendering. */
+/**
+ * Compute a pseudo-slide for master / layout canvas rendering.
+ *
+ * The composition rule (a layout is painted on top of its own master, and the
+ * pseudo-slide is keyed on the selected part's archive path) lives in
+ * `pptx-viewer-shared` so all five bindings agree; this wrapper only adapts
+ * React's already-resolved master/layout objects to it.
+ */
 export function computeMasterPseudoSlide(
 	mode: ViewerMode,
 	activeLayout: PptxSlideLayout | undefined,
 	activeMaster: PptxSlideMaster | undefined,
 ): PptxSlide | undefined {
-	if (mode !== 'master') {
+	if (mode !== 'master' || !activeMaster) {
 		return undefined;
 	}
-	if (activeLayout) {
-		return {
-			id: activeLayout.path,
-			rId: '',
-			slideNumber: 0,
-			elements: activeLayout.elements ?? [],
-			backgroundColor: activeLayout.backgroundColor ?? activeMaster?.backgroundColor,
-			backgroundImage: activeLayout.backgroundImage ?? activeMaster?.backgroundImage,
-		};
-	}
-	if (activeMaster) {
-		return {
-			id: activeMaster.path,
-			rId: '',
-			slideNumber: 0,
-			elements: activeMaster.elements ?? [],
-			backgroundColor: activeMaster.backgroundColor,
-			backgroundImage: activeMaster.backgroundImage,
-		};
-	}
-	return undefined;
+	// React resolves the layout object itself rather than an index, so pin it
+	// as the master's only layout to address it positionally.
+	const document = activeLayout
+		? { slideMasters: [{ ...activeMaster, layouts: [activeLayout] }] }
+		: { slideMasters: [activeMaster] };
+	return masterViewPseudoSlide(document, {
+		tab: 'slides',
+		masterIndex: 0,
+		layoutIndex: activeLayout ? 0 : null,
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -141,22 +178,33 @@ export function useDerivedSlideState(input: UseDerivedSlideStateInput): DerivedS
 		sections,
 		customShows,
 		activeCustomShowId,
+		presentationProperties,
 		mode,
 		activeLayout,
 		activeMaster,
-		presentationGridSpacing,
+		documentGridSpacing,
 	} = input;
 
 	// Grid spacing in pixels
 	const gridSpacingPx = useMemo(
-		() => computeGridSpacingPx(presentationGridSpacing),
-		[presentationGridSpacing],
+		() => computeGridSpacingPx(documentGridSpacing),
+		[documentGridSpacing],
 	);
 
 	// Slide indexes visible in the current custom show (or all non-hidden)
 	const visibleSlideIndexes = useMemo(
-		() => computeVisibleSlideIndexes(slides, activeCustomShowId, customShows),
-		[slides, activeCustomShowId, customShows],
+		() =>
+			computeVisibleSlideIndexes(slides, activeCustomShowId, customShows, presentationProperties),
+		[slides, activeCustomShowId, customShows, presentationProperties],
+	);
+
+	// The authored `p:sldRg` range, resolved once and reused by both
+	// `visibleSlideIndexes` above (via `computeVisibleSlideIndexes`) and every
+	// `nextPresentedSlide` preview, so they cannot disagree on the deck's
+	// authored bounds.
+	const authoredRange = useMemo(
+		() => resolveAuthoredSlideRange(presentationProperties, slides.length),
+		[presentationProperties, slides.length],
 	);
 
 	// Slide section groups for the slides pane sidebar. `computeSlideSectionGroups`
@@ -168,7 +216,7 @@ export function useDerivedSlideState(input: UseDerivedSlideStateInput): DerivedS
 				if (group.id === UNGROUPED_SECTION_ID && group.label === 'Ungrouped Slides') {
 					return { ...group, label: t('pptx.slides.ungroupedSlides') };
 				}
-				if (group.id === 'default' && group.label === 'Slides') {
+				if (group.id === DEFAULT_SECTION_GROUP_ID && group.label === 'Slides') {
 					return { ...group, label: t('pptx.sections.slides') };
 				}
 				return group;
@@ -187,5 +235,6 @@ export function useDerivedSlideState(input: UseDerivedSlideStateInput): DerivedS
 		visibleSlideIndexes,
 		slideSectionGroups,
 		masterPseudoSlide,
+		authoredRange,
 	};
 }

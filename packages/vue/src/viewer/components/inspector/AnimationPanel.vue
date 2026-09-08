@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type {
 	AnimationPresetInfo,
+	PptxAnimationTimelineAnchor,
 	PptxAnimationTrigger,
 	PptxElement,
 	PptxElementAnimation,
@@ -11,6 +12,12 @@ import {
 	EXIT_PRESETS,
 	getAnimationPresetInfo,
 } from 'pptx-viewer-core';
+import {
+	animationCatalogPresetLabelKey,
+	applyMotionPathPreset,
+	clearMotionPath,
+	motionPathFor,
+} from 'pptx-viewer-shared';
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
@@ -19,6 +26,7 @@ import { createElementAnimation, patchElementAnimation } from './animation-panel
 import { previewVueAnimation } from './animation-preview-player';
 import AnimationEditorControls from './AnimationEditorControls.vue';
 import AnimationTimeline from './AnimationTimeline.vue';
+import MotionPathRow from './MotionPathRow.vue';
 
 type AnimatableElement = PptxElement & { animations?: PptxElementAnimation[] };
 const props = withDefaults(
@@ -26,8 +34,16 @@ const props = withDefaults(
 		element: AnimatableElement;
 		slideElements?: readonly PptxElement[];
 		slideAnimations?: readonly PptxElementAnimation[];
+		/** Read-only anchors for the deck's own effect groups; see {@link PptxAnimationTimelineAnchor}. */
+		animationTimelineAnchors?: readonly PptxAnimationTimelineAnchor[];
+		canEdit?: boolean;
 	}>(),
-	{ slideElements: () => [], slideAnimations: () => [] },
+	{
+		slideElements: () => [],
+		slideAnimations: () => [],
+		animationTimelineAnchors: () => [],
+		canEdit: true,
+	},
 );
 const emit = defineEmits<{
 	update: [patch: Partial<AnimatableElement>];
@@ -58,6 +74,15 @@ const triggerOptions: readonly PptxAnimationTrigger[] = [
 	'onShapeClick',
 ];
 const presetChoices = computed(() => presets[category.value]);
+
+/**
+ * The catalogue's own `label` is a hard-coded English constant in a core data
+ * table a locale cannot override, so this picker stayed English in every
+ * language. Name each preset through the dictionary instead.
+ */
+function catalogLabel(preset: AnimationPresetInfo): string {
+	return t(animationCatalogPresetLabelKey(preset.presetId));
+}
 const timelineAnimations = computed(() =>
 	props.slideAnimations.length ? props.slideAnimations : currentAnimations.value,
 );
@@ -84,6 +109,28 @@ function patchAnimation(index: number, patch: Partial<PptxElementAnimation>): vo
 function removeAnimation(index: number): void {
 	emit('update', { animations: currentAnimations.value.filter((_, current) => current !== index) });
 }
+
+// A motion path lives on the SLIDE's animation list (keyed by element id), the
+// same list the canvas overlay and the ribbon gallery write, so the row reads
+// and commits there rather than through the element-scoped `update` patch.
+const motionPath = computed(() => motionPathFor(props.slideAnimations, props.element.id));
+
+function changeMotionPath(pathPresetId: string): void {
+	if (!props.canEdit) {
+		return;
+	}
+	// `custom` is the read-only marker for a hand-dragged path; selecting it
+	// again is a no-op rather than a reset to some catalogue entry.
+	if (pathPresetId === 'custom') {
+		return;
+	}
+	emit(
+		'updateSlideAnimations',
+		pathPresetId === 'none'
+			? clearMotionPath(props.slideAnimations, props.element.id)
+			: applyMotionPathPreset(props.slideAnimations, props.element.id, pathPresetId),
+	);
+}
 </script>
 
 <template>
@@ -104,9 +151,13 @@ function removeAnimation(index: number): void {
 		</div>
 		<p v-else class="text-muted-foreground">{{ t('pptx.animation.noAnimations') }}</p>
 
+		<!-- Motion path: geometry, not a preset, so it gets its own row -->
+		<MotionPathRow :motion-path="motionPath" :can-edit="canEdit" @change="changeMotionPath" />
+
 		<AnimationTimeline
 			:animations="timelineAnimations"
 			:elements="slideElements"
+			:animation-timeline-anchors="animationTimelineAnchors"
 			:selected-element-id="element.id"
 			@reorder="emit('updateSlideAnimations', $event)"
 		/>
@@ -127,7 +178,7 @@ function removeAnimation(index: number): void {
 				>{{ t('pptx.animation.effect') }}
 				<select v-model="presetId" aria-label="Animation preset">
 					<option v-for="preset in presetChoices" :key="preset.presetId" :value="preset.presetId">
-						{{ preset.label }}
+						{{ catalogLabel(preset) }}
 					</option>
 				</select>
 			</label>

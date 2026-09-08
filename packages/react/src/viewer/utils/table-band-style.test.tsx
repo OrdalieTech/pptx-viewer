@@ -61,8 +61,8 @@ describe('getTableCellBandStyle', () => {
 		const style = getTableCellBandStyle(el, 2, 0, 3, 3);
 		expect(style).toBeDefined();
 		expect(style!.fontWeight).toBe(700);
-		expect(style!.borderTopWidth).toBe(2);
-		expect(style!.borderTopStyle).toBe('solid');
+		// The shared resolver writes the rule as a `border-top` shorthand.
+		expect(String(style!.borderTop)).toMatch(/^2px solid /u);
 	});
 
 	it('does not apply last row emphasis to non-last rows', () => {
@@ -199,6 +199,25 @@ describe('getTableCellBandStyle', () => {
 		});
 		expect(style).toBeDefined();
 		expect(style!.backgroundColor).toBe('#4472C4');
+	});
+
+	it('keeps an authored transparent header readable', () => {
+		const tableStyleMap = {
+			'{NO-FILL-HEADER}': {
+				firstRowFill: { noFill: true },
+			},
+		};
+		const el = makeTableElement({
+			firstRowHeader: true,
+			tableStyleId: '{NO-FILL-HEADER}',
+		});
+		const style = getTableCellBandStyle(el, 0, 0, 3, 3, {
+			tableStyleMap: tableStyleMap as unknown as ParsedTableStyleMap,
+		});
+
+		expect(style).toBeDefined();
+		expect(style!.backgroundColor).toBe('transparent');
+		expect(style!.color).toBeUndefined();
 	});
 
 	// ── a:fontRef@idx font resolution (fix 1c) ──────────────────

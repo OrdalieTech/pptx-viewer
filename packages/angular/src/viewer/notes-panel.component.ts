@@ -41,7 +41,7 @@ import {
 } from '@angular/core';
 import { LucideChevronDown, LucideChevronRight } from '@lucide/angular';
 import { TranslatePipe, TranslateService } from '@ngx-translate/core';
-import type { PptxSlide, TextSegment } from 'pptx-viewer-core';
+import type { PptxSlide, PptxTextStyleLevels, TextSegment } from 'pptx-viewer-core';
 
 import type { NotesInlineCommand, NotesParagraphCommand } from '../internal/shared';
 import {
@@ -66,137 +66,8 @@ import { NotesToolbarComponent } from './notes-toolbar.component';
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
 	imports: [NotesToolbarComponent, TranslatePipe, LucideChevronRight, LucideChevronDown],
-	template: `
-		<section class="pptx-ng-notes-panel" [attr.data-collapsed]="collapsed()">
-			<button
-				type="button"
-				class="pptx-ng-notes-header"
-				[attr.aria-expanded]="!collapsed()"
-				(click)="toggle()"
-			>
-				<span class="pptx-ng-notes-label">{{ 'pptx.notes.speakerNotes' | translate }}</span>
-				<span class="pptx-ng-notes-chevron" aria-hidden="true">
-					@if (collapsed()) {
-						<svg lucideChevronRight class="h-4 w-4"></svg>
-					} @else {
-						<svg lucideChevronDown class="h-4 w-4"></svg>
-					}
-				</span>
-			</button>
-
-			@if (!collapsed()) {
-				<div id="slide-notes-content" class="pptx-ng-notes-body">
-					@if (slide()) {
-						<pptx-notes-toolbar
-							[isRichEnabled]="isRichEnabled()"
-							[showLinkPopover]="showLinkPopover()"
-							[savedSelectionText]="savedSelectionText()"
-							(inline)="inlineCommand($event)"
-							(paragraph)="paragraphCommand($event)"
-							(linkButtonClick)="openLinkPopover()"
-							(insertLink)="insertLink($event)"
-							(closeLinkPopover)="showLinkPopover.set(false)"
-							(print)="printNotes()"
-							(toggleRich)="toggleRich()"
-						/>
-					}
-
-					<div
-						#richEditor
-						class="pptx-ng-notes-rich"
-						[hidden]="!showRich()"
-						[attr.contenteditable]="showRich() ? 'true' : 'false'"
-						role="textbox"
-						aria-multiline="true"
-						[attr.aria-label]="'pptx.notes.speakerNotes' | translate"
-						(input)="onRichInput()"
-						(keydown)="onRichKeydown($event)"
-						(blur)="onRichInput()"
-						(click)="onEditorClick($event)"
-					></div>
-
-					<textarea
-						#textarea
-						name="slide-notes"
-						class="pptx-ng-notes-textarea"
-						[hidden]="showRich()"
-						[disabled]="!slide()"
-						[attr.placeholder]="
-							(slide() ? 'pptx.notes.addSpeakerNotes' : 'pptx.notes.noSlide') | translate
-						"
-						[attr.aria-label]="'pptx.notes.speakerNotes' | translate"
-						spellcheck="true"
-						(change)="onPlainCommit($event)"
-						(blur)="onPlainCommit($event)"
-					></textarea>
-				</div>
-			}
-		</section>
-	`,
-	styles: [
-		`
-			:host {
-				display: block;
-			}
-			.pptx-ng-notes-panel {
-				display: flex;
-				flex-direction: column;
-				border-top: 1px solid var(--pptx-border, rgba(0, 0, 0, 0.1));
-				background: var(--pptx-background, #ffffff);
-				color: var(--pptx-foreground, #111827);
-			}
-			.pptx-ng-notes-header {
-				display: flex;
-				width: 100%;
-				align-items: center;
-				justify-content: space-between;
-				padding: 0.5rem 0.75rem;
-				border: none;
-				background: transparent;
-				font-size: 0.8125rem;
-				font-weight: 600;
-				color: var(--pptx-muted-foreground, #6b7280);
-				cursor: pointer;
-			}
-			.pptx-ng-notes-header:hover {
-				color: var(--pptx-foreground, #111827);
-			}
-			.pptx-ng-notes-body {
-				padding: 0 0.75rem 0.75rem;
-			}
-			.pptx-ng-notes-rich,
-			.pptx-ng-notes-textarea {
-				box-sizing: border-box;
-				width: 100%;
-				min-height: 5rem;
-				padding: 0.5rem;
-				border: 1px solid rgba(0, 0, 0, 0.15);
-				border-radius: 0.375rem;
-				background: rgba(0, 0, 0, 0.03);
-				font: inherit;
-				font-size: 0.8125rem;
-				line-height: 1.5;
-				color: #111827;
-			}
-			.pptx-ng-notes-rich {
-				overflow: auto;
-				resize: vertical;
-			}
-			.pptx-ng-notes-textarea {
-				resize: vertical;
-			}
-			.pptx-ng-notes-rich:focus,
-			.pptx-ng-notes-textarea:focus {
-				outline: none;
-				border-color: #6366f1;
-				box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3);
-			}
-			.pptx-ng-notes-textarea:disabled {
-				cursor: not-allowed;
-				opacity: 0.6;
-			}
-		`,
-	],
+	templateUrl: './notes-panel.component.html',
+	styleUrl: './notes-panel.component.css',
 })
 export class NotesPanelComponent {
 	private readonly translate = inject(TranslateService);
@@ -211,6 +82,14 @@ export class NotesPanelComponent {
 	 * button and the header chevron stay in sync.
 	 */
 	readonly expanded = input<boolean>(false);
+
+	/**
+	 * The deck's notes master `<p:notesStyle>` level defaults (`PptxData.
+	 * notesMaster.notesStyle`), when the host has it. Fills in a notes
+	 * segment's missing font/colour/indent from the authored defaults instead
+	 * of a hardcoded look; see `resolveNotesSegments` / `buildNotesPrintHtml`.
+	 */
+	readonly notesStyle = input<PptxTextStyleLevels | undefined>(undefined);
 
 	/** Emits the new plain-text notes on commit. */
 	readonly update = output<string>();
@@ -231,7 +110,7 @@ export class NotesPanelComponent {
 		return this.isRichEnabled() && this.slide() !== undefined;
 	}
 
-	private draftSegments: TextSegment[] = resolveNotesSegments(undefined);
+	private draftSegments: TextSegment[] = resolveNotesSegments(undefined, this.notesStyle());
 	private draftText = '';
 	private seededId: string | null = null;
 	private debounceId: ReturnType<typeof setTimeout> | null = null;
@@ -246,7 +125,7 @@ export class NotesPanelComponent {
 				return;
 			}
 			this.seededId = id;
-			this.draftSegments = resolveNotesSegments(slide);
+			this.draftSegments = resolveNotesSegments(slide, this.notesStyle());
 			this.draftText = segmentsToPlainText(this.draftSegments);
 			queueMicrotask(() => this.seedActiveSurface());
 		});
@@ -394,8 +273,10 @@ export class NotesPanelComponent {
 		if (!slide || typeof document === 'undefined') {
 			return;
 		}
-		const html = buildNotesPrintHtml([slide], (n) =>
-			this.translate.instant('pptx.notes.slideN', { n }),
+		const html = buildNotesPrintHtml(
+			[slide],
+			(n) => this.translate.instant('pptx.notes.slideN', { n }),
+			this.notesStyle(),
 		);
 		const frame = document.createElement('iframe');
 		frame.setAttribute('aria-hidden', 'true');

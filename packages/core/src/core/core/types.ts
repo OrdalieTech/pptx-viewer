@@ -12,6 +12,7 @@ import type {
 	PptxExportOptions,
 	PptxHandoutMaster,
 	PptxLayoutOption,
+	PptxLayoutPreview,
 	PptxData,
 	PptxElement,
 	PptxHeaderFooter,
@@ -24,8 +25,10 @@ import type {
 	PptxSlide,
 	PptxSlideLayout,
 	PptxSlideMaster,
+	PptxSlideSize,
 	PptxSmartArtData,
 	PptxTagCollection,
+	PptxTextStyleLevels,
 	PptxThemeColorScheme,
 	PptxThemeFontScheme,
 	PptxViewProperties,
@@ -127,10 +130,36 @@ export interface PptxHandlerSaveOptions {
 	customerData?: PptxCustomerData[];
 	/** Photo album metadata to save back to `p:photoAlbum`. */
 	photoAlbum?: PptxPhotoAlbum;
+	/**
+	 * Slide dimensions to write back to `p:sldSz`.
+	 *
+	 * Omitting the option preserves the load-time dimensions verbatim, which
+	 * is why an edit made through a viewer's Slide Size control has to reach
+	 * the save call: nothing else in the pipeline can observe it.
+	 *
+	 * PowerPoint derives `Presentation.PageSetup.SlideSize` from `@cx`/`@cy`
+	 * alone (verified by COM: an A4-typed `p:sldSz` carrying 4:3 dimensions
+	 * still reports `ppSlideSizeCustom`), so `type` is written for fidelity
+	 * but the dimensions are what actually decide the reported preset.
+	 */
+	slideSize?: PptxSlideSize;
 	/** East Asian line-break settings to save back to `p:kinsoku`. */
 	kinsoku?: PptxKinsoku | null;
 	/** Write-protection verifier. Set to `null` to remove, `undefined` to preserve existing. */
 	modifyVerifier?: PptxModifyVerifier | null;
+	/**
+	 * `p:presentation/@embedTrueTypeFonts` to write. `undefined` preserves
+	 * whatever was loaded (or omits the attribute for a brand-new deck);
+	 * purely declarative here, see {@link PptxData.embedTrueTypeFonts}.
+	 */
+	embedTrueTypeFonts?: boolean;
+	/**
+	 * Presentation-level default text style edits to save back to
+	 * `p:defaultTextStyle`. Only the levels present in the map are touched;
+	 * omitted levels and any unmodelled XML on an edited level survive
+	 * untouched. See {@link PptxData.defaultTextStyle}.
+	 */
+	defaultTextStyle?: PptxTextStyleLevels;
 	/** View properties to save back to ppt/viewProps.xml. */
 	viewProperties?: PptxViewProperties;
 	/**
@@ -141,6 +170,24 @@ export interface PptxHandlerSaveOptions {
 	 * part untouched.
 	 */
 	tableStyles?: ParsedTableStyleMap;
+	/**
+	 * Set `ppt/tableStyles.xml`'s `<a:tblStyleLst @def>` to this style GUID
+	 * (normalised to uppercase-with-braces). `undefined` preserves the
+	 * existing default; there is no removal form (`@def` is required by the
+	 * schema and PowerPoint always points it at a real style). No-op when the
+	 * archive has no `ppt/tableStyles.xml`, same as {@link tableStyles}.
+	 */
+	tableStylesDefaultId?: string;
+	/**
+	 * Style GUIDs to remove from `ppt/tableStyles.xml` entirely, kept as a
+	 * separate opt-in list rather than inferred from omission on
+	 * {@link tableStyles}: that map is documented as safe to pass a PARTIAL
+	 * edit (only the entries a caller actually touched), so treating every
+	 * GUID missing from it as "delete this" would silently destroy untouched
+	 * styles on an ordinary targeted edit. A GUID here that is also the
+	 * current (or newly requested) default is left in place and skipped.
+	 */
+	tableStylesToDelete?: string[];
 	/**
 	 * Target output format.
 	 * - `'pptx'` (default): Standard presentation.
@@ -185,6 +232,8 @@ export interface IPptxHandlerRuntime {
 
 	getCompatibilityWarnings(): PptxCompatibilityWarning[];
 	getLayoutOptions(): PptxLayoutOption[];
+	getLayoutPreview(layoutPath: string): Promise<PptxLayoutPreview | null>;
+	getLayoutPreviews(layoutPaths?: readonly string[]): Promise<PptxLayoutPreview[]>;
 	createXmlBuilder(data: PptxData): PptxXmlBuilder;
 	Builder(data: PptxData): PptxXmlBuilder;
 	setTemplateBackground(path: string, backgroundColor: string | undefined): void;

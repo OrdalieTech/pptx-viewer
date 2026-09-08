@@ -307,12 +307,12 @@ describe('buildWaterfallViewModel — edge cases', () => {
 		}
 	});
 
-	it('svgWidth and svgHeight are at least 320x180', () => {
+	it('svgWidth and svgHeight match the element frame box exactly', () => {
 		const el = makeElement(10, 10);
 		const data = makeWaterfallData([10, 20]);
 		const vm = buildWaterfallViewModel(el, data, data.categories);
-		expect(vm.svgWidth).toBeGreaterThanOrEqual(320);
-		expect(vm.svgHeight).toBeGreaterThanOrEqual(180);
+		expect(vm.svgWidth).toBe(10);
+		expect(vm.svgHeight).toBe(10);
 	});
 });
 
@@ -362,11 +362,11 @@ describe('buildRegionMapViewModel — basic structure', () => {
 		expect(texts.length).toBeGreaterThan(0);
 	});
 
-	it('svgWidth and svgHeight enforce minimum sizes', () => {
+	it('svgWidth and svgHeight match the element frame box exactly', () => {
 		const smallEl = makeElement(50, 50);
 		const vm = buildRegionMapViewModel(smallEl, data, labels);
-		expect(vm.svgWidth).toBeGreaterThanOrEqual(320);
-		expect(vm.svgHeight).toBeGreaterThanOrEqual(200);
+		expect(vm.svgWidth).toBe(50);
+		expect(vm.svgHeight).toBe(50);
 	});
 
 	it('includes a legend colour bar (rect primitives) for the scale', () => {
@@ -374,6 +374,24 @@ describe('buildRegionMapViewModel — basic structure', () => {
 		// The background rect + the gradient bar segments all appear as rects.
 		const rects = vm.primitives.filter((p) => p.kind === 'rect');
 		expect(rects.length).toBeGreaterThan(0);
+	});
+
+	it('carries a valueDrag context spanning the matched regions min/max, so a region can be dragged to a new value', () => {
+		const vm = buildRegionMapViewModel(el, data, labels);
+		expect(vm.valueDrag).toBeDefined();
+		expect(vm.valueDrag?.range.min).toBe(20);
+		expect(vm.valueDrag?.range.max).toBe(100);
+		expect(vm.valueDrag?.plotTop).toBeLessThan(vm.valueDrag!.plotBottom);
+	});
+
+	it('tags each matched region path with the dataPoint part valueDrag commits through', () => {
+		const vm = buildRegionMapViewModel(el, data, labels);
+		const matchedPaths = vm.primitives.filter((p) => p.kind === 'path' && p.part !== undefined);
+		expect(matchedPaths.length).toBeGreaterThan(0);
+		for (const p of matchedPaths) {
+			expect(p.part?.role).toBe('dataPoint');
+			expect(p.part?.seriesIndex).toBe(0);
+		}
 	});
 });
 
@@ -484,6 +502,41 @@ describe('buildRegionMapViewModel — ChartEx geography options', () => {
 	});
 });
 
+describe('buildRegionMapViewModel cx:valueColors gradient', () => {
+	it('colours matched regions along the authored gradient instead of the default blue scale', () => {
+		const el = makeElement(600, 400);
+		// `valueColors`/`valueColorPositions` are wave-agreed core fields not yet
+		// on `PptxChartRegionMapOptions` in `packages/core/dist`; bridge them the
+		// same way `chart-waterfall-map.ts` does internally.
+		const data: PptxChartData = {
+			chartType: 'regionMap',
+			categories: ['US', 'AU'],
+			series: [
+				{
+					name: 'Values',
+					values: [0, 100],
+					regionMapOptions: {
+						valueColors: ['#000000', '#ffffff'],
+					} as PptxChartData['series'][0]['regionMapOptions'],
+				},
+			],
+		};
+		const vm = buildRegionMapViewModel(el, data, data.categories);
+		const paths = vm.primitives.filter(
+			(primitive) => primitive.kind === 'path' && primitive.part?.role === 'dataPoint',
+		);
+		expect(paths).toHaveLength(2);
+		const fills = paths.map((path) => (path.kind === 'path' ? path.fill : undefined));
+		// Min value (0) gets the first stop, max value (100) gets the last.
+		expect(fills).toContain('#000000');
+		expect(fills).toContain('#ffffff');
+		// Neither region gets the DEFAULT sequential-scale blue.
+		expect(
+			fills.some((fill) => fill === sequentialColorScale(0) || fill === sequentialColorScale(1)),
+		).toBeFalsy();
+	});
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // buildRegionMapViewModel — edge cases
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,5 +571,51 @@ describe('buildRegionMapViewModel — edge cases', () => {
 		const vm = buildRegionMapViewModel(el, data, data.categories);
 		const allTexts = vm.dataLabels.map((t) => t.text);
 		expect(allTexts).toContain('World Sales');
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Capabilities lifted out of the React / Vue region-map copies
+//
+// Both bindings drew each region with an SVG `<title>` tooltip and a real
+// `<linearGradient>` legend bar. This builder had neither: a region carried no
+// name at all, and the legend was two half-width rects of the midpoint colours,
+// which reads as a two-tone bar rather than a scale. Both were lifted here so
+// converging on shared lost nothing, and so the other three bindings gained
+// them at the same time.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('region map: region identification and legend ramp', () => {
+	const mapData: PptxChartData = {
+		chartType: 'regionMap',
+		categories: ['United States', 'Germany', 'China'],
+		series: [{ name: 'Revenue', values: [45, 62, 58] }],
+		style: {},
+	};
+
+	it('names every region in a tooltip, with the value where there is one', () => {
+		const vm = buildRegionMapViewModel(makeElement(600, 400), mapData, mapData.categories);
+		const titles = vm.primitives
+			.filter((primitive) => primitive.kind === 'path')
+			.map((primitive) => (primitive as { title?: string }).title);
+		expect(titles).toContain('United States: 45');
+		expect(titles).toContain('Germany: 62');
+		// A region with no data still says what it is.
+		expect(titles).toContain('Australia');
+		// Every region path is identified; none is an anonymous blob.
+		expect(titles.every((title) => typeof title === 'string' && title.length > 0)).toBeTruthy();
+	});
+
+	it('draws the colour legend as a fine ramp, not two flat halves', () => {
+		const vm = buildRegionMapViewModel(makeElement(600, 400), mapData, mapData.categories);
+		// The legend bar sits at a single y with a fixed 8px height; count the
+		// rects that share it.
+		const bandHeights = vm.primitives.filter(
+			(primitive) => primitive.kind === 'rect' && (primitive as { h: number }).h === 8,
+		);
+		expect(bandHeights.length).toBeGreaterThanOrEqual(16);
+		const fills = new Set(bandHeights.map((primitive) => (primitive as { fill: string }).fill));
+		// A ramp, so almost every band is a different colour.
+		expect(fills.size).toBeGreaterThanOrEqual(bandHeights.length - 1);
 	});
 });

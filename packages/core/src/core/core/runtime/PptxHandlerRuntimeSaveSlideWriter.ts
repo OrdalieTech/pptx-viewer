@@ -1,6 +1,7 @@
 import { remapEditorAnimationsToShapeIds } from '../../services';
+import { writeCommonSlideDataName } from '../../services/slide-name';
 import { XmlObject, PptxComment, PptxSlide } from '../../types';
-import type { MediaPptxElement } from '../../types';
+import type { MediaPptxElement, PptxElementAnimation } from '../../types';
 import type { AlternateContentBlock } from '../../utils';
 import { applyActiveXControlsToSlide, SHAPE_TREE_ELEMENT_TAGS } from '../../utils';
 import { saveModernSlideComments } from '../../utils/modern-comment-package';
@@ -9,8 +10,12 @@ import { buildClrMapOverrideXml } from '../../utils/theme-override-utils';
 import { PptxSlideRelationshipRegistry, PptxShapeIdValidator } from '../builders';
 import type { PptxSaveState, IPptxSlideRelationshipRegistry } from '../builders';
 import type { PptxSaveConstants } from '../factories';
+import { slideBackgroundOrigin } from './authored-slide-background';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveElementWriter';
 import type { SlideShapeCollectors, SaveSlideContext } from './PptxHandlerRuntimeSaveElementWriter';
+import { fingerprintSlide, slideMatchesFingerprint } from './slide-fingerprint';
+import { buildOrderedSlideXml, SpTreeChildOrderTracker } from './slide-save-xml-order';
+import { reconcileSlideTransition } from './slide-transition-reconcile';
 import {
 	ensureA16NamespaceOnSlideRoot,
 	slideContainsA16Element,
@@ -68,6 +73,96 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	}
 
 	/**
+	 * Can this slide keep the bytes already in the archive?
+	 *
+	 * Re-serializing a slide is not free of consequence: the shape tree is
+	 * rebuilt from the typed model, so inherited run properties get flattened
+	 * into the runs, `mc:AlternateContent` envelopes are re-wrapped, and shape
+	 * ids can be renumbered. Doing that to a slide the user never touched is
+	 * pure loss, and it used to happen to every slide of every deck on every
+	 * save because the `isDirty === false` guard below was never reachable.
+	 *
+	 * The eligibility rules, in the order they can bite:
+	 *
+	 * 1. `isDirty === true` is an explicit announcement from a mutation path
+	 *    that does not go through the typed model (`applyLayoutToSlide`,
+	 *    `merge-operations`), and always wins.
+	 * 2. There has to BE something in the archive to keep. A slide created this
+	 *    session has no cached XML and no ZIP entry, so it must be written.
+	 * 3. Comment-bearing slides are always written. The save session prunes
+	 *    every comment part that no slide claimed during this pass, so a
+	 *    skipped slide would have its comment part deleted from under it and
+	 *    `ppt/commentAuthors.xml` stripped. Everything else the session
+	 *    collects (media paths, ink paths, slide numbers) is seeded from the
+	 *    ZIP itself and only ever added to, so skipping is safe there.
+	 * 4. Otherwise the fingerprint decides: unchanged model, unchanged bytes.
+	 */
+	private canSkipSlideSave(slide: PptxSlide): boolean {
+		if (slide.isDirty === true) {
+			return false;
+		}
+		if (!this.slideMap.has(slide.id) || !this.zip.file(slide.id)) {
+			return false;
+		}
+		if ((slide.comments?.length ?? 0) > 0 || slide.modernCommentPart !== undefined) {
+			return false;
+		}
+		return slide.isDirty === false || slideMatchesFingerprint(this.savedSlideFingerprints, slide);
+	}
+
+	/**
+	 * Embed a newly-authored animation effect sound and mint its relationship.
+	 *
+	 * The animation panel's sound picker stages a chosen file as a pending
+	 * `data:` URL on `PptxElementAnimation.soundData` (the same convention
+	 * `imageData` / `mediaData` use for not-yet-embedded media). This writes
+	 * the bytes into `ppt/media/`, registers an `audio` relationship for them
+	 * (the type real PowerPoint uses for `p:snd/@r:embed`, embedded or not),
+	 * and rewrites the animation entry to reference the resolved
+	 * `soundRId` / `soundPath` so the timing writer below emits a legal
+	 * `p:stSnd`. A no-op for every entry that has no pending sound.
+	 */
+	protected embedPendingAnimationSounds(
+		animations: PptxElementAnimation[],
+		ctx: {
+			saveSession: PptxSaveState;
+			slideRelationshipRegistry: IPptxSlideRelationshipRegistry;
+			slideAudioRelationshipType: string;
+		},
+	): void {
+		for (const anim of animations) {
+			if (typeof anim.soundData !== 'string' || anim.soundData.length === 0) {
+				continue;
+			}
+			const parsedSound = this.parseDataUrlToBytes(anim.soundData);
+			delete anim.soundData;
+			if (!parsedSound) {
+				this.compatibilityService.reportWarning({
+					code: 'SAVE_ANIMATION_SOUND_PAYLOAD_UNSUPPORTED',
+					message:
+						'Animation effect sound could not be converted to an embedded media part and was dropped.',
+					scope: 'save',
+					elementId: anim.elementId,
+				});
+				anim.soundRId = undefined;
+				anim.soundPath = undefined;
+				continue;
+			}
+			const targetPath = ctx.saveSession.nextMediaPath(parsedSound.extension, 'audio');
+			this.zip.file(targetPath, parsedSound.bytes);
+			const relationshipId = ctx.slideRelationshipRegistry.nextRelationshipId();
+			const relationshipTarget = targetPath.replace(/^ppt\//u, '../');
+			ctx.slideRelationshipRegistry.upsertRelationship(
+				relationshipId,
+				ctx.slideAudioRelationshipType,
+				relationshipTarget,
+			);
+			anim.soundRId = relationshipId;
+			anim.soundPath = targetPath;
+		}
+	}
+
+	/**
 	 * Process a single slide during save: update slide XML, process elements,
 	 * rebuild shape tree, and persist relationships.
 	 */
@@ -77,7 +172,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		constants: PptxSaveConstants,
 	): Promise<void> {
 		// Skip re-serialization of unmodified slides to prevent spurious diffs
-		if (slide.isDirty === false) {
+		if (this.canSkipSlideSave(slide)) {
 			return;
 		}
 
@@ -92,53 +187,36 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		} else {
 			delete slideNode['@_show'];
 		}
+		// `@showMasterPhAnim` (CT_Slide, ECMA-376 §19.3.1.38): whether inherited
+		// master placeholder animations replay on this slide. Only touched when
+		// the typed model carries an explicit value; otherwise the attribute (if
+		// any) survives untouched via the cached XmlObject passthrough.
+		if (slide.showMasterPhAnim !== undefined) {
+			slideNode['@_showMasterPhAnim'] = slide.showMasterPhAnim ? '1' : '0';
+		}
+		// `@showMasterSp` (CT_Slide, ECMA-376 §19.3.1.38): "Hide Background
+		// Graphics" - whether the slide displays its inherited layout/master
+		// decorative shapes. Only touched when the typed model carries an
+		// explicit value; otherwise the attribute (if any) survives untouched
+		// via the cached XmlObject passthrough.
+		if (slide.showMasterShapes !== undefined) {
+			slideNode['@_showMasterSp'] = slide.showMasterShapes ? '1' : '0';
+		}
 		slideNode['p:clrMapOvr'] = buildClrMapOverrideXml(slide.clrMapOverride);
 
-		if (slide.transition !== undefined) {
-			const transitionNode = this.buildSlideTransitionXml(slide.transition);
-			if (transitionNode) {
-				slideNode['p:transition'] = transitionNode;
-			} else {
-				delete slideNode['p:transition'];
-			}
-		}
-		// Editor animations key their target by the positional `element.id`. On
-		// save, rewrite those references to the target shape's native OOXML
-		// `p:cNvPr/@id` (minting one for SDK-created shapes) so `p:spTgt/@spid`
-		// and the `pptx:editorMeta` extension reference a shape id real
-		// PowerPoint can bind, and so `reconcileAnimationTargets` can map them
-		// back on the next load. Shapes are stamped with the same id below.
-		const shapeIdAnimations =
-			slide.animations !== undefined
-				? remapEditorAnimationsToShapeIds(
-						slide.elements,
-						slide.animations,
-						this.maxCnvPrId(this.ensureSlideTree(xmlObj)),
-					)
-				: undefined;
-		if (shapeIdAnimations !== undefined) {
-			this.applyEditorAnimations(slideNode, shapeIdAnimations);
-		}
-		if (shapeIdAnimations && shapeIdAnimations.length > 0) {
-			// When rawTiming exists, surgical update preserves complex structures
-			const generatedTiming = this.animationWriteService.buildTimingXml(
-				shapeIdAnimations,
-				slide.rawTiming,
-			);
-			if (generatedTiming) {
-				this.applyMediaTimingToRawTiming(generatedTiming, slide.elements);
-				slideNode['p:timing'] = generatedTiming;
-			} else if (slide.rawTiming) {
-				this.applyMediaTimingToRawTiming(slide.rawTiming, slide.elements);
-				slideNode['p:timing'] = slide.rawTiming;
-			}
-		} else if (slide.rawTiming) {
-			this.applyMediaTimingToRawTiming(slide.rawTiming, slide.elements);
-			slideNode['p:timing'] = slide.rawTiming;
-		}
-		xmlObj['p:sld'] = slideNode;
-
 		const spTree = this.ensureSlideTree(xmlObj);
+		// `p:cSld/@name`: set or cleared from the model the same way the layout
+		// writer handles a layout's name; `ensureSlideTree` guarantees `p:cSld`.
+		writeCommonSlideDataName(slideNode['p:cSld'] as XmlObject | undefined, slide.name);
+
+		// Relationships are resolved here, ahead of the transition and animation
+		// timing blocks below, because a newly-authored effect sound
+		// (`PptxElementAnimation.soundData`, a pending `data:` URL from the
+		// animation panel's sound picker) needs a relationship id and a media
+		// part BEFORE `buildTimingXml` runs (the only place `p:stSnd/@r:embed`
+		// is written), and likewise a transition sound the user picked in the
+		// ribbon needs one BEFORE `buildSlideTransitionXml` serializes
+		// `p:sndAc/p:stSnd/p:snd/@r:embed`.
 		const slideRelsPath = this.toSlideRelsPath(slide.id);
 		const slideRelsXml = await this.zip.file(slideRelsPath)?.async('string');
 		const slideRelsData: XmlObject = slideRelsXml
@@ -161,6 +239,70 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const existingCommentRelationship = slideRelationshipRegistry.removeCommentRelationships(
 			constants.slideCommentRelationshipType,
 		);
+
+		if (slide.transition !== undefined) {
+			this.embedTransitionSound(slide.transition, {
+				saveSession,
+				slideRelationshipRegistry,
+				slideMediaRelationshipType: constants.slideMediaRelationshipType,
+				slideId: slide.id,
+			});
+			// `CT_Slide` allows ONE `p:transition`, and PowerPoint 2010+ keeps it
+			// inside a slide-root `mc:AlternateContent` envelope whenever it
+			// carries p14/p15/p159 markup. Assigning a direct child on top of
+			// that envelope emitted the transition up to three times, after
+			// `p:timing` and so out of schema sequence too.
+			reconcileSlideTransition({
+				slideNode,
+				transitionNode: this.buildSlideTransitionXml(slide.transition),
+				sourceNode: slide.transition.rawTransition,
+				getLocalName: (key) => this.compatibilityService.getXmlLocalName(key),
+			});
+		}
+		// Editor animations key their target by the positional `element.id`. On
+		// save, rewrite those references to the target shape's native OOXML
+		// `p:cNvPr/@id` (minting one for SDK-created shapes) so `p:spTgt/@spid`
+		// and the `pptx:editorMeta` extension reference a shape id real
+		// PowerPoint can bind, and so `reconcileAnimationTargets` can map them
+		// back on the next load. Shapes are stamped with the same id below.
+		const shapeIdAnimations =
+			slide.animations !== undefined
+				? remapEditorAnimationsToShapeIds(slide.elements, slide.animations, this.maxCnvPrId(spTree))
+				: undefined;
+		if (shapeIdAnimations !== undefined) {
+			// A newly-chosen effect sound arrives as a pending `data:` URL
+			// (`soundData`), same convention as pending image/media bytes. Embed it
+			// into the package and mint its relationship before anything below
+			// reads `soundRId` to write `p:stSnd`.
+			this.embedPendingAnimationSounds(shapeIdAnimations, {
+				saveSession,
+				slideRelationshipRegistry,
+				slideAudioRelationshipType: constants.slideAudioRelationshipType,
+			});
+			this.applyEditorAnimations(slideNode, shapeIdAnimations);
+		}
+		// An EMPTY list must still reach the writer: it is how "the user deleted
+		// the last effect" gets to `p:timing`. Gating on a non-empty list left the
+		// removed effect in the file forever, still playing in PowerPoint.
+		if (shapeIdAnimations !== undefined) {
+			// When rawTiming exists, surgical update preserves complex structures
+			const generatedTiming = this.animationWriteService.buildTimingXml(
+				shapeIdAnimations,
+				slide.rawTiming,
+			);
+			if (generatedTiming) {
+				this.applyMediaTimingToRawTiming(generatedTiming, slide.elements);
+				slideNode['p:timing'] = generatedTiming;
+			} else if (slide.rawTiming) {
+				this.applyMediaTimingToRawTiming(slide.rawTiming, slide.elements);
+				slideNode['p:timing'] = slide.rawTiming;
+			}
+		} else if (slide.rawTiming) {
+			this.applyMediaTimingToRawTiming(slide.rawTiming, slide.elements);
+			slideNode['p:timing'] = slide.rawTiming;
+		}
+		xmlObj['p:sld'] = slideNode;
+
 		await saveSlideSynchronization({
 			zip: this.zip,
 			parser: this.parser,
@@ -179,6 +321,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			saveState: saveSession,
 			relationshipRegistry: slideRelationshipRegistry,
 			slideImageRelationshipType: constants.slideImageRelationshipType,
+			authoredBackground: slideBackgroundOrigin(this, slide.id),
 			resolveImageToBytes: (url) => this.resolveMediaToBytes(url),
 			reportUnsupportedBackground: (imageUrl) =>
 				this.compatibilityService.reportWarning({
@@ -274,9 +417,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			slideAudioRelationshipType: constants.slideAudioRelationshipType,
 		};
 
-		slide.elements.forEach((el) => {
+		// `p:spTree` is an ordered sequence and document order IS paint order, but
+		// the collectors below are one array per tag. Stamp each emitted node with
+		// the position of the element that produced it so the interleaved order
+		// can be restored just before serialization.
+		const childOrder = new SpTreeChildOrderTracker(collectors);
+		for (const el of slide.elements) {
 			this.processSlideElement(el, collectors, ctx);
-		});
+			childOrder.capture();
+		}
 
 		// Assign lists back to spTree
 		spTree['p:sp'] = collectors.shapes;
@@ -359,7 +508,25 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			applyActiveXControlsToSlide(xmlObj, slide.activeXControls);
 		}
 
-		this.zip.file(slide.id, this.builder.build(xmlObj));
+		// Serialize through an order-corrected shallow clone: the shape tree is
+		// re-interleaved into `slide.elements` order and the slide root is put
+		// back into `CT_Slide` sequence. The clone keeps the marker keys out of
+		// the cached slide map, so the next save still sees plain tag arrays.
+		this.zip.file(
+			slide.id,
+			this.builder.build(
+				buildOrderedSlideXml({
+					xmlObj,
+					positionOf: (node) => childOrder.positionOf(node),
+					getLocalName: (key) => this.compatibilityService.getXmlLocalName(key),
+				}),
+			),
+		);
+		// The archive now holds THIS model. Fingerprinting here rather than at
+		// the end of `save()` keeps the baseline pinned to the state that
+		// actually produced the bytes: anything mutated afterwards is a genuine
+		// difference and must be rewritten on the next save.
+		this.savedSlideFingerprints.set(slide.id, fingerprintSlide(slide));
 	}
 
 	/**

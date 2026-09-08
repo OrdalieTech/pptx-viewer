@@ -46,6 +46,8 @@ import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 
+import { resetTabSession } from './support/deck';
+
 const fixturePath = resolve(fileURLToPath(new URL('./fixtures/sample-deck.pptx', import.meta.url)));
 const outputDir = resolve(
 	fileURLToPath(new URL('../test-results/equation-editing/', import.meta.url)),
@@ -218,21 +220,22 @@ test.describe('equation editing', () => {
 		// Deselect the freshly-inserted equation first.
 		await page.keyboard.press('Escape');
 
-		// Save via File ▸ Save .pptx. Scoped to the ribbon toolbar (matches
+		// Save via File ▸ Save. Scoped to the ribbon toolbar (matches
 		// `switchToInsertTab`) rather than an unscoped `page.locator('button')`
 		// text filter. The toolbar scope avoids matching persistent quick-save
 		// controls exposed elsewhere in the viewer.
 		await ribbonTab(page, 'File').click();
 		await page.waitForTimeout(300);
 
-		// React/Vue label this button "Save .pptx"; Angular's File tab only
-		// offers a single generic "Save" button (always .pptx format, per its
-		// "Save as Presentation (.pptx)" tooltip) rather than React/Vue's
-		// separate .pptx/.ppsx/.pptm buttons - a real feature gap, not a test
-		// bug. `.last()` picks the File-tab-scoped button over the persistent
-		// quick-save icon some bindings also render earlier in the DOM.
+		// Every binding's File tab is the shared backstage now: a "Save" nav
+		// entry (saves .pptx directly) plus a "Save As" page offering the
+		// .pptx/.ppsx/.pptm flavors from the shared BACKSTAGE_PAGE_CARDS list
+		// (live-verified in all five, Angular included; the old "Angular offers
+		// only a generic Save" accommodation is gone). `.last()` picks the
+		// File-tab-scoped Save over the persistent quick-save icon some
+		// bindings also render earlier in the DOM.
 		const downloadPromise = page.waitForEvent('download');
-		const saveBtn = page.getByRole('button', { name: /^Save(\s\.pptx)?$/iu }).last();
+		const saveBtn = page.getByRole('button', { name: /^Save$/iu }).last();
 		await saveBtn.click();
 
 		const download = await downloadPromise;
@@ -240,12 +243,17 @@ test.describe('equation editing', () => {
 		const savePath = resolve(outputDir, `${testInfo.project.name}-${fileName}`);
 		await download.saveAs(savePath);
 
-		// Reload the just-saved file through the app's own file input. None of
-		// the three demos expose an "Open another file" affordance while a deck
-		// is already loaded (`#file-input` only exists in the empty/dropzone
-		// state - e.g. demo-react's `main.tsx` unmounts it once `content` is
-		// set), so a fresh navigation back to the dropzone is what a real
-		// close-and-reopen round-trip looks like.
+		// Reload the just-saved file through the app's own file input. No demo
+		// exposes an "Open another file" affordance while a deck is already
+		// loaded (`#file-input` only exists in the empty/dropzone state - e.g.
+		// demo-react's `main.tsx` unmounts it once `content` is set), so a fresh
+		// navigation back to the dropzone is what a real close-and-reopen
+		// round-trip looks like.
+		//
+		// Clearing the tab session is what MAKES that navigation land on the
+		// dropzone: session-restore would otherwise reopen the deck and the
+		// input would never mount.
+		await resetTabSession(page);
 		await page.goto('/');
 		await page.locator('#file-input').setInputFiles(savePath);
 		await page.locator('[data-pptx-element="true"]').first().waitFor();

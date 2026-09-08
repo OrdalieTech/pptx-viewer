@@ -1,25 +1,50 @@
 import type { PptxElement } from 'pptx-viewer-core';
-import type { ResizeHandleId, SnapLine } from 'pptx-viewer-shared';
-import { publishLiveInlineText } from 'pptx-viewer-shared';
-
-import type { EditorControllerDeps } from './editor-controller-deps';
+import type {
+	ConnectorEndpointKind,
+	GestureController,
+	ResizeHandleId,
+	ShapeAdjustmentHandleDescriptor,
+	SnapLine,
+} from 'pptx-viewer-shared';
 import {
-	elementInteractionBox,
-	selectionOverlayBox,
-	siblingBoxes,
-} from './editor-controller-geometry';
-import { createGestureController } from './editor-gestures';
-import type { GestureController } from './editor-gestures';
-import { createInkGestureController } from './editor-ink-gesture';
+	armEditorKeyboard,
+	collectConnectorSiteCandidates,
+	findConnectorSiteNear,
+	publishLiveInlineText,
+	resolveConnectorEndpointUpdate,
+	resolveContextMenuElementId,
+	withConnectorEndpointUpdate,
+} from 'pptx-viewer-shared';
+
+import { readTableCellTarget } from './context-menu-dispatch';
+import type { AdjustGestureController } from './editor-adjust-gesture';
+import type { EditorControllerDeps } from './editor-controller-deps';
+import { selectionOverlayBox } from './editor-controller-geometry';
+import {
+	createAdjustGestures,
+	createEditorKeydown,
+	createInkGestures,
+	createSelectionGestures,
+	createTransformGestures,
+} from './editor-controller-wiring';
+import type { EditorControllerHost } from './editor-controller-wiring';
+import { createHandleHandlers } from './editor-handle-handlers';
+import type { HandleHandlers } from './editor-handle-handlers';
 import type { InkGestureController } from './editor-ink-gesture';
-import { createEditorKeydownHandler } from './editor-keyboard';
-import { createSelectionGestureController } from './editor-selection-gestures';
 import type { EditorMarqueeRect } from './editor-selection-gestures';
+import { canMoveElement, selectionInteractivity } from './editor-selection-interactivity';
+import type { SelectionInteractivity } from './editor-selection-interactivity';
 import type { EditorState } from './editor-state.svelte';
 import { resolveEditTargetElementId, resolveTopLevelElementId } from './element-hit';
 import { canInlineEditElement } from './inline-text';
+import { applyTableCellPointer } from './table-cell-pointer';
 
 export type { EditorControllerDeps } from './editor-controller-deps';
+
+/** Max gap between two taps for them to count as a double-tap. */
+const DOUBLE_TAP_MS = 400;
+/** px tolerance for matching the second tap after a selection-induced reflow. */
+const TAP_DISTANCE = 40;
 
 export class EditorController {
 	readonly #editor: EditorState;
@@ -28,6 +53,14 @@ export class EditorController {
 	readonly #ink: InkGestureController;
 	readonly #keydown: (event: KeyboardEvent) => void;
 	readonly #selectionGestures;
+	readonly #adjust: AdjustGestureController;
+	readonly #handles: HandleHandlers;
+
+	// Touch double-tap detection (mirrors React/Vue/Angular canvas-level
+	// detection). On mobile, native `dblclick` is not reliably synthesised from
+	// two quick taps, so the last tap's element id and coordinates are tracked
+	// by hand. Plain mutable state, never rendered, so it is not a rune.
+	#lastTap: { id: string | undefined; time: number; x: number; y: number } | null = null;
 
 	snapLines = $state<readonly SnapLine[]>([]);
 	editingId = $state<string | null>(null);
@@ -37,101 +70,43 @@ export class EditorController {
 		this.#editor = editor;
 		this.#deps = deps;
 
-		this.#gestures = createGestureController({
-			getScale: () => this.#deps.getScale(),
-			getElementBox: (id) => elementInteractionBox(this.#currentElements(), id),
-			getSiblings: () => siblingBoxes(this.#currentElements()),
-			getSnapToGrid: () => this.#deps.getSnapToGrid?.() ?? false,
-			getSnapToShape: () => this.#deps.getSnapToShape?.() ?? true,
-			getGuides: () => this.#deps.getGuides?.() ?? [],
-			getStageOrigin: () => {
-				const rect = this.#deps.getHolderEl()?.getBoundingClientRect();
-				return { left: rect?.left ?? 0, top: rect?.top ?? 0 };
-			},
-			onStart: () => {
-				this.#editor.pushHistory();
-				this.#editor.interactionActive = true;
-			},
-			onPreview: (transform, lines) => {
-				this.#editor.patchGeometry(transform.id, transform);
+		// One host object, four sub-controllers: the wiring lives in
+		// `editor-controller-wiring.ts` so this class stays the pointer/keyboard
+		// event surface rather than a construction script.
+		const host: EditorControllerHost = {
+			editor,
+			deps,
+			currentElements: () => this.#currentElements(),
+			setSnapLines: (lines) => {
 				this.snapLines = lines;
 			},
-			onEnd: (transform, moved, id) => {
-				this.snapLines = [];
-				if (transform) {
-					this.#editor.patchGeometry(id, transform);
-				}
-				this.#editor.interactionActive = false;
-				if (moved) {
-					this.#editor.commitChange();
-				}
-			},
-		});
-
-		this.#ink = createInkGestureController({
-			getScale: () => this.#deps.getScale(),
-			getStageOrigin: () => {
-				const rect = this.#deps.getHolderEl()?.getBoundingClientRect();
-				return { left: rect?.left ?? 0, top: rect?.top ?? 0 };
-			},
-			getTool: () => this.#editor.inkOps.tool,
-			onStrokeStart: () => {
-				this.#editor.interactionActive = true;
-			},
-			onStrokePreview: (points) => {
-				this.#editor.inkOps.previewStroke(points);
-			},
-			onStrokeEnd: (points) => {
-				this.#editor.interactionActive = false;
-				this.#editor.inkOps.commitStroke(points);
-			},
-			onErase: (point) => {
-				this.#editor.inkOps.eraseElementAt(point);
-			},
-		});
-
-		this.#keydown = createEditorKeydownHandler({
-			isActive: () =>
-				this.#editor.editable && !this.#deps.getPresenting() && this.editingId === null,
-			getSelectedId: () => this.#editor.selectedElementId,
-			deselect: () => this.#editor.select(null),
-			deleteSelected: () => this.#editor.deleteSelected(),
-			duplicateSelected: () => void this.#editor.duplicateSelected(),
-			nudgeSelected: (dx, dy) => this.#editor.nudgeSelected(dx, dy),
-			undo: () => this.#editor.undo(),
-			redo: () => this.#editor.redo(),
-			copySelected: () => this.#editor.clipboardOps.copySelected(),
-			cutSelected: () => this.#editor.clipboardOps.cutSelected(),
-			paste: () => void this.#editor.clipboardOps.pasteClipboard(),
-			cancelFormatPainter: () => {
-				const active = this.#editor.formatPainter.active;
-				this.#editor.formatPainter.cancel();
-				return active;
-			},
-		});
-
-		this.#selectionGestures = createSelectionGestureController({
-			getScale: () => this.#deps.getScale(),
-			getStageRect: () => this.#deps.getHolderEl()?.getBoundingClientRect(),
-			getElements: () => this.#currentElements(),
-			getSelectedIds: () => this.#editor.selection.ids,
-			onStart: () => {
-				this.#editor.pushHistory();
-				this.#editor.interactionActive = true;
-			},
-			onPatch: (id, patch) => this.#editor.patchGeometry(id, patch),
-			onCommit: () => {
-				this.#editor.interactionActive = false;
-				this.#editor.commitChange();
-			},
-			onSelect: (ids) => this.#editor.selection.setAll(ids),
-			onMarquee: (rect) => {
+			setMarquee: (rect) => {
 				this.marquee = rect;
 			},
+			getEditingId: () => this.editingId,
+		};
+		this.#gestures = createTransformGestures(host);
+		this.#ink = createInkGestures(host);
+		this.#keydown = createEditorKeydown(host);
+		this.#selectionGestures = createSelectionGestures(host);
+		this.#adjust = createAdjustGestures(host);
+		this.#handles = createHandleHandlers({
+			getSelectedId: () => editor.selectedElementId,
+			getSelectedElement: () => editor.selectedElement,
+			getInteractivity: () => this.interactivity,
+			gestures: this.#gestures,
+			beginCollectiveTransform: (kind, event, handle) =>
+				this.#selectionGestures.beginTransform(kind, event, handle),
+			adjust: this.#adjust,
 		});
 	}
 
 	#currentElements(): PptxElement[] {
+		return this.#editor.activeElements;
+	}
+
+	/** The elements the pointer acts on (slide, or master/layout), for overlays. */
+	get activeElements(): PptxElement[] {
 		return this.#editor.activeElements;
 	}
 
@@ -140,6 +115,15 @@ export class EditorController {
 			return null;
 		}
 		return selectionOverlayBox(this.#editor.selectedElements);
+	}
+
+	/**
+	 * Which selection chrome the authored `a:spLocks` still permit, plus the
+	 * shape-adjustment descriptor. The overlay only ever sees an `OverlayBox`,
+	 * so the element-level verdict is computed here and passed down as a prop.
+	 */
+	get interactivity(): SelectionInteractivity {
+		return selectionInteractivity(this.#editor.selectedElements);
 	}
 
 	get editing(): boolean {
@@ -164,6 +148,12 @@ export class EditorController {
 	}
 
 	onStagePointerDown = (event: PointerEvent): void => {
+		// The gestures below call preventDefault(), which suppresses the focus move
+		// this click would otherwise make. Without repairing it here focus stays on
+		// document.body, outside the root's keydown listener, and every shortcut is
+		// silently dead after the most ordinary interaction there is: clicking a
+		// shape and pressing Delete.
+		armEditorKeyboard(this.#deps.getRootEl?.() ?? null);
 		if (
 			!this.#editor.editable ||
 			this.#deps.getPresenting() ||
@@ -180,10 +170,24 @@ export class EditorController {
 			this.#ink.handlePointerDown(event);
 			return;
 		}
-		const id = resolveTopLevelElementId(event.target, this.#deps.getStageRoot());
-		if (!id || !this.#editor.isElementInteractive(id)) {
+		const hitId = resolveTopLevelElementId(event.target, this.#deps.getStageRoot());
+		const id = hitId && this.#editor.isElementInteractive(hitId) ? hitId : undefined;
+		// Touch only: native `dblclick` is not reliably synthesised from two quick
+		// taps on mobile, so a matched second tap is handled here instead and
+		// consumes the event (no select / drag / marquee for that tap).
+		if (event.pointerType !== 'mouse' && this.#trackTap(event, id)) {
+			return;
+		}
+		if (!id) {
 			this.#editor.formatPainter.cancel();
 			this.#selectionGestures.beginMarquee(event);
+			return;
+		}
+		// A click in a table cell (re)anchors the cell range; a Shift-click inside
+		// the selected table stretches it and CONSUMES the event, so it never
+		// reaches the element-level Shift toggle below.
+		if (applyTableCellPointer(this.#editor, id, event.target, event.shiftKey)) {
+			event.preventDefault();
 			return;
 		}
 		if (event.shiftKey || event.ctrlKey || event.metaKey) {
@@ -196,9 +200,19 @@ export class EditorController {
 		if (!this.#editor.selection.has(id)) {
 			this.#editor.select(id);
 		}
+		// A `noMove` element still SELECTS (so it can be unlocked from the
+		// inspector) but arms no drag, which is exactly PowerPoint's behaviour.
+		if (!canMoveElement(this.#editor.elementById(id))) {
+			return;
+		}
 		if (this.#selectionGestures.beginTransform('move', event)) {
 			return;
 		}
+		// Shared `GestureController.begin` takes a plain `PointerLike` and no
+		// longer calls `preventDefault`/`stopPropagation` itself (a plain object
+		// has no such methods), so the caller must consume the event first.
+		event.preventDefault();
+		event.stopPropagation();
 		this.#gestures.begin('move', id, event);
 	};
 
@@ -230,10 +244,7 @@ export class EditorController {
 			this.#editor.selectedElementId,
 		);
 		if (id && this.#editor.isElementInteractive(id)) {
-			if (this.#editor.equationOps.open(id)) {
-				return;
-			}
-			this.enterInlineEdit(id);
+			this.#requestElementEdit(id);
 		}
 	};
 
@@ -242,35 +253,202 @@ export class EditorController {
 		if (!this.#editor.editable || this.#deps.getPresenting() || this.#editor.inkOps.isDrawing) {
 			return;
 		}
-		const id = resolveTopLevelElementId(event.target, this.#deps.getStageRoot());
+		// The inline text editor is an overlay beside the elements, not a child of
+		// the one it edits, so a right-click inside it hit-tests to nothing. Fall
+		// back to the element being edited rather than swallowing the menu on the
+		// element the user just clicked.
+		const id = resolveContextMenuElementId(
+			resolveTopLevelElementId(event.target, this.#deps.getStageRoot()),
+			event.target,
+			this.editingId,
+		);
 		if (!id || !this.#editor.isElementInteractive(id)) {
 			return;
 		}
 		event.preventDefault();
-		this.#editor.select(id);
-		this.#deps.onContextMenu?.(event.clientX, event.clientY);
+		// Only when the right-click landed OUTSIDE the current selection. An
+		// unconditional select collapsed a multi-selection to the one element
+		// under the cursor, so right-clicking either of two rubber-banded shapes
+		// left the menu with nothing to Group, which is how Svelte shipped.
+		if (!this.#editor.selection.has(id)) {
+			this.#editor.select(id);
+		}
+		// The right-clicked table cell (if any) rides along: the menu's row /
+		// column / merge commands act on the cell under the pointer.
+		this.#deps.onContextMenu?.(event.clientX, event.clientY, readTableCellTarget(event.target));
 	};
 
-	onHandlePointerDown = (handle: ResizeHandleId, event: PointerEvent): void => {
-		const id = this.#editor.selectedElementId;
-		if (id) {
-			if (this.#selectionGestures.beginTransform('resize', event, handle)) {
+	// Resize handle / rotate knob / adjustment diamond: see `editor-handle-handlers`.
+	onHandlePointerDown = (handle: ResizeHandleId, event: PointerEvent): void =>
+		this.#handles.onHandlePointerDown(handle, event);
+
+	onRotatePointerDown = (event: PointerEvent): void => this.#handles.onRotatePointerDown(event);
+
+	onAdjustPointerDown = (event: PointerEvent, descriptor: ShapeAdjustmentHandleDescriptor): void =>
+		this.#handles.onAdjustPointerDown(event, descriptor);
+
+	// ── Connector endpoint authoring ─────────────────────────────────────────
+
+	/** Live connector-endpoint drag position in SLIDE px, or null when idle. */
+	connectorEndpointDrag = $state<{ kind: ConnectorEndpointKind; x: number; y: number } | null>(
+		null,
+	);
+
+	/** The selected connector, when exactly one connector is selected. */
+	get selectedConnector(): PptxElement | null {
+		if (!this.#editor.editable || this.#deps.getPresenting() || this.editingId !== null) {
+			return null;
+		}
+		const selected = this.#editor.selectedElements;
+		return selected.length === 1 && selected[0].type === 'connector' ? selected[0] : null;
+	}
+
+	/** Pointer position in SLIDE px (this overlay layer is unscaled). */
+	#stagePoint(event: PointerEvent): { x: number; y: number } {
+		const rect = this.#deps.getStageRoot()?.getBoundingClientRect();
+		const scale = this.#deps.getScale() || 1;
+		return {
+			x: (event.clientX - (rect?.left ?? 0)) / scale,
+			y: (event.clientY - (rect?.top ?? 0)) / scale,
+		};
+	}
+
+	onConnectorEndpointPointerDown = (kind: ConnectorEndpointKind, event: PointerEvent): void => {
+		if (!this.selectedConnector) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		this.connectorEndpointDrag = { kind, ...this.#stagePoint(event) };
+		const onMove = (moveEvent: PointerEvent): void => {
+			if (this.connectorEndpointDrag) {
+				this.connectorEndpointDrag = {
+					kind: this.connectorEndpointDrag.kind,
+					...this.#stagePoint(moveEvent),
+				};
+			}
+		};
+		const onUp = (upEvent: PointerEvent): void => {
+			window.removeEventListener('pointermove', onMove);
+			window.removeEventListener('pointerup', onUp);
+			window.removeEventListener('pointercancel', onUp);
+			const drag = this.connectorEndpointDrag;
+			this.connectorEndpointDrag = null;
+			const connector = this.selectedConnector;
+			if (!drag || !connector) {
 				return;
 			}
-			this.#gestures.begin('resize', id, event, handle);
-		}
-	};
-
-	onRotatePointerDown = (event: PointerEvent): void => {
-		const id = this.#editor.selectedElementId;
-		if (id) {
-			this.#gestures.begin('rotate', id, event);
-		}
+			const point = this.#stagePoint(upEvent);
+			const elements = this.#currentElements();
+			const target = findConnectorSiteNear(
+				collectConnectorSiteCandidates(elements.filter((el) => el.id !== connector.id)),
+				point.x,
+				point.y,
+			);
+			const update = resolveConnectorEndpointUpdate(connector, elements, drag.kind, point, target);
+			const next = withConnectorEndpointUpdate(connector, update);
+			this.#editor.pushHistory();
+			this.#editor.replaceActiveElements(
+				elements.map((element) => (element.id === connector.id ? next : element)),
+			);
+			this.#editor.commitChange();
+		};
+		window.addEventListener('pointermove', onMove);
+		window.addEventListener('pointerup', onUp);
+		window.addEventListener('pointercancel', onUp);
 	};
 
 	onKeyDown = (event: KeyboardEvent): void => {
 		this.#keydown(event);
 	};
+
+	/**
+	 * Route a tap / double-click that should open an element for editing: an
+	 * equation element opens the equation editor (inline text editing would
+	 * only see the "[Equation]" placeholder and destroy the OMML on commit),
+	 * everything else enters ordinary inline text editing.
+	 */
+	#requestElementEdit(id: string): void {
+		if (this.#editor.equationOps.open(id)) {
+			return;
+		}
+		this.enterInlineEdit(id);
+	}
+
+	/**
+	 * Second tap of a touch double-tap: open the tapped thing for editing. A
+	 * table routes to the nearest cell (after a selection reflow
+	 * `elementFromPoint` may no longer hit the `<td>` directly, so the nearest
+	 * one by centre distance is used instead) by dispatching a real `dblclick`
+	 * on it, which `TableView`'s own handler already turns into cell-edit mode;
+	 * everything else goes through `#requestElementEdit`. Always returns true:
+	 * a matched second tap is consumed either way.
+	 */
+	#handleDoubleTap(event: PointerEvent, doubleTapId: string | undefined): boolean {
+		if (!doubleTapId) {
+			return true;
+		}
+		const el = this.#editor.elementById(doubleTapId);
+		if (el?.type === 'table') {
+			const tableHost = this.#deps
+				.getStageRoot()
+				?.querySelector(`[data-element-id="${doubleTapId}"]`);
+			const cells = tableHost?.querySelectorAll('td');
+			let closest: HTMLElement | null = null;
+			let minDist = Infinity;
+			for (const cell of cells ?? []) {
+				const rect = cell.getBoundingClientRect();
+				if (rect.width === 0 || rect.height === 0) {
+					continue;
+				}
+				const cx = rect.left + rect.width / 2;
+				const cy = rect.top + rect.height / 2;
+				const dist = Math.hypot(event.clientX - cx, event.clientY - cy);
+				if (dist < minDist) {
+					minDist = dist;
+					closest = cell;
+				}
+			}
+			if (closest) {
+				closest.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+				return true;
+			}
+		}
+		this.#requestElementEdit(doubleTapId);
+		return true;
+	}
+
+	/**
+	 * Touch/pen tap bookkeeping. Returns true when this tap completed a
+	 * double-tap and the caller must stop (no selection / drag / marquee).
+	 */
+	#trackTap(event: PointerEvent, resolvedId: string | undefined): boolean {
+		const now = event.timeStamp || Date.now();
+		const last = this.#lastTap;
+
+		// On the second tap, match against the first tap's element. Layout may
+		// shift between taps (selection causing fit-scale change), so the second
+		// tap might not resolve to ANY element; use proximity + the stored id.
+		const isSameTarget =
+			last !== null &&
+			now - last.time < DOUBLE_TAP_MS &&
+			(resolvedId === last.id ||
+				(Math.abs(event.clientX - last.x) < TAP_DISTANCE &&
+					Math.abs(event.clientY - last.y) < TAP_DISTANCE));
+
+		if (last && isSameTarget) {
+			this.#lastTap = null;
+			return this.#handleDoubleTap(event, resolvedId ?? last.id);
+		}
+		if (resolvedId) {
+			this.#lastTap = { id: resolvedId, time: now, x: event.clientX, y: event.clientY };
+		} else if (!(last && now - last.time < DOUBLE_TAP_MS)) {
+			// Keep the previous tap alive if no element resolved (second tap in a
+			// reflowed area); the proximity check above still matches it.
+			this.#lastTap = null;
+		}
+		return false;
+	}
 
 	/** Open the inline text editor over `id` when the element carries text. */
 	enterInlineEdit(id: string): void {
@@ -311,5 +489,6 @@ export class EditorController {
 		this.#gestures.dispose();
 		this.#selectionGestures.dispose();
 		this.#ink.dispose();
+		this.#adjust.dispose();
 	}
 }

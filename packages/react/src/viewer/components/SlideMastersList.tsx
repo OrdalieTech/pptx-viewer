@@ -1,4 +1,5 @@
-import type { PptxSlide, PptxSlideMaster, PptxSlideLayout } from 'pptx-viewer-core';
+import type { PptxSlide, PptxSlideMaster } from 'pptx-viewer-core';
+import { masterViewPseudoSlide } from 'pptx-viewer-shared';
 import React, { useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -10,27 +11,19 @@ import { SlideThumbnail } from './SlideThumbnail';
 // Helpers: build pseudo PptxSlide for thumbnail rendering
 // ---------------------------------------------------------------------------
 
-function masterToSlide(master: PptxSlideMaster): PptxSlide {
-	return {
-		id: master.path,
-		rId: '',
-		slideNumber: 0,
-		elements: master.elements ?? [],
-		backgroundColor: master.backgroundColor,
-		backgroundImage: master.backgroundImage,
-	};
+/**
+ * The rail's thumbnails are the same pseudo-slides the master canvas paints,
+ * so they come from the shared rule rather than a fourth local copy of it: a
+ * layout thumbnail shows the master's artwork behind its own.
+ */
+function partToSlide(master: PptxSlideMaster, layoutIndex: number | null): PptxSlide | undefined {
+	return masterViewPseudoSlide(
+		{ slideMasters: [master] },
+		{ tab: 'slides', masterIndex: 0, layoutIndex },
+	);
 }
 
-function layoutToSlide(layout: PptxSlideLayout): PptxSlide {
-	return {
-		id: layout.path,
-		rId: '',
-		slideNumber: 0,
-		elements: layout.elements ?? [],
-		backgroundColor: layout.backgroundColor,
-		backgroundImage: layout.backgroundImage,
-	};
-}
+const EMPTY_SLIDE: PptxSlide = { id: '', rId: '', slideNumber: 0, elements: [] };
 
 // ---------------------------------------------------------------------------
 // Props
@@ -57,10 +50,13 @@ export function SlideMastersList({
 	onSelectMaster,
 	onSelectLayout,
 }: SlideMastersListProps): React.ReactElement {
-	const activeRef = useRef<HTMLDivElement>(null);
+	const activeRef = useRef<HTMLButtonElement>(null);
 
+	// The dep values aren't read in the body; they're re-run triggers, since the
+	// scrolled-to DOM node is read from `activeRef`, not derived from them.
 	useEffect(() => {
 		activeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+		// oxlint-disable-next-line react/exhaustive-effect-dependencies -- see comment above
 	}, [activeMasterIndex, activeLayoutIndex]);
 
 	const { t } = useTranslation();
@@ -73,10 +69,20 @@ export function SlideMastersList({
 
 				return (
 					<div key={master.path} className='space-y-1'>
-						<div
+						{/*
+						 * A real <button> with an accessible name, as vue, angular,
+						 * svelte and vanilla all render here. React's rail was a bare
+						 * `<div onClick>`: not reachable by keyboard, invisible to
+						 * assistive technology, and nameless, so the only way to pick a
+						 * master or layout was a mouse click on an unlabelled box.
+						 */}
+						<button
+							type='button'
 							ref={isMasterActive ? activeRef : undefined}
+							aria-pressed={isMasterActive}
+							aria-label={master.name || t('pptx.master.master')}
 							className={cn(
-								'group relative cursor-pointer rounded-lg border-2 p-1 transition-all',
+								'group relative block w-full cursor-pointer rounded-lg border-2 p-1 text-left transition-all',
 								isMasterActive
 									? 'border-amber-500 bg-amber-500/10'
 									: 'border-border bg-background/40 hover:border-border',
@@ -85,7 +91,7 @@ export function SlideMastersList({
 						>
 							<div className='relative overflow-hidden rounded bg-white'>
 								<SlideThumbnail
-									slide={masterToSlide(master)}
+									slide={partToSlide(master, null) ?? EMPTY_SLIDE}
 									templateElements={[]}
 									canvasSize={canvasSize}
 								/>
@@ -100,7 +106,7 @@ export function SlideMastersList({
 									{master.name || t('pptx.master.master')}
 								</span>
 							</div>
-						</div>
+						</button>
 
 						{layouts.length > 0 && (
 							<div className='ml-3 space-y-1 border-l border-border/40 pl-2'>
@@ -109,11 +115,14 @@ export function SlideMastersList({
 										masterIdx === activeMasterIndex && layoutIdx === activeLayoutIndex;
 
 									return (
-										<div
+										<button
+											type='button'
 											key={layout.path}
 											ref={isLayoutActive ? activeRef : undefined}
+											aria-pressed={isLayoutActive}
+											aria-label={layout.name || t('pptx.master.layout')}
 											className={cn(
-												'group relative cursor-pointer rounded-md border-2 p-0.5 transition-all',
+												'group relative block w-full cursor-pointer rounded-md border-2 p-0.5 text-left transition-all',
 												isLayoutActive
 													? 'border-primary bg-primary/10'
 													: 'border-border bg-background/40 hover:border-border',
@@ -122,8 +131,8 @@ export function SlideMastersList({
 										>
 											<div className='relative overflow-hidden rounded bg-white'>
 												<SlideThumbnail
-													slide={layoutToSlide(layout)}
-													templateElements={master.elements ?? []}
+													slide={partToSlide(master, layoutIdx) ?? EMPTY_SLIDE}
+													templateElements={[]}
 													canvasSize={canvasSize}
 												/>
 											</div>
@@ -137,7 +146,7 @@ export function SlideMastersList({
 													{layout.name || t('pptx.master.layout')}
 												</span>
 											</div>
-										</div>
+										</button>
 									);
 								})}
 							</div>

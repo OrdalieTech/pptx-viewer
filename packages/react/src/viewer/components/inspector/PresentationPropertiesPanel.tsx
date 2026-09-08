@@ -6,10 +6,13 @@ import type {
 	PptxThemeOption,
 	PptxTheme,
 	PptxSlide,
+	PptxSlideTransition,
 	PptxNotesMaster,
 	PptxHandoutMaster,
 	PptxTagCollection,
 } from 'pptx-viewer-core';
+import type { SlideSizeEmu, SlideSizeRescaleMode } from 'pptx-viewer-shared';
+import { mergeSlideTransition } from 'pptx-viewer-shared';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -23,6 +26,7 @@ import {
 	SlideSizeCard,
 } from './PresentationSettingsCards';
 import { SlideThemeOverridePanel } from './SlideThemeOverridePanel';
+import { SlideTransitionSection } from './SlideTransitionSection';
 import { TagsSection } from './TagsSection';
 
 // ---------------------------------------------------------------------------
@@ -45,6 +49,11 @@ interface PresentationPropertiesPanelProps {
 
 	canvasSize: CanvasSize;
 	onUpdateCanvasSize: (size: CanvasSize) => void;
+	/** The deck's `p:sldSz` in EMU, so the card can name the matching preset. */
+	slideSizeEmu?: SlideSizeEmu | undefined;
+	onUpdateSlideSize?: (size: SlideSizeEmu, rescaleMode?: SlideSizeRescaleMode) => void;
+	/** Whether any slide has at least one element; gates the rescale prompt. */
+	hasContent: boolean;
 
 	notesCanvasSize: CanvasSize | undefined;
 	notesMaster: PptxNotesMaster | undefined;
@@ -78,6 +87,9 @@ export function PresentationPropertiesPanel({
 	onUpdateSlide,
 	canvasSize,
 	onUpdateCanvasSize,
+	slideSizeEmu,
+	onUpdateSlideSize,
+	hasContent,
 	notesCanvasSize,
 	notesMaster,
 	handoutMaster,
@@ -91,6 +103,20 @@ export function PresentationPropertiesPanel({
 	onUpdateTagCollections,
 }: PresentationPropertiesPanelProps): React.ReactElement {
 	const { t } = useTranslation();
+
+	// A transition is a single OOXML element edited one attribute at a time, so
+	// every change MERGES onto whatever the slide already carries (shared
+	// `mergeSlideTransition`). Replacing it wholesale is the bug this avoids:
+	// retiming the transition would silently discard an authored sound,
+	// direction or spoke count that came out of the deck.
+	const handleTransitionChange = React.useCallback(
+		(updates: Partial<PptxSlideTransition>) => {
+			onUpdateSlide({
+				transition: mergeSlideTransition(activeSlide?.transition, updates),
+			});
+		},
+		[activeSlide?.transition, onUpdateSlide],
+	);
 
 	return (
 		<div className='space-y-3'>
@@ -118,7 +144,22 @@ export function PresentationPropertiesPanel({
 				/>
 			</div>
 
-			<SlideSizeCard canvasSize={canvasSize} canEdit={canEdit} onUpdate={onUpdateCanvasSize} />
+			<SlideSizeCard
+				canvasSize={canvasSize}
+				slideSizeEmu={slideSizeEmu}
+				canEdit={canEdit}
+				onUpdate={onUpdateCanvasSize}
+				onUpdateSlideSize={onUpdateSlideSize}
+				hasContent={hasContent}
+			/>
+
+			{/* SLIDE TRANSITION sits beside SLIDE SIZE, matching where Angular,
+			    Svelte and Vanilla place it in their deck-properties panes. */}
+			<SlideTransitionSection
+				activeSlide={activeSlide ?? null}
+				canEdit={canEdit}
+				onTransitionChange={handleTransitionChange}
+			/>
 
 			<NotesHandoutCard
 				notesCanvasSize={notesCanvasSize}

@@ -2,6 +2,7 @@ import type { PptxElement } from 'pptx-viewer-core';
 import type { AlignEdge, DistributeAxis, ElementPosition } from 'pptx-viewer-shared';
 import {
 	alignElements,
+	canInteractWithElement,
 	distributeElements,
 	groupElements,
 	ungroupElements,
@@ -103,14 +104,32 @@ export function groupSelection(
 	ids: readonly string[],
 	groupId: string,
 ): { elements: PptxElement[]; groupId: string | null } {
+	// G10: a:spLocks/@noGrouping rejects the whole attempt if it involves a
+	// locked shape, not just that one shape.
+	const selected = ids.map((id) => elements.find((el) => el.id === id));
+	if (!selected.every((el) => canInteractWithElement(el, 'group'))) {
+		return { elements: [...elements], groupId: null };
+	}
 	return groupElements(elements, ids, groupId);
 }
 
-/** Ungroup the `group` element identified by `groupId` back into its children. */
+/**
+ * Ungroup the `group` element identified by `groupId` back into its children.
+ *
+ * `intoTemplate` decides which store the promoted subtree routes to: it renames
+ * the descendants of a promoted NESTED group whose ids sit on the other side,
+ * which nothing did while only the top level was renamed.
+ */
 export function ungroupSelection(
 	elements: readonly PptxElement[],
 	groupId: string,
 	childIds: readonly string[],
+	intoTemplate = false,
 ): { elements: PptxElement[]; childIds: string[] } {
-	return ungroupElements(elements, groupId, childIds);
+	// G10: a:grpSpLocks/@noGrouping forbids ungrouping this specific group.
+	const group = elements.find((el) => el.id === groupId);
+	if (!canInteractWithElement(group, 'group')) {
+		return { elements: [...elements], childIds: [] };
+	}
+	return ungroupElements(elements, groupId, childIds, { intoTemplate });
 }

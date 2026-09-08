@@ -9,14 +9,25 @@ import type {
 	PptxCustomerData,
 	PptxSlide,
 } from '../../types';
-import { applySmartArtLayoutDefinition, convertXmlToStrict, decomposeSmartArt } from '../../utils';
+import {
+	applySmartArtLayoutDefinition,
+	convertXmlToStrict,
+	decomposeSmartArt,
+	isTransitionalNamespaceUri,
+} from '../../utils';
 import { writeCustomerDataScopes } from '../../utils/customer-data-package';
 import type { CustomerDataScope } from '../../utils/customer-data-package';
 import { serializeEmbeddedFontList, setEmbeddedFontList } from '../../utils/embedded-font-list';
 import { obfuscateFont, generateFontGuid } from '../../utils/font-deobfuscation';
 import { safeResolveZipPath } from '../../utils/safe-path';
+import { applySmartArtConnectorLabels } from '../../utils/smartart-connector-labels';
 import { writeTagCollections } from '../../utils/tag-package';
 import type { PptxSaveFormat } from '../types';
+import {
+	masterPartBackgroundEdited,
+	masterPartLoadedBackground,
+} from './master-part-background-cache';
+import { applyBackgroundColorToCSld } from './master-save-helpers';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveDataSerialization';
 import { applySmartArtColorTransform } from './smartart-colors-builder';
 import {
@@ -151,6 +162,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				// point's prSet / spPr / extLst survive the round-trip.
 				if (ptKey && ptList) {
 					ptList[ptKey] = mergeSmartArtPointXml(existingPts, smartArtData.nodes);
+					// Write an edited connector label back onto its linked
+					// parTrans/sibTrans point (preserved verbatim otherwise).
+					if (desiredConnections && desiredConnections.length > 0) {
+						applySmartArtConnectorLabels(
+							this.ensureArray(ptList[ptKey]) as XmlObject[],
+							desiredConnections,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+						);
+					}
 				}
 
 				// Surgically merge dgm:cxnLst so each unchanged connection keeps its
@@ -268,8 +288,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			'colorsDef',
 			'colours',
 			(colorsDef) =>
-				applySmartArtColorTransform(colorsDef, transform, (k) =>
-					this.compatibilityService.getXmlLocalName(k),
+				applySmartArtColorTransform(
+					colorsDef,
+					transform,
+					(k) => this.compatibilityService.getXmlLocalName(k),
+					(node) => this.parseColor(node),
 				),
 		);
 	}
@@ -345,9 +368,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 	/**
 	 * Apply notes master background colour changes to `notesMaster1.xml`.
+	 *
+	 * Two hand-rolled copies of the `<p:bg>` writer used to live here and in
+	 * {@link applyHandoutMasterChanges}, each unconditionally flattening
+	 * whatever `<p:bg>` the part carried into a literal solid fill whenever the
+	 * model held a colour, which it always does after a load. Both now go
+	 * through {@link applyBackgroundColorToCSld} with the loaded colour, so an
+	 * untouched part is not rewritten at all.
 	 */
 	protected async applyNotesMasterChanges(notesMaster: PptxNotesMaster | undefined): Promise<void> {
 		if (!notesMaster) {
+			return;
+		}
+		if (!masterPartBackgroundEdited(this, notesMaster)) {
 			return;
 		}
 		const file = this.zip.file(notesMaster.path);
@@ -364,17 +397,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			}
 
 			const cSld = (root['p:cSld'] || {}) as XmlObject;
-
-			// Update background colour
-			if (notesMaster.backgroundColor) {
-				const hex = notesMaster.backgroundColor.replace('#', '');
-				cSld['p:bg'] = {
-					'p:bgPr': {
-						'a:solidFill': { 'a:srgbClr': { '@_val': hex } },
-						'a:effectLst': {},
-					},
-				};
-			}
+			applyBackgroundColorToCSld(
+				cSld,
+				notesMaster.backgroundColor,
+				masterPartLoadedBackground(this, notesMaster.path),
+			);
 
 			root['p:cSld'] = cSld;
 			data['p:notesMaster'] = root;
@@ -394,6 +421,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		if (!handoutMaster) {
 			return;
 		}
+		if (!masterPartBackgroundEdited(this, handoutMaster)) {
+			return;
+		}
 		const file = this.zip.file(handoutMaster.path);
 		if (!file) {
 			return;
@@ -408,17 +438,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			}
 
 			const cSld = (root['p:cSld'] || {}) as XmlObject;
-
-			// Update background colour
-			if (handoutMaster.backgroundColor) {
-				const hex = handoutMaster.backgroundColor.replace('#', '');
-				cSld['p:bg'] = {
-					'p:bgPr': {
-						'a:solidFill': { 'a:srgbClr': { '@_val': hex } },
-						'a:effectLst': {},
-					},
-				};
-			}
+			applyBackgroundColorToCSld(
+				cSld,
+				handoutMaster.backgroundColor,
+				masterPartLoadedBackground(this, handoutMaster.path),
+			);
 
 			root['p:cSld'] = cSld;
 			data['p:handoutMaster'] = root;
@@ -897,14 +921,27 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				continue;
 			}
 
+			// presentation.xml gets the conformance="strict" attribute, so it is
+			// always rebuilt. Every other part with no Strict/Transitional URI to
+			// convert (custom XML parts, most slide/media relationship targets,
+			// tags, ...) has nothing for `convertXmlToStrict` to change; skip the
+			// needless reparse/rebuild cycle rather than reformatting the part
+			// (self-closing tags, whitespace, attribute quoting) for no reason.
+			const isPresentationXml = path === 'ppt/presentation.xml';
+			if (!isPresentationXml) {
+				const candidateUris = xmlText.match(/https?:\/\/[^"'<>\s]+/gu);
+				const hasConvertibleUri = candidateUris?.some((uri) => isTransitionalNamespaceUri(uri));
+				if (!hasConvertibleUri) {
+					continue;
+				}
+			}
+
 			try {
 				const parsed = parse(xmlText) as Record<string, unknown>;
 				if (typeof parsed !== 'object' || parsed === null) {
 					continue;
 				}
 
-				// presentation.xml gets the conformance="strict" attribute
-				const isPresentationXml = path === 'ppt/presentation.xml';
 				convertXmlToStrict(parsed, isPresentationXml);
 
 				this.zip.file(path, this.builder.build(parsed));

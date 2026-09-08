@@ -8,9 +8,11 @@ import type {
 	ZoomPptxElement,
 } from 'pptx-viewer-core';
 import { isInkElement } from 'pptx-viewer-core';
+import { getGroupChildParentFill, mediaTransportVisible } from 'pptx-viewer-shared';
 import React from 'react';
 
 import {
+	getImageSurfaceStyle,
 	getTextLayoutStyle,
 	renderMediaElement,
 	renderTableElement,
@@ -59,6 +61,7 @@ export function renderBody(options: RenderBodyOptions): React.ReactNode {
 		onColResize,
 		onRowResize,
 		isPresentationPassive,
+		isStaticSurface,
 		handleMediaPlayStateChange,
 		allSlides,
 		onZoomClick,
@@ -95,7 +98,12 @@ export function renderBody(options: RenderBodyOptions): React.ReactNode {
 		);
 	}
 	if (isImg) {
-		return renderImg(el, imgStyle, imgFilter, imgAlt, imgOpacity);
+		return (
+			<div className='absolute inset-0 pointer-events-none' style={getImageSurfaceStyle(el)}>
+				{renderImg(el, imgStyle, imgFilter, imgAlt, imgOpacity)}
+				{vecShape ? <div className='pointer-events-none absolute inset-0'>{vecShape}</div> : null}
+			</div>
+		);
 	}
 	if (isEditing) {
 		return (
@@ -151,9 +159,25 @@ export function renderBody(options: RenderBodyOptions): React.ReactNode {
 	}
 	if (el.type === 'media') {
 		return renderMediaElement(el, media, {
-			autoPlay: isPresentationPassive,
+			// Present mode autoplays every media element on the active slide,
+			// not only ones persisted with their own `autoPlay` flag (matching
+			// the other four bindings' unconditional `presenting`-gated
+			// `startMediaAutoplay` call): a clip inserted via Insert > Media
+			// never gets that flag, so gating on `el.autoPlay` left it silently
+			// paused the moment the show reached its slide.
+			autoPlay: isPresentationPassive === true,
 			fullScreen: isPresentationPassive && Boolean(el.fullScreen),
 			isPresentationMode: isPresentationPassive,
+			// A still of a slide never carries a transport, whatever the canvas
+			// does. The rule is shared so the five bindings cannot drift on it.
+			showTransport: mediaTransportVisible({
+				presenting: isPresentationPassive === true,
+				preview: isStaticSurface === true,
+				canvasTransport: true,
+			}),
+			// ...and never the play badge / placeholder box either: a still is
+			// slide content, and the transition overlay paints one (issue #147).
+			preview: isStaticSurface === true,
 			onPlayStateChange: handleMediaPlayStateChange,
 		});
 	}
@@ -179,7 +203,11 @@ export function renderBody(options: RenderBodyOptions): React.ReactNode {
 				</div>
 			);
 		}
-		return renderGroup((el as GroupPptxElement).children, (el as GroupPptxElement).groupFill);
+		// Via the shared resolver, not the raw `groupFill`: a group whose own fill
+		// is itself `a:grpFill` has nothing to hand down from here (there is no
+		// enclosing group at this level), and passing the group-mode style on
+		// would have its children resolve against a fill that is not one.
+		return renderGroup((el as GroupPptxElement).children, getGroupChildParentFill(el));
 	}
 	if (shouldRenderFallbackLabel(el, isTxtEl)) {
 		return (

@@ -10,6 +10,7 @@
  */
 
 import type { PptxElement, PptxSmartArtNode, PptxTableCell, PptxTableRow } from 'pptx-viewer-core';
+import { DEFAULT_POWERPOINT_TABLE_STYLE_ID } from 'pptx-viewer-core';
 
 import { substituteFieldText } from './text-field-substitution';
 
@@ -177,29 +178,26 @@ export function newTableElement(
 
 	const tableRows: PptxTableRow[] = Array.from({ length: rows }, (_, rowIdx): PptxTableRow => {
 		const isHeader = rowIdx === 0;
-		const cells: PptxTableCell[] = Array.from(
-			{ length: cols },
-			(__, colIdx): PptxTableCell => ({
-				text: isHeader ? `Header ${colIdx + 1}` : '',
-				style: {
-					borderTopWidth: 1,
-					borderBottomWidth: 1,
-					borderLeftWidth: 1,
-					borderRightWidth: 1,
-					borderTopColor: '#cccccc',
-					borderBottomColor: '#cccccc',
-					borderLeftColor: '#cccccc',
-					borderRightColor: '#cccccc',
-					...(isHeader
-						? {
-								bold: true,
-								backgroundColor: '#2563eb',
-								color: '#ffffff',
-							}
-						: {}),
-				},
-			}),
-		);
+		const cells: PptxTableCell[] = Array.from({ length: cols }, (__, colIdx): PptxTableCell => ({
+			text: isHeader ? `Header ${colIdx + 1}` : '',
+			style: {
+				borderTopWidth: 1,
+				borderBottomWidth: 1,
+				borderLeftWidth: 1,
+				borderRightWidth: 1,
+				borderTopColor: '#cccccc',
+				borderBottomColor: '#cccccc',
+				borderLeftColor: '#cccccc',
+				borderRightColor: '#cccccc',
+				...(isHeader
+					? {
+							bold: true,
+							backgroundColor: '#2563eb',
+							color: '#ffffff',
+						}
+					: {}),
+			},
+		}));
 		return { cells, height: isHeader ? 40 : 36 };
 	});
 
@@ -216,6 +214,9 @@ export function newTableElement(
 			columnWidths,
 			firstRowHeader: true,
 			bandedRows: true,
+			// PowerPoint's default for a freshly inserted table; the save path no
+			// longer injects it, so creation is where it has to land.
+			tableStyleId: DEFAULT_POWERPOINT_TABLE_STYLE_ID,
 		},
 	} as PptxElement;
 }

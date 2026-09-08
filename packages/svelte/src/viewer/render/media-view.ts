@@ -1,6 +1,8 @@
 import type { MediaPptxElement } from 'pptx-viewer-core';
 import { getImageSrc } from 'pptx-viewer-shared';
 
+export { registerCrossSlideAudio } from 'pptx-viewer-shared';
+
 /**
  * Source resolution for `media` (audio / video) elements (port of the vanilla
  * binding's `renderMediaElement` cascade): `mediaData` (data-URL embedded by

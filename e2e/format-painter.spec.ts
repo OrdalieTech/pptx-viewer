@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 
+import { resetTabSession } from './support/deck';
+
 const fixturePath = resolve(
 	fileURLToPath(new URL('./fixtures/format-painter.pptx', import.meta.url)),
 );
@@ -23,6 +25,9 @@ async function openFixture(page: Page): Promise<{
 	target: Locator;
 	canvas: Locator;
 }> {
+	// Forget any restored session first, or the deck reopens and the landing
+	// dropzone (the only place #file-input exists) never mounts.
+	await resetTabSession(page);
 	await page.goto('/');
 
 	// The drop zone is the only thing rendered before any deck is loaded; it
@@ -100,7 +105,7 @@ test.describe('format painter', () => {
 		await painter.click();
 		await expect(painter).toHaveAttribute('data-active', 'true');
 
-		// Click well outside both shapes — there's a wide empty band between
+		// Click well outside both shapes - there's a wide empty band between
 		// SOURCE (right edge ≈ 300px) and TARGET (left edge ≈ 500px) on the
 		// 960×540 canvas. Click in the gap, which the canvas captures as
 		// empty-stage mousedown.

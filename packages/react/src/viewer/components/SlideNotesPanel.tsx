@@ -1,4 +1,4 @@
-import type { PptxSlide, TextSegment } from 'pptx-viewer-core';
+import type { PptxSlide, PptxTextStyleLevels, TextSegment } from 'pptx-viewer-core';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -24,13 +24,20 @@ interface SlideNotesPanelProps {
 	onUpdateNotes: (text: string, segments?: TextSegment[]) => void;
 	/** Height of the panel in pixels (for resizable panels). */
 	panelHeight?: number;
+	/**
+	 * The deck's notes master `<p:notesStyle>` (`PptxData.notesMaster.
+	 * notesStyle`), when loaded. Fills in a segment's missing font
+	 * size/family/colour from the deck's own authored notes-text defaults
+	 * instead of this panel's hardcoded look.
+	 */
+	notesStyle?: PptxTextStyleLevels;
 }
 
 /* ------------------------------------------------------------------ */
 /*  Main component                                                     */
 /* ------------------------------------------------------------------ */
 
-export const SlideNotesPanel: React.FC<SlideNotesPanelProps> = ({
+export function SlideNotesPanel({
 	activeSlide,
 	allSlides,
 	isExpanded,
@@ -38,7 +45,8 @@ export const SlideNotesPanel: React.FC<SlideNotesPanelProps> = ({
 	onToggle,
 	onUpdateNotes,
 	panelHeight,
-}) => {
+	notesStyle,
+}: SlideNotesPanelProps) {
 	const { t } = useTranslation();
 
 	const {
@@ -72,6 +80,7 @@ export const SlideNotesPanel: React.FC<SlideNotesPanelProps> = ({
 		canEdit,
 		onToggle,
 		onUpdateNotes,
+		notesStyle,
 	});
 
 	const hasNotes = draft.trim().length > 0;
@@ -90,7 +99,7 @@ export const SlideNotesPanel: React.FC<SlideNotesPanelProps> = ({
 			{isExpanded && (
 				<button
 					type='button'
-					aria-label={t('common.close')}
+					aria-label={t('pptx.common.close')}
 					onClick={onToggle}
 					className='md:hidden fixed inset-0 z-20 bg-black/40 backdrop-blur-[2px] animate-in fade-in duration-150'
 				/>
@@ -201,9 +210,13 @@ export const SlideNotesPanel: React.FC<SlideNotesPanelProps> = ({
 				)}
 
 				{showPrintDialog && allSlides && (
-					<NotesPrintDialog slides={allSlides} onClose={() => setShowPrintDialog(false)} />
+					<NotesPrintDialog
+						slides={allSlides}
+						onClose={() => setShowPrintDialog(false)}
+						notesStyle={notesStyle}
+					/>
 				)}
 			</div>
 		</>
 	);
-};
+}

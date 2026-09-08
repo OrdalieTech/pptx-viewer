@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import type { PptxElement, ShapeStyle, StrokeDashType } from 'pptx-viewer-core';
 import { hasShapeProperties } from 'pptx-viewer-core';
+import type { ThemeColorPickerCommit } from 'pptx-viewer-shared';
+import { STROKE_DASH_OPTIONS } from 'pptx-viewer-shared';
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
+
+import { injectRecentColors } from '../../composables/recent-colors-context';
+import RecentColorsRow from '../RecentColorsRow.vue';
+import ThemeColorSwatchGrid from './ThemeColorSwatchGrid.vue';
 
 /**
  * StrokePanel: line/border inspector for the Vue `pptx-vue-viewer` editor.
@@ -24,15 +30,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-
-const DASH_OPTIONS: ReadonlyArray<{ value: StrokeDashType; i18nKey: string }> = [
-	{ value: 'solid', i18nKey: 'pptx.stroke.dashSolid' },
-	{ value: 'dash', i18nKey: 'pptx.stroke.dashDash' },
-	{ value: 'dot', i18nKey: 'pptx.stroke.dashDot' },
-	{ value: 'dashDot', i18nKey: 'pptx.stroke.dashDashDot' },
-	{ value: 'sysDash', i18nKey: 'pptx.stroke.dashSysDash' },
-	{ value: 'sysDot', i18nKey: 'pptx.stroke.dashSysDot' },
-];
+const recentColors = injectRecentColors();
 
 const applicable = computed(() => hasShapeProperties(props.element));
 
@@ -49,7 +47,20 @@ function patchShapeStyle(next: Partial<ShapeStyle>): void {
 }
 
 function onColor(event: Event): void {
-	patchShapeStyle({ strokeColor: (event.target as HTMLInputElement).value });
+	patchShapeStyle({
+		strokeColor: (event.target as HTMLInputElement).value,
+		strokeColorRef: undefined,
+	});
+}
+
+function onColorPick(hex: string): void {
+	patchShapeStyle({ strokeColor: hex, strokeColorRef: undefined });
+	recentColors?.push(hex);
+}
+
+function onThemeColor(commit: ThemeColorPickerCommit): void {
+	patchShapeStyle({ strokeColor: commit.hex, strokeColorRef: commit.ref });
+	recentColors?.push(commit.hex);
 }
 
 function onWidth(event: Event): void {
@@ -84,8 +95,19 @@ function onDash(event: Event): void {
 					class="pptx-vue-stroke-color w-full h-8 bg-muted border border-border rounded p-0.5"
 					:value="strokeColor"
 					@input="onColor"
+					@change="onColorPick(($event.target as HTMLInputElement).value)"
 				/>
 			</label>
+			<ThemeColorSwatchGrid
+				:selected-ref="shapeStyle?.strokeColorRef"
+				:selected-hex="strokeColor"
+				@pick="onThemeColor"
+			/>
+			<RecentColorsRow
+				v-if="recentColors"
+				:colors="recentColors.recent.value"
+				@pick="onColorPick"
+			/>
 
 			<label class="pptx-vue-stroke-field flex flex-col gap-1">
 				<span class="pptx-vue-stroke-label text-muted-foreground">{{
@@ -104,11 +126,12 @@ function onDash(event: Event): void {
 			<label class="pptx-vue-stroke-field flex flex-col gap-1">
 				<span class="pptx-vue-stroke-label text-muted-foreground">{{ t('pptx.stroke.dash') }}</span>
 				<select
+					:aria-label="t('pptx.stroke.dash')"
 					class="pptx-vue-stroke-input w-full bg-muted border border-border rounded px-2 py-1"
 					:value="strokeDash"
 					@change="onDash"
 				>
-					<option v-for="opt in DASH_OPTIONS" :key="opt.value" :value="opt.value">
+					<option v-for="opt in STROKE_DASH_OPTIONS" :key="opt.value" :value="opt.value">
 						{{ t(opt.i18nKey) }}
 					</option>
 				</select>

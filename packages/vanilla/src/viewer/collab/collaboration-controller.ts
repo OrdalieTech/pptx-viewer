@@ -1,4 +1,5 @@
 import type {
+	CollabLoadOrigin,
 	CollaborationConfig,
 	ConnectionStatus,
 	YDocLike,
@@ -11,8 +12,10 @@ import {
 	isMixedContentBlocked,
 	LOCAL_SYNC_ORIGIN,
 	observeYDocSlides,
+	readSlidesFromYDoc,
 	registerCollaborationTeardown,
 	resolveTransportForServerUrl,
+	shouldRoomSlidesReplaceLoad,
 	validateRoomId,
 } from 'pptx-viewer-shared';
 
@@ -79,6 +82,7 @@ export function createCollaborationController(
 	const writeBack = createWriteBackScheduler({
 		getYDoc: () => currentYDoc,
 		getHandler: deps.getHandler,
+		getSaveOptions: deps.getSaveOptions,
 	});
 
 	const slidesSync: SlidesSync = createSlidesSync(store, (config) => writeBack.schedule(config));
@@ -197,7 +201,7 @@ export function createCollaborationController(
 	}
 
 	// Content-load adoption: the load pipeline commits its parsed deck to the
-	// store unconditionally, so a late joiner whose bootstrap deck finishes
+	// store unconditionally, so a late joiner whose BOOTSTRAP deck finishes
 	// parsing AFTER the room's slides were applied would clobber the synced
 	// state and, with the doc itself unchanged, the observer never re-fires to
 	// repair it. The load path brackets its commit with beginContentLoad /
@@ -205,17 +209,25 @@ export function createCollaborationController(
 	// room's slides win when the doc has content (applyRemoteSlides bypasses
 	// the JSON dedupe and re-arms it against the echo); an empty doc means this
 	// client is the seeder, so the suppressed publish runs now instead.
-	function beginContentLoad(): void {
+	//
+	// A deck the USER opened mid-session is the case that rule must not touch
+	// (`shouldRoomSlidesReplaceLoad`): joining a room and then opening a file
+	// used to leave the room's starter deck on screen, because the file was
+	// parsed, committed and immediately overwritten by the room.
+	function beginContentLoad(_origin: CollabLoadOrigin): void {
 		loadApplying = true;
 	}
 
-	function notifyContentLoaded(): void {
+	function notifyContentLoaded(origin: CollabLoadOrigin): void {
 		const suppressed = loadApplying;
 		loadApplying = false;
 		if (!active || !currentYDoc || !lastConfig) {
 			return;
 		}
-		if (slidesSync.applyRemoteSlides(currentYDoc, lastConfig)) {
+		if (
+			shouldRoomSlidesReplaceLoad(origin, readSlidesFromYDoc(currentYDoc).length) &&
+			slidesSync.applyRemoteSlides(currentYDoc, lastConfig)
+		) {
 			return;
 		}
 		if (suppressed && syncGate.isOpen()) {

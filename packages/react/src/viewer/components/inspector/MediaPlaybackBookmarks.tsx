@@ -100,6 +100,7 @@ export function MediaPlaybackBookmarks({
 				<label className={LABEL_CLS}>
 					<span className={`text-[11px] ${LABEL_TEXT}`}>{t('pptx.media.speed')}</span>
 					<select
+						aria-label={t('pptx.media.speed')}
 						disabled={!canEdit}
 						className={`${INPUT} text-[11px] max-w-[100px]`}
 						value={element.playbackSpeed ?? 1}
@@ -174,6 +175,7 @@ export function MediaPlaybackBookmarks({
 				<label className='flex items-center justify-between gap-2'>
 					<span className={`text-[11px] ${LABEL_TEXT}`}>{t('pptx.media.startTrigger')}</span>
 					<select
+						aria-label={t('pptx.media.startTrigger')}
 						disabled={!canEdit}
 						className='text-[11px] bg-transparent border border-border rounded px-1 py-0.5'
 						value={element.autoPlay ? 'auto' : 'onClick'}
@@ -261,7 +263,7 @@ export function MediaPlaybackBookmarks({
 											type='button'
 											className='opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 transition-opacity'
 											onClick={() => handleRemoveBookmark(bmk.id)}
-											title={t('common.remove')}
+											title={t('pptx.common.remove')}
 										>
 											<LuTrash2 className='w-3 h-3' />
 										</button>

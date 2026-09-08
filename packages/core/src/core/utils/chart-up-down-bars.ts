@@ -1,5 +1,8 @@
-import type { PptxChartShapeProps, PptxChartUpDownBars, XmlObject } from '../types';
+import type { PptxChartUpDownBars, XmlObject } from '../types';
+import type { ResolveChartColor } from './chart-color-choice';
+import { chartPercentUnionValue } from './chart-percent-union-value';
 import { parseShapeProps } from './chart-series-detail-parser';
+import { writeChartShapeProps } from './chart-shape-props-writer';
 
 interface XmlLookupLike {
 	getChildByLocalName: (parent: XmlObject | undefined, name: string) => XmlObject | undefined;
@@ -60,147 +63,6 @@ export function parseChartUpDownBars(
 
 const findKey = (node: XmlObject, name: string, localName: LocalName) =>
 	Object.keys(node).find((key) => localName(key) === name);
-const hex = (value: string) => value.replace(/^#/u, '').toUpperCase();
-
-function setDrawingChild(
-	node: XmlObject,
-	name: string,
-	value: XmlObject,
-	order: readonly string[],
-	localName: LocalName,
-): void {
-	const key = findKey(node, name, localName);
-	if (key) {
-		node[key] = value;
-		return;
-	}
-	const entries = Object.entries(node);
-	const rank = order.indexOf(name);
-	const index = entries.findIndex(([candidate]) => {
-		const candidateRank = order.indexOf(localName(candidate));
-		return candidateRank >= 0 && candidateRank > rank;
-	});
-	entries.splice(index < 0 ? entries.length : index, 0, [`a:${name}`, value]);
-	for (const candidate of Object.keys(node)) {
-		delete node[candidate];
-	}
-	for (const [candidate, child] of entries) {
-		node[candidate] = child;
-	}
-}
-
-function applyShapeProps(
-	existing: XmlObject | undefined,
-	style: PptxChartShapeProps,
-	localName: LocalName,
-): XmlObject {
-	const spPr: XmlObject = { ...(existing ?? {}) };
-	if (style.fillColor) {
-		const noFill = findKey(spPr, 'noFill', localName);
-		if (noFill) {
-			delete spPr[noFill];
-		}
-		setDrawingChild(
-			spPr,
-			'solidFill',
-			{ 'a:srgbClr': { '@_val': hex(style.fillColor) } },
-			[
-				'xfrm',
-				'prstGeom',
-				'custGeom',
-				'noFill',
-				'solidFill',
-				'gradFill',
-				'pattFill',
-				'ln',
-				'effectLst',
-				'effectDag',
-				'scene3d',
-				'sp3d',
-				'extLst',
-			],
-			localName,
-		);
-	}
-	const hasLine = style.strokeColor || style.strokeWidth !== undefined || style.strokeDashStyle;
-	if (hasLine) {
-		const key = findKey(spPr, 'ln', localName) ?? 'a:ln';
-		const line: XmlObject = { ...((spPr[key] as XmlObject | undefined) ?? {}) };
-		if (style.strokeWidth !== undefined) {
-			line['@_w'] = String(Math.round(style.strokeWidth * 12700));
-		}
-		if (style.strokeColor) {
-			const noFill = findKey(line, 'noFill', localName);
-			if (noFill) {
-				delete line[noFill];
-			}
-			setDrawingChild(
-				line,
-				'solidFill',
-				{ 'a:srgbClr': { '@_val': hex(style.strokeColor) } },
-				[
-					'noFill',
-					'solidFill',
-					'gradFill',
-					'pattFill',
-					'prstDash',
-					'custDash',
-					'round',
-					'bevel',
-					'miter',
-					'headEnd',
-					'tailEnd',
-					'extLst',
-				],
-				localName,
-			);
-		}
-		if (style.strokeDashStyle) {
-			setDrawingChild(
-				line,
-				'prstDash',
-				{ '@_val': style.strokeDashStyle },
-				[
-					'noFill',
-					'solidFill',
-					'gradFill',
-					'pattFill',
-					'prstDash',
-					'custDash',
-					'round',
-					'bevel',
-					'miter',
-					'headEnd',
-					'tailEnd',
-					'extLst',
-				],
-				localName,
-			);
-		}
-		setDrawingChild(
-			spPr,
-			'ln',
-			line,
-			[
-				'xfrm',
-				'prstGeom',
-				'custGeom',
-				'noFill',
-				'solidFill',
-				'gradFill',
-				'pattFill',
-				'ln',
-				'effectLst',
-				'effectDag',
-				'scene3d',
-				'sp3d',
-				'extLst',
-			],
-			localName,
-		);
-	}
-	return spPr;
-}
 
 function setOrdered(
 	node: XmlObject,
@@ -234,6 +96,7 @@ export function applyChartUpDownBars(
 	chartContainer: XmlObject,
 	options: PptxChartUpDownBars | null | undefined,
 	localName: LocalName,
+	resolveColor?: ResolveChartColor,
 ): void {
 	if (options === undefined) {
 		return;
@@ -247,13 +110,13 @@ export function applyChartUpDownBars(
 	}
 	const node: XmlObject = { ...((key ? chartContainer[key] : undefined) as XmlObject | undefined) };
 	if (options.gapWidth !== undefined) {
-		if (!Number.isFinite(options.gapWidth) || options.gapWidth < 0 || options.gapWidth > 500) {
-			throw new RangeError('gapWidth must be between 0 and 500');
-		}
+		// ST_GapAmount is a union of ST_GapAmountPercent and ST_GapAmountUShort.
+		// PowerPoint only implements the unsigned-short member; `val="150%"` is
+		// schema-valid yet fatal (0x80070570). See chartPercentUnionValue.
 		setOrdered(
 			node,
 			'gapWidth',
-			{ '@_val': `${options.gapWidth}%` },
+			{ '@_val': chartPercentUnionValue(options.gapWidth, { name: 'gapWidth', min: 0, max: 500 }) },
 			['gapWidth', 'upBars', 'downBars', 'extLst'],
 			localName,
 		);
@@ -268,7 +131,12 @@ export function applyChartUpDownBars(
 			...((existingBar ? node[existingBar] : undefined) as XmlObject | undefined),
 		};
 		const spPrKey = findKey(bar, 'spPr', localName) ?? 'c:spPr';
-		bar[spPrKey] = applyShapeProps(bar[spPrKey] as XmlObject | undefined, style, localName);
+		bar[spPrKey] = writeChartShapeProps(
+			bar[spPrKey] as XmlObject | undefined,
+			style,
+			localName,
+			resolveColor,
+		);
 		setOrdered(node, name, bar, ['gapWidth', 'upBars', 'downBars', 'extLst'], localName);
 	}
 	setOrdered(chartContainer, 'upDownBars', node, CONTAINER_ORDER, localName);

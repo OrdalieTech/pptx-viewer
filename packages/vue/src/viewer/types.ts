@@ -49,9 +49,30 @@ export interface PowerPointViewerProps {
 	fileName?: string;
 	/** Whether editing actions are enabled. */
 	canEdit?: boolean;
-	/** Enable debounced autosave (emits `@autosave` with serialised bytes). */
+	/**
+	 * Recovery autosave: after an edit the deck is re-serialised (always as a
+	 * plain, unencrypted package, because recovery has no password), stashed in
+	 * the shared IndexedDB store keyed by {@link filePath}, and emitted as
+	 * `@autosave`. It is a crash-safety net and never replaces the user's real
+	 * Save: the document stays dirty. On load, a newer snapshot is offered back
+	 * through a recovery prompt.
+	 *
+	 * **The prop is a policy ceiling; the title-bar AutoSave toggle is the user's
+	 * preference inside it.** `false` turns autosave off and makes the toggle
+	 * inert (a user cannot switch on what the application forbade). `true` or
+	 * omitted permits it, and the toggle decides, defaulting to on. Identical in
+	 * all five bindings; see `resolveAutosaveActivation` in `pptx-viewer-shared`.
+	 *
+	 * @default true
+	 */
 	autosave?: boolean;
-	/** Autosave debounce window in milliseconds (default 2000). */
+	/**
+	 * Autosave debounce window in milliseconds. An explicit value is a host
+	 * policy and is honoured as given; omit it to follow the user's File >
+	 * Options > Save > "Save AutoRecover information every N minutes" (two
+	 * minutes by default). Was a private 2000ms default before the five bindings
+	 * were brought onto one rule.
+	 */
 	autosaveIntervalMs?: number;
 	/** Optional class name applied to the root element. */
 	class?: string;
@@ -96,6 +117,62 @@ export interface PowerPointViewerProps {
 	 * the SVG SmartArt renderer. Default `false`.
 	 */
 	smartArt3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js surface-chart renderer. When `true`,
+	 * `surface`/`surface3D` charts render as a camera-orbitable WebGL mesh
+	 * (drag to rotate, scroll to zoom) instead of the static SVG isometric
+	 * projection. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable grid), the viewer transparently falls back
+	 * to the SVG surface renderer. Default `false`.
+	 */
+	surfaceChart3D?: boolean;
+
+	/**
+	 * Opt in to the interactive Three.js bar3D-chart renderer. When `true`,
+	 * `bar3D` charts render as camera-orbitable real box meshes (drag to
+	 * rotate, scroll to zoom) instead of the flat SVG oblique-projection
+	 * illusion. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable grid, or it is a horizontal 3-D Bar), the
+	 * viewer transparently falls back to the flat SVG bar3D renderer. Default
+	 * `false`.
+	 */
+	barChart3D?: boolean;
+
+	/**
+	 * Opt in to the interactive Three.js line3D-chart renderer. When `true`,
+	 * `line3D` charts render as a camera-orbitable real tube-path mesh per
+	 * series, one per depth ("series") plane (drag to rotate, scroll to zoom),
+	 * instead of the flat SVG oblique-projection illusion. Chart marks are not
+	 * selectable/draggable in this mode. Requires the optional `three` peer
+	 * dependency; when it is not installed (or the chart has no plottable
+	 * grid), the viewer transparently falls back to the flat SVG line3D
+	 * renderer. Default `false`.
+	 */
+	lineChart3D?: boolean;
+
+	/**
+	 * Opt in to the interactive Three.js area3D-chart renderer. When `true`,
+	 * `area3D` charts render as a camera-orbitable real tube path + filled
+	 * ribbon mesh per series, one per depth ("series") plane (drag to rotate,
+	 * scroll to zoom), instead of the flat SVG oblique-projection illusion.
+	 * Chart marks are not selectable/draggable in this mode. Requires the
+	 * optional `three` peer dependency; when it is not installed (or the chart
+	 * has no plottable grid), the viewer transparently falls back to the flat
+	 * SVG area3D renderer. Default `false`.
+	 */
+	areaChart3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js pie3D-chart renderer. When `true`,
+	 * `pie3D` charts render as camera-orbitable real wedge meshes (drag to
+	 * rotate, scroll to zoom) instead of the flat SVG oblique-projection
+	 * illusion. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable series), the viewer transparently falls
+	 * back to the flat SVG pie3D renderer. Default `false`.
+	 */
+	pieChart3D?: boolean;
 	/**
 	 * Individual toolbar buttons and/or ribbon tabs to hide, letting a host
 	 * curate the chrome instead of only the all-or-nothing `canEdit` toggle.

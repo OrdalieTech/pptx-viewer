@@ -4,6 +4,8 @@
  */
 import { themeColorSchemesEqual } from 'pptx-viewer-core';
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
+import type { SlideSizeEmu, SlideSizeRescaleMode } from 'pptx-viewer-shared';
+import { scaleSlidesForSizeChange, slideSizeToCanvasPx } from 'pptx-viewer-shared';
 import type { PptxAiBridge, PptxAiConfig } from 'pptx-viewer-shared/ai';
 
 import { ViewerInspector, SelectionPane } from '.';
@@ -13,6 +15,7 @@ import type { EditorHistoryResult } from '../hooks/useEditorHistory';
 import type { ElementManipulationHandlers } from '../hooks/useElementManipulation';
 import type { ElementOperations } from '../hooks/useElementOperations';
 import type { PropertyHandlersResult } from '../hooks/usePropertyHandlers';
+import { useTableStyleMapHandlers } from '../hooks/useTableStyleMapHandlers';
 import type { ThemeHandlersResult } from '../hooks/useThemeHandlers';
 import type { ViewerState } from '../hooks/useViewerState';
 import type { CanvasSize } from '../types';
@@ -84,6 +87,33 @@ export function ViewerSidePanels(props: ViewerSidePanelsProps) {
 		aiPanel,
 	} = props;
 
+	// A Slide Size preset / orientation pick moves BOTH the EMU size a save
+	// writes and the pixel canvas the stage renders at. Keeping them in step
+	// here is what lets `resolveSlideSizeSelection` prefer the EMU (and so the
+	// preset identity) instead of falling back to the lossy pixel round-trip.
+	//
+	// `rescaleMode` arrives only when the user confirmed `SlideSizeCard`'s
+	// Maximize/Ensure Fit prompt: every slide's elements are rescaled via the
+	// shared `scaleSlidesForSizeChange` in the SAME state update as the size
+	// change, so the editor's change-detection effect (`useEditorHistory`,
+	// which watches `slides` and `canvasSize` together) captures both as one
+	// undo entry rather than two.
+	const handleSetSlideSize = (size: SlideSizeEmu, rescaleMode?: SlideSizeRescaleMode): void => {
+		if (rescaleMode && s.slideSizeEmu) {
+			s.setSlides(scaleSlidesForSizeChange(slides, s.slideSizeEmu, size, rescaleMode));
+		}
+		s.setSlideSizeEmu(size);
+		s.setCanvasSize(slideSizeToCanvasPx(size));
+		history.markDirty();
+	};
+
+	const { handleTableStyleMapChange, handleDeleteTableStyle } = useTableStyleMapHandlers({
+		tableStyleMap: s.tableStyleMap,
+		setTableStyleMap: s.setTableStyleMap,
+		tableStylesToDelete: s.tableStylesToDelete,
+		setTableStylesToDelete: s.setTableStylesToDelete,
+	});
+
 	const effectiveSlide = mode === 'master' ? masterPseudoSlide : activeSlide;
 	const currentBuiltInTheme =
 		BUILT_IN_THEMES.find((candidate) =>
@@ -101,6 +131,7 @@ export function ViewerSidePanels(props: ViewerSidePanelsProps) {
 				mode={mode}
 				activeSlide={effectiveSlide}
 				slides={slides}
+				customShows={s.customShows}
 				canvasSize={canvasSize}
 				selectedElement={selectedElement}
 				effectiveSelectedIds={s.effectiveSelectedIds}
@@ -108,6 +139,7 @@ export function ViewerSidePanels(props: ViewerSidePanelsProps) {
 				sidebarPanelMode={s.sidebarPanelMode}
 				activeSlideIndex={activeSlideIndex}
 				comments={comments}
+				commentAuthors={s.modernCommentAuthors}
 				onSetSidebarPanelMode={s.setSidebarPanelMode}
 				onClose={() => s.setIsInspectorPaneOpen(false)}
 				onUpdateElementStyle={ops.updateSelectedShapeStyle}
@@ -115,6 +147,8 @@ export function ViewerSidePanels(props: ViewerSidePanelsProps) {
 				onUpdateElement={ops.updateSelectedElement}
 				onApplySelection={ops.applySelection}
 				onSetCanvasSize={s.setCanvasSize}
+				slideSizeEmu={s.slideSizeEmu}
+				onSetSlideSize={handleSetSlideSize}
 				onMoveLayer={manipulation.handleMoveLayer}
 				onMoveLayerToEdge={manipulation.handleMoveLayerToEdge}
 				onDeleteElement={manipulation.handleDelete}
@@ -140,6 +174,9 @@ export function ViewerSidePanels(props: ViewerSidePanelsProps) {
 				onGetTemplateBackgroundColor={themeHandlers.handleGetTemplateBackgroundColor}
 				mediaDataUrls={s.mediaDataUrls}
 				theme={s.theme}
+				tableStyleMap={s.tableStyleMap}
+				onTableStyleMapChange={handleTableStyleMapChange}
+				onDeleteTableStyle={handleDeleteTableStyle}
 				panelWidth={panelWidth}
 			/>
 

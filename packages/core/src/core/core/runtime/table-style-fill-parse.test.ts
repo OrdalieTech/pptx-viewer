@@ -20,6 +20,26 @@ describe('parseTableStyleSectionFill', () => {
 		expect(fill?.color).toBeUndefined();
 	});
 
+	it('parses scheme-colour tint/shade in both the transitional and Strict-OOXML lexical form', () => {
+		const transitional = parseTableStyleSectionFill(
+			section({
+				'a:solidFill': {
+					'a:schemeClr': { '@_val': 'accent1', 'a:tint': { '@_val': '20000' } },
+				},
+			}),
+		);
+		expect(transitional?.tint).toBe(20000);
+
+		const strict = parseTableStyleSectionFill(
+			section({
+				'a:solidFill': {
+					'a:schemeClr': { '@_val': 'accent1', 'a:shade': { '@_val': '20%' } },
+				},
+			}),
+		);
+		expect(strict?.shade).toBe(20000);
+	});
+
 	it('parses an explicit sRGB solid fill (issue #95)', () => {
 		const fill = parseTableStyleSectionFill(
 			section({ 'a:solidFill': { 'a:srgbClr': { '@_val': 'FF8800' } } }),
@@ -88,6 +108,49 @@ describe('parseTableStyleSectionFill', () => {
 		const s = { 'a:tcStyle': { 'a:fillRef': { '@_idx': '1' } } } as XmlObject;
 		expect(parseTableStyleSectionFill(s)).toBeUndefined();
 	});
+
+	describe('a:blipFill image texture fill', () => {
+		function blipFillSection(rEmbed?: string, rLink?: string): XmlObject {
+			return section({
+				'a:blipFill': {
+					'a:blip': {
+						...(rEmbed ? { '@_r:embed': rEmbed } : {}),
+						...(rLink ? { '@_r:link': rLink } : {}),
+					},
+				},
+			});
+		}
+
+		it('resolves an image texture fill via the supplied resolver (r:embed)', () => {
+			const fill = parseTableStyleSectionFill(blipFillSection('rId1'), (rEmbed, rLink) => {
+				expect(rEmbed).toBe('rId1');
+				expect(rLink).toBeUndefined();
+				return 'ppt/media/image1.png';
+			});
+			expect(fill?.schemeColor).toBe('');
+			expect(fill?.image?.path).toBe('ppt/media/image1.png');
+		});
+
+		it('resolves an image texture fill via r:link when there is no r:embed', () => {
+			const fill = parseTableStyleSectionFill(
+				blipFillSection(undefined, 'rId2'),
+				(rEmbed, rLink) => {
+					expect(rEmbed).toBeUndefined();
+					expect(rLink).toBe('rId2');
+					return 'https://example.com/tex.png';
+				},
+			);
+			expect(fill?.image?.path).toBe('https://example.com/tex.png');
+		});
+
+		it('returns undefined without a resolver (no zip/rels context wired up)', () => {
+			expect(parseTableStyleSectionFill(blipFillSection('rId1'))).toBeUndefined();
+		});
+
+		it('returns undefined when the resolver cannot resolve the relationship', () => {
+			expect(parseTableStyleSectionFill(blipFillSection('rId1'), () => undefined)).toBeUndefined();
+		});
+	});
 });
 
 describe('parseTableStyleSectionText', () => {
@@ -122,6 +185,20 @@ describe('parseTableStyleSectionText', () => {
 		expect(text?.fontSchemeColor).toBe('accent2');
 		expect(text?.fontTint).toBe(40000);
 		expect(text?.fontColor).toBeUndefined();
+	});
+
+	it('accepts the Strict-OOXML lexical percentage form for tint/shade', () => {
+		const text = parseTableStyleSectionText({
+			'a:tcTxStyle': {
+				'a:schemeClr': {
+					'@_val': 'accent2',
+					'a:tint': { '@_val': '40%' },
+					'a:shade': { '@_val': '10%' },
+				},
+			},
+		} as XmlObject);
+		expect(text?.fontTint).toBe(40000);
+		expect(text?.fontShade).toBe(10000);
 	});
 
 	it('ignores u="none"', () => {

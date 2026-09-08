@@ -1,10 +1,19 @@
-import type { PptxTableCellStyle, PptxTableData, PptxTableRow, XmlObject } from '../../types';
+import type {
+	ParsedTableStyleFill,
+	PptxTableCellStyle,
+	PptxTableData,
+	PptxTableRow,
+	XmlObject,
+} from '../../types';
+import { parseTableEffectChain } from '../runtime/table-style-effect-parse';
+import { parseTablePropertiesFill } from '../runtime/table-style-fill-parse';
 import { applyCell3DStyle } from './table-cell-3d-helpers';
 import {
 	applyCellFillStyle,
 	applyCellBorderStyle,
 	applyCellMarginStyle,
 } from './table-cell-fill-border-helpers';
+import { extractTableCellTextRuns } from './table-cell-runs';
 import { applyCellAlignmentStyle, applyCellTextFormat } from './table-cell-text-style-helpers';
 
 export interface PptxTableDataParserContext {
@@ -22,10 +31,16 @@ export interface PptxTableDataParserContext {
 	extractGradientFillToRect?: (
 		gradFill: XmlObject,
 	) => { l: number; t: number; r: number; b: number } | undefined;
+	/** See {@link TableCellFillBorderContext.resolveCellImagePath}. */
+	resolveCellImagePath?: (
+		rEmbed: string | undefined,
+		rLink: string | undefined,
+		slidePath: string | undefined,
+	) => string | undefined;
 }
 
 export interface IPptxTableDataParser {
-	parseTableData(graphicData: XmlObject): PptxTableData | undefined;
+	parseTableData(graphicData: XmlObject, slidePath?: string): PptxTableData | undefined;
 }
 
 export class PptxTableDataParser implements IPptxTableDataParser {
@@ -35,7 +50,7 @@ export class PptxTableDataParser implements IPptxTableDataParser {
 		this.context = context;
 	}
 
-	public parseTableData(graphicData: XmlObject): PptxTableData | undefined {
+	public parseTableData(graphicData: XmlObject, slidePath?: string): PptxTableData | undefined {
 		try {
 			const tableNode = graphicData['a:tbl'] as XmlObject | undefined;
 			if (!tableNode) {
@@ -72,9 +87,11 @@ export class PptxTableDataParser implements IPptxTableDataParser {
 						const extraAttributes = this.extractCellExtraAttributes(
 							cellNode['a:tcPr'] as XmlObject | undefined,
 						);
+						const textRuns = extractTableCellTextRuns(cellNode, this.context);
 						return {
 							text: this.extractTableCellText(cellNode),
-							style: this.extractTableCellStyleFromXml(cellNode),
+							...(textRuns ? { textRuns } : {}),
+							style: this.extractTableCellStyleFromXml(cellNode, slidePath),
 							gridSpan: cellNode['@_gridSpan']
 								? parseInt(String(cellNode['@_gridSpan']), 10)
 								: undefined,
@@ -96,6 +113,26 @@ export class PptxTableDataParser implements IPptxTableDataParser {
 			const bandColCycle = this.extractBandCycle(tableProperties, 'bandColCycle');
 			const rtl = tableProperties['@_rtl'] === '1';
 
+			// a:tblPr's OWN fill/effectLst, independent of a:tblStyleLst/a:tblBg
+			// (issue G6). Reachable mainly from non-PowerPoint authoring tools;
+			// real PowerPoint decks route appearance through tableStyleId.
+			const resolveImagePath = this.context.resolveCellImagePath;
+			const tableFill: ParsedTableStyleFill | undefined = parseTablePropertiesFill(
+				tableProperties,
+				resolveImagePath
+					? (rEmbed, rLink) => resolveImagePath(rEmbed, rLink, slidePath)
+					: undefined,
+			);
+			// `a:effectDag` leaves are opaque here (see
+			// table-style-effect-parse.ts docblock): recorded as a single
+			// pass-through node rather than decomposed, since decomposing the
+			// DAG's own nested `a:effect` containers is out of scope for a
+			// construct this rare on a table root.
+			const effectDag = tableProperties['a:effectDag'] as XmlObject | undefined;
+			const tableEffects =
+				parseTableEffectChain(tableProperties['a:effectLst'] as XmlObject | undefined) ??
+				(effectDag ? [{ kind: 'effectDag', xml: effectDag }] : undefined);
+
 			return {
 				rows,
 				columnWidths,
@@ -109,6 +146,8 @@ export class PptxTableDataParser implements IPptxTableDataParser {
 				bandRowCycle: bandRowCycle ?? 1,
 				bandColCycle: bandColCycle ?? 1,
 				...(rtl ? { rtl: true } : {}),
+				...(tableFill ? { tableFill } : {}),
+				...(tableEffects ? { tableEffects } : {}),
 			};
 		} catch {
 			return undefined;
@@ -223,13 +262,16 @@ export class PptxTableDataParser implements IPptxTableDataParser {
 		return lines.join('\n');
 	}
 
-	private extractTableCellStyleFromXml(tableCell: XmlObject): PptxTableCellStyle | undefined {
+	private extractTableCellStyleFromXml(
+		tableCell: XmlObject,
+		slidePath?: string,
+	): PptxTableCellStyle | undefined {
 		try {
 			const cellProperties = tableCell?.['a:tcPr'] as XmlObject | undefined;
 			const style: PptxTableCellStyle = {};
 			let hasStyle = false;
 
-			hasStyle = applyCellFillStyle(cellProperties, style, this.context) || hasStyle;
+			hasStyle = applyCellFillStyle(cellProperties, style, this.context, slidePath) || hasStyle;
 			hasStyle = applyCellBorderStyle(cellProperties, style, this.context) || hasStyle;
 			hasStyle = applyCell3DStyle(cellProperties, style, this.context) || hasStyle;
 			hasStyle = applyCellMarginStyle(cellProperties, style, this.context) || hasStyle;
@@ -250,5 +292,7 @@ export {
 	applyCellMarginStyle,
 } from './table-cell-fill-border-helpers';
 export { applyCell3DStyle } from './table-cell-3d-helpers';
+export type { TableCellRunsContext } from './table-cell-runs';
+export { extractTableCellTextRuns } from './table-cell-runs';
 export type { TableCellTextStyleContext } from './table-cell-text-style-helpers';
 export { applyCellAlignmentStyle, applyCellTextFormat } from './table-cell-text-style-helpers';

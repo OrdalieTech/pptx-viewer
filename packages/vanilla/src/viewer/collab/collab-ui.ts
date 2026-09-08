@@ -1,3 +1,4 @@
+/* oxlint-disable eslint/one-var -- pre-existing throughout this file; independent concerns, not one statement */
 import type { CollaborationConfig, ConnectionStatus, ToolbarActionId } from 'pptx-viewer-shared';
 import { buildBroadcastViewerUrl, isActionHidden } from 'pptx-viewer-shared';
 
@@ -14,6 +15,7 @@ import { createCollaborationCursors } from './ui/collaboration-cursors';
 import { createCollaborationStatus } from './ui/collaboration-status';
 import { createFollowModeBar } from './ui/follow-mode-bar';
 import { createRemoteSelectionOverlay } from './ui/remote-selection-overlay';
+import type { ShareDialogSession } from './ui/share-dialog';
 import { createShareDialog } from './ui/share-dialog';
 
 /**
@@ -41,6 +43,8 @@ export interface CollabUiDeps {
 	shareDefaults?: ShareDefaults;
 	/** Individually hidden toolbar buttons; gates the Share/Broadcast triggers this module builds. */
 	hiddenActions?: readonly ToolbarActionId[];
+	/** Options > General > "Initials" override for the Share dialog's local-user avatar. */
+	getUserInitials?: () => string | undefined;
 }
 
 export interface CollabUiController {
@@ -91,6 +95,7 @@ export function createCollabUi(deps: CollabUiDeps): CollabUiController {
 			},
 		},
 		themeHost,
+		deps.getUserInitials,
 	);
 
 	const broadcastDialog = createBroadcastDialog(
@@ -203,6 +208,15 @@ export function createCollabUi(deps: CollabUiDeps): CollabUiController {
 		return deps.getStatus() === 'disconnected' ? 0 : state.remotePresences.length + 1;
 	}
 
+	function shareSession(state: ViewerState): ShareDialogSession {
+		return {
+			status: deps.getStatus(),
+			connectedCount: connectedCount(state),
+			config: deps.getConfig(),
+			remoteUsers: state.remotePresences,
+		};
+	}
+
 	function render(state: ViewerState): void {
 		mountOverlay();
 		cursors.update(state.cursors, deps.getScale());
@@ -214,6 +228,7 @@ export function createCollabUi(deps: CollabUiDeps): CollabUiController {
 		);
 		followBar.update(state.remotePresences, state.followedClientId);
 		statusPill.update(deps.getStatus(), connectedCount(state));
+		shareDialog.updateSession(shareSession(state));
 	}
 	render(deps.store.get());
 
