@@ -2,6 +2,8 @@ import type JSZip from 'jszip';
 
 import type { PptxSlide, XmlObject } from '../../types';
 import { BLIP_FILL_ORDER, reorderObjectKeys } from '../../utils/xml-reorder';
+import type { AuthoredSlideBackground } from '../runtime/authored-slide-background';
+import { slideBackgroundIsPurelyInherited } from '../runtime/authored-slide-background';
 import type { PptxSaveState } from './PptxSaveSessionBuilder';
 import type { IPptxSlideRelationshipRegistry } from './PptxSlideRelationshipRegistry';
 
@@ -22,6 +24,13 @@ export interface PptxSlideBackgroundBuilderInput {
 	resolveImageToBytes: (url: string) => Promise<{ bytes: Uint8Array; extension: string } | null>;
 	/** Optional sink for a "could not embed background" compatibility warning. */
 	reportUnsupportedBackground?: (imageUrl: string) => void;
+	/**
+	 * What the loader recorded about this slide's `<p:bg>`: whether the slide
+	 * authored one at all, and what the inheritance chain resolved to. Omitted
+	 * for slides this handler never parsed (SDK-built decks), where the flat
+	 * values on the model are the only description available.
+	 */
+	authoredBackground?: AuthoredSlideBackground | undefined;
 }
 
 export interface IPptxSlideBackgroundBuilder {
@@ -43,6 +52,17 @@ export class PptxSlideBackgroundBuilder implements IPptxSlideBackgroundBuilder {
 
 		const cSld = (init.slideNode['p:cSld'] || {}) as XmlObject;
 
+		// A slide that authored no `<p:bg>` is SHOWING its layout's or master's,
+		// and the loader put that resolved value on the model so something could
+		// be painted. Writing it back would emit a slide-level background, which
+		// outranks both: on a plain deck every slide gained
+		// `<p:bg><p:bgPr><a:solidFill><a:srgbClr val="FFFFFF"/>…` on the first
+		// save, and the themed or picture background it was inheriting was gone
+		// for good. Leave the part exactly as authored instead.
+		if (slideBackgroundIsPurelyInherited(init.authoredBackground, init.slide)) {
+			return;
+		}
+
 		if (!(hasBackgroundColor || hasBackgroundImage || hasBackgroundGradient)) {
 			delete cSld['p:bg'];
 			init.slideNode['p:cSld'] = cSld;
@@ -61,11 +81,22 @@ export class PptxSlideBackgroundBuilder implements IPptxSlideBackgroundBuilder {
 		// backgroundColor / backgroundGradient frequently come from layout or
 		// master fallbacks in the loader (see PptxSlideLoaderService), so their
 		// presence alone must not clobber a slide-level blipFill. We only
-		// regenerate on a data-URL image (a direct override).
+		// regenerate on a data-URL image (a direct override), OR when the
+		// model's `backgroundImage` no longer matches what was authored at load.
+		// The latter catches an explicit removal (e.g. the inspector's "remove
+		// background image" button, which only clears `backgroundImage` and
+		// leaves whatever fallback `backgroundColor` the loader resolved
+		// untouched): the field goes to '' without ever producing a data URL, so
+		// it previously fell through this guard unnoticed and the stale image
+		// kept rendering after save, because nothing distinguished "empty
+		// because never touched" from "empty because the user cleared it".
 		const existingBg = cSld['p:bg'] as XmlObject | undefined;
 		const existingBgPr = existingBg?.['p:bgPr'] as XmlObject | undefined;
 		const existingHasBlipFill = existingBgPr?.['a:blipFill'] !== undefined;
-		if (!hasDataUrlBackgroundImage && existingHasBlipFill) {
+		const backgroundImageUnchangedFromAuthored =
+			init.authoredBackground === undefined ||
+			rawBackgroundImage === (init.authoredBackground.image ?? '');
+		if (!hasDataUrlBackgroundImage && existingHasBlipFill && backgroundImageUnchangedFromAuthored) {
 			// OOXML CT_CommonSlideData requires child order: bg, spTree, ...
 			// Reorder cSld so p:bg comes first while preserving the raw node.
 			this.reorderCSldBgFirst(cSld, existingBg!);

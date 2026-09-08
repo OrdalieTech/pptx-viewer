@@ -1,3 +1,5 @@
+/* oxlint-disable eslint/one-var -- many independent it() blocks, each with
+   its own unrelated locals; merging across them would hurt readability. */
 import type { PptxElement } from 'pptx-viewer-core';
 import { describe, it, expect } from 'vitest';
 
@@ -6,6 +8,7 @@ import {
 	isImageTiled,
 	getImageTilingStyle,
 	getImageRenderStyle,
+	getImageSurfaceMaskStyle,
 	buildMirrorTiledBackground,
 } from './image-style';
 
@@ -52,20 +55,24 @@ describe('getCropShapeClipPath', () => {
 		).toBeUndefined();
 	});
 
-	it('returns ellipse clip path', () => {
+	it('returns ellipse clip path via the shared adjustment-aware preset cascade', () => {
+		// Regression: this used to be a small fixed `ellipse(50% 50% at 50% 50%)`
+		// polygon table entry. It now routes through the same preset cascade
+		// shapes use (`getResolvedShapeClipPathFor`), so it renders as an SVG
+		// `path()` instead of a CSS basic shape.
 		const result = getCropShapeClipPath(
 			makeImageElement({ cropShape: 'ellipse' } as Partial<PptxElement>),
 		);
 		expect(result).toBeDefined();
-		expect(result).toContain('ellipse(');
+		expect(result).toContain('path(');
 	});
 
-	it('returns roundedRect clip path', () => {
+	it('returns a real rounded-corner roundedRect clip path (was a fixed 12% radius)', () => {
 		const result = getCropShapeClipPath(
 			makeImageElement({ cropShape: 'roundedRect' } as Partial<PptxElement>),
 		);
 		expect(result).toBeDefined();
-		expect(result).toContain('inset(0 round 12%)');
+		expect(result).toContain('path(');
 	});
 
 	it('returns triangle clip path', () => {
@@ -73,7 +80,7 @@ describe('getCropShapeClipPath', () => {
 			makeImageElement({ cropShape: 'triangle' } as Partial<PptxElement>),
 		);
 		expect(result).toBeDefined();
-		expect(result).toContain('polygon(');
+		expect(result).toContain('path(');
 	});
 
 	it('returns diamond clip path', () => {
@@ -81,15 +88,15 @@ describe('getCropShapeClipPath', () => {
 			makeImageElement({ cropShape: 'diamond' } as Partial<PptxElement>),
 		);
 		expect(result).toBeDefined();
-		expect(result).toContain('polygon(');
+		expect(result).toContain('path(');
 	});
 
-	it('returns star clip path', () => {
+	it('returns a real 5-point star clip path (was a fixed 10-point outline)', () => {
 		const result = getCropShapeClipPath(
 			makeImageElement({ cropShape: 'star' } as Partial<PptxElement>),
 		);
 		expect(result).toBeDefined();
-		expect(result).toContain('polygon(');
+		expect(result).toContain('path(');
 	});
 
 	it('returns undefined for unknown crop shape', () => {
@@ -292,18 +299,18 @@ describe('getImageTilingStyle flip integration', () => {
 // ---------------------------------------------------------------------------
 
 describe('getImageRenderStyle', () => {
-	it('returns basic cover style for non-image elements', () => {
+	it('returns basic fill style for non-image elements', () => {
 		const style = getImageRenderStyle(makeShapeElement());
 		expect(style.width).toBe('100%');
 		expect(style.height).toBe('100%');
-		expect(style.objectFit).toBe('cover');
+		expect(style.objectFit).toBe('fill');
 	});
 
-	it('returns basic cover style for image without crop', () => {
+	it('returns basic fill style for image without crop', () => {
 		const style = getImageRenderStyle(makeImageElement());
 		expect(style.width).toBe('100%');
 		expect(style.height).toBe('100%');
-		expect(style.objectFit).toBe('cover');
+		expect(style.objectFit).toBe('fill');
 	});
 
 	it('applies crop transform when crop values are set', () => {
@@ -327,7 +334,7 @@ describe('getImageRenderStyle', () => {
 			cropBottom: 0,
 		} as Partial<PptxElement>);
 		const style = getImageRenderStyle(el);
-		expect(style.objectFit).toBe('cover');
+		expect(style.objectFit).toBe('fill');
 	});
 
 	it('handles extreme crop values safely', () => {
@@ -353,5 +360,19 @@ describe('getImageRenderStyle', () => {
 		} as Partial<PptxElement>);
 		const style = getImageRenderStyle(el);
 		expect(style.transformOrigin).toBe('top left');
+	});
+});
+
+describe('getImageSurfaceMaskStyle', () => {
+	it('keeps a translated crop inside a stationary preset mask', () => {
+		const element = makeImageElement({
+			shapeType: 'ellipse',
+			cropLeft: 0.2,
+		} as Partial<PptxElement>);
+		const bitmap = getImageRenderStyle(element);
+		const surface = getImageSurfaceMaskStyle(element);
+		expect(bitmap.transform).toBeDefined();
+		expect(bitmap.borderRadius).toBeUndefined();
+		expect(surface).toMatchObject({ overflow: 'hidden', borderRadius: '50%' });
 	});
 });

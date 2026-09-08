@@ -6,6 +6,9 @@
  * {@link SmartArt3DModel} of extruded meshes + connectors. No `three` import.
  */
 
+import type { PptxSmartArtNode } from 'pptx-viewer-core';
+import { flattenNodes } from 'pptx-viewer-core';
+
 import {
 	boundsOf,
 	circleOutline,
@@ -19,14 +22,33 @@ import { applySpatialLayout } from './smartart-3d-spatial';
 import type {
 	Point2,
 	SmartArt3DConnector,
+	SmartArt3DFamily,
 	SmartArt3DMesh,
 	SmartArt3DModel,
 	SmartArt3DModelOptions,
 } from './smartart-3d-types';
-import type { RenderedNode, SmartArtLayoutResult } from './smartart-layout-types';
+import type { LayoutFamily, RenderedNode, SmartArtLayoutResult } from './smartart-layout-types';
+
+/**
+ * The 2D engine grew three families (gear / timeline / bending) that the 3D
+ * spatial transform has no arrangement for. Each folds onto the family whose
+ * spatial treatment it used to receive, so 3D output is unchanged.
+ */
+const SPATIAL_FAMILY_FALLBACK: Partial<Record<LayoutFamily, SmartArt3DFamily>> = {
+	gear: 'radial',
+	timeline: 'process',
+	bending: 'process',
+};
+
+/** Narrow a 2D layout family to the subset the 3D spatial transform handles. */
+function spatialFamily(family: LayoutFamily): SmartArt3DFamily {
+	return SPATIAL_FAMILY_FALLBACK[family] ?? (family as SmartArt3DFamily);
+}
 
 const DEFAULT_DEPTH_RATIO = 0.35;
 const DEFAULT_BEVEL_RATIO = 0.2;
+/** Maximum fractional swing applied to a varied node's bevel (+/-15%). */
+const COHERENT_3D_BEVEL_VARIATION = 0.15;
 
 /** Resolve the extrusion depth for a node footprint. */
 function resolveDepth(footprint: number, opts: SmartArt3DModelOptions): number {
@@ -35,6 +57,37 @@ function resolveDepth(footprint: number, opts: SmartArt3DModelOptions): number {
 	}
 	const ratio = opts.depthRatio ?? DEFAULT_DEPTH_RATIO;
 	return Math.max(2, footprint * ratio);
+}
+
+/**
+ * Deterministic 0..1 hash of a node id (djb2 variant), used to derive a
+ * stable per-node bevel variation instead of `Math.random()` so the same
+ * deck renders identically every time (and stays snapshot-testable).
+ */
+function nodeVariationFactor(nodeId: string): number {
+	let hash = 5381;
+	for (let i = 0; i < nodeId.length; i++) {
+		hash = (hash * 33) ^ nodeId.charCodeAt(i);
+	}
+	return ((hash >>> 0) % 1000) / 1000;
+}
+
+/**
+ * Bevel multiplier for a node: `1` (no variation) when the node has no id, has
+ * opted out via `coherent3DOff`, or the caller supplied no opt-out set at all
+ * (pre-existing behaviour); otherwise a deterministic +/-15% swing so
+ * identical shapes in a "coherent 3-D" SmartArt style do not render
+ * pixel-identical, matching PowerPoint's per-node bevel variation.
+ */
+function bevelVariationMultiplier(
+	nodeId: string | undefined,
+	coherent3DOffNodeIds: ReadonlySet<string> | undefined,
+): number {
+	if (!coherent3DOffNodeIds || nodeId === undefined || coherent3DOffNodeIds.has(nodeId)) {
+		return 1;
+	}
+	const factor = nodeVariationFactor(nodeId) - 0.5; // -0.5..0.5
+	return 1 + factor * 2 * COHERENT_3D_BEVEL_VARIATION;
 }
 
 /** Build the extruded mesh for a single rendered node, or `null` if empty. */
@@ -86,7 +139,10 @@ function meshForNode(
 
 	const footprint = Math.max(2, Math.min(halfWidth, halfHeight) * 2);
 	const depth = resolveDepth(footprint, opts);
-	const bevel = depth * (opts.bevelRatio ?? DEFAULT_BEVEL_RATIO);
+	const bevel =
+		depth *
+		(opts.bevelRatio ?? DEFAULT_BEVEL_RATIO) *
+		bevelVariationMultiplier(node.nodeId, opts.coherent3DOffNodeIds);
 
 	return {
 		id: node.key,
@@ -146,9 +202,28 @@ export function buildSmartArt3DModel(
 		meshes,
 		connectors,
 		bounds: { width: w, height: h },
-		family: layout.family,
+		family: spatialFamily(layout.family),
 		background: options.background,
 	};
 
 	return options.spatial ? applySpatialLayout(model) : model;
+}
+
+/**
+ * Collect the ids of nodes (including nested children) that opt out of
+ * PowerPoint's "coherent 3-D" per-node bevel variation via
+ * `dgm:prSet/@coherent3DOff`. Every binding's 3D SmartArt renderer calls this
+ * once from the element's `smartArtData.nodes` and passes the result as
+ * {@link SmartArt3DModelOptions.coherent3DOffNodeIds}.
+ */
+export function collectCoherent3DOffNodeIds(
+	nodes: readonly PptxSmartArtNode[],
+): ReadonlySet<string> {
+	const ids = new Set<string>();
+	for (const node of flattenNodes([...nodes])) {
+		if (node.coherent3DOff) {
+			ids.add(node.id);
+		}
+	}
+	return ids;
 }

@@ -11,6 +11,8 @@
  */
 
 import type { PptxChartErrBars, XmlObject } from '../types';
+import type { ResolveChartColor } from './chart-color-choice';
+import { writeChartShapeProps } from './chart-shape-props-writer';
 
 type GetLocalName = (key: string) => string;
 
@@ -25,10 +27,6 @@ function ensureArray<T>(v: T | T[] | undefined): T[] {
 	return Array.isArray(v) ? v : [v];
 }
 
-function hex(color: string): string {
-	return color.replace(/^#/u, '').toUpperCase();
-}
-
 function validateErrBars(e: PptxChartErrBars): void {
 	if (e.val !== undefined && !Number.isFinite(e.val)) {
 		throw new RangeError('error-bar value must be finite');
@@ -40,14 +38,25 @@ function validateErrBars(e: PptxChartErrBars): void {
 	}
 }
 
-function buildSpPr(existing: XmlObject | undefined, color: string, getLocalName: GetLocalName) {
-	const spPr: XmlObject = existing ? { ...existing } : {};
-	const lnKey = findKey(spPr, 'ln', getLocalName) ?? 'a:ln';
-	const ln = { ...((spPr[lnKey] as XmlObject | undefined) ?? {}) };
-	const fillKey = findKey(ln, 'solidFill', getLocalName) ?? 'a:solidFill';
-	ln[fillKey] = { 'a:srgbClr': { '@_val': hex(color) } };
-	spPr[lnKey] = ln;
-	return spPr;
+/**
+ * Build the error bar's `c:spPr/a:ln` from its modeled line colour/width/dash.
+ * Delegates to the shared {@link writeChartShapeProps} writer (only its line
+ * half applies here, an error bar has no fill) so a width or dash edit is not
+ * silently dropped the way the single-colour writer this replaced would drop
+ * it.
+ */
+function buildSpPr(
+	existing: XmlObject | undefined,
+	e: PptxChartErrBars,
+	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
+): XmlObject {
+	return writeChartShapeProps(
+		existing,
+		{ strokeColor: e.color, strokeWidth: e.width, strokeDashStyle: e.dashStyle },
+		getLocalName,
+		resolveColor,
+	);
 }
 
 /** Build a `c:numLit` cache for custom error-bar values. */
@@ -63,6 +72,7 @@ function buildErrBars(
 	existing: XmlObject | undefined,
 	e: PptxChartErrBars,
 	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
 ): XmlObject {
 	validateErrBars(e);
 	const node: XmlObject = {
@@ -93,8 +103,8 @@ function buildErrBars(
 
 	const spPrKey = existing ? findKey(existing, 'spPr', getLocalName) : undefined;
 	const existingSpPr = spPrKey ? (existing?.[spPrKey] as XmlObject) : undefined;
-	if (e.color) {
-		node['c:spPr'] = buildSpPr(existingSpPr, e.color, getLocalName);
+	if (e.color || e.width !== undefined || e.dashStyle) {
+		node['c:spPr'] = buildSpPr(existingSpPr, e, getLocalName, resolveColor);
 	} else if (existingSpPr) {
 		node['c:spPr'] = existingSpPr;
 	}
@@ -117,11 +127,14 @@ export function applySeriesErrBarsToXml(
 	seriesNode: XmlObject,
 	errBars: PptxChartErrBars[],
 	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
 ): void {
 	const existingKey = findKey(seriesNode, 'errBars', getLocalName);
 	const existingNodes = (existingKey ? ensureArray(seriesNode[existingKey]) : []) as XmlObject[];
 
-	const built = errBars.map((e, i) => buildErrBars(existingNodes[i], e, getLocalName));
+	const built = errBars.map((e, i) =>
+		buildErrBars(existingNodes[i], e, getLocalName, resolveColor),
+	);
 
 	if (existingKey) {
 		delete seriesNode[existingKey];

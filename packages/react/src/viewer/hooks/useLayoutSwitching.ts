@@ -1,4 +1,10 @@
-import type { PptxSlide, PptxLayoutOption, PptxHandler } from 'pptx-viewer-core';
+import type {
+	PptxElement,
+	PptxSlide,
+	PptxLayoutOption,
+	PptxLayoutPreview,
+	PptxHandler,
+} from 'pptx-viewer-core';
 /**
  * useLayoutSwitching -- Hook for switching an existing slide's layout.
  *
@@ -24,6 +30,14 @@ export interface UseLayoutSwitchingInput {
 	ops: ElementOperations;
 	/** Editor history for marking dirty state. */
 	history: EditorHistoryResult;
+	/**
+	 * Called with the slide's refreshed layout / master artwork after a switch.
+	 *
+	 * The viewer keeps that artwork outside `slide.elements`, so nothing else
+	 * would notice the relationship change and the canvas would keep painting the
+	 * previous layout until the file was reopened.
+	 */
+	onTemplateElementsChanged?: (slideId: string, elements: PptxElement[]) => void;
 }
 
 /**
@@ -38,6 +52,14 @@ export interface LayoutSwitchingResult {
 	loadAvailableLayouts: () => Promise<void>;
 	/** Apply a layout to the active slide by its archive path. */
 	applyLayout: (layoutPath: string) => Promise<void>;
+	/**
+	 * Build the artwork thumbnails the New Slide / Layout galleries draw.
+	 *
+	 * Deliberately a callback rather than state: parsing every layout is only
+	 * worth doing once the user opens one of those menus, and core memoises the
+	 * result so reopening costs nothing.
+	 */
+	loadLayoutPreviews: () => Promise<PptxLayoutPreview[]>;
 	/** The current slide's layout path (if known). */
 	currentLayoutPath: string | undefined;
 }
@@ -58,7 +80,7 @@ export interface LayoutSwitchingResult {
  * ```
  */
 export function useLayoutSwitching(input: UseLayoutSwitchingInput): LayoutSwitchingResult {
-	const { handler, slides, activeSlideIndex, ops, history } = input;
+	const { handler, slides, activeSlideIndex, ops, history, onTemplateElementsChanged } = input;
 
 	const [availableLayouts, setAvailableLayouts] = useState<PptxLayoutOption[]>([]);
 	const [isLoading, setIsLoading] = useState(false);
@@ -83,6 +105,10 @@ export function useLayoutSwitching(input: UseLayoutSwitchingInput): LayoutSwitch
 		} finally {
 			setIsLoading(false);
 		}
+		// `activeSlideIndex` IS read above (inside the `try`), but the analyzer
+		// doesn't see through an `await` call wrapped in try/finally and flags it
+		// as unused; verified as a false positive with a minimal repro.
+		// oxlint-disable-next-line react/memo-dependencies -- see comment above
 	}, [handler, activeSlideIndex]);
 
 	const applyLayout = useCallback(
@@ -103,12 +129,27 @@ export function useLayoutSwitching(input: UseLayoutSwitchingInput): LayoutSwitch
 					next[activeSlideIndex] = updated;
 					return next;
 				});
+				if (onTemplateElementsChanged) {
+					onTemplateElementsChanged(
+						updated.id,
+						await handler.getTemplateElementsForSlide(updated.id),
+					);
+				}
 				history.markDirty();
 			} finally {
 				setIsLoading(false);
 			}
 		},
-		[handler, activeSlideIndex, ops, history],
+		// `activeSlideIndex` IS read above (inside the `try`), but the analyzer
+		// doesn't see through an `await` call wrapped in try/finally and flags it
+		// as unused; verified as a false positive with a minimal repro.
+		// oxlint-disable-next-line react/memo-dependencies -- see comment above
+		[handler, activeSlideIndex, ops, history, onTemplateElementsChanged],
+	);
+
+	const loadLayoutPreviews = useCallback(
+		async () => (handler ? handler.getLayoutPreviews() : []),
+		[handler],
 	);
 
 	return {
@@ -116,6 +157,7 @@ export function useLayoutSwitching(input: UseLayoutSwitchingInput): LayoutSwitch
 		isLoading,
 		loadAvailableLayouts,
 		applyLayout,
+		loadLayoutPreviews,
 		currentLayoutPath,
 	};
 }

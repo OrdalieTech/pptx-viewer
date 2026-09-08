@@ -1,3 +1,4 @@
+import { themeColorRefFromSchemeClr } from '../color/theme-color-ref';
 /**
  * Helper functions extracted from PptxNativeAnimationService.
  * Provides XML parsing utilities for animation timing trees.
@@ -8,12 +9,15 @@ import type {
 	PptxAnimationKeyframe,
 	PptxNativeAnimation,
 	PptxTextBuildType,
+	PptxThemeColorRef,
 	XmlObject,
 } from '../types';
 import {
 	parseTimeTargetElement,
 	serializeTimeTargetElement,
 } from './animation-target-build-helpers';
+import { extractBldPResumeAttrs } from './animation-timing-attrs';
+import { extractBldPTemplates } from './animation-timing-templates';
 
 /**
  * Extract sound action (`p:stSnd` or `p:endSnd`) from a `p:cTn` node.
@@ -63,6 +67,9 @@ export function extractChildMotionValues(childTnList: XmlObject | undefined): {
 	motionPathRotateAuto?: boolean;
 	motionPathEditMode?: string;
 	motionPtsTypes?: string;
+	motionPathRotationAngle?: number;
+	motionPathRotationCenterX?: number;
+	motionPathRotationCenterY?: number;
 	rotationBy?: number;
 	rotationFrom?: number;
 	rotationTo?: number;
@@ -76,9 +83,13 @@ export function extractChildMotionValues(childTnList: XmlObject | undefined): {
 } {
 	let motionPath: string | undefined;
 	let motionOrigin: string | undefined;
-	let motionPathRotateAuto: boolean | undefined;
+	// Never parsed from XML (see the rAng note below); authoring-only hint.
+	const motionPathRotateAuto: boolean | undefined = undefined;
 	let motionPathEditMode: string | undefined;
 	let motionPtsTypes: string | undefined;
+	let motionPathRotationAngle: number | undefined;
+	let motionPathRotationCenterX: number | undefined;
+	let motionPathRotationCenterY: number | undefined;
 	let rotationBy: number | undefined;
 	let rotationFrom: number | undefined;
 	let rotationTo: number | undefined;
@@ -97,6 +108,9 @@ export function extractChildMotionValues(childTnList: XmlObject | undefined): {
 			motionPathRotateAuto,
 			motionPathEditMode,
 			motionPtsTypes,
+			motionPathRotationAngle,
+			motionPathRotationCenterX,
+			motionPathRotationCenterY,
 			rotationBy,
 			rotationFrom,
 			rotationTo,
@@ -115,19 +129,37 @@ export function extractChildMotionValues(childTnList: XmlObject | undefined): {
 		if (motionNode['@_path'] !== undefined) {
 			motionPath = String(motionNode['@_path']);
 			motionOrigin = motionNode['@_origin'] ? String(motionNode['@_origin']) : undefined;
-			// p:animMotion/@rAng = "0" means the element auto-rotates to follow the
-			// path tangent direction (equivalent to CSS offset-rotate: auto).
-			if (motionNode['@_rAng'] !== undefined) {
-				const rAng = String(motionNode['@_rAng']);
-				if (rAng === '0') {
-					motionPathRotateAuto = true;
-				}
-			}
+			// `p:animMotion/@rAng` is a ROTATION ANGLE (60000ths of a degree), and
+			// PowerPoint writes `rAng="0"` on every plain motion path it authors.
+			// It must NOT be read as "auto-rotate along the path": doing so spun
+			// every motion-path target to the path tangent (a leftward path turned
+			// right-pointing arrows 180 degrees, issue #132). OOXML has no
+			// auto-rotate flag on `p:animMotion`, so `motionPathRotateAuto` is
+			// never inferred from it; it stays a viewer-authoring-only hint.
 			if (motionNode['@_pathEditMode'] !== undefined) {
 				motionPathEditMode = String(motionNode['@_pathEditMode']);
 			}
 			if (motionNode['@_ptsTypes'] !== undefined) {
 				motionPtsTypes = String(motionNode['@_ptsTypes']);
+			}
+			if (motionNode['@_rAng'] !== undefined) {
+				const parsed = Number.parseInt(String(motionNode['@_rAng']), 10);
+				if (Number.isFinite(parsed)) {
+					motionPathRotationAngle = parsed / 60000;
+				}
+			}
+			const rotationCenter = motionNode['p:rCtr'] as XmlObject | undefined;
+			if (rotationCenter?.['@_x'] !== undefined) {
+				const parsed = Number.parseInt(String(rotationCenter['@_x']), 10);
+				if (Number.isFinite(parsed)) {
+					motionPathRotationCenterX = parsed / 1000;
+				}
+			}
+			if (rotationCenter?.['@_y'] !== undefined) {
+				const parsed = Number.parseInt(String(rotationCenter['@_y']), 10);
+				if (Number.isFinite(parsed)) {
+					motionPathRotationCenterY = parsed / 1000;
+				}
 			}
 		}
 	}
@@ -189,6 +221,9 @@ export function extractChildMotionValues(childTnList: XmlObject | undefined): {
 		motionPathRotateAuto,
 		motionPathEditMode,
 		motionPtsTypes,
+		motionPathRotationAngle,
+		motionPathRotationCenterX,
+		motionPathRotationCenterY,
 		rotationBy,
 		rotationFrom,
 		rotationTo,
@@ -264,15 +299,27 @@ export function extractKeyframes(
 		if (fmlaRaw !== undefined) {
 			entry.fmla = String(fmlaRaw);
 		}
+		if (decoded.colorRef) {
+			entry.colorRef = decoded.colorRef;
+		}
 		out.push(entry);
 	}
 
 	return out.length > 0 ? out : undefined;
 }
 
-function decodeKeyframeValue(
-	valNode: XmlObject,
-): { value: string | boolean | number; valueType: 'str' | 'bool' | 'int' | 'flt' | 'clr' } | null {
+/**
+ * Decode a CT_TLAnimVariant-shaped value wrapper (`p:val` on a `p:tav`
+ * keyframe, or `p:to`/`p:from`/`p:by` on a `p:set`/`p:anim` behaviour): one
+ * of `p:strVal`/`p:boolVal`/`p:intVal`/`p:fltVal`/`p:clrVal`. Exported so
+ * `native-animation-set-components.ts` can decode a `p:set`'s `p:to` the
+ * same way {@link extractKeyframes} decodes a `p:tav`'s `p:val`.
+ */
+export function decodeKeyframeValue(valNode: XmlObject): {
+	value: string | boolean | number;
+	valueType: 'str' | 'bool' | 'int' | 'flt' | 'clr';
+	colorRef?: PptxThemeColorRef;
+} | null {
 	const strVal = valNode['p:strVal'] as XmlObject | undefined;
 	if (strVal && strVal['@_val'] !== undefined) {
 		return { value: String(strVal['@_val']), valueType: 'str' };
@@ -309,7 +356,10 @@ function decodeKeyframeValue(
 		}
 		const scheme = clrVal['a:schemeClr'] as XmlObject | undefined;
 		if (scheme?.['@_val'] !== undefined) {
-			return { value: String(scheme['@_val']), valueType: 'clr' };
+			const colorRef = themeColorRefFromSchemeClr(scheme);
+			return colorRef
+				? { value: String(scheme['@_val']), valueType: 'clr', colorRef }
+				: { value: String(scheme['@_val']), valueType: 'clr' };
 		}
 	}
 
@@ -399,7 +449,12 @@ export function extractAnimationTargetId(cTn: XmlObject): string | undefined {
 		const targetElement = behavior?.['p:tgtEl'] as XmlObject | undefined;
 		const shapeTarget = targetElement?.['p:spTgt'] as XmlObject | undefined;
 		if (shapeTarget?.['@_spid']) {
-			return String(shapeTarget['@_spid']);
+			// `p:subSp/@_spid` names the actual descendant shape inside the
+			// group when the effect targets one member of a group without
+			// ungrouping it (see `PptxAnimationTarget.subShapeId`); prefer it
+			// over the enclosing group's own id.
+			const subSp = shapeTarget['p:subSp'] as XmlObject | undefined;
+			return String(subSp?.['@_spid'] ?? shapeTarget['@_spid']);
 		}
 	}
 
@@ -466,6 +521,13 @@ export function applyBuildList(timing: XmlObject, animations: PptxNativeAnimatio
 				anim.groupId = groupId;
 				if (bldLvl !== undefined && !Number.isNaN(bldLvl)) {
 					anim.buildLevel = bldLvl;
+				}
+				const resumeAttrs = extractBldPResumeAttrs(bldP);
+				anim.buildReverse = resumeAttrs.buildReverse;
+				anim.buildAdvAutoMs = resumeAttrs.buildAdvAutoMs;
+				const templates = extractBldPTemplates(bldP);
+				if (templates.length > 0) {
+					anim.buildTemplates = templates;
 				}
 			} else if (matchesGrp && bldLvl !== undefined && !Number.isNaN(bldLvl)) {
 				anim.buildLevel = bldLvl;
@@ -544,6 +606,8 @@ const TYPED_CTN_ATTRS: ReadonlySet<string> = new Set([
 	'@_accel',
 	'@_decel',
 	'@_restart',
+	'@_repeatDur',
+	'@_spd',
 	'@_grpId',
 	// afterEffect is surfaced as a typed boolean separately
 	'@_afterEffect',
@@ -635,6 +699,7 @@ const VALID_CONDITION_EVENTS = new Set<string>([
 	'onNext',
 	'onPrev',
 	'onStopAudio',
+	'onDblClick',
 ]);
 
 /**

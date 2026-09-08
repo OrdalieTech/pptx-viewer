@@ -10,6 +10,7 @@ export {
 	extractPathPoints,
 	interpolateWidth,
 	generatePressureCircles,
+	generateNibMarks,
 	hasPressureVariation,
 	pressuresToWidths,
 	estimatePathLength,
@@ -22,11 +23,20 @@ export {
 	resolveInkWidth,
 	INK_REPLAY_KEYFRAME_NAME,
 	INK_REPLAY_KEYFRAMES,
+	buildContentPartStrokes,
+	contentPartViewBox,
+	buildInkGroupStrokes,
+	inkGroupViewBox,
 } from 'pptx-viewer-shared';
 export type {
 	PathPoint,
 	PressureConfig,
 	PressureCircle,
+	NibMarkConfig,
+	NibMark,
 	InkReplayConfig,
 	InkStrokeAnimationStyle,
+	InkStrokeView,
+	ContentPartStrokeView,
+	InkGroupStrokeView,
 } from 'pptx-viewer-shared';

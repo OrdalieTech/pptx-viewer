@@ -1,15 +1,22 @@
 <script setup lang="ts">
 import type { PptxTableCellStyle } from 'pptx-viewer-core';
-import { FILL_MODE_OPTIONS, GRADIENT_TYPE_OPTIONS, PATTERN_OPTIONS } from 'pptx-viewer-shared';
+import {
+	FILL_MODE_OPTIONS,
+	GRADIENT_TYPE_OPTIONS,
+	PATTERN_PRESET_OPTIONS,
+} from 'pptx-viewer-shared';
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
+
+import { injectRecentColors } from '../../composables/recent-colors-context';
 
 /**
  * TableCellAdvancedFill: Vue port of React's inspector
  * `TableCellAdvancedFill.tsx`. Advanced (gradient / pattern) cell fill controls
  * plus cell margins. Fill-mode, gradient-type and pattern-preset option lists
- * come from `pptx-viewer-shared` (`render/table-advanced-fill.ts`); their i18n
- * keys are resolved via vue-i18n's `t()` against the host dictionary.
+ * come from `pptx-viewer-shared` (`render/table-advanced-fill.ts`,
+ * `render/fill-pattern-label-keys.ts`); their i18n keys are resolved via
+ * vue-i18n's `t()` against the host dictionary.
  */
 const props = defineProps<{
 	cellStyle: PptxTableCellStyle;
@@ -21,6 +28,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const recentColors = injectRecentColors();
 
 const MARGIN_FIELDS: Array<[keyof PptxTableCellStyle, string]> = [
 	['marginTop', 'pptx.table.marginTop'],
@@ -75,6 +83,7 @@ function addStop(): void {
 		<label class="flex flex-col gap-1">
 			<span class="text-[11px] text-muted-foreground">{{ t('pptx.table.fillMode') }}</span>
 			<select
+				:aria-label="t('pptx.table.fillMode')"
 				class="w-full rounded border border-border bg-muted px-2 py-1 text-[11px]"
 				:disabled="!canEdit"
 				:value="fillMode"
@@ -92,6 +101,7 @@ function addStop(): void {
 				<label class="flex flex-col gap-0.5">
 					<span class="text-[11px] text-muted-foreground">{{ t('pptx.table.gradientType') }}</span>
 					<select
+						:aria-label="t('pptx.table.gradientType')"
 						class="w-full rounded border border-border bg-muted px-2 py-1 text-[11px]"
 						:disabled="!canEdit"
 						:value="gradientType"
@@ -132,6 +142,7 @@ function addStop(): void {
 					:disabled="!canEdit"
 					:value="stop.color"
 					@input="updateStop(idx, { color: ($event.target as HTMLInputElement).value })"
+					@change="recentColors?.push(($event.target as HTMLInputElement).value)"
 				/>
 				<input
 					type="number"
@@ -159,6 +170,7 @@ function addStop(): void {
 			<label class="flex flex-col gap-0.5">
 				<span class="text-[11px] text-muted-foreground">{{ t('pptx.table.patternPreset') }}</span>
 				<select
+					:aria-label="t('pptx.table.patternPreset')"
 					class="w-full rounded border border-border bg-muted px-2 py-1 text-[11px]"
 					:disabled="!canEdit"
 					:value="cellStyle.patternFillPreset ?? 'ltDnDiag'"
@@ -166,7 +178,9 @@ function addStop(): void {
 						emit('update', { patternFillPreset: ($event.target as HTMLSelectElement).value })
 					"
 				>
-					<option v-for="p in PATTERN_OPTIONS" :key="p" :value="p">{{ p }}</option>
+					<option v-for="p in PATTERN_PRESET_OPTIONS" :key="p.value" :value="p.value">
+						{{ t(p.labelKey) }}
+					</option>
 				</select>
 			</label>
 			<div class="grid grid-cols-2 gap-1.5">
@@ -182,6 +196,7 @@ function addStop(): void {
 						@input="
 							emit('update', { patternFillForeground: ($event.target as HTMLInputElement).value })
 						"
+						@change="recentColors?.push(($event.target as HTMLInputElement).value)"
 					/>
 				</label>
 				<label class="flex flex-col gap-0.5">
@@ -196,6 +211,7 @@ function addStop(): void {
 						@input="
 							emit('update', { patternFillBackground: ($event.target as HTMLInputElement).value })
 						"
+						@change="recentColors?.push(($event.target as HTMLInputElement).value)"
 					/>
 				</label>
 			</div>

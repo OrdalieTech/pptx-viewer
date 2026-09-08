@@ -18,7 +18,7 @@
  */
 import { ChangeDetectionStrategy, Component, input, output, signal } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
-import type { PptxElement, PptxTransitionType } from 'pptx-viewer-core';
+import type { PptxElement } from 'pptx-viewer-core';
 
 import type { ToolbarActionId } from '../internal/shared';
 import { RibbonAnimationsSectionComponent } from './ribbon-animations-section.component';
@@ -65,6 +65,8 @@ import { RibbonViewSectionComponent } from './ribbon-view-section.component';
 					(broadcast)="broadcast.emit()"
 					(openCustomShows)="openCustomShows.emit()"
 					(openSetUpSlideShow)="openSetUpSlideShow.emit()"
+					[activeSlideHidden]="activeSlideHidden()"
+					(toggleHideSlide)="toggleHideSlide.emit()"
 				/>
 			}
 			@case ('review') {
@@ -89,9 +91,8 @@ import { RibbonViewSectionComponent } from './ribbon-view-section.component';
 					[snapToShape]="snapToShape()"
 					[eyedropperActive]="eyedropperActive()"
 					(openSorter)="openSorter.emit()"
-					(toggleNotes)="toggleNotes.emit()"
-					(print)="print.emit()"
-					(openShortcuts)="openShortcuts.emit()"
+					(openReadingView)="openReadingView.emit()"
+					(openOutlineView)="openOutlineView.emit()"
 					(openMasterView)="openMasterView.emit()"
 					(toggleGrid)="toggleGrid.emit()"
 					(toggleRulers)="toggleRulers.emit()"
@@ -116,18 +117,14 @@ import { RibbonViewSectionComponent } from './ribbon-view-section.component';
 				<pptx-ribbon-design-section
 					[themeGalleryOpen]="themeGalleryOpen()"
 					(toggleThemeGallery)="toggleThemeGallery.emit()"
-					(info)="info.emit()"
+					(editTheme)="editTheme.emit()"
+					(openSlideSize)="openSlideSize.emit()"
 					(toggleInspector)="toggleInspector.emit()"
 				/>
 			}
 			@case ('transitions') {
 				<pptx-ribbon-transitions-section
 					[slideIndex]="slideIndex()"
-					[selectedTransition]="selectedTransition()"
-					[transitionDurationSec]="transitionDurationSec()"
-					(transitionChange)="selectedTransition.set($event)"
-					(durationChange)="transitionDurationSec.set($event)"
-					(present)="present.emit()"
 					(toggleInspector)="toggleInspector.emit()"
 				/>
 			}
@@ -148,7 +145,7 @@ import { RibbonViewSectionComponent } from './ribbon-view-section.component';
 					{{ 'pptx.settings.keyboardShortcuts' | translate }}
 				</button>
 				<button type="button" class="pptx-rb-pill" (click)="a11y.emit()">
-					{{ 'pptx.ribbon.accessibility' | translate }}
+					{{ 'pptx.ribbon.accessibilityCheck' | translate }}
 				</button>
 			}
 			@case ('record') {
@@ -175,6 +172,8 @@ export class RibbonContentSecondaryComponent {
 	readonly themeGalleryOpen = input<boolean>(false);
 	readonly spellCheckEnabled = input<boolean>(false);
 	readonly showSubtitles = input<boolean>(false);
+	/** Whether the active slide is hidden, for Hide Slide's pressed state. */
+	readonly activeSlideHidden = input<boolean>(false);
 	/** Toolbar buttons the host wants hidden (threaded to the Slide Show section). */
 	readonly hiddenActions = input<ToolbarActionId[]>([]);
 
@@ -189,17 +188,23 @@ export class RibbonContentSecondaryComponent {
 	readonly recordFromCurrent = output<void>();
 	readonly spellCheckChange = output<boolean>();
 	readonly broadcast = output<void>();
-	readonly info = output<void>();
 	readonly print = output<void>();
 	readonly comments = output<void>();
 	readonly a11y = output<void>();
 	readonly link = output<void>();
 	readonly openSorter = output<void>();
+	/** View tab > Reading View: the deck full-window, not the slide show. */
+	readonly openReadingView = output<void>();
+	readonly openOutlineView = output<void>();
 	readonly openMasterView = output<void>();
 	readonly toggleNotes = output<void>();
 	readonly toggleInspector = output<void>();
 	readonly drawToolChange = output<DrawToolState>();
 	readonly toggleThemeGallery = output<void>();
+	/** Design > Edit Theme: open the theme gallery in its customise mode. */
+	readonly editTheme = output<void>();
+	/** Design > Slide Size: surface the inspector card that owns the size. */
+	readonly openSlideSize = output<void>();
 	readonly toggleGrid = output<void>();
 	readonly toggleRulers = output<void>();
 	readonly toggleGuides = output<void>();
@@ -211,16 +216,19 @@ export class RibbonContentSecondaryComponent {
 	readonly zoomToFit = output<void>();
 	readonly toggleEyedropper = output<void>();
 	readonly openSetUpSlideShow = output<void>();
+	/** PowerPoint's Hide Slide toggle for the active slide. */
+	readonly toggleHideSlide = output<void>();
 	readonly openCompare = output<void>();
 	readonly openShortcuts = output<void>();
 	readonly openSettings = output<void>();
 
 	// ── Tab-local state (owned here so it survives tab switches) ────────────────
+	// The Transitions tab keeps no state here any more: its draft is read back
+	// from the active slide's own `transition`, which survives a tab switch
+	// because it lives in the deck rather than in a component.
 	protected readonly activeTool = signal<DrawTool>('select');
 	protected readonly drawingColor = signal<string>('#000000');
 	protected readonly drawingWidth = signal<number>(3);
-	protected readonly selectedTransition = signal<PptxTransitionType>('none');
-	protected readonly transitionDurationSec = signal<number>(0.5);
 
 	/** Sync the draw-tool signals with a Draw-tab change and re-broadcast it. */
 	protected onDrawChange(state: DrawToolState): void {

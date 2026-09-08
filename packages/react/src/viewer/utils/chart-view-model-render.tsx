@@ -17,7 +17,12 @@
  * @module chart-view-model-render
  */
 import type { PptxChartData, PptxElement } from 'pptx-viewer-core';
-import { buildChartViewModel, chartPartToAttrs, getChartStylePalette } from 'pptx-viewer-shared';
+import {
+	buildChartViewModel,
+	chartPartToAttrs,
+	computeChartLegendLayout,
+	getChartStylePalette,
+} from 'pptx-viewer-shared';
 import type {
 	ChartPartRef,
 	ChartViewModel,
@@ -31,8 +36,6 @@ import type {
 	SvgText,
 } from 'pptx-viewer-shared';
 import React from 'react';
-
-const LEGEND_ITEM_WIDTH = 80;
 
 /**
  * `data-chart-*` hit-testing attributes for a tagged data-mark primitive.
@@ -66,11 +69,11 @@ export function buildReactChartViewModel(element: PptxElement): ChartViewModel {
 	if (element.type !== 'chart' || !element.chartData) {
 		return buildChartViewModel(element);
 	}
-	const palette = resolveReactPalette(element.chartData);
-	const themedElement: PptxElement = {
-		...element,
-		chartData: { ...element.chartData, colorPalette: palette },
-	};
+	const palette = resolveReactPalette(element.chartData),
+		themedElement: PptxElement = {
+			...element,
+			chartData: { ...element.chartData, colorPalette: palette },
+		};
 	return buildChartViewModel(themedElement);
 }
 
@@ -89,7 +92,9 @@ function renderPrimitive(prim: SvgPrimitive, key: string): React.ReactNode {
 					rx={r.rx ?? 0}
 					opacity={r.opacity ?? 1}
 					{...partAttrs(r.part)}
-				/>
+				>
+					{r.title !== undefined ? <title>{r.title}</title> : null}
+				</rect>
 			);
 		}
 		case 'path': {
@@ -103,7 +108,13 @@ function renderPrimitive(prim: SvgPrimitive, key: string): React.ReactNode {
 					strokeWidth={p.strokeWidth ?? 0}
 					fillOpacity={p.opacity ?? 1}
 					{...partAttrs(p.part)}
-				/>
+				>
+					{/* A single string child on purpose: the old region-map renderer
+					    interpolated the value next to the name, which makes `children`
+					    an ARRAY, and React refuses arrays inside <title> - every region
+					    logged a warning and no tooltip was produced. */}
+					{p.title !== undefined ? <title>{p.title}</title> : null}
+				</path>
 			);
 		}
 		case 'polyline': {
@@ -117,7 +128,9 @@ function renderPrimitive(prim: SvgPrimitive, key: string): React.ReactNode {
 					fill={p.fill}
 					opacity={p.opacity ?? 1}
 					{...partAttrs(p.part)}
-				/>
+				>
+					{p.title !== undefined ? <title>{p.title}</title> : null}
+				</polyline>
 			);
 		}
 		case 'circle': {
@@ -131,7 +144,9 @@ function renderPrimitive(prim: SvgPrimitive, key: string): React.ReactNode {
 					fill={c.fill}
 					opacity={c.opacity ?? 1}
 					{...partAttrs(c.part)}
-				/>
+				>
+					{c.title !== undefined ? <title>{c.title}</title> : null}
+				</circle>
 			);
 		}
 		case 'line': {
@@ -147,7 +162,10 @@ function renderPrimitive(prim: SvgPrimitive, key: string): React.ReactNode {
 					strokeWidth={l.strokeWidth}
 					strokeDasharray={l.dashArray}
 					opacity={l.opacity ?? 1}
-				/>
+					transform={l.transform}
+				>
+					{l.title !== undefined ? <title>{l.title}</title> : null}
+				</line>
 			);
 		}
 		case 'polygon': {
@@ -161,8 +179,11 @@ function renderPrimitive(prim: SvgPrimitive, key: string): React.ReactNode {
 					strokeWidth={p.strokeWidth}
 					opacity={p.opacity ?? 1}
 					strokeDasharray={p.dashArray}
+					transform={p.transform}
 					{...partAttrs(p.part)}
-				/>
+				>
+					{p.title !== undefined ? <title>{p.title}</title> : null}
+				</polygon>
 			);
 		}
 		case 'text': {
@@ -201,6 +222,8 @@ function renderText(t: SvgText, key: string): React.ReactNode {
 			fontSize={t.fontSize}
 			fill={t.fill}
 			fontWeight={t.fontWeight ?? 'normal'}
+			fontStyle={t.fontStyle ?? 'normal'}
+			fontFamily={t.fontFamily}
 			dominantBaseline={t.dominantBaseline as React.SVGProps<SVGTextElement>['dominantBaseline']}
 			opacity={t.opacity ?? 1}
 			transform={t.transform}
@@ -231,26 +254,74 @@ export function renderChartViewModel(
 	vm: ChartViewModel,
 	preserveAspectRatio: 'none' | 'xMidYMid meet' = 'none',
 ): React.ReactNode {
-	const isVerticalLegend = vm.legendAnchor === 'start';
+	const legendItems = computeChartLegendLayout(vm);
 	return (
 		<svg
 			className='w-full h-full pointer-events-none'
 			viewBox={`0 0 ${vm.svgWidth} ${vm.svgHeight}`}
 			preserveAspectRatio={preserveAspectRatio}
 		>
-			<rect x={0} y={0} width={vm.svgWidth} height={vm.svgHeight} fill='#0f172a11' />
+			{vm.defs && vm.defs.length > 0 && (
+				<defs>
+					{vm.defs.map((def, i) => (
+						<pattern
+							key={`${elementId}-def-${i}`}
+							id={def.id}
+							patternUnits={def.patternUnits}
+							x={def.x}
+							y={def.y}
+							width={def.width}
+							height={def.height}
+						>
+							<image
+								href={def.href}
+								x={0}
+								y={0}
+								width={def.width}
+								height={def.height}
+								preserveAspectRatio={def.preserveAspectRatio}
+							/>
+						</pattern>
+					))}
+				</defs>
+			)}
+
+			{vm.areaFill && (
+				<rect
+					x={0}
+					y={0}
+					width={vm.svgWidth}
+					height={vm.svgHeight}
+					rx={vm.areaRadius}
+					fill={vm.areaFill}
+				/>
+			)}
 
 			{vm.title && (
 				<text
 					x={vm.titleX}
 					y={vm.titleY}
 					textAnchor='middle'
-					fontSize={12}
-					fontWeight={600}
-					fill='#1e293b'
+					fontSize={vm.titleStyle?.fontSize ?? 12}
+					fontWeight={vm.titleStyle?.fontWeight ?? 600}
+					fontFamily={vm.titleStyle?.fontFamily}
+					fill={vm.titleStyle?.fill ?? '#1e293b'}
 					data-chart-part='title'
 				>
-					{vm.title}
+					{vm.titleRunSpans && vm.titleRunSpans.length > 0
+						? vm.titleRunSpans.map((run, i) => (
+								<tspan
+									key={`${elementId}-title-run-${i}`}
+									fontSize={run.fontSize}
+									fontWeight={run.fontWeight}
+									fontStyle={run.fontStyle}
+									fontFamily={run.fontFamily}
+									fill={run.fill}
+								>
+									{run.text}
+								</tspan>
+							))
+						: vm.title}
 				</text>
 			)}
 
@@ -301,20 +372,25 @@ export function renderChartViewModel(
 
 			{vm.dataLabels.map((dl, i) => renderText(dl, `${elementId}-dl-${i}`))}
 
-			{vm.legend.map((entry, i) => {
-				const x = isVerticalLegend
-					? vm.legendX
-					: vm.legendX - (vm.legend.length * LEGEND_ITEM_WIDTH) / 2 + i * LEGEND_ITEM_WIDTH;
-				const y = isVerticalLegend ? vm.legendY + i * 14 : vm.legendY;
-				return (
-					<g key={`${elementId}-lg-${i}`} transform={`translate(${x.toFixed(1)},${y.toFixed(1)})`}>
-						<rect x={0} y={-7} width={10} height={10} rx={2} fill={entry.color} />
-						<text x={13} y={3} fontSize={9} fill='#475569'>
-							{entry.label}
-						</text>
-					</g>
-				);
-			})}
+			{legendItems.map((item, i) => (
+				<g
+					key={`${elementId}-lg-${i}`}
+					transform={`translate(${item.x.toFixed(1)},${item.y.toFixed(1)})`}
+				>
+					<rect x={0} y={-7} width={10} height={10} rx={2} fill={item.color} />
+					<text
+						x={13}
+						y={3}
+						fontSize={item.fontSize}
+						fill={item.fill}
+						fontWeight={item.fontWeight}
+						fontStyle={item.fontStyle}
+						fontFamily={item.fontFamily}
+					>
+						{item.label}
+					</text>
+				</g>
+			))}
 		</svg>
 	);
 }

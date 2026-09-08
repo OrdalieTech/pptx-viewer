@@ -1,5 +1,15 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import {
+	attachPresentationVisibilityPause,
+	buildMorphAnimationRules,
+	buildMorphTransitionPlan,
+	createPresenterShowGuard,
+	firstShowSlideIndex,
+	morphOptionToMode,
+	presentationEntrySlideIndex,
+} from 'pptx-viewer-shared';
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 
+import { acceptsPresentationInput } from './presentation-mode/audience-content-store';
 import type {
 	PresentationTransitionOverlayState,
 	SlideAdvanceTrigger,
@@ -8,6 +18,7 @@ import type {
 } from './presentation-mode/types';
 import { useAnimationPlayback } from './presentation-mode/useAnimationPlayback';
 import { useAudienceMode } from './presentation-mode/useAudienceMode';
+import { usePresentationActionExtensions } from './presentation-mode/usePresentationActionExtensions';
 import { usePresentationKeyboard } from './presentation-mode/usePresentationKeyboard';
 import { usePresenterConsole } from './presentation-mode/usePresenterConsole';
 import { usePresenterWindow } from './presentation-mode/usePresenterWindow';
@@ -25,22 +36,30 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 	const {
 		mode,
 		slides,
+		templateElementsBySlideId,
 		visibleSlideIndexes,
+		canvasSize,
+		themeColorMap,
 		activeSlideIndex,
 		containerRef,
 		content,
 		onSetMode,
 		onSetActiveSlideIndex,
 		onPlayActionSound,
+		onStopActionSound,
 		onSetPointerTool,
 		onEraseAnnotations,
 		onToggleInkMarkup,
 		onToggleToolbar,
+		onToggleSubtitles,
 		onSaveRehearsalTimings,
 		loopContinuously,
 		showWithAnimation,
 		useTimings,
 		endWithBlackSlide = true,
+		customShows = [],
+		activeCustomShowId = null,
+		onSetActiveCustomShowId,
 	} = input;
 
 	// -----------------------------------------------------------------------
@@ -61,9 +80,11 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 	// slide (Options > Advanced > "End with black slide").
 	const [endOfShowVisible, setEndOfShowVisible] = useState(false);
 	const [presentationStartTime, setPresentationStartTime] = useState<number | null>(null);
-	// Guards against the fullscreenchange listener exiting present mode
-	// when we intentionally exit fullscreen to switch to presenter view.
-	const switchingToPresenterRef = useRef(false);
+	// Guards against the fullscreenchange listener exiting present mode when we
+	// intentionally leave fullscreen to switch to presenter view. React grew this
+	// latch first, as a private ref; it is now shared so the other four bindings
+	// classify the same exit the same way (see `presenter-show-lifecycle`).
+	const showGuard = useMemo(() => createPresenterShowGuard(), []);
 
 	// -----------------------------------------------------------------------
 	// Sub-hooks
@@ -81,8 +102,17 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		handleHoverStart,
 		handleHoverEnd,
 		runPresentationEntranceAnimations,
+		seedSlideAnimations,
+		startSlideAnimations,
+		isSeededCompleted,
 		presentationTimersRef,
-	} = useAnimationPlayback({ slides, onPlayActionSound, showWithAnimation });
+	} = useAnimationPlayback({
+		slides,
+		onPlayActionSound,
+		showWithAnimation,
+		canvasSize,
+		themeColorMap,
+	});
 
 	const {
 		rehearsing,
@@ -105,15 +135,31 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		setPresenterMode,
 	});
 
-	// Advancing past the last slide either shows the black end-of-show
-	// screen (PowerPoint's "End with black slide") or exits directly.
-	const handleAdvancePastLastSlide = useCallback(() => {
-		if (endWithBlackSlide) {
-			setEndOfShowVisible(true);
-		} else {
-			onSetMode('edit');
+	// Leaving the show for ANY reason also ends the presenter console. Without
+	// this the console stayed "open" after the show exited, so the audience
+	// window was never told to close and sat on the last slide indefinitely.
+	useEffect(() => {
+		if (mode !== 'present') {
+			setPresenterMode(false);
 		}
-	}, [endWithBlackSlide, onSetMode]);
+	}, [mode]);
+
+	// Wave-4 `PresentationActionRunner` extensions (customShow, lastViewed,
+	// openFile, openPresentation, playMedia, oleVerb) and the end-of-show hook that
+	// lets a `returnAfter` custom show resume its origin. Extracted: see
+	// `usePresentationActionExtensions` for why the navigator is wired in via
+	// `bindNavigateToSlide` after `useSlideNavigation` builds it below.
+	const actionExtensions = usePresentationActionExtensions({
+		slides,
+		customShows,
+		activeCustomShowId,
+		onSetActiveCustomShowId,
+		presentationSlideIndex,
+		containerRef,
+		endWithBlackSlide,
+		onSetMode,
+		setEndOfShowVisible,
+	});
 
 	const {
 		movePresentationSlide: moveNavigationSlide,
@@ -130,22 +176,38 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		onSetMode,
 		onSetActiveSlideIndex,
 		onPlayActionSound,
+		onStopActionSound,
 		loopContinuously,
 		useTimings,
-		onAdvancePastLastSlide: handleAdvancePastLastSlide,
+		onAdvancePastLastSlide: actionExtensions.handleAdvancePastLastSlide,
 		playNextAnimationGroup,
 		clearPresentationTimers,
-		runPresentationEntranceAnimations,
+		seedSlideAnimations,
+		startSlideAnimations,
 		presentationTimersRef,
 		rehearsing,
 		recordCurrentSlideTime,
 		setShowRehearsalSummary,
+		onLastViewed: actionExtensions.onLastViewed,
+		onCustomShow: actionExtensions.onCustomShow,
+		onOpenFile: actionExtensions.onOpenFile,
+		onOpenPresentation: actionExtensions.onOpenPresentation,
+		onPlayMedia: actionExtensions.onPlayMedia,
+		onOleVerb: actionExtensions.onOleVerb,
 	});
+
+	actionExtensions.bindNavigateToSlide(navigateToSlide);
 
 	// While the end-of-show screen is up, the next forward advance exits the
 	// show and a backward advance returns to the last slide.
 	const movePresentationSlide = useCallback(
 		(direction: 1 | -1, trigger: SlideAdvanceTrigger = 'explicit') => {
+			// An audience display mirrors the presenter and never drives itself: a
+			// tap or swipe of its own would move it off the presenter's slide, and
+			// the next snapshot would drag it back.
+			if (!acceptsPresentationInput()) {
+				return;
+			}
 			if (endOfShowVisible) {
 				setEndOfShowVisible(false);
 				if (direction === 1) {
@@ -153,16 +215,33 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 				}
 				return;
 			}
+			// A slide entered backward shows its builds already complete. The next
+			// back press replays them from the start rather than leaving the slide,
+			// so a presenter who overshot can watch the build again (PowerPoint).
+			if (direction === -1 && isSeededCompleted()) {
+				runPresentationEntranceAnimations(presentationSlideIndex);
+				return;
+			}
 			moveNavigationSlide(direction, trigger);
 		},
-		[endOfShowVisible, moveNavigationSlide, onSetMode],
+		[
+			endOfShowVisible,
+			isSeededCompleted,
+			moveNavigationSlide,
+			onSetMode,
+			presentationSlideIndex,
+			runPresentationEntranceAnimations,
+		],
 	);
 
 	const { handleZoomClick, zoomReturnSlideIndex, returnToZoomSlide, clearZoomReturn } =
 		useZoomNavigation({ navigateToSlide });
 	const openAllSlides = useCallback(() => setAllSlidesOpen(true), []);
 	const closeAllSlides = useCallback(() => setAllSlidesOpen(false), []);
-	const presenterConsole = usePresenterConsole(presentationSlideIndex);
+	// Gated on the show being live: this hook is mounted for the whole session,
+	// so an always-on console clock re-rendered the entire editor at 1 Hz while
+	// the user was only editing (issue #145).
+	const presenterConsole = usePresenterConsole(presentationSlideIndex, mode === 'present');
 
 	const {
 		openAudienceWindow,
@@ -188,6 +267,9 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		},
 		containerRef,
 		onSnapshot: presenterConsole.applyAudienceSnapshot,
+		// The presenter ended the session but this tab could not close itself:
+		// show the black end-of-slide-show screen rather than the editor.
+		onPresenterEnded: () => setEndOfShowVisible(true),
 	});
 
 	// -----------------------------------------------------------------------
@@ -212,6 +294,20 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		onSetMode('present');
 	}, [containerRef, onSetMode, setRehearsing]);
 
+	/**
+	 * "From Beginning" / F5: unlike {@link enterPresentMode} ("From Current
+	 * Slide"), this ignores wherever the editor's active slide happens to be
+	 * and seeds it to the show's first slide first, so the entry effect below
+	 * (which reads the active slide) opens there. Also a user-gesture handler.
+	 */
+	const enterPresentModeFromBeginning = useCallback(() => {
+		const first = firstShowSlideIndex(visibleSlideIndexes);
+		if (first !== undefined) {
+			onSetActiveSlideIndex(first);
+		}
+		enterPresentMode();
+	}, [visibleSlideIndexes, onSetActiveSlideIndex, enterPresentMode]);
+
 	const enterPresenterView = useCallback(() => {
 		setPresenterMode(true);
 		setRehearsing(false);
@@ -226,9 +322,9 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 	const togglePresenterView = useCallback(() => {
 		if (!presenterMode) {
 			// Switch from fullscreen to presenter view: exit fullscreen first.
-			// Set the guard so the fullscreenchange listener doesn't exit
+			// Arm the guard so the fullscreenchange listener doesn't exit
 			// present mode when it sees fullscreen disappear.
-			switchingToPresenterRef.current = true;
+			showGuard.expectAudienceBounce();
 			try {
 				if (document.fullscreenElement) {
 					void document.exitFullscreen().catch(() => {
@@ -256,7 +352,7 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 				/* fullscreen not supported */
 			}
 		}
-	}, [presenterMode, presentationStartTime, containerRef]);
+	}, [presenterMode, presentationStartTime, containerRef, showGuard]);
 
 	// -----------------------------------------------------------------------
 	// Keyboard navigation
@@ -267,12 +363,14 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		movePresentationSlide,
 		navigateToSlide,
 		slideCount: slides.length,
+		showSlideIndexes: visibleSlideIndexes,
 		onSetMode,
 		onSetPointerTool,
 		onEraseAnnotations,
 		onToggleInkMarkup,
 		onToggleToolbar,
 		onShowAllSlides: openAllSlides,
+		onToggleSubtitles,
 		onToggleBlackScreen: () =>
 			presenterConsole.setBlackout(
 				presenterConsole.snapshot.blackout === 'black' ? 'none' : 'black',
@@ -301,15 +399,57 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 	scheduleAutoAdvanceRef.current = scheduleAutoAdvanceForSlide;
 	const activeSlideIndexRef = useRef(activeSlideIndex);
 	activeSlideIndexRef.current = activeSlideIndex;
+	const visibleSlideIndexesRef = useRef(visibleSlideIndexes);
+	visibleSlideIndexesRef.current = visibleSlideIndexes;
+	const onSetActiveSlideIndexRef = useRef(onSetActiveSlideIndex);
+	onSetActiveSlideIndexRef.current = onSetActiveSlideIndex;
+	const presentationSlideIndexRef = useRef(presentationSlideIndex);
+	presentationSlideIndexRef.current = presentationSlideIndex;
+	const clearPresentationTimersRef = useRef(clearPresentationTimers);
+	clearPresentationTimersRef.current = clearPresentationTimers;
 
+	// A hidden tab is a paused show: stage media and cross-slide persistent
+	// audio stop, and the pending auto-advance timer is cancelled so the deck
+	// does not run on unseen. When the tab is visible again the media resumes
+	// and auto-advance re-arms for the slide the show is currently on.
 	useEffect(() => {
+		if (mode !== 'present') {
+			return;
+		}
+		return attachPresentationVisibilityPause({
+			root: containerRef.current ?? undefined,
+			onHidden: () => clearPresentationTimersRef.current(),
+			onVisible: () => scheduleAutoAdvanceRef.current(presentationSlideIndexRef.current),
+		});
+	}, [mode, containerRef]);
+
+	// Layout effect on purpose: entering the show must seed the first slide's
+	// animation states BEFORE the browser paints the presentation stage, or the
+	// opening slide flashes every entrance-animated element at its final state
+	// for a frame before snapping back to replay (issue #132).
+	useLayoutEffect(() => {
 		if (mode === 'present') {
 			// Only runs when entering present mode (mode changes to "present").
 			// Slide-to-slide navigation during presentation is handled entirely
 			// by executeSlideTransition; re-running here on every activeSlideIndex
 			// change would duplicate entrance animations and cause visible lag.
-			const idx = activeSlideIndexRef.current;
+			//
+			// The active slide wins only when the show actually includes it
+			// ("From Current Slide"); otherwise the show opens on its own first
+			// slide instead of a slide the author took out of the show
+			// (`presentationEntrySlideIndex`, see its own doc for the full rule).
+			const idx = presentationEntrySlideIndex(
+				activeSlideIndexRef.current,
+				visibleSlideIndexesRef.current,
+			);
 			setPresentationSlideIndex(idx);
+			// The stage paints the ACTIVE slide (navigation moves both indexes
+			// together, see `executeSlideTransition`), so an entry slide other
+			// than the active one has to move it as well or the counter says
+			// "2 / 3" over a stage still showing slide 1.
+			if (idx !== activeSlideIndexRef.current) {
+				onSetActiveSlideIndexRef.current(idx);
+			}
 			runEntranceAnimationsRef.current(idx);
 			scheduleAutoAdvanceRef.current(idx);
 		} else {
@@ -359,8 +499,7 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		const handleFullscreenChange = () => {
 			// When toggling to presenter view, we intentionally exit fullscreen.
 			// Don't treat that as "user wants to leave present mode".
-			if (switchingToPresenterRef.current) {
-				switchingToPresenterRef.current = false;
+			if (showGuard.classifyFullscreenExit() === 'restore-show') {
 				wasFullscreen = Boolean(document.fullscreenElement);
 				return;
 			}
@@ -387,6 +526,7 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		recordCurrentSlideTime,
 		presentationSlideIndex,
 		setShowRehearsalSummary,
+		showGuard,
 	]);
 
 	// -----------------------------------------------------------------------
@@ -403,6 +543,62 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 	}, [presentationTimersRef]);
 
 	// -----------------------------------------------------------------------
+	// Morph transition
+	// -----------------------------------------------------------------------
+
+	// PowerPoint's Morph is a FLIP animation: the ARRIVING slide's elements are
+	// what move, starting from wherever their counterpart sat on the leaving
+	// slide. So the per-element animations are merged into the live stage's
+	// animation states here, and only the elements with no counterpart are left
+	// for the overlay to fade out. See shared `buildMorphTransitionPlan`.
+	const morphPlan = useMemo(() => {
+		if (!transitionOverlay || transitionOverlay.transition.type !== 'morph') {
+			return undefined;
+		}
+		const incoming = slides[transitionOverlay.incomingSlideIndex];
+		return buildMorphTransitionPlan(
+			slides[transitionOverlay.outgoingSlideIndex],
+			incoming,
+			transitionOverlay.durationMs,
+			morphOptionToMode(transitionOverlay.transition.morphOption),
+			// `PresentationStage` stacks the incoming slide's elements above its
+			// template shapes (`zIndex = templateElements.length + index`), so a
+			// z-index journey has to start counting where the stage does.
+			{ zIndexBase: incoming ? (templateElementsBySlideId?.[incoming.id]?.length ?? 0) : 0 },
+		);
+	}, [transitionOverlay, slides, templateElementsBySlideId]);
+
+	const morphedElementStates = useMemo(() => {
+		if (!morphPlan || morphPlan.incomingAnimations.size === 0) {
+			return presentationElementStates;
+		}
+		const merged = new Map(presentationElementStates);
+		for (const [elementId, animation] of morphPlan.incomingAnimations) {
+			const existing = merged.get(elementId);
+			// An entrance animation on the arriving slide wins: PowerPoint plays
+			// the build, not the morph, for a shape that is explicitly animated in.
+			if (existing?.cssAnimation) {
+				continue;
+			}
+			merged.set(elementId, { ...existing, visible: true, cssAnimation: animation });
+		}
+		return merged;
+	}, [morphPlan, presentationElementStates]);
+
+	// A picture's source crop rides the `<img>` INSIDE the element, so unlike
+	// every other morph animation it cannot be merged into the element state
+	// above: it needs a descendant rule. The stage injects this stylesheet, and
+	// the ids are unique to the arriving slide, so no scope attribute is needed
+	// (see `buildMorphAnimationRules`). Issue #148.
+	const morphedKeyframesCss = useMemo(() => {
+		if (!morphPlan) {
+			return presentationKeyframesCss;
+		}
+		const imageRules = buildMorphAnimationRules(morphPlan, '', 'incoming', 'image');
+		return `${presentationKeyframesCss ?? ''}\n${morphPlan.keyframesCss}\n${imageRules}`;
+	}, [morphPlan, presentationKeyframesCss]);
+
+	// -----------------------------------------------------------------------
 	// Return
 	// -----------------------------------------------------------------------
 
@@ -412,9 +608,10 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		presentationSlideVisible,
 		transitionOverlay,
 		handleTransitionOverlayComplete,
+		morphPlan,
 		presentationAnimations,
-		presentationElementStates,
-		presentationKeyframesCss,
+		presentationElementStates: morphedElementStates,
+		presentationKeyframesCss: morphedKeyframesCss,
 		clearPresentationTimers,
 		runPresentationEntranceAnimations,
 		endOfShowVisible,
@@ -430,6 +627,7 @@ export function usePresentationMode(input: UsePresentationModeInput): UsePresent
 		handleHoverStart,
 		handleHoverEnd,
 		enterPresentMode,
+		enterPresentModeFromBeginning,
 		presenterMode,
 		enterPresenterView,
 		togglePresenterView,

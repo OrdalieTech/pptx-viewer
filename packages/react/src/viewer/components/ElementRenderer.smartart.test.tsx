@@ -67,7 +67,7 @@ function makeProps(overrides: Partial<ElementRendererProps>): ElementRendererPro
 		showResizeHandles: false,
 		renderInk: true,
 		renderGroups: true,
-		adjustmentHandleDescriptor: null,
+		adjustmentHandles: [],
 		onResizePointerDown: vi.fn<() => void>(),
 		onAdjustmentPointerDown: vi.fn<() => void>(),
 		onInlineEditChange: vi.fn<() => void>(),
@@ -135,6 +135,21 @@ describe('elementRenderer - inline SmartArt editing wiring', () => {
 	it('does not enable editing while the element is presentation-passive', () => {
 		const onUpdateSmartArtElement = vi.fn<(id: string, updates: Partial<PptxElement>) => void>();
 		mount(makeProps({ canInteract: false, onUpdateSmartArtElement }));
+
+		doubleClickNode('n1');
+		expect(container.querySelector('textarea')).toBeNull();
+	});
+
+	// G8 (OpenXML parity audit, D3): a:graphicFrameLocks/@noDrilldown was
+	// parsed but never enforced - a node was still double-click editable on a
+	// locked SmartArt.
+	it('does not open the node editor on double-click when noDrilldown is set', () => {
+		const onUpdateSmartArtElement = vi.fn<(id: string, updates: Partial<PptxElement>) => void>();
+		const locked = {
+			...makeSmartArtElement(),
+			locks: { noDrilldown: true },
+		} as SmartArtPptxElement;
+		mount(makeProps({ element: locked, onUpdateSmartArtElement }));
 
 		doubleClickNode('n1');
 		expect(container.querySelector('textarea')).toBeNull();

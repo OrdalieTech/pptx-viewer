@@ -22,6 +22,9 @@
 	import NotesHandoutSection from './NotesHandoutSection.svelte';
 	import PresentationSettingsSection from './PresentationSettingsSection.svelte';
 	import SlideSizeSection from './SlideSizeSection.svelte';
+	import SlideTransitionSection from './SlideTransitionSection.svelte';
+	import TagsSection from './TagsSection.svelte';
+	import TemplateBackgroundSection from './TemplateBackgroundSection.svelte';
 	import ThemeSection from './ThemeSection.svelte';
 	import ThemeSelectorSection from './ThemeSelectorSection.svelte';
 
@@ -93,8 +96,30 @@
 			<h4>{t('pptx.slideSize.title')}</h4>
 			<SlideSizeSection
 				canvasSize={effectiveCanvasSize}
+				slideSize={deck.slideSize}
 				{canEdit}
+				hasContent={deck.hasContent}
 				onupdate={(size) => deck.updateCanvasSize(size)}
+				onupdateslidesize={(size, rescaleMode) => deck.updateSlideSize(size, rescaleMode)}
+			/>
+		</div>
+	{/if}
+	<!-- React pairs slide size + transition in `SlideProperties`; same order. -->
+	{#if activeSlide}
+		<div class="pptx-svelte-inspector-section">
+			<h4>{t('pptx.slideInspector.slideTransition')}</h4>
+			<SlideTransitionSection {editor} />
+		</div>
+	{/if}
+	{#if editor.editTemplateMode && activeSlide}
+		<div class="pptx-svelte-inspector-section">
+			<h4>{t('pptx.slideBackground.templateBackgroundsHeading')}</h4>
+			<TemplateBackgroundSection
+				{editor}
+				{activeSlide}
+				slideMasters={editor.slideMasters}
+				{deck}
+				{canEdit}
 			/>
 		</div>
 	{/if}
@@ -116,6 +141,14 @@
 			onupdatecore={(patch) => deck.updateCoreProperties(patch)}
 			onupdateapp={(patch) => deck.updateAppProperties(patch)}
 			onupdatecustom={(next) => deck.updateCustomProperties(next)}
+		/>
+	</div>
+	<!-- React renders TAGS from the same PresentationPropertiesPanel. -->
+	<div class="pptx-svelte-inspector-section">
+		<TagsSection
+			tagCollections={editor.tagCollections}
+			{canEdit}
+			onupdate={(next) => editor.updateTagCollections(next)}
 		/>
 	</div>
 	{#if activeSlide}

@@ -25,10 +25,19 @@
 
 import type { PptxChartData, PptxElement } from 'pptx-viewer-core';
 
-import { computeLayoutOptions } from './chart-axis';
+import { computeLayoutOptions, computeValueRangeForChart } from './chart-axis';
 import { verticalAxisX } from './chart-axis-crossing';
 import { buildPrimaryAxis } from './chart-axis-render';
+import { computeDataTablePrimitives } from './chart-data-table-render';
+import { shouldRenderMajorGridlines } from './chart-gridlines-toggle';
+import { computeHelperLinePrimitives } from './chart-helper-lines';
 import { buildCartesianHorizontalAxis } from './chart-horizontal-axis';
+import {
+	computeAxisTitlePrimitives,
+	computeErrorBarPrimitives,
+	computeTrendlinePrimitives,
+} from './chart-overlays';
+import { buildStockCloseLabel } from './chart-stock-close-label';
 import type {
 	ChartViewModel,
 	PlotLayout,
@@ -43,8 +52,6 @@ import {
 	buildLegend,
 	buildZeroLine,
 	computePlotLayout,
-	computeValueRange,
-	formatAxisValue,
 	valueToY,
 } from './chart-view-model';
 
@@ -98,7 +105,10 @@ export function buildStockViewModel(
 	);
 	const catCount = Math.max(categoryLabels.length, 1);
 
-	const range: ValueRange = computeValueRange(chartData.series);
+	// Through `computeValueRangeForChart`, not the bare linear helper: a stock
+	// chart is as entitled to a log or display-unit value axis as any other
+	// cartesian kind, and the bare helper silently ignores `c:scaling`.
+	const range: ValueRange = computeValueRangeForChart(chartData.series, chartData.axes);
 
 	const valueAxis = chartData.axes?.find((axis) => axis.axisType === 'valAx' && axis.axPos !== 'r');
 	const categoryAxis = chartData.axes?.find(
@@ -106,6 +116,7 @@ export function buildStockViewModel(
 			(axis.axisType === 'catAx' || axis.axisType === 'dateAx') &&
 			axis.axisId === valueAxis?.crossAxisId,
 	);
+	const showMajorGridlines = shouldRenderMajorGridlines(chartData);
 	const renderedAxis =
 		categoryAxis?.crosses !== undefined || categoryAxis?.crossesAt !== undefined
 			? buildPrimaryAxis(
@@ -113,8 +124,9 @@ export function buildStockViewModel(
 					layout,
 					valueAxis,
 					verticalAxisX(categoryAxis, catCount, layout, 'left', chartData.dateCategories?.values),
+					showMajorGridlines,
 				)
-			: buildGridlinesAndLabels(range, layout);
+			: buildGridlinesAndLabels(range, layout, showMajorGridlines);
 	const { gridlines, axisLabels } = renderedAxis;
 	const zeroLine = buildZeroLine(range, layout);
 	const horizontalAxis = buildCartesianHorizontalAxis(
@@ -145,6 +157,17 @@ export function buildStockViewModel(
 
 	const primitives: SvgPrimitive[] = [];
 	const dataLabels: SvgText[] = [];
+
+	// `c:hiLowLines` and `c:upDownBars` are not decoration on a stock chart, they
+	// ARE the chart: PowerPoint's own "Open-High-Low-Close" preset writes both,
+	// and without them the plot is four detached candles. They are drawn first so
+	// the candles stay on top.
+	primitives.push(
+		...computeHelperLinePrimitives(chartData, layout, range, catCount, {
+			mode: 'bar',
+			xPositions: horizontalAxis.xPositions,
+		}),
+	);
 
 	if (highSeries && lowSeries && closeSeries) {
 		const barGroupWidth = layout.plotWidth / catCount;
@@ -196,19 +219,51 @@ export function buildStockViewModel(
 			} satisfies SvgRect);
 
 			if (chartData.style?.hasDataLabels) {
-				dataLabels.push({
-					kind: 'text',
-					x: cx,
-					y: highY - 4,
-					text: formatAxisValue(close),
-					fontSize: 7,
-					fill: '#334155',
-					textAnchor: 'middle',
-				} satisfies SvgText);
+				const closeLabel = buildStockCloseLabel(
+					chartData,
+					closeSeries,
+					sourceIndex,
+					close,
+					cx,
+					closeY,
+					{
+						width: layout.svgWidth,
+						height: layout.svgHeight,
+					},
+				);
+				if (closeLabel) {
+					dataLabels.push(closeLabel);
+				}
 			}
 		}
 	}
 	primitives.push(...horizontalAxis.tickMarks);
+
+	// Overlay depth, matching every other cartesian kind: regression trendlines,
+	// error bars, axis titles and the data-table block. `computePlotLayout`
+	// already reserved room for the table via `computeLayoutOptions`, so without
+	// these the space was reserved and left blank.
+	const displayChartData = horizontalAxis.displayChartData;
+	const overlays: SvgPrimitive[] = [
+		...computeTrendlinePrimitives(
+			displayChartData,
+			catCount,
+			layout,
+			range,
+			'bar',
+			chartData.colorPalette,
+		),
+		...computeErrorBarPrimitives(displayChartData, catCount, layout, range, 'bar', {
+			xPositions: horizontalAxis.xPositions,
+		}),
+		...computeAxisTitlePrimitives(chartData, layout),
+	];
+	const dataTablePrimitives = computeDataTablePrimitives(
+		displayChartData,
+		layout,
+		chartData.colorPalette,
+	);
+	primitives.push(...overlays, ...dataTablePrimitives);
 
 	const title = chartData.style?.hasTitle && chartData.title ? chartData.title : undefined;
 
@@ -228,5 +283,7 @@ export function buildStockViewModel(
 		legendX,
 		legendY,
 		legendAnchor,
+		overlays: overlays.length > 0 ? overlays : undefined,
+		dataTable: dataTablePrimitives.length > 0 ? dataTablePrimitives : undefined,
 	};
 }

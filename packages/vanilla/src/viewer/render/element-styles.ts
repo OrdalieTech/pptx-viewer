@@ -1,27 +1,22 @@
 import type { PptxElement } from 'pptx-viewer-core';
-import {
-	getRoundRectRadiusPx,
-	getShapeType,
-	hasShapeProperties,
-	hasTextProperties,
-} from 'pptx-viewer-core';
+import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
 import type { Computed3dStyle, CssStyleMap } from 'pptx-viewer-shared';
 import {
 	DEFAULT_STROKE_COLOR,
 	DEFAULT_TEXT_COLOR,
+	buildTextBlockStyle,
+	buildTextBody3DSceneStyle,
 	getComputed3dStyle,
 	getComputedEffectStyle,
 	getComputedFillStyle,
+	getComputedStrokeStyle,
 	getCssBorderDashStyle,
-	getResolvedShapeClipPath,
-	isVerticalTextDirection,
+	isHollowShapeElement,
+	resolveShapeGeometry,
 	px,
-	resolveCssTextAlign,
-	resolveLineHeight,
-	toCssTextOrientation,
-	toCssVerticalDirection,
-	toCssWritingMode,
 } from 'pptx-viewer-shared';
+
+import { composeTransforms } from './dom';
 
 /**
  * Fill / stroke / geometry and text-block style builders for the vanilla
@@ -33,13 +28,6 @@ import {
  * delegating every pure computation (fills, effects, clip paths, 3D, text
  * direction, line height) to the shared helpers.
  */
-
-/**
- * Default text-body insets, in px (PowerPoint defaults: 0.1" left/right,
- * 0.05" top/bottom, i.e. EMU / EMU_PER_PIXEL). Mirrors React and Vue.
- */
-const DEFAULT_BODY_INSET_LR_PX = 91440 / 9525;
-const DEFAULT_BODY_INSET_TB_PX = 45720 / 9525;
 
 /**
  * Merge a shared {@link Computed3dStyle} into a style map, COMBINING
@@ -63,6 +51,12 @@ function merge3dStyle(base: CssStyleMap, computed: Computed3dStyle | undefined):
 	}
 	if (computed.perspective) {
 		base['perspective'] = computed.perspective;
+	}
+	if (computed.perspectiveOrigin) {
+		base['perspectiveOrigin'] = computed.perspectiveOrigin;
+	}
+	if (computed.transformOrigin) {
+		base['transformOrigin'] = computed.transformOrigin;
 	}
 	if (computed.transformStyle) {
 		base['transformStyle'] = computed.transformStyle;
@@ -101,6 +95,24 @@ export function getShapeFillStrokeStyle(
 	animatesFill?: boolean,
 	animatesStroke?: boolean,
 ): CssStyleMap {
+	if (el.type === 'group') {
+		// A group has no fill/stroke/geometry of its own (the branches below all
+		// read `el.shapeStyle`, which a group never has), but PowerPoint still
+		// lets `p:grpSpPr/a:effectLst` carry a shadow/glow/soft-edge for the
+		// group's own COMPOSITE raster (see shared `getComputedEffectStyle`).
+		// Reflection rides a separate mirrored sibling node (`renderReflectionOverlay`),
+		// same as a shape, so only the container-level `filter` / `overflow`
+		// belong here.
+		const fx = getComputedEffectStyle(el);
+		const groupStyle: CssStyleMap = {};
+		if (fx.filter) {
+			groupStyle.filter = fx.filter;
+		}
+		if (fx.overflowVisible) {
+			groupStyle.overflow = 'visible';
+		}
+		return groupStyle;
+	}
 	if (!hasShapeProperties(el)) {
 		return {};
 	}
@@ -117,16 +129,33 @@ export function getShapeFillStrokeStyle(
 			}
 		}
 
-		const strokeWidth = Math.max(0, ss.strokeWidth ?? 0);
-		if (strokeWidth > 0) {
+		// Stroke: the whole `a:ln` -> CSS decision lives in shared
+		// `getComputedStrokeStyle` (painted width, dash, compound `@cmpd` lines as
+		// `border-style: double`, `strokeOpacity`, and the inherited join / cap /
+		// miter-limit), so this binding only maps it. It also drops the border for
+		// an outline the SVG overlay is painting instead - a gradient/pattern line
+		// or an open preset - rather than drawing the averaged solid underneath.
+		const stroke = getComputedStrokeStyle(el);
+		if (stroke.borderWidth > 0) {
 			if (animatesStroke) {
 				// Keep width / dash; the colour is left to the animated keyframes.
-				style['borderWidth'] = px(strokeWidth);
-				style['borderStyle'] = getCssBorderDashStyle(ss.strokeDash) ?? 'solid';
+				style['borderWidth'] = px(stroke.borderWidth);
+				style['borderStyle'] = stroke.borderStyle ?? 'solid';
 			} else {
-				style['border'] =
-					`${px(strokeWidth)} ${getCssBorderDashStyle(ss.strokeDash)} ${ss.strokeColor ?? DEFAULT_STROKE_COLOR}`;
+				style['border'] = stroke.border ?? '';
 			}
+		}
+		// SVG presentation properties are INHERITED, so writing them on the shape
+		// box is what carries `a:ln`'s join / cap / `a:miter/@lim` into the stroke
+		// overlay's `<path>` without the overlay restating them.
+		if (stroke.strokeLinejoin) {
+			style['strokeLinejoin'] = stroke.strokeLinejoin;
+		}
+		if (stroke.strokeLinecap) {
+			style['strokeLinecap'] = stroke.strokeLinecap;
+		}
+		if (stroke.strokeMiterlimit !== undefined) {
+			style['strokeMiterlimit'] = stroke.strokeMiterlimit;
 		}
 	}
 
@@ -139,9 +168,10 @@ export function getShapeFillStrokeStyle(
 	if (fx.filter) {
 		style['filter'] = fx.filter;
 	}
-	if (fx.webkitBoxReflect) {
-		style['WebkitBoxReflect'] = fx.webkitBoxReflect;
-	}
+	// Reflection is no longer a single CSS property (`-webkit-box-reflect`
+	// never worked in Firefox): the element renderer builds a mirrored sibling
+	// node instead, using shared's `getReflectionWrapperStyle` directly (see
+	// `elements/reflection-overlay.ts`).
 	if (fx.mixBlendMode) {
 		style['mixBlendMode'] = fx.mixBlendMode;
 	}
@@ -160,135 +190,83 @@ export function getShapeFillStrokeStyle(
 	merge3dStyle(style, getComputed3dStyle(el));
 
 	// Geometry cascade: connector, roundRect, ellipse, clip-path, line, cylinder.
-	const normalizedShapeType = getShapeType(el.shapeType);
-
-	if (el.type === 'connector' || normalizedShapeType === 'connector') {
-		// Connectors paint as SVG; the box itself is bare.
-		style['backgroundColor'] = 'transparent';
-		style['border'] = 'none';
-		return style;
+	// An unfilled, textless shape is a FRAME: PowerPoint hit-tests it on its
+	// outline only, so its interior must not swallow clicks meant for what it is
+	// drawn over. ShapeEffectOverlay paints a transparent pointer-events:stroke
+	// band that opts the outline back in.
+	if (isHollowShapeElement(el)) {
+		style['pointerEvents'] = 'none';
 	}
 
-	if (normalizedShapeType === 'roundRect') {
-		const radiusPx = getRoundRectRadiusPx(el);
-		if (radiusPx > 0.01) {
-			style['borderRadius'] = px(radiusPx);
-		}
-		return style;
+	// Geometry: the branch ORDER and every threshold live in shared
+	// `resolveShapeGeometry`, so this binding only maps the decision onto its
+	// own style map. Keeping the cascade in one place is what stops the copies
+	// drifting - Angular's had, four separate ways.
+	const geometry = resolveShapeGeometry(el);
+	switch (geometry.kind) {
+		case 'bare':
+			// Connectors paint as SVG; the box itself is bare.
+			style['backgroundColor'] = 'transparent';
+			style['border'] = 'none';
+			return style;
+		case 'strokeOnly':
+			// An open preset has no region to fill and no box to outline:
+			// `renderStrokeOutline` strokes the evaluated geometry. The clip in
+			// particular encloses zero area and would clip that overlay away.
+			style['backgroundColor'] = 'transparent';
+			delete style['backgroundImage'];
+			style['border'] = 'none';
+			return style;
+		case 'borderRadius':
+			style['borderRadius'] = geometry.radius;
+			return style;
+		case 'clipPath':
+			style['clipPath'] = geometry.clipPath;
+			return style;
+		case 'lineEdge':
+			style['backgroundColor'] = 'transparent';
+			style['border'] = 'none';
+			style['borderTop'] =
+				`${px(geometry.strokeWidth)} ${getCssBorderDashStyle(el.shapeStyle?.strokeDash)} ${el.shapeStyle?.strokeColor ?? DEFAULT_STROKE_COLOR}`;
+			return style;
+		default:
+			return style;
 	}
-
-	if (normalizedShapeType === 'ellipse') {
-		style['borderRadius'] = '9999px';
-		return style;
-	}
-
-	const clipPath = getResolvedShapeClipPath(el);
-	if (clipPath) {
-		style['clipPath'] = clipPath;
-		return style;
-	}
-
-	if (normalizedShapeType === 'line') {
-		// A bare line shape: drop the box fill/border and draw only the top edge.
-		const strokeWidth = Math.max(0, el.shapeStyle?.strokeWidth ?? 0);
-		style['backgroundColor'] = 'transparent';
-		style['border'] = 'none';
-		style['borderTop'] =
-			`${px(Math.max(strokeWidth, 2))} ${getCssBorderDashStyle(el.shapeStyle?.strokeDash)} ${el.shapeStyle?.strokeColor ?? DEFAULT_STROKE_COLOR}`;
-		return style;
-	}
-
-	if (normalizedShapeType === 'cylinder') {
-		style['borderRadius'] = '48% / 12%';
-		return style;
-	}
-
-	return style;
 }
 
-/** Text block style (flex column, body insets, font, alignment, writing mode). */
+/**
+ * Text block style (flex column, body insets, font, alignment, writing mode).
+ *
+ * A thin adapter over the shared {@link buildTextBlockStyle}, which React
+ * renders from too. This used to be a hand-ported copy of React's builder, and
+ * the copy had silently lost `a:normAutofit` (a shrink-to-fit title painted 43%
+ * too large), `a:bodyPr/@wrap="none"` (a no-wrap line wrapped to three), the
+ * default font declaration, the italic padding nudge and the body
+ * margin/indent pair. `pxLengths` is required because these maps are written
+ * straight onto `element.style`, where a bare number is not a length.
+ *
+ * Also folds in the text body's 3D scene (`a:bodyPr/a:scene3d` -> CSS
+ * `perspective` + `rotate` transform), mirroring React/Vue/Angular's
+ * `ElementBody`. The scene transform is COMPOSED with any existing text-block
+ * transform rather than clobbering it; a no-op for the common no-scene3d case.
+ */
 export function getTextBlockStyle(el: PptxElement): CssStyleMap {
 	if (!hasTextProperties(el)) {
 		return {};
 	}
-	const ts = el.textStyle;
-	const style: CssStyleMap = {
-		display: 'flex',
-		flexDirection: 'column',
-		width: '100%',
-		height: '100%',
-		overflow: 'visible',
-		whiteSpace: 'pre-wrap',
-		wordBreak: 'break-word',
-		paddingTop: px(ts?.bodyInsetTop ?? DEFAULT_BODY_INSET_TB_PX),
-		paddingBottom: px(ts?.bodyInsetBottom ?? DEFAULT_BODY_INSET_TB_PX),
-		paddingLeft: px(ts?.bodyInsetLeft ?? DEFAULT_BODY_INSET_LR_PX),
-		paddingRight: px(ts?.bodyInsetRight ?? DEFAULT_BODY_INSET_LR_PX),
-	};
-	if (!ts) {
-		style['color'] = DEFAULT_TEXT_COLOR;
-		return style;
+	const base = buildTextBlockStyle(el, {
+		fallbackColor: DEFAULT_TEXT_COLOR,
+		bodyLayout: true,
+		pxLengths: true,
+	});
+	const scene3d = buildTextBody3DSceneStyle(el.textStyle, { width: el.width, height: el.height });
+	if (!scene3d) {
+		return base;
 	}
-
-	style['color'] = ts.color ?? DEFAULT_TEXT_COLOR;
-	if (ts.fontFamily) {
-		style['fontFamily'] = ts.fontFamily;
+	const merged: CssStyleMap = { ...base, ...scene3d };
+	const transform = composeTransforms(base.transform, scene3d.transform);
+	if (transform !== undefined) {
+		merged.transform = transform;
 	}
-	// Font size renders in CSS px (the parsed value already is the px size).
-	if (typeof ts.fontSize === 'number') {
-		style['fontSize'] = px(ts.fontSize);
-	}
-	style['lineHeight'] = resolveLineHeight(ts, Boolean(ts.italic));
-	if (ts.bold) {
-		style['fontWeight'] = 'bold';
-	}
-	if (ts.italic) {
-		style['fontStyle'] = 'italic';
-	}
-
-	const decorations: string[] = [];
-	if (ts.underline) {
-		decorations.push('underline');
-	}
-	if (ts.strikethrough) {
-		decorations.push('line-through');
-	}
-	if (decorations.length > 0) {
-		style['textDecoration'] = decorations.join(' ');
-	}
-
-	const isRtl = ts.rtl === true;
-	style['textAlign'] = resolveCssTextAlign(ts.align, isRtl) ?? 'left';
-
-	if (isVerticalTextDirection(ts.textDirection)) {
-		const writingMode = toCssWritingMode(ts.textDirection);
-		const textOrientation = toCssTextOrientation(ts.textDirection);
-		const verticalDirection = toCssVerticalDirection(ts.textDirection);
-		if (writingMode) {
-			style['writingMode'] = writingMode;
-		}
-		if (textOrientation) {
-			style['textOrientation'] = textOrientation;
-		}
-		if (verticalDirection) {
-			style['direction'] = verticalDirection;
-		} else if (isRtl) {
-			style['direction'] = 'rtl';
-		}
-	} else if (isRtl) {
-		style['direction'] = 'rtl';
-	}
-
-	switch (ts.vAlign) {
-		case 'middle':
-			style['justifyContent'] = 'center';
-			break;
-		case 'bottom':
-			style['justifyContent'] = 'flex-end';
-			break;
-		default:
-			style['justifyContent'] = 'flex-start';
-	}
-
-	return style;
+	return merged;
 }

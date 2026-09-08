@@ -7,8 +7,29 @@
  * binding casts it into its own style type at the call site.
  */
 
+import type { TextStyle } from 'pptx-viewer-core';
+
 /** CSS `text-decoration-style` keyword values. */
 export type CssTextDecorationStyle = 'solid' | 'double' | 'dotted' | 'dashed' | 'wavy';
+
+/** EMU per CSS px, matching every other length conversion in this package. */
+const EMU_PER_PX = 9525;
+
+/** `a:uLn/a:prstDash/@val` -> the closest CSS `text-decoration-style` keyword. */
+const UNDERLINE_DASH_TO_CSS: Record<string, CssTextDecorationStyle> = {
+	solid: 'solid',
+	dot: 'dotted',
+	sysDot: 'dotted',
+	dash: 'dashed',
+	sysDash: 'dashed',
+	lgDash: 'dashed',
+	dashDot: 'dashed',
+	sysDashDot: 'dashed',
+	lgDashDot: 'dashed',
+	dashDotDot: 'dotted',
+	sysDashDotDot: 'dotted',
+	lgDashDotDot: 'dotted',
+};
 
 /**
  * CSS properties that fully describe the visual appearance of an underline or
@@ -50,6 +71,20 @@ export function resolveUnderlineDecorationStyle(
 	switch (underlineStyle) {
 		// Single / default
 		case 'sng':
+			return { textDecorationStyle: 'solid', textDecorationThickness: '1px' };
+
+		// D2-G3: `words` underlines only the non-whitespace characters, leaving
+		// inter-word spaces unmarked (ST_TextUnderlineType, ECMA-376 §20.1.10.64),
+		// distinct from `sng`'s continuous line. A single `text-decoration` on
+		// the whole run cannot skip spaces (CSS's `text-decoration-skip: spaces`
+		// never shipped in Chromium, the app's target runtime - see the
+		// `hanging-punctuation` precedent in `kinsoku-styles.ts`), so this falls
+		// back to the same continuous solid underline as `sng` rather than
+		// silently drawing nothing (the previous `default: undefined` behaviour).
+		// A binding wanting the true per-word gap needs to split the run into
+		// per-word pieces before applying this decoration - see
+		// {@link splitWordsForUnderline}.
+		case 'words':
 			return { textDecorationStyle: 'solid', textDecorationThickness: '1px' };
 
 		// Double
@@ -131,4 +166,91 @@ export function resolveUnderlineDecorationStyle(
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * Resolve a run's own `<a:rPr><a:uLn>` (underline line properties: width,
+ * compound type, dash pattern, caps) to the CSS that overrides the plain
+ * `a:u`-style decoration {@link resolveUnderlineDecorationStyle} produces.
+ *
+ * `a:uLn` is a distinct, independent line description from `a:u`'s style
+ * token - a run can author both (`u="sng"` for the underline TYPE plus a
+ * custom-width dashed `uLn` for its STROKE), and the line's own width/dash
+ * take priority over whatever the type token implied, exactly as `a:ln`
+ * overrides a shape outline's default weight. Previously only the line's
+ * colour (`a:uLn/a:solidFill`, via `underlineColor`) was ever rendered; the
+ * width and dash preset parsed into {@link TextStyle.underlineLine} were
+ * captured for round-trip but never reached the screen.
+ *
+ * @param underlineLine The run's parsed `a:uLn`, or `undefined`.
+ * @param hasUnderline  Whether the run actually renders an underline at all
+ *                       (`a:u` present and not `"none"`); a `uLn` on a run
+ *                       with no underline has nothing to decorate.
+ * @returns The thickness/style override, or `undefined` when the run has no
+ *          underline or its `uLn` authors neither a width nor a known dash.
+ */
+export function resolveUnderlineLineDecoration(
+	underlineLine: TextStyle['underlineLine'] | undefined,
+	hasUnderline: boolean,
+): UnderlineDecorationCss | undefined {
+	if (!hasUnderline || !underlineLine) {
+		return undefined;
+	}
+	const out: UnderlineDecorationCss = {};
+	if (typeof underlineLine.widthEmu === 'number' && underlineLine.widthEmu > 0) {
+		const px = Math.max(1, Math.round(underlineLine.widthEmu / EMU_PER_PX));
+		out.textDecorationThickness = `${px}px`;
+	}
+	if (underlineLine.prstDash) {
+		const css = UNDERLINE_DASH_TO_CSS[underlineLine.prstDash];
+		if (css) {
+			out.textDecorationStyle = css;
+		}
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** One word-or-whitespace piece of a run's text, for `u="words"` rendering. */
+export interface UnderlineWordPiece {
+	text: string;
+	/** Whether this piece should carry the underline decoration. */
+	underline: boolean;
+}
+
+/**
+ * Split `text` into alternating word / whitespace pieces so a binding can
+ * render `a:rPr/@u="words"` (D2-G3) as true per-word underlines with a gap
+ * under the spaces between them, by wrapping each `underline: true` piece in
+ * its own `<span>` and leaving whitespace pieces undecorated.
+ *
+ * Wired into the ordinary per-word metric split via `splitStyledRun`
+ * (`text-run-spacing.ts`, which emits the words/gaps as sibling `BuiltRun`s)
+ * and, for the two run shapes that must stay ONE piece, into
+ * `paragraph-run-build.ts` (`BuiltRun.underlineWordPieces`, a ruby run) and
+ * `text-tab-run-build.ts` (`TabbedRunPiece.words`, a tab-separated piece) -
+ * both fall back to {@link resolveUnderlineDecorationStyle}'s `'words'` case
+ * (a single continuous underline) for a binding that does not render the
+ * per-piece field yet.
+ *
+ * @param text Run text to split. Whitespace here means ASCII/Unicode spaces
+ *             and tabs; a run already split into `tabLines` should call this
+ *             per tab-stop segment, not on the raw unsplit text.
+ */
+export function splitWordsForUnderline(text: string): UnderlineWordPiece[] {
+	if (!text) {
+		return [];
+	}
+	const pieces: UnderlineWordPiece[] = [];
+	// Alternates between "run of whitespace" and "run of non-whitespace"
+	// matches, in text order (String.split with a capturing group interleaves
+	// the delimiters, so a manual matchAll keeps this a single linear pass).
+	const matches = text.matchAll(/(\s+)|(\S+)/gu);
+	for (const match of matches) {
+		if (match[1] !== undefined) {
+			pieces.push({ text: match[1], underline: false });
+		} else if (match[2] !== undefined) {
+			pieces.push({ text: match[2], underline: true });
+		}
+	}
+	return pieces;
 }

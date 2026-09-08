@@ -1,5 +1,11 @@
-import { hasTextProperties } from 'pptx-viewer-core';
-import type { ImagePptxElement, PptxElementWithText, ShapeStyle } from 'pptx-viewer-core';
+import { hasTextProperties, resolveThemeColorRef } from 'pptx-viewer-core';
+import type {
+	ImagePptxElement,
+	PptxElement,
+	PptxElementWithText,
+	PptxThemeColorRef,
+	ShapeStyle,
+} from 'pptx-viewer-core';
 
 import type { ToolContext, ToolResult } from '../types.js';
 import { validateSlideIndex } from './helpers.js';
@@ -11,6 +17,16 @@ export interface UpdateElementStyleParams {
 	elementId: string;
 	// fill
 	fillColor?: string;
+	/**
+	 * A theme colour for the fill (`{ scheme: 'accent1', lumMod: 0.8 }`).
+	 * Wins on save: the shape is written as `<a:schemeClr>` instead of a
+	 * canonical `<a:srgbClr>`, so it keeps following the theme after a later
+	 * theme change. Also resolves `fillColor` immediately (against the
+	 * deck's `themeColorMap`) when `fillColor` was not explicitly given.
+	 * Passing `fillColor` alone (no `fillThemeColor`) clears any previously
+	 * set fill theme colour, matching a user typing a custom hex.
+	 */
+	fillThemeColor?: PptxThemeColorRef;
 	fillMode?: ShapeStyle['fillMode'];
 	fillGradientStops?: Array<{ color: string; position: number; opacity?: number }>;
 	fillGradientAngle?: number;
@@ -18,6 +34,8 @@ export interface UpdateElementStyleParams {
 	fillOpacity?: number;
 	// stroke
 	strokeColor?: string;
+	/** A theme colour for the outline; see {@link fillThemeColor}. */
+	strokeThemeColor?: PptxThemeColorRef;
 	strokeWidth?: number;
 	strokeDash?: ShapeStyle['strokeDash'];
 	strokeOpacity?: number;
@@ -40,7 +58,64 @@ export interface UpdateElementStyleParams {
 	brightness?: number;
 	contrast?: number;
 	grayscale?: boolean;
+	/**
+	 * Accessibility description (`p:cNvPr/@descr`). Accepted for pictures,
+	 * every graphic frame kind (table, chart, smartArt, ole, media), and a
+	 * plain shape / text box / connector: the core writer serialises all
+	 * eight kinds, so the tool must not stop at images.
+	 */
 	altText?: string;
+	/**
+	 * Accessibility title (`p:cNvPr/@title`). Accepted for every kind that
+	 * models it: table, chart, smartArt, ole, media, text, shape and
+	 * connector (a picture has no separate title field, only `altText`).
+	 */
+	title?: string;
+}
+
+/** Element kinds whose core type models `altText` and whose writer persists it. */
+export const ALT_TEXT_ELEMENT_TYPES: ReadonlySet<PptxElement['type']> = new Set<
+	PptxElement['type']
+>(['image', 'picture', 'table', 'chart', 'smartArt', 'ole', 'media', 'text', 'shape', 'connector']);
+
+/** Element kinds whose core type models `title` and whose writer persists it. */
+export const TITLE_ELEMENT_TYPES: ReadonlySet<PptxElement['type']> = new Set<PptxElement['type']>([
+	'table',
+	'chart',
+	'smartArt',
+	'ole',
+	'media',
+	'text',
+	'shape',
+	'connector',
+]);
+
+/**
+ * Write `altText` onto `el`, or throw when the element kind has nowhere to
+ * persist it.
+ */
+export function applyElementAltText(el: PptxElement, altText: string): void {
+	if (!ALT_TEXT_ELEMENT_TYPES.has(el.type)) {
+		throw new Error(
+			`Element '${el.id}' (${el.type}) does not support altText; ` +
+				`only ${[...ALT_TEXT_ELEMENT_TYPES].join(', ')} elements do.`,
+		);
+	}
+	(el as { altText?: string }).altText = altText;
+}
+
+/**
+ * Write `title` onto `el`, or throw when the element kind has nowhere to
+ * persist it (a picture's `p:cNvPr` only ever carries `@descr`, not `@title`).
+ */
+export function applyElementTitle(el: PptxElement, title: string): void {
+	if (!TITLE_ELEMENT_TYPES.has(el.type)) {
+		throw new Error(
+			`Element '${el.id}' (${el.type}) does not support title; ` +
+				`only ${[...TITLE_ELEMENT_TYPES].join(', ')} elements do.`,
+		);
+	}
+	(el as { title?: string }).title = title;
 }
 
 export function updateElementStyle(
@@ -65,8 +140,22 @@ export function updateElementStyle(
 		}
 		const ss = el.shapeStyle as ShapeStyle;
 
-		if (params.fillColor !== undefined) {
+		if (params.fillThemeColor !== undefined) {
+			ss.fillColorRef = params.fillThemeColor;
+			// Resolve immediately so renderers reading the plain hex field see the
+			// theme colour right away; an explicit `fillColor` still wins when the
+			// caller supplied both.
+			const resolved = resolveThemeColorRef(params.fillThemeColor, ctx.pptxData.themeColorMap);
+			if (params.fillColor !== undefined) {
+				ss.fillColor = params.fillColor;
+			} else if (resolved) {
+				ss.fillColor = resolved;
+			}
+		} else if (params.fillColor !== undefined) {
+			// A plain hex edit with no theme colour clears any ref this shape
+			// previously carried (matches a user typing a custom colour).
 			ss.fillColor = params.fillColor;
+			ss.fillColorRef = undefined;
 		}
 		if (params.fillMode !== undefined) {
 			ss.fillMode = params.fillMode;
@@ -83,8 +172,17 @@ export function updateElementStyle(
 		if (params.fillOpacity !== undefined) {
 			ss.fillOpacity = params.fillOpacity;
 		}
-		if (params.strokeColor !== undefined) {
+		if (params.strokeThemeColor !== undefined) {
+			ss.strokeColorRef = params.strokeThemeColor;
+			const resolved = resolveThemeColorRef(params.strokeThemeColor, ctx.pptxData.themeColorMap);
+			if (params.strokeColor !== undefined) {
+				ss.strokeColor = params.strokeColor;
+			} else if (resolved) {
+				ss.strokeColor = resolved;
+			}
+		} else if (params.strokeColor !== undefined) {
 			ss.strokeColor = params.strokeColor;
+			ss.strokeColorRef = undefined;
 		}
 		if (params.strokeWidth !== undefined) {
 			ss.strokeWidth = params.strokeWidth;
@@ -124,12 +222,19 @@ export function updateElementStyle(
 		}
 	}
 
+	// Alt text: pictures, every graphic-frame kind, and shapes/text/connectors
+	// carry it.
+	if (params.altText !== undefined) {
+		applyElementAltText(el, params.altText);
+	}
+	// Title: every altText kind except pictures also models a title.
+	if (params.title !== undefined) {
+		applyElementTitle(el, params.title);
+	}
+
 	// Apply image-specific fields
 	if (el.type === 'image' || el.type === 'picture') {
 		const img = el as ImagePptxElement;
-		if (params.altText !== undefined) {
-			img.altText = params.altText;
-		}
 		if (params.cropLeft !== undefined) {
 			img.cropLeft = params.cropLeft;
 		}

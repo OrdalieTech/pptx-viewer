@@ -20,7 +20,19 @@ function ellipseShape(): PptxElement {
 		y: 0,
 		width: 40,
 		height: 40,
-		shapeStyle: {},
+		// The paint lives on the element, not in the call arguments: the fill and
+		// stroke are resolved by shared `getComputedFillStyle` /
+		// `getComputedStrokeStyle` from `shapeStyle`, exactly as `shapeParams`
+		// derives the (now vestigial) positional arguments from it.
+		// `lineAlignment: 'in'` pins the CSS border path: this file tests the
+		// animClr override cascade, not alignment, and the default `ctr` would
+		// route the stroke through the SVG overlay instead of `borderColor`.
+		shapeStyle: {
+			fillColor: '#ff0000',
+			strokeWidth: 2,
+			strokeColor: '#0000ff',
+			lineAlignment: 'in',
+		},
 	} as unknown as PptxElement;
 }
 
@@ -35,6 +47,7 @@ describe('getShapeVisualStyle p:animClr fill/stroke recolor', () => {
 		const style = getShapeVisualStyle(ellipseShape(), true, '#ff0000', 2, '#0000ff', true, false);
 		expect(style.backgroundColor).toBeUndefined();
 		expect(style.backgroundImage).toBeUndefined();
+		expect((style as Record<string, unknown>)['--pptx-animation-fill-base']).toBe('#ff0000');
 		// Stroke untouched when only the fill is animated.
 		expect(style.borderColor).toBeTruthy();
 	});
@@ -42,6 +55,7 @@ describe('getShapeVisualStyle p:animClr fill/stroke recolor', () => {
 	it('drops the static container stroke when a stroke animation is active', () => {
 		const style = getShapeVisualStyle(ellipseShape(), true, '#ff0000', 2, '#0000ff', false, true);
 		expect(style.borderColor).toBeUndefined();
+		expect((style as Record<string, unknown>)['--pptx-animation-stroke-base']).toBe('#0000ff');
 		// Fill untouched when only the stroke is animated.
 		expect(style.backgroundColor).toBeTruthy();
 	});

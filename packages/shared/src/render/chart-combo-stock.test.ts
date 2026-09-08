@@ -246,7 +246,11 @@ describe('buildComboViewModel', () => {
 			line?.kind === 'polyline'
 				? line.points.split(' ').map((point) => Number(point.split(',')[1]))
 				: [];
-		expect(Math.abs((yCoordinates[0] ?? 0) - (yCoordinates[1] ?? 0))).toBeGreaterThan(100);
+		// Mapped to the secondary axis (rounded out to 0..3) the two points sit a
+		// third of the plot apart. Mapped to the PRIMARY axis, whose range runs to
+		// thousands, they would be a fraction of a pixel apart, which is what this
+		// gap discriminates.
+		expect(Math.abs((yCoordinates[0] ?? 0) - (yCoordinates[1] ?? 0))).toBeGreaterThan(40);
 		expect(vm.secondaryGridlines).toBeDefined();
 		expect(vm.secondaryAxisLabels?.some((label) => label.text === '2')).toBeTruthy();
 	});
@@ -501,15 +505,15 @@ describe('buildComboViewModel', () => {
 		expect(() => buildComboViewModel(makeElement(), chartData, [])).not.toThrow();
 	});
 
-	it('enforces minimum SVG dimensions', () => {
+	it('matches the element frame box exactly (no minimum SVG dimensions)', () => {
 		const chartData: PptxChartData = {
 			chartType: 'combo',
 			categories: [],
 			series: [{ name: 'Bars', values: [1] }],
 		};
 		const vm = buildComboViewModel(makeElement(10, 10), chartData, []);
-		expect(vm.svgWidth).toBeGreaterThanOrEqual(320);
-		expect(vm.svgHeight).toBeGreaterThanOrEqual(180);
+		expect(vm.svgWidth).toBe(10);
+		expect(vm.svgHeight).toBe(10);
 	});
 
 	// ── series colour ─────────────────────────────────────────────────────────
@@ -859,6 +863,69 @@ describe('buildStockViewModel', () => {
 		expect(vm.dataLabels[0].text).toBe('103');
 	});
 
+	// limitations.md "Stock/candlestick 'close' label": the close series' own
+	// dLblPos/numberFormat/manual-layout cascade must be honoured, not a fixed
+	// "above the high" placement with the series' raw cell format.
+	it('defaults the close label to the right of the close tick (textAnchor start)', () => {
+		const chartData: PptxChartData = {
+			chartType: 'stock',
+			categories: ['D1'],
+			series: [
+				{ name: 'High', values: [110] },
+				{ name: 'Low', values: [90] },
+				{ name: 'Close', values: [103] },
+			],
+			style: { hasDataLabels: true },
+		};
+		const vm = buildStockViewModel(makeElement(), chartData, ['D1']);
+		expect(vm.dataLabels[0].textAnchor).toBe('start');
+	});
+
+	it("honours the close series' own c:dLblPos override (e.g. 'b')", () => {
+		const chartData: PptxChartData = {
+			chartType: 'stock',
+			categories: ['D1'],
+			series: [
+				{ name: 'High', values: [110] },
+				{ name: 'Low', values: [90] },
+				{ name: 'Close', values: [103], dataLabelOptions: { position: 'b' } },
+			],
+			style: { hasDataLabels: true },
+		};
+		const vm = buildStockViewModel(makeElement(), chartData, ['D1']);
+		expect(vm.dataLabels[0].textAnchor).toBe('middle');
+	});
+
+	it("honours the close series' own numberFormat override", () => {
+		const chartData: PptxChartData = {
+			chartType: 'stock',
+			categories: ['D1'],
+			series: [
+				{ name: 'High', values: [110] },
+				{ name: 'Low', values: [90] },
+				{ name: 'Close', values: [103.4], numberFormat: '0.00' },
+			],
+			style: { hasDataLabels: true },
+		};
+		const vm = buildStockViewModel(makeElement(), chartData, ['D1']);
+		expect(vm.dataLabels[0].text).toBe('103.40');
+	});
+
+	it('suppresses the close label when c:dLbl/c:delete is set for that point', () => {
+		const chartData: PptxChartData = {
+			chartType: 'stock',
+			categories: ['D1'],
+			series: [
+				{ name: 'High', values: [110] },
+				{ name: 'Low', values: [90] },
+				{ name: 'Close', values: [103], dataLabels: [{ idx: 0, deleted: true }] },
+			],
+			style: { hasDataLabels: true },
+		};
+		const vm = buildStockViewModel(makeElement(), chartData, ['D1']);
+		expect(vm.dataLabels).toHaveLength(0);
+	});
+
 	it('produces no data labels when hasDataLabels is not set', () => {
 		const chartData: PptxChartData = {
 			chartType: 'stock',
@@ -930,14 +997,102 @@ describe('buildStockViewModel', () => {
 		expect(() => buildStockViewModel(makeElement(), chartData, [])).not.toThrow();
 	});
 
-	it('enforces minimum SVG dimensions', () => {
+	it('matches the element frame box exactly (no minimum SVG dimensions)', () => {
 		const chartData: PptxChartData = {
 			chartType: 'stock',
 			categories: [],
 			series: [],
 		};
 		const vm = buildStockViewModel(makeElement(10, 10), chartData, []);
-		expect(vm.svgWidth).toBeGreaterThanOrEqual(320);
-		expect(vm.svgHeight).toBeGreaterThanOrEqual(180);
+		expect(vm.svgWidth).toBe(10);
+		expect(vm.svgHeight).toBe(10);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Overlay depth lifted out of the React / Vue copies
+//
+// React's private stock and combo renderers called `renderOverlays` (up-down
+// bars, drop lines, hi-low lines, trendlines, error bars) and painted a data
+// table below the plot. The shared builders did neither for stock and only
+// error bars for combo, so converging the bindings on shared would have LOST
+// those. They were lifted here first.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('stock / combo overlay depth', () => {
+	const OHLC: PptxChartData = {
+		chartType: 'stock',
+		categories: CATEGORIES,
+		series: [
+			{ name: 'Open', values: [42, 58, 55, 66] },
+			{ name: 'High', values: [50, 65, 62, 74] },
+			{ name: 'Low', values: [38, 52, 51, 61] },
+			{ name: 'Close', values: [47, 61, 53, 71] },
+		],
+		style: { hasLegend: true, legendPosition: 'b' },
+	};
+
+	it('draws c:hiLowLines on a stock chart', () => {
+		const without = buildStockViewModel(makeElement(), OHLC, CATEGORIES);
+		const withLines = buildStockViewModel(makeElement(), { ...OHLC, hiLowLines: {} }, CATEGORIES);
+		expect(withLines.primitives.length).toBeGreaterThan(without.primitives.length);
+	});
+
+	it('draws c:upDownBars on a stock chart', () => {
+		const without = buildStockViewModel(makeElement(), OHLC, CATEGORIES);
+		const withBars = buildStockViewModel(
+			makeElement(),
+			{ ...OHLC, upDownBars: { gapWidth: 150 } },
+			CATEGORIES,
+		);
+		expect(withBars.primitives.length).toBeGreaterThan(without.primitives.length);
+	});
+
+	it('emits a data-table block for a stock chart that declares one', () => {
+		const vm = buildStockViewModel(
+			makeElement(),
+			{ ...OHLC, dataTable: { showKeys: true, showOutline: true } },
+			CATEGORIES,
+		);
+		expect(vm.dataTable).toBeDefined();
+		expect(vm.dataTable!.length).toBeGreaterThan(0);
+	});
+
+	it('emits a data-table block for a combo chart that declares one', () => {
+		const chartData: PptxChartData = {
+			chartType: 'combo',
+			categories: CATEGORIES,
+			series: [
+				{ name: 'Revenue', values: [45, 62, 58, 71] },
+				{ name: 'Margin', values: [30, 41, 38, 52] },
+			],
+			dataTable: { showKeys: true, showOutline: true },
+			style: { hasLegend: true, legendPosition: 'b' },
+		};
+		const vm = buildComboViewModel(makeElement(), chartData, CATEGORIES);
+		expect(vm.dataTable).toBeDefined();
+		expect(vm.dataTable!.length).toBeGreaterThan(0);
+	});
+
+	it('draws a trendline on a combo series that declares one', () => {
+		const base: PptxChartData = {
+			chartType: 'combo',
+			categories: CATEGORIES,
+			series: [
+				{ name: 'Revenue', values: [45, 62, 58, 71] },
+				{ name: 'Margin', values: [30, 41, 38, 52] },
+			],
+			style: { hasLegend: true, legendPosition: 'b' },
+		};
+		const without = buildComboViewModel(makeElement(), base, CATEGORIES);
+		const withTrend = buildComboViewModel(
+			makeElement(),
+			{
+				...base,
+				series: [{ ...base.series[0], trendlines: [{ trendlineType: 'linear' }] }, base.series[1]],
+			},
+			CATEGORIES,
+		);
+		expect(withTrend.primitives.length).toBeGreaterThan(without.primitives.length);
 	});
 });

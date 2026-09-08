@@ -1,8 +1,15 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per hook/handler, several separated
+   by comments or guard clauses); merging them isn't a style choice here. */
 import { PptxHandler } from 'pptx-viewer-core';
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useTranslation } from 'react-i18next';
 
+// The openable-file allow list comes from the binding's public surface, not a
+// local regex: a hand-rolled `.pptx|.ppt|.json` refused a `.pptm` on drop that
+// the viewer's own File > Open accepted.
+import { PPTX_OPEN_ACCEPT, isSupportedPresentationFile } from '../../packages/react/src/index';
 import {
 	themeToCssVars,
 	vermilionDarkTheme,
@@ -14,9 +21,12 @@ import {
 	isAudienceTab,
 	loadAudienceContent,
 	parseAudienceNonce,
+	rememberSessionDeck,
+	restoreSessionDeck,
 	storeAudienceContent,
 } from '../../packages/react/src/viewer';
 import type { CollaborationConfig } from '../../packages/react/src/viewer';
+import { markAutosaveSnapshotConsumed } from '../../packages/shared/src/render/autosave-recovery';
 import {
 	getAutosaveSnapshot,
 	listAutosaveSnapshots,
@@ -287,9 +297,38 @@ function useRootTheme(theme: ViewerTheme) {
 
 const RECOVERY_STORAGE_KEY = 'pptx-demo-last-file';
 
+/**
+ * Drop `?sample=1` from the address bar.
+ *
+ * The docs landing page embeds the demo with `?sample=1` so it opens
+ * pre-populated. Once the user opens a deck of their own that param is stale:
+ * left in place it would re-seed the bundled sample on the next refresh and
+ * throw away what they were looking at.
+ */
+function dropSampleParam(): void {
+	const url = new URL(window.location.href);
+	if (!url.searchParams.has('sample')) {
+		return;
+	}
+	url.searchParams.delete('sample');
+	window.history.replaceState({}, '', url.toString());
+}
+
 function App() {
 	const [content, setContent] = useState<Uint8Array | null>(null);
 	const [fileName, setFileName] = useState<string>('');
+	// Whether the "does this tab have a deck to reopen?" check has finished. The
+	// `?sample=1` auto-load waits for it so a restored deck wins over the sample.
+	// Collaboration / broadcast / audience tabs never restore (see the effect
+	// below), so seed this true for them at mount instead of a redundant
+	// synchronous setState right after render; `room`/`broadcast` are read raw
+	// here (not from the `urlRoom`/`urlBroadcast` state below, which isn't
+	// declared yet at this point in the component).
+	// eslint-disable-next-line react/hook-use-state
+	const [restoreChecked, setRestoreChecked] = useState(() => {
+		const params = new URLSearchParams(window.location.search);
+		return Boolean(params.get('room') || params.get('broadcast')) || isAudienceTab();
+	});
 	const [recoveryOffer, setRecoveryOffer] = useState<{
 		filePath: string;
 		timestamp: number;
@@ -341,6 +380,40 @@ function App() {
 	const [smartArt3D] = useState(
 		() => new URLSearchParams(window.location.search).get('smartArt3D') === '1',
 	);
+	// Opt in to the experimental Three.js interactive surface-chart renderer
+	// (camera orbit/zoom + raycast hover tooltip) via `?surfaceChart3D=1`.
+	// eslint-disable-next-line react/hook-use-state
+	const [surfaceChart3D] = useState(
+		() => new URLSearchParams(window.location.search).get('surfaceChart3D') === '1',
+	);
+	// Opt in to the experimental Three.js interactive bar3D-chart renderer
+	// (real box meshes, camera orbit/zoom + raycast hover tooltip) via
+	// `?barChart3D=1`.
+	// eslint-disable-next-line react/hook-use-state
+	const [barChart3D] = useState(
+		() => new URLSearchParams(window.location.search).get('barChart3D') === '1',
+	);
+	// Opt in to the experimental Three.js interactive line3D-chart renderer
+	// (real tube-path meshes, camera orbit/zoom + raycast hover tooltip) via
+	// `?lineChart3D=1`.
+	// eslint-disable-next-line react/hook-use-state
+	const [lineChart3D] = useState(
+		() => new URLSearchParams(window.location.search).get('lineChart3D') === '1',
+	);
+	// Opt in to the experimental Three.js interactive area3D-chart renderer
+	// (real tube-path + ribbon meshes, camera orbit/zoom + raycast hover
+	// tooltip) via `?areaChart3D=1`.
+	// eslint-disable-next-line react/hook-use-state
+	const [areaChart3D] = useState(
+		() => new URLSearchParams(window.location.search).get('areaChart3D') === '1',
+	);
+	// Opt in to the experimental Three.js interactive pie3D-chart renderer
+	// (real wedge meshes, camera orbit/zoom + raycast hover tooltip) via
+	// `?pieChart3D=1`.
+	// eslint-disable-next-line react/hook-use-state
+	const [pieChart3D] = useState(
+		() => new URLSearchParams(window.location.search).get('pieChart3D') === '1',
+	);
 	// `?sample=1` auto-loads the bundled sample deck (used by the docs landing
 	// page to embed a live, pre-populated viewer).
 	// eslint-disable-next-line react/hook-use-state
@@ -380,75 +453,68 @@ function App() {
 	const aiConfig = useDemoAiConfig();
 
 	// ── Collaboration ────────────────────────────────────────────────────
-	const [collaborationConfig, setCollaborationConfig] = useState<CollaborationConfig | null>(null);
-
-	// Auto-connect if room is in URL (collaboration mode). Peer-to-peer joins
-	// (transport=webrtc) need no server and skip the trusted-host check.
-	useEffect(() => {
-		if (!urlRoom || collaborationConfig) {
-			return;
+	// Auto-connect if room and/or broadcast is in the URL at mount (collaboration
+	// / viewer mode respectively; peer-to-peer joins need no server and skip the
+	// trusted-host check). Computed once here rather than in an effect that
+	// setState's synchronously on every render where it applies: urlRoom /
+	// urlBroadcast only ever go from a URL-seeded value to `null` (see
+	// handleStopCollaboration below), never the other way, so this can never
+	// need to fire again after mount. Room is checked first and broadcast
+	// second so that, in the (URL-crafted, not UI-reachable) case where both are
+	// present, broadcast wins, preserving this file's previous two-effects
+	// ordering where the broadcast effect ran after the room effect.
+	const [collaborationConfig, setCollaborationConfig] = useState<CollaborationConfig | null>(() => {
+		let config: CollaborationConfig | null = null;
+		if (urlRoom) {
+			if (isWebrtcJoin) {
+				config = {
+					roomId: urlRoom,
+					serverUrl: '',
+					transport: 'webrtc',
+					signaling: signalingList,
+					userName: urlName ?? autoName,
+					userColor: randomCursorColor(),
+				};
+			} else if (isTrustedServerUrl(urlServer)) {
+				config = {
+					roomId: urlRoom,
+					serverUrl: urlServer,
+					userName: urlName ?? autoName,
+					userColor: randomCursorColor(),
+				};
+			} else {
+				console.warn(
+					`Ignoring ?room= auto-connect because ?server=${urlServer} is not in the trusted-host allowlist. Use the Share dialog to connect explicitly.`,
+				);
+			}
 		}
-		if (isWebrtcJoin) {
-			setCollaborationConfig({
-				roomId: urlRoom,
-				serverUrl: '',
-				transport: 'webrtc',
-				signaling: signalingList,
-				userName: urlName ?? autoName,
-				userColor: randomCursorColor(),
-			});
-		} else if (isTrustedServerUrl(urlServer)) {
-			setCollaborationConfig({
-				roomId: urlRoom,
-				serverUrl: urlServer,
-				userName: urlName ?? autoName,
-				userColor: randomCursorColor(),
-			});
-		} else {
-			console.warn(
-				`Ignoring ?room= auto-connect because ?server=${urlServer} is not in the trusted-host allowlist. Use the Share dialog to connect explicitly.`,
-			);
+		if (urlBroadcast) {
+			if (isWebrtcJoin) {
+				config = {
+					roomId: urlBroadcast,
+					serverUrl: '',
+					transport: 'webrtc',
+					signaling: signalingList,
+					userName: urlName ?? autoName,
+					userColor: randomCursorColor(),
+					role: 'viewer',
+				};
+			} else if (isTrustedServerUrl(urlServer)) {
+				config = {
+					roomId: urlBroadcast,
+					serverUrl: urlServer,
+					userName: urlName ?? autoName,
+					userColor: randomCursorColor(),
+					role: 'viewer',
+				};
+			} else {
+				console.warn(
+					`Ignoring ?broadcast= auto-connect because ?server=${urlServer} is not in the trusted-host allowlist.`,
+				);
+			}
 		}
-	}, [urlRoom, urlServer, urlName, autoName, collaborationConfig, isWebrtcJoin, signalingList]);
-
-	// Auto-connect if broadcast is in URL (viewer mode). Peer-to-peer joins need
-	// no server and skip the trusted-host check.
-	useEffect(() => {
-		if (!urlBroadcast || collaborationConfig) {
-			return;
-		}
-		if (isWebrtcJoin) {
-			setCollaborationConfig({
-				roomId: urlBroadcast,
-				serverUrl: '',
-				transport: 'webrtc',
-				signaling: signalingList,
-				userName: urlName ?? autoName,
-				userColor: randomCursorColor(),
-				role: 'viewer',
-			});
-		} else if (isTrustedServerUrl(urlServer)) {
-			setCollaborationConfig({
-				roomId: urlBroadcast,
-				serverUrl: urlServer,
-				userName: urlName ?? autoName,
-				userColor: randomCursorColor(),
-				role: 'viewer',
-			});
-		} else {
-			console.warn(
-				`Ignoring ?broadcast= auto-connect because ?server=${urlServer} is not in the trusted-host allowlist.`,
-			);
-		}
-	}, [
-		urlBroadcast,
-		urlServer,
-		urlName,
-		autoName,
-		collaborationConfig,
-		isWebrtcJoin,
-		signalingList,
-	]);
+		return config;
+	});
 
 	const handleStartCollaboration = useCallback(
 		(config: CollaborationConfig) => {
@@ -513,9 +579,11 @@ function App() {
 
 	// Auto-load the bundled sample deck when `?sample=1` is present. Runs before
 	// the blank-deck collab bootstrap below (local fetch beats its 1.5s timer),
-	// so a `?sample=1&room=…` host pane seeds the session with the sample.
+	// so a `?sample=1&room=…` host pane seeds the session with the sample, and
+	// AFTER the restore check below: a tab that already has a deck of its own
+	// must not have the sample dropped back on top of it.
 	useEffect(() => {
-		if (!urlSample || content) {
+		if (!urlSample || content || !restoreChecked) {
 			return;
 		}
 		let cancelled = false;
@@ -539,7 +607,7 @@ function App() {
 		return () => {
 			cancelled = true;
 		};
-	}, [urlSample, content]);
+	}, [urlSample, content, restoreChecked]);
 
 	// When joining via URL with a room/broadcast param, download PPTX from the
 	// collab server — but ONLY if the server is in the trusted-host allowlist.
@@ -586,48 +654,53 @@ function App() {
 		};
 	}, [joinRoomId, urlServer, content, urlBroadcast, isWebrtcJoin]);
 
-	// Fallback: try IndexedDB (same-browser tabs). For a peer-to-peer join with
-	// no local copy, bootstrap a blank deck so the viewer (and its webrtc
-	// provider) mount; the Y.Doc late-joiner sync then replaces the slides with
-	// the host's deck.
+	// Fallback: try IndexedDB (same-browser tabs).
+	// A `?sample=1` host seeds the session from the bundled deck instead, so
+	// never race it with the IndexedDB / blank-deck fallbacks.
 	useEffect(() => {
-		// A `?sample=1` host seeds the session from the bundled deck instead, so
-		// never race it with the IndexedDB / blank-deck fallbacks.
 		if (!joinRoomId || content || urlSample) {
 			return;
 		}
 		let cancelled = false;
 		const timer = setTimeout(() => {
-			void (async () => {
-				const bytes = await loadAudienceContent();
-				if (cancelled) {
-					return;
+			void loadAudienceContent().then((bytes) => {
+				if (cancelled || !bytes) {
+					return undefined;
 				}
-				if (bytes) {
-					setContent(bytes);
-					setFileName(urlBroadcast ? 'Broadcast Session' : 'Collaboration Session');
-					return;
-				}
-				if (!isWebrtcJoin) {
-					return;
-				}
-				const { handler, data } = await PptxHandler.createBlank({
-					title: 'Collaboration Session',
-					initialSlideCount: 1,
-				});
-				const blank = await handler.save(data.slides);
-				if (cancelled) {
-					return;
-				}
-				setContent(blank);
+				setContent(bytes);
 				setFileName(urlBroadcast ? 'Broadcast Session' : 'Collaboration Session');
-			})();
+				return undefined;
+			});
 		}, 1500);
 		return () => {
 			cancelled = true;
 			clearTimeout(timer);
 		};
-	}, [joinRoomId, content, isWebrtcJoin, urlBroadcast, urlSample]);
+	}, [joinRoomId, content, urlBroadcast, urlSample]);
+
+	// Serverless webrtc joins have no file server and no IndexedDB seed:
+	// bootstrap a blank deck immediately (no delay) so the viewer (and its
+	// webrtc provider) mount right away; the Y.Doc late-joiner sync then
+	// replaces the blank deck with the host's real slides.
+	useEffect(() => {
+		if (!isWebrtcJoin || !joinRoomId || content || urlSample) {
+			return;
+		}
+		let cancelled = false;
+		void PptxHandler.createBlank({ title: 'Collaboration Session', initialSlideCount: 1 })
+			.then(({ handler, data }) => handler.save(data.slides))
+			.then((blank) => {
+				if (cancelled) {
+					return undefined;
+				}
+				setContent(blank);
+				setFileName(urlBroadcast ? 'Broadcast Session' : 'Collaboration Session');
+				return undefined;
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [isWebrtcJoin, joinRoomId, content, urlBroadcast, urlSample]);
 
 	// When opened as an audience tab, load the PPTX content from IndexedDB
 	useEffect(() => {
@@ -647,6 +720,49 @@ function App() {
 			cancelled = true;
 		};
 	}, []);
+
+	// ── Refresh survival ────────────────────────────────────────────────────
+	// Remember the open deck for THIS tab, and reopen it on the next load. A
+	// refresh used to drop the presentation and land the user back on the file
+	// picker; now it comes back, with any autosaved edits (restoreSessionDeck
+	// prefers the newer of the two). An audience tab is fed by the presenter
+	// window, so it neither remembers nor restores.
+	useEffect(() => {
+		if (!content || isAudienceTab()) {
+			return;
+		}
+		void rememberSessionDeck(fileName, content);
+	}, [content, fileName]);
+
+	useEffect(() => {
+		// Collaboration / broadcast / audience tabs are fed by the session; they
+		// never restore, and must not hold the sample fetch up either. Already
+		// reflected in `restoreChecked`'s initial value above (joinRoomId can only
+		// ever go truthy -> falsy, never the other way, so this can't be the
+		// first time that's observed true) — just skip the restore attempt.
+		if (joinRoomId || isAudienceTab()) {
+			return;
+		}
+		let cancelled = false;
+		void restoreSessionDeck().then((deck) => {
+			if (cancelled) {
+				return undefined;
+			}
+			if (deck) {
+				// This tab has moved on from the bundled sample (the user opened a
+				// deck of their own, possibly through the viewer's own File > Open),
+				// so a leftover `?sample=1` must not re-seed it on the next refresh.
+				dropSampleParam();
+				setContent(deck.data);
+				setFileName(deck.fileName);
+			}
+			setRestoreChecked(true);
+			return undefined;
+		});
+		return () => {
+			cancelled = true;
+		};
+	}, [joinRoomId]);
 
 	// ── Recovery detection on mount ─────────────────────────────────────────
 	// Check IndexedDB for autosave snapshots. If we find one for the last opened
@@ -692,6 +808,9 @@ function App() {
 		try {
 			const snapshot = await getAutosaveSnapshot(recoveryOffer.filePath);
 			if (snapshot) {
+				// The host is taking delivery of this snapshot, so the viewer must not
+				// then offer to "recover" the bytes it is about to be handed.
+				markAutosaveSnapshotConsumed(snapshot.timestamp);
 				setContent(snapshot.data);
 				setFileName(snapshot.key);
 				try {
@@ -739,6 +858,7 @@ function App() {
 	}, [languageKey]);
 
 	const handleFile = useCallback((file: File) => {
+		dropSampleParam();
 		setFileName(file.name);
 		try {
 			localStorage.setItem(RECOVERY_STORAGE_KEY, file.name);
@@ -754,6 +874,7 @@ function App() {
 	}, []);
 
 	const handleNewPresentation = useCallback(async () => {
+		dropSampleParam();
 		const { handler, data } = await PptxHandler.createBlank({
 			title: 'Untitled Presentation',
 			initialSlideCount: 1,
@@ -772,7 +893,7 @@ function App() {
 		(e: React.DragEvent) => {
 			e.preventDefault();
 			const file = e.dataTransfer.files[0];
-			if (file?.name.endsWith('.pptx')) {
+			if (file && isSupportedPresentationFile(file.name)) {
 				handleFile(file);
 			}
 		},
@@ -793,15 +914,48 @@ function App() {
 		[handleFile],
 	);
 
+	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	/** Open the native picker from the explicit Browse control. */
+	const openFilePicker = useCallback(() => {
+		fileInputRef.current?.click();
+	}, []);
+
+	/**
+	 * The dashed zone paints `cursor: pointer` over its whole area and the copy
+	 * says "click to browse", so the whole area has to open the picker, not just
+	 * the one text line that happens to be a <label>. Clicks that originate on a
+	 * button, on the label, or on the input itself are already handled by those
+	 * elements; re-opening from here would double-fire or loop.
+	 */
+	const handleZoneClick = useCallback(
+		(e: React.MouseEvent<HTMLElement>) => {
+			if ((e.target as HTMLElement).closest('button, label[for="file-input"], #file-input')) {
+				return;
+			}
+			openFilePicker();
+		},
+		[openFilePicker],
+	);
+
 	if (content) {
 		return (
 			<main className='h-[100dvh] w-screen'>
+				{/* `autosaveIntervalMs`: a demo wants snappy crash recovery, and an
+				    explicit interval is a host policy that outranks the File > Options
+				    AutoRecover cadence the viewer otherwise follows (2 minutes). */}
 				<PowerPointViewer
 					content={content}
 					fileName={fileName}
 					filePath={fileName}
 					canEdit
+					autosaveIntervalMs={2000}
 					smartArt3D={smartArt3D}
+					surfaceChart3D={surfaceChart3D}
+					barChart3D={barChart3D}
+					lineChart3D={lineChart3D}
+					areaChart3D={areaChart3D}
+					pieChart3D={pieChart3D}
 					authorName={collaborationConfig?.userName ?? autoName}
 					collaboration={collaborationConfig ?? undefined}
 					onStartCollaboration={handleStartCollaboration}
@@ -853,7 +1007,9 @@ function App() {
 			<div
 				className='max-w-[900px] w-full border-2 border-dashed border-border rounded-xl p-12 text-center cursor-pointer transition-colors hover:border-primary hover:bg-accent'
 				role='group'
+				data-testid='dropzone'
 				aria-label={t('demo.dropzone.uploadAriaLabel')}
+				onClick={handleZoneClick}
 				onDrop={handleDrop}
 				onDragOver={handleDragOver}
 			>
@@ -885,21 +1041,36 @@ function App() {
 					</label>
 				)}
 				<p className='text-sm text-muted-foreground'>{t('demo.dropzone.processed')}</p>
-				<button
-					onClick={(e) => {
-						e.stopPropagation();
-						void handleNewPresentation();
-					}}
-					className='mt-4 px-4 py-2 rounded-lg border border-border bg-muted hover:bg-accent text-foreground text-sm transition-colors'
-				>
-					{t('demo.dropzone.newPresentation')}
-				</button>
+				<div className='mt-4 flex flex-wrap items-center justify-center gap-2'>
+					<button
+						type='button'
+						data-testid='browse-files'
+						onClick={(e) => {
+							e.stopPropagation();
+							openFilePicker();
+						}}
+						className='px-4 py-2 rounded-lg border border-primary bg-primary text-primary-foreground hover:opacity-90 text-sm font-medium transition-opacity'
+					>
+						{t('demo.dropzone.browse')}
+					</button>
+					<button
+						type='button'
+						onClick={(e) => {
+							e.stopPropagation();
+							void handleNewPresentation();
+						}}
+						className='px-4 py-2 rounded-lg border border-border bg-muted hover:bg-accent text-foreground text-sm transition-colors'
+					>
+						{t('demo.dropzone.newPresentation')}
+					</button>
+				</div>
 				<input
 					type='file'
 					id='file-input'
-					accept='.pptx'
+					accept={PPTX_OPEN_ACCEPT}
 					aria-label={t('demo.dropzone.uploadAriaLabel')}
 					className='sr-only'
+					ref={fileInputRef}
 					onChange={handleInputChange}
 				/>
 			</div>

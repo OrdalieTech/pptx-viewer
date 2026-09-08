@@ -5,7 +5,13 @@ import {
 	updateSmartArtNodeText,
 } from 'pptx-viewer-core';
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
-import { isTemplateElementId } from 'pptx-viewer-shared';
+import {
+	bringForward as sharedBringForward,
+	bringToFront as sharedBringToFront,
+	isTemplateElementId,
+	sendBackward as sharedSendBackward,
+	sendToBack as sharedSendToBack,
+} from 'pptx-viewer-shared';
 import { computed, ref } from 'vue';
 import type { ComputedRef, Ref } from 'vue';
 
@@ -96,6 +102,10 @@ export interface EditorOperations {
 	bringForward: (elementId: string) => void;
 	/** Swap an element one step earlier in z-order (towards the back). */
 	sendBackward: (elementId: string) => void;
+	/** Move an element in front of every sibling on its layer. */
+	bringToFront: (elementId: string) => void;
+	/** Move an element behind every sibling on its layer. */
+	sendToBack: (elementId: string) => void;
 	/** Move an element to an explicit index within the active slide's z-order. */
 	reorder: (elementId: string, toIndex: number) => void;
 	/**
@@ -168,6 +178,25 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 			return;
 		}
 		commitElements(mapElements);
+	};
+
+	/**
+	 * Like {@link commitForId}, but skips the commit (and its `pushHistory`
+	 * snapshot) entirely when `mapElements` is a no-op. The shared z-order family
+	 * (`bringForward`/`sendBackward`/`bringToFront`/`sendToBack`) returns the
+	 * SAME array reference when the element is missing or already at that edge,
+	 * so a reference check is enough to detect "nothing changed" without a
+	 * second pass over the array.
+	 */
+	const commitForIdIfChanged = (
+		elementId: string,
+		mapElements: (elements: PptxElement[]) => PptxElement[],
+	): void => {
+		const current = elementsForId(elementId);
+		if (mapElements(current) === current) {
+			return;
+		}
+		commitForId(elementId, mapElements);
 	};
 
 	/** The element array (slide or template store) that an id currently lives in. */
@@ -246,28 +275,25 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 	};
 
 	// -- Z-order -----------------------------------------------------------
+	// Every transform below defers to shared `element-operations` (the same
+	// `(elements, id) => PptxElement[]` z-order family every binding uses), routed
+	// through `commitForId` / `reorderElementOnSlide`'s pure `(elements) =>
+	// PptxElement[]` shape so template-id routing keeps working. A private
+	// reorder implementation used to live here and could drift from the other
+	// bindings; it no longer does.
 
-	const swapLayer = (elementId: string, direction: 1 | -1): void => {
-		const layer = elementsForId(elementId);
-		const index = layer.findIndex((el) => el.id === elementId);
-		if (index === -1) {
-			return;
-		}
-		const target = index + direction;
-		if (target < 0 || target >= layer.length) {
-			return;
-		}
-		commitForId(elementId, (elements) => {
-			const next = [...elements];
-			const tmp = next[index];
-			next[index] = next[target];
-			next[target] = tmp;
-			return next;
-		});
+	const bringForward = (elementId: string): void => {
+		commitForIdIfChanged(elementId, (elements) => sharedBringForward(elements, elementId));
 	};
-
-	const bringForward = (elementId: string): void => swapLayer(elementId, 1);
-	const sendBackward = (elementId: string): void => swapLayer(elementId, -1);
+	const sendBackward = (elementId: string): void => {
+		commitForIdIfChanged(elementId, (elements) => sharedSendBackward(elements, elementId));
+	};
+	const bringToFront = (elementId: string): void => {
+		commitForIdIfChanged(elementId, (elements) => sharedBringToFront(elements, elementId));
+	};
+	const sendToBack = (elementId: string): void => {
+		commitForIdIfChanged(elementId, (elements) => sharedSendToBack(elements, elementId));
+	};
 
 	const reorder = (elementId: string, toIndex: number): void => {
 		const layer = elementsForId(elementId);
@@ -331,6 +357,8 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 		duplicateElement: duplicateElementById,
 		bringForward,
 		sendBackward,
+		bringToFront,
+		sendToBack,
 		reorder,
 		updateElementText,
 	};

@@ -696,4 +696,266 @@ describe('pptxShapeEffectXmlCodec', () => {
 			expect(codec.buildPresetShadowXml({} as ShapeStyle)).toBeUndefined();
 		});
 	});
+
+	// ---------------------------------------------------------------------
+	// ST_PositiveFixedAngle range (ECMA-376 S20.1.10.53)
+	// ---------------------------------------------------------------------
+	/**
+	 * `@dir` on `a:outerShdw` / `a:prstShdw` / `a:innerShdw`, and `@dir` /
+	 * `@fadeDir` on `a:reflection`, are all typed `ST_PositiveFixedAngle`:
+	 * `0 <= v < 21600000`. PowerPoint does NOT clamp an out-of-range value, it
+	 * refuses to open the whole package ("The file or directory is corrupted and
+	 * unreadable"), verified through COM on a round-tripped deck.
+	 *
+	 * The offset-derived paths here were already normalised. The exposure was the
+	 * STORED-value branch, which assigned `shapeStyle.shadowAngle` straight
+	 * through: that value arrives from a UI shadow-angle spinner or the public
+	 * API and is freely negative or past a full turn.
+	 */
+	describe('@dir / @fadeDir stay inside ST_PositiveFixedAngle', () => {
+		const MAX_UNITS = 21600000;
+
+		function expectInRange(value: unknown): number {
+			const units = Number(value);
+			expect(Number.isInteger(units)).toBeTruthy();
+			expect(units).toBeGreaterThanOrEqual(0);
+			expect(units).toBeLessThan(MAX_UNITS);
+			return units;
+		}
+
+		it('normalises a negative STORED outer-shadow angle', () => {
+			const xml = codec.buildOuterShadowXml({
+				shadowColor: '#000000',
+				shadowAngle: -45,
+				shadowDistance: 5.66,
+			} as ShapeStyle);
+			expect(expectInRange(xml!['@_dir'])).toBe(315 * 60000);
+		});
+
+		it('folds a STORED outer-shadow angle past a full turn', () => {
+			const xml = codec.buildOuterShadowXml({
+				shadowColor: '#000000',
+				shadowAngle: 405,
+				shadowDistance: 5.66,
+			} as ShapeStyle);
+			expect(expectInRange(xml!['@_dir'])).toBe(45 * 60000);
+		});
+
+		it('normalises a negative STORED preset-shadow angle', () => {
+			const xml = codec.buildPresetShadowXml({
+				presetShadowName: 'shdw1',
+				shadowColor: '#000000',
+				shadowAngle: -135,
+				shadowDistance: 4,
+			} as ShapeStyle);
+			expect(expectInRange(xml!['@_dir'])).toBe(225 * 60000);
+		});
+
+		it('normalises a negative reflection @dir', () => {
+			const xml = codec.buildReflectionXml({
+				reflectionBlurRadius: 1,
+				reflectionDirection: -90,
+			} as ShapeStyle);
+			expect(expectInRange(xml!['@_dir'])).toBe(270 * 60000);
+		});
+
+		it('normalises a negative reflection @fadeDir', () => {
+			const xml = codec.buildReflectionXml({
+				reflectionBlurRadius: 1,
+				reflectionFadeDirection: -90,
+			} as ShapeStyle);
+			expect(expectInRange(xml!['@_fadeDir'])).toBe(270 * 60000);
+		});
+
+		it('never emits an out-of-range angle for any stored direction', () => {
+			const outOfRange: string[] = [];
+			for (let degrees = -720; degrees <= 720; degrees += 15) {
+				const nodes: Array<[string, XmlObject | undefined, string]> = [
+					[
+						'outerShdw@dir',
+						codec.buildOuterShadowXml({
+							shadowColor: '#000000',
+							shadowAngle: degrees,
+							shadowDistance: 4,
+						} as ShapeStyle),
+						'@_dir',
+					],
+					[
+						'prstShdw@dir',
+						codec.buildPresetShadowXml({
+							presetShadowName: 'shdw1',
+							shadowColor: '#000000',
+							shadowAngle: degrees,
+							shadowDistance: 4,
+						} as ShapeStyle),
+						'@_dir',
+					],
+					[
+						'innerShdw@dir',
+						codec.buildInnerShadowXml({
+							innerShadowColor: '#000000',
+							innerShadowOffsetX: Math.cos((degrees * Math.PI) / 180) * 3,
+							innerShadowOffsetY: Math.sin((degrees * Math.PI) / 180) * 3,
+						} as ShapeStyle),
+						'@_dir',
+					],
+					[
+						'reflection@dir',
+						codec.buildReflectionXml({
+							reflectionBlurRadius: 1,
+							reflectionDirection: degrees,
+						} as ShapeStyle),
+						'@_dir',
+					],
+					[
+						'reflection@fadeDir',
+						codec.buildReflectionXml({
+							reflectionBlurRadius: 1,
+							reflectionFadeDirection: degrees,
+						} as ShapeStyle),
+						'@_fadeDir',
+					],
+					[
+						'ln/outerShdw@dir',
+						codec.buildLineEffectListXml({
+							lineShadowColor: '#000000',
+							lineShadowOffsetX: Math.cos((degrees * Math.PI) / 180) * 3,
+							lineShadowOffsetY: Math.sin((degrees * Math.PI) / 180) * 3,
+						} as ShapeStyle)?.['a:outerShdw'] as XmlObject | undefined,
+						'@_dir',
+					],
+				];
+				for (const [label, node, attribute] of nodes) {
+					const units = Number(node?.[attribute]);
+					if (!(units >= 0 && units < MAX_UNITS)) {
+						outOfRange.push(`${label}=${units} at ${degrees} deg`);
+					}
+				}
+			}
+			expect(outOfRange).toStrictEqual([]);
+		});
+	});
+
+	// ── Direct effectLst fillOverlay (D1-G3) ──
+
+	describe('extractFillOverlayStyle (direct a:effectLst/a:fillOverlay)', () => {
+		it('parses @blend and the a:solidFill colour+opacity of a direct effectLst fillOverlay', () => {
+			const shapeProps: XmlObject = {
+				'a:effectLst': {
+					'a:fillOverlay': {
+						'@_blend': 'mult',
+						'a:solidFill': {
+							'a:srgbClr': { '@_val': 'FF0000', 'a:alpha': { '@_val': '50000' } },
+						},
+					},
+				},
+			};
+			const style = codec.extractFillOverlayStyle(shapeProps);
+			expect(style.shapeFillOverlayBlend).toBe('mult');
+			expect(style.shapeFillOverlayColor).toBe('#FF0000');
+			expect(style.shapeFillOverlayOpacity).toBe(0.5);
+			expect(style.effectListXml).toBeDefined();
+			expect(style.fillOverlayXml).toBeDefined();
+		});
+
+		it('reads the first gradient stop colour when the overlay uses a:gradFill', () => {
+			const shapeProps: XmlObject = {
+				'a:effectLst': {
+					'a:fillOverlay': {
+						'@_blend': 'screen',
+						'a:gradFill': {
+							'a:gsLst': {
+								'a:gs': [
+									{ '@_pos': '0', 'a:srgbClr': { '@_val': '00FF00' } },
+									{ '@_pos': '100000', 'a:srgbClr': { '@_val': '0000FF' } },
+								],
+							},
+						},
+					},
+				},
+			};
+			const style = codec.extractFillOverlayStyle(shapeProps);
+			expect(style.shapeFillOverlayBlend).toBe('screen');
+			expect(style.shapeFillOverlayColor).toBe('#00FF00');
+		});
+
+		it('returns an empty style when effectLst has no fillOverlay child', () => {
+			const style = codec.extractFillOverlayStyle({ 'a:effectLst': { 'a:glow': {} } });
+			expect(style.shapeFillOverlayColor).toBeUndefined();
+			expect(style.shapeFillOverlayBlend).toBeUndefined();
+		});
+
+		it('does not collide with the effectDag fillOverlay fields (distinct property names)', () => {
+			const shapeProps: XmlObject = {
+				'a:effectLst': {
+					'a:fillOverlay': {
+						'@_blend': 'darken',
+						'a:solidFill': { 'a:srgbClr': { '@_val': 'ABCDEF' } },
+					},
+				},
+			};
+			const style = codec.extractFillOverlayStyle(shapeProps);
+			expect(style.shapeFillOverlayColor).toBe('#ABCDEF');
+			expect((style as ShapeStyle).dagFillOverlayColor).toBeUndefined();
+		});
+	});
+
+	describe('buildFillOverlayXml', () => {
+		it('builds a solid-colour a:fillOverlay with @blend and a:solidFill/a:srgbClr', () => {
+			const xml = codec.buildFillOverlayXml({
+				shapeFillOverlayColor: '#112233',
+				shapeFillOverlayBlend: 'mult',
+				shapeFillOverlayOpacity: 0.4,
+			} as ShapeStyle);
+			expect(xml?.['@_blend']).toBe('mult');
+			const solidFill = xml?.['a:solidFill'] as XmlObject;
+			const srgb = solidFill['a:srgbClr'] as XmlObject;
+			expect(srgb['@_val']).toBe('112233');
+			expect((srgb['a:alpha'] as XmlObject)['@_val']).toBe('40000');
+		});
+
+		it('returns undefined when no fill overlay colour is set', () => {
+			expect(codec.buildFillOverlayXml({} as ShapeStyle)).toBeUndefined();
+		});
+
+		it('defaults @blend to "over" when unset', () => {
+			const xml = codec.buildFillOverlayXml({ shapeFillOverlayColor: '#FF00FF' } as ShapeStyle);
+			expect(xml?.['@_blend']).toBe('over');
+		});
+
+		it('preserves the original a:gradFill verbatim when colour/opacity are unchanged from parse', () => {
+			const originalFillOverlay: XmlObject = {
+				'@_blend': 'screen',
+				'a:gradFill': {
+					'a:gsLst': { 'a:gs': [{ '@_pos': '0', 'a:schemeClr': { '@_val': 'accent1' } }] },
+				},
+			};
+			const xml = codec.buildFillOverlayXml({
+				fillOverlayXml: originalFillOverlay,
+				shapeFillOverlayColor: '#theme_accent1',
+				shapeFillOverlayOriginalColor: '#theme_accent1',
+				shapeFillOverlayOpacity: undefined,
+				shapeFillOverlayOriginalOpacity: undefined,
+			} as unknown as ShapeStyle);
+			expect(xml?.['a:gradFill']).toBeDefined();
+			expect(xml?.['a:solidFill']).toBeUndefined();
+		});
+
+		it('replaces the fill with a fresh solidFill when the colour was edited', () => {
+			const originalFillOverlay: XmlObject = {
+				'@_blend': 'screen',
+				'a:gradFill': {
+					'a:gsLst': { 'a:gs': [{ '@_pos': '0', 'a:srgbClr': { '@_val': '000000' } }] },
+				},
+			};
+			const xml = codec.buildFillOverlayXml({
+				fillOverlayXml: originalFillOverlay,
+				shapeFillOverlayColor: '#FFFFFF',
+				shapeFillOverlayOriginalColor: '#000000',
+			} as ShapeStyle);
+			expect(xml?.['a:gradFill']).toBeUndefined();
+			const solidFill = xml?.['a:solidFill'] as XmlObject;
+			expect((solidFill['a:srgbClr'] as XmlObject)['@_val']).toBe('FFFFFF');
+		});
+	});
 });

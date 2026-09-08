@@ -170,20 +170,26 @@ export const ENTRANCE_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified against retail PowerPoint via COM automation: entr.11
+		// emits a plain visibility flash with no filter (Flash Once), not
+		// Flash Bulb. Flash Bulb is an EMPHASIS effect (emph.26), not an
+		// entrance effect at all, and is out of this catalog's entrance list.
 		presetId: 'entr.11',
-		label: 'Flash Bulb',
-		category: 'entrance',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'entr.12',
 		label: 'Flash Once',
 		category: 'entrance',
 		defaultDurationMs: 300,
 		hasDirection: false,
 		hasTextBuild: false,
+	},
+	{
+		// Verified via COM: entr.12 carries `filter="wipe(up)"`, a peek reveal.
+		presetId: 'entr.12',
+		label: 'Peek In',
+		category: 'entrance',
+		defaultDurationMs: 500,
+		hasDirection: true,
+		directions: DIRECTIONS_4WAY,
+		hasTextBuild: true,
 	},
 	{
 		presetId: 'entr.13',
@@ -212,16 +218,9 @@ export const ENTRANCE_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified via COM: entr.16 carries `filter="barn(inVertical)"`, the
+		// split barn-door reveal.
 		presetId: 'entr.16',
-		label: 'Peek In',
-		category: 'entrance',
-		defaultDurationMs: 500,
-		hasDirection: true,
-		directions: DIRECTIONS_4WAY,
-		hasTextBuild: true,
-	},
-	{
-		presetId: 'entr.17',
 		label: 'Split',
 		category: 'entrance',
 		defaultDurationMs: 500,
@@ -230,21 +229,40 @@ export const ENTRANCE_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
-		presetId: 'entr.18',
+		// Verified via COM: entr.17 emits a plain `ppt_w`/`ppt_h` grow from 0
+		// to full size (no filter), matching Stretch. Note entr.18 already
+		// carries its own (separately unverified) "Stretch" label in this
+		// catalog; that duplicate is a pre-existing, out-of-scope issue this
+		// fix does not resolve.
+		presetId: 'entr.17',
 		label: 'Stretch',
 		category: 'entrance',
 		defaultDurationMs: 500,
-		hasDirection: true,
-		directions: ['fromBottom', 'fromLeft', 'fromRight', 'fromTop', 'across'],
+		hasDirection: false,
 		hasTextBuild: true,
 	},
 	{
-		presetId: 'entr.19',
+		// Verified via COM: entr.18 carries `filter="strips(...)"`, the Strips
+		// reveal, not Stretch (real Stretch is entr.17 above; this entry used
+		// to duplicate that label). entr.19 (below) was previously mislabelled
+		// "Strips"; the two were swapped.
+		presetId: 'entr.18',
 		label: 'Strips',
 		category: 'entrance',
 		defaultDurationMs: 500,
 		hasDirection: true,
 		directions: ['leftDown', 'leftUp', 'rightDown', 'rightUp'],
+		hasTextBuild: true,
+	},
+	{
+		// Verified via COM: entr.19 is Swivel (`msoAnimEffectSwivel` serializes
+		// as presetID 19), not Strips (real Strips is entr.18 above).
+		presetId: 'entr.19',
+		label: 'Swivel',
+		category: 'entrance',
+		defaultDurationMs: 1000,
+		hasDirection: true,
+		directions: DIRECTIONS_AXIS,
 		hasTextBuild: true,
 	},
 	{
@@ -299,8 +317,11 @@ export const ENTRANCE_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified via COM: `msoAnimEffectBounce` serializes as presetID 26,
+		// not "Rise Up" (real Rise Up is entr.37, see below). The two were
+		// previously swapped in this catalog.
 		presetId: 'entr.26',
-		label: 'Rise Up',
+		label: 'Bounce',
 		category: 'entrance',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -388,8 +409,11 @@ export const ENTRANCE_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified via COM: `msoAnimEffectRiseUp` serializes as presetID 37,
+		// not "Bounce" (real Bounce is entr.26 above). The two were
+		// previously swapped in this catalog.
 		presetId: 'entr.37',
-		label: 'Bounce',
+		label: 'Rise Up',
 		category: 'entrance',
 		defaultDurationMs: 1000,
 		hasDirection: false,
@@ -468,12 +492,16 @@ export const ENTRANCE_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified via COM: entr.47 is "Descend" (`msoAnimEffectDescend`
+		// serializes as presetID 47), not Swivel (real Swivel is entr.19, see
+		// above). Note entr.61 already carries its own (separately
+		// unverified) "Descend" label in this catalog; that duplicate is a
+		// newly surfaced, out-of-scope issue this fix does not resolve.
 		presetId: 'entr.47',
-		label: 'Swivel',
+		label: 'Descend',
 		category: 'entrance',
 		defaultDurationMs: 1000,
-		hasDirection: true,
-		directions: DIRECTIONS_AXIS,
+		hasDirection: false,
 		hasTextBuild: true,
 	},
 	{
@@ -485,8 +513,14 @@ export const ENTRANCE_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified via COM: `msoAnimEffectSpinner` serializes as presetID 49,
+		// matching write-mappings' existing `spinnerIn`; the catalog's
+		// previous "Pinwheel IV" label was internally inconsistent with that.
+		// Note entr.30 already carries its own (separately unverified)
+		// "Spinner" label in this catalog; that duplicate is a newly
+		// surfaced, out-of-scope issue this fix does not resolve.
 		presetId: 'entr.49',
-		label: 'Pinwheel IV',
+		label: 'Spinner',
 		category: 'entrance',
 		defaultDurationMs: 1000,
 		hasDirection: false,
@@ -743,20 +777,34 @@ export const EXIT_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified via COM: `msoAnimEffectFlashOnce` with `Effect.Exit = True`
+		// serializes as presetID 11 (no filter, matching entr.11); Flash Bulb
+		// cannot be made an exit effect at all (`Effect.Exit = True` throws
+		// for it).
 		presetId: 'exit.11',
-		label: 'Flash Bulb',
-		category: 'exit',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'exit.12',
 		label: 'Flash Once',
 		category: 'exit',
 		defaultDurationMs: 300,
 		hasDirection: false,
 		hasTextBuild: false,
+	},
+	{
+		// Verified via COM (this repo's own PowerShell automation): `AddEffect`
+		// with the Peek In `MsoAnimEffect` constant then `Effect.Exit = True`
+		// re-emits `presetID="12" presetSubtype="4"` with a child
+		// `p:animEffect[@filter="wipe(down)"]`, matching
+		// `pptx-viewer-shared`'s `animation-preset-ground-truth.ts`
+		// (`row('exit', 12, { sub: 4, filter: 'wipe(down)' })`) exactly. exit.12
+		// IS "Peek Out", the exit-gallery counterpart of entr.12's "Peek In"
+		// above; this label previously duplicated "Flash Once" as an
+		// out-of-scope, unresolved placeholder.
+		presetId: 'exit.12',
+		label: 'Peek Out',
+		category: 'exit',
+		defaultDurationMs: 500,
+		hasDirection: true,
+		directions: DIRECTIONS_4WAY_OUT,
+		hasTextBuild: true,
 	},
 	{
 		presetId: 'exit.13',
@@ -871,8 +919,13 @@ export const EXIT_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified via a fresh COM pass: `msoAnimEffectBounce` with
+		// `Effect.Exit = True` re-emits presetID 26, the SAME id as its
+		// entrance form (see entr.26 above), i.e. exit.26 is Bounce, not Sink
+		// Down (real Sink Down is exit.37, see below). The two were swapped
+		// in this catalog.
 		presetId: 'exit.26',
-		label: 'Sink Down',
+		label: 'Bounce',
 		category: 'exit',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -960,8 +1013,13 @@ export const EXIT_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: true,
 	},
 	{
+		// Verified via a fresh COM pass: `msoAnimEffectRiseUp` with
+		// `Effect.Exit = True` re-emits presetID 37, the SAME id as its
+		// entrance form (see entr.37 above), i.e. exit.37 is Sink Down
+		// (Rise Up's exit-gallery name), not Bounce (real Bounce is exit.26,
+		// see above). The two were swapped in this catalog.
 		presetId: 'exit.37',
-		label: 'Bounce',
+		label: 'Sink Down',
 		category: 'exit',
 		defaultDurationMs: 1000,
 		hasDirection: false,
@@ -1225,10 +1283,36 @@ export const EXIT_PRESETS: AnimationPresetInfo[] = [
 // Emphasis presets
 // ---------------------------------------------------------------------------
 
+// FULL GROUND TRUTH (2026-09-05): every id below was directly observed via
+// TWO independent COM/UI-Automation methods - (1) `MainSequence.AddEffect`
+// with a named `MsoAnimEffect` constant, and (2) UI Automation invoking the
+// literal ribbon / "Add Emphasis Effect" dialog item by its displayed name,
+// required for the five ribbon-only names (Pulse, Color Pulse, Object Color,
+// Blink, Shimmer) with no `MsoAnimEffect` constant. All 26 items in the "Add
+// Emphasis Effect" dialog's Basic/3D/Subtle/Moderate/Exciting groups were
+// enumerated via UI Automation and every one resolves to an entry below; see
+// `pptx-viewer-shared`'s `animation-emphasis-ground-truth.ts` for the raw
+// per-id XML. ids 11/12/13/17/29/37/38/39 correspond to NO named effect
+// anywhere in PowerPoint's UI or object model and are correctly absent.
+//
+// The previous version of this array filled ids 11-64 by sequentially
+// GUESSING a label per id with no verification (Spin Slow/Fast, Wobble,
+// Jiggle, Heartbeat, Glow, Rainbow, Bob, etc., none of which are real
+// PowerPoint emphasis effects); every guess disagreed with the ground truth
+// and has been removed. The real catalogue tops out at id 41 (two unnamed
+// "3D" dialog items with no representable 2D animation) - there is no id
+// 42-64.
+//
+// emph.26 is both Pulse (the modern ribbon name) and Flash Bulb (the
+// `MsoAnimEffect` name): the two methods produced byte-identical XML
+// (`presetID="26"`, a `filter="fade"` flash curve plus a 105%/105%
+// `autoRev` `animScale`), so this is one preset with two historical names,
+// not two effects that were swapped onto one id. Likewise emph.27 is both
+// Flicker and Color Pulse.
 export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	{
 		presetId: 'emph.1',
-		label: 'Bold Flash',
+		label: 'Fill Color',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1236,7 +1320,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.2',
-		label: 'Color Wave',
+		label: 'Change Font',
 		category: 'emphasis',
 		defaultDurationMs: 1000,
 		hasDirection: false,
@@ -1244,23 +1328,23 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.3',
-		label: 'Brush on Color',
+		label: 'Font Color',
 		category: 'emphasis',
-		defaultDurationMs: 1000,
+		defaultDurationMs: 500,
 		hasDirection: false,
 		hasTextBuild: false,
 	},
 	{
 		presetId: 'emph.4',
-		label: 'Brush on Underline',
+		label: 'Change Font Size',
 		category: 'emphasis',
-		defaultDurationMs: 1000,
+		defaultDurationMs: 500,
 		hasDirection: false,
 		hasTextBuild: false,
 	},
 	{
 		presetId: 'emph.5',
-		label: 'Change Font',
+		label: 'Change Font Style',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1276,7 +1360,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.7',
-		label: 'Change Font Color',
+		label: 'Line Color',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1301,31 +1385,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.10',
-		label: 'Change Font Size',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.11',
-		label: 'Change Font Style',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.12',
-		label: 'Grow with Color',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.13',
-		label: 'Desaturate',
+		label: 'Bold Flash',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1333,7 +1393,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.14',
-		label: 'Teeter',
+		label: 'Blast',
 		category: 'emphasis',
 		defaultDurationMs: 1000,
 		hasDirection: false,
@@ -1341,30 +1401,6 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.15',
-		label: 'Vertical Highlight',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.16',
-		label: 'Wave',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.17',
-		label: 'Blast',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.18',
 		label: 'Bold Reveal',
 		category: 'emphasis',
 		defaultDurationMs: 500,
@@ -1372,8 +1408,24 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 		hasTextBuild: false,
 	},
 	{
+		presetId: 'emph.16',
+		label: 'Brush on Color',
+		category: 'emphasis',
+		defaultDurationMs: 1000,
+		hasDirection: false,
+		hasTextBuild: false,
+	},
+	{
+		presetId: 'emph.18',
+		label: 'Underline',
+		category: 'emphasis',
+		defaultDurationMs: 500,
+		hasDirection: false,
+		hasTextBuild: false,
+	},
+	{
 		presetId: 'emph.19',
-		label: 'Wash Out',
+		label: 'Object Color',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1381,7 +1433,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.20',
-		label: 'Shimmer',
+		label: 'Color Wave',
 		category: 'emphasis',
 		defaultDurationMs: 1000,
 		hasDirection: false,
@@ -1389,7 +1441,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.21',
-		label: 'Flicker',
+		label: 'Complementary Color',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1397,15 +1449,15 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.22',
-		label: 'Grow with Color (Sustain)',
+		label: 'Complementary Color 2',
 		category: 'emphasis',
-		defaultDurationMs: 1000,
+		defaultDurationMs: 500,
 		hasDirection: false,
 		hasTextBuild: false,
 	},
 	{
 		presetId: 'emph.23',
-		label: 'Lighten',
+		label: 'Contrasting Color',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1421,7 +1473,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.25',
-		label: 'Style Emphasis',
+		label: 'Desaturate',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1445,23 +1497,15 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.28',
-		label: 'Color Blend',
+		label: 'Grow With Color',
 		category: 'emphasis',
 		defaultDurationMs: 1000,
 		hasDirection: false,
 		hasTextBuild: false,
 	},
 	{
-		presetId: 'emph.29',
-		label: 'Complementary Color',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
 		presetId: 'emph.30',
-		label: 'Complementary Color 2',
+		label: 'Lighten',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1469,7 +1513,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.31',
-		label: 'Contrasting Color',
+		label: 'Style Emphasis',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1477,7 +1521,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.32',
-		label: 'Pulse Once',
+		label: 'Teeter',
 		category: 'emphasis',
 		defaultDurationMs: 1000,
 		hasDirection: false,
@@ -1485,7 +1529,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.33',
-		label: 'Underline',
+		label: 'Vertical Grow',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1493,7 +1537,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.34',
-		label: 'Bold Flash (Variant)',
+		label: 'Wave',
 		category: 'emphasis',
 		defaultDurationMs: 500,
 		hasDirection: false,
@@ -1501,7 +1545,7 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.35',
-		label: 'Teeter (Variant)',
+		label: 'Blink',
 		category: 'emphasis',
 		defaultDurationMs: 1000,
 		hasDirection: false,
@@ -1509,236 +1553,29 @@ export const EMPHASIS_PRESETS: AnimationPresetInfo[] = [
 	},
 	{
 		presetId: 'emph.36',
-		label: 'Wave (Variant)',
+		label: 'Shimmer',
 		category: 'emphasis',
 		defaultDurationMs: 1000,
 		hasDirection: false,
 		hasTextBuild: false,
 	},
 	{
-		presetId: 'emph.37',
-		label: 'Object Color',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.38',
-		label: 'Fill Color',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.39',
-		label: 'Line Color',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
+		// The "Add Emphasis Effect" dialog's "3D" group has two unnamed
+		// "Custom" items; both save with an empty `<p:childTnLst>` (nothing
+		// 2D-representable). Labelled descriptively since PowerPoint's own
+		// dialog does not name them either.
 		presetId: 'emph.40',
-		label: 'Brush on Color (Sustain)',
+		label: '3D Custom 1',
 		category: 'emphasis',
-		defaultDurationMs: 1000,
+		defaultDurationMs: 500,
 		hasDirection: false,
 		hasTextBuild: false,
 	},
 	{
 		presetId: 'emph.41',
-		label: 'Color Wave (Sustain)',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.42',
-		label: 'Flash',
-		category: 'emphasis',
-		defaultDurationMs: 300,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.43',
-		label: 'Flicker Slow',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.44',
-		label: 'Grow Big',
+		label: '3D Custom 2',
 		category: 'emphasis',
 		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.45',
-		label: 'Shrink Small',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.46',
-		label: 'Color Lighten',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.47',
-		label: 'Color Darken',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.48',
-		label: 'Bold Italics',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.49',
-		label: 'Spin Slow',
-		category: 'emphasis',
-		defaultDurationMs: 2000,
-		hasDirection: true,
-		directions: DIRECTIONS_SPIN,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.50',
-		label: 'Spin Fast',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: true,
-		directions: DIRECTIONS_SPIN,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.51',
-		label: 'Wobble',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.52',
-		label: 'Jiggle',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.53',
-		label: 'Bounce In Place',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.54',
-		label: 'Heartbeat',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.55',
-		label: 'Glow',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.56',
-		label: 'Brighten',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.57',
-		label: 'Dim',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.58',
-		label: 'Saturate',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.59',
-		label: 'Color Cycle',
-		category: 'emphasis',
-		defaultDurationMs: 1500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.60',
-		label: 'Rainbow',
-		category: 'emphasis',
-		defaultDurationMs: 1500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.61',
-		label: 'Shake',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: true,
-		directions: DIRECTIONS_AXIS,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.62',
-		label: 'Vibrate',
-		category: 'emphasis',
-		defaultDurationMs: 500,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.63',
-		label: 'Sway',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
-		hasDirection: false,
-		hasTextBuild: false,
-	},
-	{
-		presetId: 'emph.64',
-		label: 'Bob',
-		category: 'emphasis',
-		defaultDurationMs: 1000,
 		hasDirection: false,
 		hasTextBuild: false,
 	},

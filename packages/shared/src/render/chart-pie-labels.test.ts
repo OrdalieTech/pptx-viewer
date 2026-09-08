@@ -54,8 +54,111 @@ describe('buildPieDataLabels', () => {
 		expect(result.leaderLines).toHaveLength(0);
 	});
 
+	it('uses the default grey leader-line stroke when no leaderLineStyle is given', () => {
+		const result = buildPieDataLabels({ slices, values, ...geom, position: 'outEnd' });
+		expect(result.leaderLines[0].stroke).toBe('#94a3b8');
+	});
+
+	// Data-label leaderLineStyle, resolved from c:dLbls/c:leaderLines/c:spPr or
+	// its chart15-extension mirror (chart-data-label-parser.ts), confirmed
+	// against real corpus markup (issue-132-gradient-fill.pptx /
+	// issue-132-hr-deck.pptx: a themed grey `a:schemeClr tx1 lumMod/lumOff`
+	// resolved to a hex string by core before it reaches this renderer).
+	it('uses the authored leaderLineStyle stroke colour when given', () => {
+		const result = buildPieDataLabels({
+			slices,
+			values,
+			...geom,
+			position: 'outEnd',
+			leaderLineStyle: { strokeColor: '#a6a6a6' },
+		});
+		expect(result.leaderLines).toHaveLength(2);
+		expect(result.leaderLines[0].stroke).toBe('#a6a6a6');
+		expect(result.leaderLines[1].stroke).toBe('#a6a6a6');
+	});
+
 	it('skips slices with an undefined value', () => {
 		const result = buildPieDataLabels({ slices, values: [60], ...geom, position: 'ctr' });
 		expect(result.labels).toHaveLength(1);
+	});
+
+	// Limitations.md "Pie/doughnut manual-layout label offset" (c:dLbl/c:layout).
+	describe('manual layout offset (per-point c:dLbl/c:layout)', () => {
+		const frame = { width: 200, height: 200 };
+
+		it('shifts an inside label by its per-point manual layout (factor mode)', () => {
+			const result = buildPieDataLabels({
+				slices,
+				values,
+				...geom,
+				position: 'ctr',
+				frame,
+				svgWidth: 200,
+				svgHeight: 200,
+				layoutFor: (pointIndex) => (pointIndex === 0 ? { x: 0.1, y: -0.05 } : undefined),
+			});
+			// slice 0's auto centroid is (170, 100); factor mode offsets by
+			// layout.x/y * frame width/height.
+			expect(result.labels[0].x).toBe(170 + 0.1 * 200);
+			expect(result.labels[0].y).toBe(100 + -0.05 * 200);
+			// slice 1 has no layout override: unaffected.
+			expect(result.labels[1].x).toBe(30);
+		});
+
+		it('leaves labels unmoved when layoutFor is given but frame is not', () => {
+			const result = buildPieDataLabels({
+				slices,
+				values,
+				...geom,
+				position: 'ctr',
+				layoutFor: () => ({ x: 0.5 }),
+			});
+			expect(result.labels[0].x).toBe(170);
+		});
+
+		it('moves an outside label AND its leader line endpoint together', () => {
+			const result = buildPieDataLabels({
+				slices,
+				values,
+				...geom,
+				position: 'outEnd',
+				frame,
+				svgWidth: 200,
+				svgHeight: 200,
+				layoutFor: (pointIndex) => (pointIndex === 0 ? { x: 0.2, xMode: 'factor' } : undefined),
+			});
+			const label = result.labels[0];
+			const leader = result.leaderLines[0];
+			// The leader line's far endpoint must track the moved label, not the
+			// original auto position (rim -> unmoved point would be a stale connector).
+			expect(leader.x2).toBeCloseTo(label.x - 2, 5);
+			expect(leader.y2).toBe(label.y);
+		});
+	});
+
+	// C2-G1 data-label half: c:dLbl/c:dLbls txPr per-point font override.
+	describe('per-point font override (txPr)', () => {
+		it('applies fontFamily/fontSize/bold from the resolved label content', () => {
+			const result = buildPieDataLabels({
+				slices,
+				values,
+				...geom,
+				position: 'ctr',
+				labelText: (pointIndex, value) => ({
+					text: String(value),
+					fontFamily: 'Calibri',
+					fontSize: 12,
+					bold: true,
+				}),
+			});
+			expect(result.labels[0].fontFamily).toBe('Calibri');
+			expect(result.labels[0].fontSize).toBeCloseTo(12 * (4 / 3), 5);
+			expect(result.labels[0].fontWeight).toBe('bold');
+		});
+
+		it('keeps the fixed default font size when no txPr override resolves', () => {
+			const result = buildPieDataLabels({ slices, values, ...geom, position: 'ctr' });
+			expect(result.labels[0].fontFamily).toBeUndefined();
+		});
 	});
 });

@@ -25,12 +25,6 @@ import type {
 	PptxChartType,
 } from 'pptx-viewer-core';
 import {
-	chartDataAddCategory,
-	chartDataAddSeries,
-	chartDataChangeType,
-	chartDataRemoveCategory,
-	chartDataRemoveSeries,
-	chartDataUpdatePoint,
 	setChartAxisGridlineStyle,
 	setChartAxisLogScale,
 	setChartAxisTitleStyle,
@@ -41,10 +35,17 @@ import {
 	setChartSeriesChartType,
 	setChartSeriesMarker,
 } from 'pptx-viewer-core';
+import {
+	addChartCategory,
+	addChartSeries,
+	patchChartData as sharedPatchChartData,
+	removeChartCategory,
+	removeChartSeries,
+	setChartCategoryLabel,
+	setChartCellValue,
+} from 'pptx-viewer-shared';
 import type { ComputedRef } from 'vue';
 import { toRaw } from 'vue';
-
-import { useSafeTranslate } from './useSafeTranslate';
 
 /** Edit shape for axis-title font styling (matches the core op). */
 export interface ChartAxisTitleStyleEdit {
@@ -117,13 +118,16 @@ export interface ChartEditing {
  * @param element    reactive accessor for the selected chart element (or null).
  * @param chartData  reactive accessor for that element's chart data (or null).
  * @param emitUpdate emits the shallow `{ chartData }` patch up to the host.
+ * @param getFollowDataPoint File > Options > Advanced > "Properties follow
+ *   chart data point for current workbook", read fresh on every category
+ *   removal. Defaults to PowerPoint's own default (`true`) when omitted.
  */
 export function useChartEditing(
 	element: ComputedRef<ChartPptxElement | null>,
 	chartData: ComputedRef<PptxChartData | null>,
 	emitUpdate: (next: PptxChartData) => void,
+	getFollowDataPoint: () => boolean = () => true,
 ): ChartEditing {
-	const t = useSafeTranslate();
 	const replaceChartData = (next: PptxChartData): void => emitUpdate(next);
 
 	const patchChartData = (patch: Partial<PptxChartData>): void => {
@@ -131,13 +135,7 @@ export function useChartEditing(
 		if (!data) {
 			return;
 		}
-		if (patch.chartType && patch.chartType !== data.chartType) {
-			const adapted = chartDataChangeType(data, patch.chartType);
-			const { chartType: _ct, ...rest } = patch;
-			replaceChartData({ ...adapted, ...rest });
-			return;
-		}
-		replaceChartData({ ...data, ...patch });
+		replaceChartData(sharedPatchChartData(data, patch));
 	};
 
 	const updateStyle = (patch: Partial<PptxChartStyle>): void => {
@@ -180,10 +178,10 @@ export function useChartEditing(
 
 	const updateCategoryLabel = (catIndex: number, value: string): void => {
 		const data = chartData.value;
-		if (!data) {
-			return;
+		const next = data && setChartCategoryLabel(data, catIndex, value);
+		if (next) {
+			replaceChartData(next);
 		}
-		patchChartData({ categories: data.categories.map((c, i) => (i === catIndex ? value : c)) });
 	};
 
 	const updateValue = (seriesIndex: number, catIndex: number, raw: string): void => {
@@ -191,11 +189,10 @@ export function useChartEditing(
 		if (!data) {
 			return;
 		}
-		const num = Number.parseFloat(raw);
-		if (!Number.isFinite(num)) {
-			return;
+		const next = setChartCellValue(data, seriesIndex, catIndex, raw);
+		if (next) {
+			replaceChartData(next);
 		}
-		replaceChartData(chartDataUpdatePoint(data, seriesIndex, catIndex, num));
 	};
 
 	const addCategory = (): void => {
@@ -203,15 +200,15 @@ export function useChartEditing(
 		if (!data) {
 			return;
 		}
-		replaceChartData(chartDataAddCategory(data, `Cat ${data.categories.length + 1}`));
+		replaceChartData(addChartCategory(data));
 	};
 
 	const removeCategory = (catIndex: number): void => {
 		const data = chartData.value;
-		if (!data || data.categories.length <= 1) {
-			return;
+		const next = data && removeChartCategory(data, catIndex, getFollowDataPoint());
+		if (next) {
+			replaceChartData(next);
 		}
-		replaceChartData(chartDataRemoveCategory(data, catIndex));
 	};
 
 	const addSeries = (): void => {
@@ -219,20 +216,15 @@ export function useChartEditing(
 		if (!data) {
 			return;
 		}
-		replaceChartData(
-			chartDataAddSeries(data, {
-				name: t('pptx.chart.seriesDefaultName', { number: data.series.length + 1 }),
-				values: data.categories.map(() => 0),
-			}),
-		);
+		replaceChartData(addChartSeries(data));
 	};
 
 	const removeSeries = (seriesIndex: number): void => {
 		const data = chartData.value;
-		if (!data || data.series.length <= 1) {
-			return;
+		const next = data && removeChartSeries(data, seriesIndex);
+		if (next) {
+			replaceChartData(next);
 		}
-		replaceChartData(chartDataRemoveSeries(data, seriesIndex));
 	};
 
 	const setSeriesTrendline = (index: number, trendline: PptxChartTrendline | null): void =>

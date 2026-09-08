@@ -1,56 +1,46 @@
 <script setup lang="ts">
 import type { PptxChartData, PptxChartType, PptxElement } from 'pptx-viewer-core';
-import type {
-	ChartViewModel,
-	ElementAnimationState,
-	PlotLayout,
-	ValueRange,
-} from 'pptx-viewer-shared';
+import type { ChartViewModel, ElementAnimationState } from 'pptx-viewer-shared';
 import {
-	applyChartBuildReveal,
-	computeLayout,
-	computeValueRange,
-	resolveCategoryLabels,
+	chartPlaceholderLabel,
+	chartPreserveAspectRatio,
+	resolveChartKind,
+	resolveRevealedChartData,
 } from 'pptx-viewer-shared';
 import type { CSSProperties } from 'vue';
 import { computed, ref } from 'vue';
+import { useI18n } from 'vue-i18n';
 
+import { useBarFacePictureSampleVersion } from '../composables/bar-face-picture-sample-version';
+import { useChart3DSceneSelection } from '../composables/chart-3d-scene-selection';
 import { useChartCanvasInteraction } from '../composables/chart-canvas-interaction';
 import { getContainerStyle } from '../composables/element-style';
-import BoxWhiskerChart from './chart/BoxWhiskerChart.vue';
-import { resolveRenderKind, SHARED_VIEW_MODEL_KINDS } from './chart/chart-render-kind';
-import type { RenderKind } from './chart/chart-render-kind';
+import Area3DChartRenderer from './Area3DChartRenderer.vue';
+import Bar3DChartRenderer from './Bar3DChartRenderer.vue';
 import { buildVueChartViewModel } from './chart/chart-view-model';
-import ChartChrome from './chart/ChartChrome.vue';
 import ChartEditOverlays from './chart/ChartEditOverlays.vue';
 import ChartViewModelSvg from './chart/ChartViewModelSvg.vue';
-import ComboChart from './chart/ComboChart.vue';
-import FunnelChart from './chart/FunnelChart.vue';
-import HistogramChart from './chart/HistogramChart.vue';
-import RegionMapChart from './chart/RegionMapChart.vue';
-import StockChart from './chart/StockChart.vue';
-import SunburstChart from './chart/SunburstChart.vue';
-import SurfaceChart from './chart/SurfaceChart.vue';
-import TreemapChart from './chart/TreemapChart.vue';
-import WaterfallChart from './chart/WaterfallChart.vue';
+import Line3DChartRenderer from './Line3DChartRenderer.vue';
+import PieChart3DRenderer from './PieChart3DRenderer.vue';
+import SurfaceChart3DRenderer from './SurfaceChart3DRenderer.vue';
 
 /**
- * ChartRenderer: Vue port of the React chart renderer (`viewer/utils/chart.tsx`
- * and friends). Renders a PPTX chart element as an inline SVG.
+ * ChartRenderer: a chart element as inline SVG.
  *
- * Chart types via the shared `buildChartViewModel` engine (`ChartViewModelSvg`):
- *   - bar / column (clustered, stacked, percentStacked)
- *   - line / line3D, area / area3D, scatter, bubble
- *   - pie / doughnut / pie3D, radar
- *   These honour secondary value axes, log / display-unit axes, and trendline /
- *   error-bar / axis-title / data-table overlays inside the shared engine.
+ * EVERY chart kind is projected from the framework-agnostic `buildChartViewModel`
+ * engine in `pptx-viewer-shared` through `ChartViewModelSvg`. This component
+ * decides nothing about geometry; it resolves the palette (via
+ * `buildVueChartViewModel`), applies any staged animation reveal, and asks
+ * shared which aspect-ratio policy the kind wants.
  *
- * Chart types still on bespoke Vue components:
- *   - waterfall / combo / stock  - axis `<svg>` + `ChartChrome` + own component
- *   - funnel / sunburst          - own no-axis components
- *   - treemap / surface          - own SVG mesh / rectangles
- *   - histogram / boxWhisker     - own shared-backed components
- *   - regionMap                  - choropleth map (`RegionMapChart.vue`)
+ * Until this change, six kinds (waterfall / combo / stock / surface / treemap /
+ * regionMap) were drawn by bespoke Vue components ported from a set of private
+ * React renderers. They emitted no `data-chart-part` attributes, so on-canvas
+ * mark selection silently did nothing for exactly those kinds while it worked
+ * in Angular, Svelte and Vanilla; and two of them were plain wrong (the
+ * waterfall scaled cumulative bars against the RAW value range, so its bars ran
+ * off the top of the plot, and the treemap ignored ChartEx category levels so a
+ * hierarchical treemap came out flat).
  */
 const props = defineProps<{
 	element: PptxElement;
@@ -58,13 +48,25 @@ const props = defineProps<{
 	mediaDataUrls?: Map<string, string>;
 	/** True only on the primary editable canvas: enables direct chart editing. */
 	interactive?: boolean;
+	/** Emit the data-pptx-element marker even when not interactive (template layer). */
+	marked?: boolean;
 	/**
 	 * Native-animation playback state. When it carries a staged chart build
-	 * (`build.kind === 'chart'`) the chart reveals its series / categories / cells
-	 * progressively via the shared `applyChartBuildReveal`.
+	 * (`build.kind === 'chart'`, or the authored-index `chartReveal`) the chart
+	 * reveals its series / categories / cells progressively via the shared
+	 * `resolveRevealedChartData`.
 	 */
 	animationState?: ElementAnimationState;
+	/**
+	 * Scoped `!important` CSS override for an active font-style emphasis effect
+	 * (Bold Flash, Bold Reveal, Underline, Change Font Style/Size), built by the
+	 * parent `ElementRenderer` (`buildTextStyleOverrideCss`) so a chart
+	 * title/label/legend animates the same way a shape's text does.
+	 */
+	textStyleOverrideCss?: string;
 }>();
+
+const { t } = useI18n();
 
 const containerStyle = computed<CSSProperties>(() =>
 	getContainerStyle(props.element, props.zIndex),
@@ -95,12 +97,6 @@ const {
 	buildViewModel: buildVueChartViewModel,
 });
 
-/** Staged chart-build descriptor, when an active native animation reveals one. */
-const chartBuild = computed(() => {
-	const build = props.animationState?.build;
-	return build?.kind === 'chart' ? build : undefined;
-});
-
 /**
  * The chart element with its data trimmed to the stages revealed at the current
  * build progress (drag preview wins first). Whole-chart / no-build renders return
@@ -108,11 +104,10 @@ const chartBuild = computed(() => {
  */
 const revealedElement = computed<PptxElement>(() => {
 	const el = renderedElement.value;
-	const build = chartBuild.value;
-	if (!build || el.type !== 'chart' || !el.chartData) {
+	if (el.type !== 'chart' || !el.chartData) {
 		return el;
 	}
-	const revealed = applyChartBuildReveal(el.chartData, build);
+	const revealed = resolveRevealedChartData(el.chartData, props.animationState);
 	return revealed === el.chartData ? el : { ...el, chartData: revealed };
 });
 
@@ -131,67 +126,63 @@ const chartData = computed<PptxChartData | undefined>(() => {
 
 const chartType = computed<PptxChartType>(() => chartData.value?.chartType ?? 'bar');
 
-const categoryLabels = computed<string[]>(() =>
-	chartData.value ? resolveCategoryLabels(chartData.value) : [],
+/** The shared engine's verdict on this chart's family. */
+const chartKind = computed(() =>
+	chartData.value ? resolveChartKind(chartType.value) : 'unsupported',
 );
 
-/** Which renderer to dispatch to (pure dispatch table in `chart-render-kind`). */
-const renderKind = computed<RenderKind>(() => resolveRenderKind(chartData.value));
-
-const isPlaceholder = computed(() => renderKind.value === 'placeholder');
-
-const placeholderLabel = computed(() => `Chart: ${chartType.value}`);
-
-// ── Shared layout ────────────────────────────────────────────────
-
-const style = computed(() => chartData.value?.style);
-const legendPos = computed(() => style.value?.legendPosition || 'b');
-
-/** Plot layout for axis-based charts (combo / stock / waterfall / surface). */
-const layout = computed<PlotLayout>(() =>
-	computeLayout(props.element.width, props.element.height, style.value, true, legendPos.value),
-);
-
-/** Radar / sunburst / treemap / funnel use a no-axis layout. */
-const noAxisLayout = computed<PlotLayout>(() =>
-	computeLayout(props.element.width, props.element.height, style.value, false, legendPos.value),
-);
-
-const svgWidth = computed(() => layout.value.svgWidth);
-const svgHeight = computed(() => layout.value.svgHeight);
-
-/** Value range for the bespoke combo / stock / waterfall / surface overlays. */
-const barRange = computed<ValueRange>(() =>
-	chartData.value ? computeValueRange(chartData.value.series) : { min: 0, max: 1, span: 1 },
-);
-
-// ── Shared view-model engine (pie / doughnut / radar + cartesian) ─
-//
-// Pie / doughnut, radar, and the whole cartesian family (bar / column / line /
-// area / scatter / bubble, including clustered / stacked / percentStacked and
-// log / display-unit / secondary value axes plus trendline / error-bar /
-// axis-title / data-table overlays) are fully covered by the framework-agnostic
-// `buildChartViewModel` engine in pptx-viewer-shared. Vue projects its
-// view-model through `ChartViewModelSvg.vue` (mirroring React's
-// `renderChartViewModel`), so React / Vue / Angular share one geometry / layout
-// engine. Vue's style-id palette is threaded in via `buildVueChartViewModel`,
-// so only colour stays Vue-specific, not geometry.
-
-/** Render kinds projected through the shared view-model engine. */
-const usesSharedViewModel = computed(() => SHARED_VIEW_MODEL_KINDS.has(renderKind.value));
+const isPlaceholder = computed(() => chartKind.value === 'unsupported');
 
 /**
- * Shared view-model for the kinds above, with Vue's palette threaded in.
- * Built from `renderedElement` so an in-flight value drag previews live.
+ * Opt-in interactive 3D scenes (real box/wedge/tube-path/ribbon/surface
+ * meshes, camera orbit/zoom via OrbitControls, plus on-canvas part
+ * click/drag; see `useChart3DSceneSelection`). Marks are not
+ * selectable/draggable for surface/pie: a mesh facet or wedge has no single
+ * vertical value axis to drag against.
  */
-const sharedViewModel = computed<ChartViewModel | undefined>(() =>
-	usesSharedViewModel.value ? buildVueChartViewModel(revealedElement.value) : undefined,
+const { showSurface3D, showBar3D, showLine3D, showArea3D, showPie3D } = useChart3DSceneSelection({
+	chartKind: () => chartKind.value,
+	chartType: () => chartType.value,
+});
+
+const placeholderLabel = computed(() =>
+	chartPlaceholderLabel(chartType.value, (key, params) => t(key, params ?? {})),
 );
 
-/** Pie / doughnut / radar keep their square `xMidYMid meet` aspect ratio. */
-const sharedAspectRatio = computed<'none' | 'xMidYMid meet'>(() =>
-	renderKind.value === 'pie' || renderKind.value === 'radar' ? 'xMidYMid meet' : 'none',
-);
+// An untargeted bar3D extrusion face whose fill is picture-only samples a
+// colour from the picture ASYNCHRONOUSLY (see `chart-bar3d-face-picture-
+// sample.ts`'s module doc for the COM-verified ground truth this
+// reproduces); the shared view-model builder only ever sees whatever is
+// already cached, so `viewModel` below reads this to rebuild once one lands.
+const barFacePictureSampleVersion = useBarFacePictureSampleVersion();
+
+/**
+ * Shared view-model, with Vue's palette threaded in. Built from
+ * `revealedElement` so an in-flight value drag previews live.
+ */
+const viewModel = computed<ChartViewModel | undefined>(() => {
+	// Referenced so this computed re-derives once a bar3D face-picture colour
+	// sample resolves (the shared sample cache is a plain module-level cache,
+	// not a Vue ref, so Vue would otherwise never know to re-run this).
+	void barFacePictureSampleVersion.value;
+	return isPlaceholder.value ? undefined : buildVueChartViewModel(revealedElement.value);
+});
+
+/**
+ * Aspect-ratio policy, decided by shared rather than by a local kind chain.
+ * Vue's own chain had drifted: it letterboxed sunburst, which the other four
+ * bindings stretch.
+ */
+const aspectRatio = computed(() => chartPreserveAspectRatio(chartKind.value));
+
+/**
+ * Active text-style emphasis override, threaded into the 3D chart renderers'
+ * own `textStyle` prop: they apply it via their mounted handle's
+ * `setTextStyle` (a DOM CSS override, i.e. `textStyleOverrideCss` above,
+ * cannot reach a WebGL canvas). Pie3D draws no axis labels, so it does not
+ * take this prop.
+ */
+const textStyle = computed(() => props.animationState?.textStyle);
 </script>
 
 <template>
@@ -201,163 +192,74 @@ const sharedAspectRatio = computed<'none' | 'xMidYMid meet'>(() =>
 		:class="interactiveClass"
 		:style="containerStyle"
 		:data-element-id="element.id"
+		:data-pptx-element="interactive || marked ? 'true' : undefined"
 		@pointerdown="onPointerdown"
 		@pointermove="onPointermove"
 		@pointerup="onPointerup"
 		@dblclick="onDblclick"
 	>
-		<!-- Labelled placeholder for unsupported / deferred chart types -->
+		<!--
+			`<style>` is a forbidden side-effect tag in an SFC template, so the
+			override is rendered through the dynamic `<component :is>` escape
+			hatch instead (see `ElementRenderer.vue`).
+		-->
+		<component :is="'style'" v-if="textStyleOverrideCss">{{ textStyleOverrideCss }}</component>
+		<!-- Labelled placeholder for chart types the engine does not support -->
 		<div v-if="isPlaceholder" class="pptx-vue-placeholder pptx-vue-chart-placeholder">
 			{{ placeholderLabel }}
 		</div>
 
-		<!-- Shared view-model engine: pie / doughnut / radar + the cartesian
-		     family (bar / column / line / area / scatter / bubble, incl.
-		     clustered / stacked / percentStacked, secondary / log /
-		     display-unit axes, and trendline / error-bar / axis-title /
-		     data-table overlays). Pie / radar keep a square aspect ratio. -->
-		<ChartViewModelSvg
-			v-else-if="usesSharedViewModel && sharedViewModel"
-			:element-id="element.id"
-			:vm="sharedViewModel"
-			:preserve-aspect-ratio="sharedAspectRatio"
+		<!-- Opt-in interactive 3D surface scene, falling back to the SVG below -->
+		<SurfaceChart3DRenderer
+			v-else-if="showSurface3D && viewModel"
+			:element="revealedElement"
+			:view-model="viewModel"
+			:preserve-aspect-ratio="aspectRatio"
+			:text-style="textStyle"
 		/>
 
-		<!-- Sunburst: concentric rings (no axes), shared view-model engine -->
-		<SunburstChart v-else-if="renderKind === 'sunburst'" :element="revealedElement" />
+		<!-- Opt-in interactive 3D bar scene, falling back to the SVG below -->
+		<Bar3DChartRenderer
+			v-else-if="showBar3D && viewModel"
+			:element="revealedElement"
+			:view-model="viewModel"
+			:preserve-aspect-ratio="aspectRatio"
+			:text-style="textStyle"
+		/>
 
-		<!-- Treemap: hierarchical rectangles (no axes) -->
-		<svg
-			v-else-if="renderKind === 'treemap'"
-			class="pptx-vue-chart-svg"
-			:viewBox="`0 0 ${noAxisLayout.svgWidth} ${noAxisLayout.svgHeight}`"
-			preserveAspectRatio="none"
-		>
-			<rect
-				:x="0"
-				:y="0"
-				:width="noAxisLayout.svgWidth"
-				:height="noAxisLayout.svgHeight"
-				fill="#0f172a11"
-			/>
-			<text
-				v-if="style?.hasTitle"
-				:x="noAxisLayout.svgWidth / 2"
-				y="14"
-				text-anchor="middle"
-				font-size="12"
-				font-weight="600"
-				fill="#1e293b"
-			>
-				{{ chartData?.title || 'Chart' }}
-			</text>
-			<TreemapChart
-				v-if="chartData"
-				:chart-data="chartData"
-				:layout="noAxisLayout"
-				:categories="categoryLabels"
-			/>
-		</svg>
+		<!-- Opt-in interactive 3D line scene, falling back to the SVG below -->
+		<Line3DChartRenderer
+			v-else-if="showLine3D && viewModel"
+			:element="revealedElement"
+			:view-model="viewModel"
+			:preserve-aspect-ratio="aspectRatio"
+			:text-style="textStyle"
+		/>
 
-		<!-- Funnel: descending trapezoids (no axes), shared view-model engine -->
-		<FunnelChart v-else-if="renderKind === 'funnel'" :element="revealedElement" />
+		<!-- Opt-in interactive 3D area scene, falling back to the SVG below -->
+		<Area3DChartRenderer
+			v-else-if="showArea3D && viewModel"
+			:element="revealedElement"
+			:view-model="viewModel"
+			:preserve-aspect-ratio="aspectRatio"
+			:text-style="textStyle"
+		/>
 
-		<!-- Histogram: contiguous bars, shared view-model engine -->
-		<HistogramChart v-else-if="renderKind === 'histogram'" :element="revealedElement" />
+		<!-- Opt-in interactive 3D pie scene, falling back to the SVG below -->
+		<PieChart3DRenderer
+			v-else-if="showPie3D && viewModel"
+			:element="revealedElement"
+			:view-model="viewModel"
+			:preserve-aspect-ratio="aspectRatio"
+		/>
 
-		<!-- Box-and-whisker: shared view-model engine -->
-		<BoxWhiskerChart v-else-if="renderKind === 'boxWhisker'" :element="revealedElement" />
-
-		<!-- Surface: isometric 2.5D mesh (own SVG, no axis chrome) -->
-		<svg
-			v-else-if="renderKind === 'surface'"
-			class="pptx-vue-chart-svg"
-			:viewBox="`0 0 ${svgWidth} ${svgHeight}`"
-			preserveAspectRatio="none"
-		>
-			<rect :x="0" :y="0" :width="svgWidth" :height="svgHeight" fill="#0f172a11" />
-			<text
-				v-if="style?.hasTitle"
-				:x="svgWidth / 2"
-				y="14"
-				text-anchor="middle"
-				font-size="12"
-				font-weight="600"
-				fill="#1e293b"
-			>
-				{{ chartData?.title || 'Chart' }}
-			</text>
-			<SurfaceChart
-				v-if="chartData"
-				:chart-data="chartData"
-				:layout="layout"
-				:range="barRange"
-				:categories="categoryLabels"
-			/>
-		</svg>
-
-		<!-- Region map: choropleth world map (no axes; component draws its own bg) -->
-		<svg
-			v-else-if="renderKind === 'regionMap'"
-			class="pptx-vue-chart-svg"
-			:viewBox="`0 0 ${noAxisLayout.svgWidth} ${noAxisLayout.svgHeight}`"
-			preserveAspectRatio="xMidYMid meet"
-		>
-			<RegionMapChart
-				v-if="chartData"
-				:chart-data="chartData"
-				:layout="noAxisLayout"
-				:categories="categoryLabels"
-			/>
-		</svg>
-
-		<!-- Bespoke axis-based charts the shared engine does not yet cover:
-		     waterfall / combo / stock. Chrome (gridlines / axes / category
-		     labels / legend) is drawn by ChartChrome around the plot. -->
-		<svg
-			v-else
-			class="pptx-vue-chart-svg"
-			:viewBox="`0 0 ${svgWidth} ${svgHeight}`"
-			preserveAspectRatio="none"
-		>
-			<rect :x="0" :y="0" :width="svgWidth" :height="svgHeight" fill="#0f172a11" />
-
-			<ChartChrome
-				v-if="chartData"
-				:chart-data="chartData"
-				:layout="layout"
-				:range="barRange"
-				:categories="categoryLabels"
-				category-axis-style="bar"
-			/>
-
-			<!-- Waterfall -->
-			<WaterfallChart
-				v-if="renderKind === 'waterfall' && chartData"
-				:chart-data="chartData"
-				:layout="layout"
-				:range="barRange"
-				:categories="categoryLabels"
-			/>
-
-			<!-- Combo (column + line) -->
-			<ComboChart
-				v-else-if="renderKind === 'combo' && chartData"
-				:chart-data="chartData"
-				:layout="layout"
-				:range="barRange"
-				:categories="categoryLabels"
-			/>
-
-			<!-- Stock (OHLC candlestick) -->
-			<StockChart
-				v-else-if="renderKind === 'stock' && chartData"
-				:chart-data="chartData"
-				:layout="layout"
-				:range="barRange"
-				:categories="categoryLabels"
-			/>
-		</svg>
+		<!-- Every supported kind: the shared view-model engine, projected as SVG -->
+		<ChartViewModelSvg
+			v-else-if="viewModel"
+			:element-id="element.id"
+			:vm="viewModel"
+			:preserve-aspect-ratio="aspectRatio"
+		/>
 
 		<!-- Drag value badge + inline title editor (direct on-canvas editing) -->
 		<ChartEditOverlays
@@ -380,12 +282,6 @@ const sharedAspectRatio = computed<'none' | 'xMidYMid meet'>(() =>
    thumbnails / export / presentation stay click-transparent. */
 .pptx-vue-chart.pptx-vue-chart-selectable {
 	pointer-events: auto;
-}
-
-.pptx-vue-chart-svg {
-	width: 100%;
-	height: 100%;
-	display: block;
 }
 
 .pptx-vue-chart-placeholder {

@@ -13,12 +13,12 @@ import type {
 	YDocLike,
 } from 'pptx-viewer-shared';
 import {
+	assignUserColor,
 	CONNECTION_TIMEOUT_MS,
 	createCollaborationLivePatcher,
 	createPresencePublisher,
 	createSyncGate,
 	createWriteBackScheduler,
-	DEFAULT_CURSOR_COLOR,
 	isMixedContentBlocked,
 	LOCAL_SYNC_ORIGIN,
 	observeYDocSlides,
@@ -33,7 +33,7 @@ import { computed, onScopeDispose, ref, watch } from 'vue';
 
 import type { RemoteCursor } from '../components/CollaborationCursors.vue';
 import { watchLoadAdoption } from './collaboration-load-adoption';
-import { projectPresence, readBound } from './collaboration-presence-view';
+import { createPresenceProjection, readBound } from './collaboration-presence-view';
 import { createCollabProvider } from './collaboration-provider';
 import type { CollabProviderHandle } from './collaboration-provider';
 import type {
@@ -94,6 +94,7 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 		getSourceBytes: options.getSourceBytes,
 		getTemplateElements: options.getTemplateElements,
 		mergeTemplateElements: buildSaveSlides,
+		getSaveOptions: options.getSaveOptions,
 	});
 
 	/** Write the current local slides into the doc (granular, echo-deduped). */
@@ -130,19 +131,35 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 		writeBack.cancel();
 	}
 
+	// Memoises the awareness -> view-model projection so idle peer heartbeats
+	// do not re-render the collaboration overlay.
+	const presenceProjection = createPresenceProjection();
+
 	function refreshPresence(): void {
 		if (!awareness) {
+			presenceProjection.reset();
 			remotePresences.value = [];
 			cursors.value = [];
 			return;
 		}
-		const { presences, cursors: nextCursors } = projectPresence(
+		// Assigning a ref triggers whether or not the value differs, and awareness
+		// fires on every peer heartbeat, so an idle room re-rendered the cursor
+		// overlay on a fixed interval. Skip the writes entirely when the shared
+		// projector reports nothing visible moved (issue #145).
+		const {
+			presences,
+			cursors: nextCursors,
+			changed,
+		} = presenceProjection.project(
 			awareness.getStates(),
 			selfId,
 			readBound(options.canvasWidth),
 			readBound(options.canvasHeight),
 			localActiveSlide,
 		);
+		if (!changed) {
+			return;
+		}
 		remotePresences.value = presences;
 		cursors.value = nextCursors;
 		if (
@@ -198,7 +215,12 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 
 			publisher = createPresencePublisher(awareness, {
 				userName: config.userName,
-				userColor: options.userColor ?? config.userColor ?? DEFAULT_CURSOR_COLOR,
+				// Deterministic per-user colour when the host app supplied none: the
+				// same `userName` always lands on the same palette entry, so a peer
+				// keeps a stable hue across sessions instead of every unlabelled peer
+				// sharing one flat default colour (indistinguishable cursors in a
+				// room with more than one anonymous participant).
+				userColor: options.userColor ?? config.userColor ?? assignUserColor(config.userName),
 				userAvatar: config.userAvatar,
 				role: config.role,
 			});
@@ -289,6 +311,7 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 					loadVersion: options.loadVersion,
 					getYDoc: () => currentYDoc,
 					isConnected: () => status.value === 'connected',
+					getLoadOrigin: options.getLoadOrigin,
 					adoptDocSlides: (docSlides) => {
 						applyingRemote = true;
 						options.onRemoteSlides(docSlides);

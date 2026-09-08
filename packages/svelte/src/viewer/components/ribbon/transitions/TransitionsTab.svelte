@@ -1,40 +1,146 @@
 <script lang="ts">
 	/**
-	 * TransitionsTab: the ribbon's Transitions tab. A preset gallery that
-	 * assigns a slide transition, a duration input (seconds), and an
-	 * "Apply to All Slides" checkbox. Every preset click routes through
-	 * `EditorState.transitionOps.applyTransition`, which writes the exact
-	 * `PptxSlide.transition` field the presentation-mode playback state machine
-	 * already consumes (see `presentation/presentation-controller.svelte.ts`),
-	 * so a picked transition plays back immediately in Present mode. The
-	 * duration field and checkbox are modifiers applied on the *next* preset
-	 * click, not independently committed, so typing a duration never spawns
-	 * its own history entry.
+	 * TransitionsTab: the ribbon's Transitions tab, at React's
+	 * `TransitionsSection` control set (Preview / gallery / Timing / Advance
+	 * Slide / Inspector).
+	 *
+	 * The controls hold a `RibbonTransitionDraft` (shared's
+	 * `render/ribbon-transitions`), seeded from the active slide so the tab
+	 * cannot lie after a navigation, and EVERY control commits that whole draft
+	 * through `EditorState.transitionOps.applyRibbonDraft`. That writes the exact
+	 * `PptxSlide.transition` field the playback state machine consumes (see
+	 * `presentation/presentation-controller.svelte.ts`), so duration and the
+	 * Advance Slide boxes take effect on their own rather than waiting for the
+	 * next preset click (which is how they used to reach nothing at all).
+	 *
+	 * Preview REPLAYS the transition on the editing stage through the shared
+	 * `playSlideTransitionPreview`, without writing to the deck: re-committing
+	 * the values the slide already had (what this and two other bindings used to
+	 * do) is a no-op the user cannot see.
 	 */
 	import type { PptxTransitionType } from 'pptx-viewer-core';
+	import type { RibbonTransitionDraft } from 'pptx-viewer-shared';
+	import {
+		applyRibbonTransitionDraft,
+		applyTransitionSoundFile,
+		clearTransitionSound,
+		EMPTY_RIBBON_TRANSITION_DRAFT,
+		playSlideTransitionPreview,
+		readRibbonTransitionDraft,
+		readSoundFileAsDataUrl,
+		TRANSITION_SOUND_NONE_VALUE,
+		TRANSITION_SOUND_OTHER_VALUE,
+		transitionSoundOptions,
+		transitionSoundSelectedValue,
+	} from 'pptx-viewer-shared';
 
 	import { useTranslator } from '../../../../i18n/context';
 	import type { EditorState } from '../../../editor/editor-state.svelte';
-	import { DEFAULT_TRANSITION_DURATION_SEC, TRANSITION_PRESETS } from './transition-presets';
+	import type { ChromeUiState } from '../../../state/chrome-ui.svelte';
+	import { TRANSITION_PRESETS } from './transition-presets';
 
-	const { editor }: { editor: EditorState } = $props();
+	const { editor, chromeUi }: { editor: EditorState; chromeUi?: ChromeUiState } = $props();
 	const t = useTranslator();
 
-	// eslint-disable-next-line prefer-const
-	let durationSec = $state(DEFAULT_TRANSITION_DURATION_SEC);
-	// eslint-disable-next-line prefer-const
-	let applyToAll = $state(false);
+	let draft = $state<RibbonTransitionDraft>({ ...EMPTY_RIBBON_TRANSITION_DRAFT });
+
+	// Seeded by the effect below (not at init, which would only ever capture the
+	// first `editor`), and re-seeded only when the ACTIVE SLIDE changes rather
+	// than after our own commits: a commit-triggered re-seed would untick "After"
+	// the moment it is ticked, since an armed-but-zero advance reads back as
+	// unarmed.
+	let seededKey: string | null = null;
+	$effect(() => {
+		const index = editor.currentSlideIndex;
+		const slide = editor.slides[index];
+		const key = `${index}:${slide?.id ?? ''}`;
+		if (key !== seededKey) {
+			seededKey = key;
+			draft = readRibbonTransitionDraft(slide);
+		}
+	});
 
 	const activeType = $derived<PptxTransitionType | undefined>(
 		editor.slides[editor.currentSlideIndex]?.transition?.type,
 	);
 
-	function applyPreset(type: PptxTransitionType): void {
-		editor.transitionOps.applyTransition(type, Math.round(durationSec * 1000), applyToAll);
+	/** Fold a control's change into the draft and commit the whole draft. */
+	function commit(change: Partial<RibbonTransitionDraft>): void {
+		draft = { ...draft, ...change };
+		editor.transitionOps.applyRibbonDraft(draft, false);
+	}
+
+	/**
+	 * PowerPoint's "Apply To All" is a BUTTON that pushes the current timing onto
+	 * every slide when pressed, not the arming checkbox this binding used to
+	 * render (which made the same preset click mean two different things).
+	 */
+	function applyToAll(): void {
+		editor.transitionOps.applyRibbonDraft(draft, true);
+	}
+
+	/** Replay the active slide's transition on the stage. Never writes. */
+	function preview(): void {
+		const slide = editor.slides[editor.currentSlideIndex];
+		playSlideTransitionPreview(
+			slide?.transition ?? applyRibbonTransitionDraft(undefined, draft),
+			document,
+		);
+	}
+
+	// The Sound picker's file input: hidden, and clicked programmatically by
+	// the "Other Sound..." entry. A sound pick writes a raw partial change
+	// through `transitionOps.applyChange`, bypassing the ribbon draft (a
+	// freshly-picked file's `soundData` has no equivalent in it).
+	let soundFileInput = $state<HTMLInputElement | undefined>();
+	const soundOptions = $derived(
+		transitionSoundOptions(editor.slides[editor.currentSlideIndex]?.transition),
+	);
+	const soundSelectedValue = $derived(
+		transitionSoundSelectedValue(editor.slides[editor.currentSlideIndex]?.transition),
+	);
+
+	function onSoundSelectChange(event: Event): void {
+		const select = event.currentTarget as HTMLSelectElement;
+		if (select.value === TRANSITION_SOUND_OTHER_VALUE) {
+			soundFileInput?.click();
+			// The file input's own change (or a cancelled dialog) decides what
+			// happens next; put the select back to what the slide actually has.
+			select.value = soundSelectedValue;
+			return;
+		}
+		if (select.value === TRANSITION_SOUND_NONE_VALUE) {
+			editor.transitionOps.applyChange(clearTransitionSound());
+		}
+	}
+
+	function onSoundFileChange(event: Event): void {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file) {
+			return;
+		}
+		void readSoundFileAsDataUrl(file).then((dataUrl) => {
+			if (dataUrl) {
+				editor.transitionOps.applyChange(applyTransitionSoundFile({ name: file.name, dataUrl }));
+			}
+			return undefined;
+		});
 	}
 </script>
 
 <div class="pptx-svelte-transitionstab" role="group" aria-label={t('pptx.ribbon.tab.transitions')}>
+	<button
+		type="button"
+		class="pptx-svelte-transitionstab-pill"
+		title={t('pptx.ribbon.previewTransition')}
+		onclick={preview}
+	>
+		<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 3 9 5-9 5z" fill="currentColor" /></svg>
+		{t('pptx.ribbon.preview')}
+	</button>
+
 	<div class="pptx-svelte-transitionstab-gallery">
 		{#each TRANSITION_PRESETS as preset (preset.type)}
 			<button
@@ -43,30 +149,111 @@
 				class:pptx-svelte-transitionstab-active={activeType === preset.type}
 				aria-label={t(preset.labelKey)}
 				title={t(preset.labelKey)}
-				onclick={() => applyPreset(preset.type)}
+				onclick={() => commit({ type: preset.type })}
 			>
 				{t(preset.labelKey)}
 			</button>
 		{/each}
 	</div>
 
-	<label class="pptx-svelte-transitionstab-duration">
+	<label class="pptx-svelte-transitionstab-field">
 		<span>{t('pptx.ribbon.duration')}</span>
 		<input
 			type="number"
 			min="0"
 			max="20"
 			step="0.25"
+			title={t('pptx.ribbon.transitionDurationTitle')}
 			disabled={!editor.editable}
-			value={durationSec}
-			oninput={(e) => (durationSec = Math.max(0, Number(e.currentTarget.value) || 0))}
+			value={draft.durationSec}
+			oninput={(e) => commit({ durationSec: Math.max(0, Number(e.currentTarget.value) || 0) })}
 		/>
 	</label>
 
-	<label class="pptx-svelte-transitionstab-applyall">
-		<input type="checkbox" disabled={!editor.editable} bind:checked={applyToAll} />
-		{t('pptx.ribbon.applyTransitionToAll')}
+	<!-- "Other Sound..." opens a native file picker and the chosen file is
+	     embedded into the package on save (core's `embedTransitionSound`).
+	     "None" clears any sound the slide carries. -->
+	<label class="pptx-svelte-transitionstab-field">
+		<span>{t('pptx.ribbon.sound')}</span>
+		<select
+			aria-label={t('pptx.ribbon.sound')}
+			disabled={!editor.editable}
+			value={soundSelectedValue}
+			onchange={onSoundSelectChange}
+		>
+			{#each soundOptions as option (option.value)}
+				<option value={option.value}>{option.i18nKey ? t(option.i18nKey) : option.label}</option>
+			{/each}
+		</select>
+		<input
+			bind:this={soundFileInput}
+			type="file"
+			accept="audio/*"
+			class="pptx-svelte-transitionstab-sound-file"
+			onchange={onSoundFileChange}
+		/>
 	</label>
+
+	<button
+		type="button"
+		class="pptx-svelte-transitionstab-pill"
+		disabled={!editor.editable}
+		title={t('pptx.ribbon.applyTransitionToAll')}
+		onclick={applyToAll}
+	>
+		<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="6" y="6" width="8" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" /><path d="M3 10H2.5a.5.5 0 0 1-.5-.5v-7a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 .5.5V3" fill="none" stroke="currentColor" stroke-width="1.2" /></svg>
+		{t('pptx.headerFooter.applyToAll')}
+	</button>
+
+	<div class="pptx-svelte-transitionstab-advance">
+		<span class="pptx-svelte-transitionstab-advance-title">{t('pptx.ribbon.advanceSlide')}</span>
+		<label class="pptx-svelte-transitionstab-field">
+			<input
+				type="checkbox"
+				disabled={!editor.editable}
+				checked={draft.advanceOnClick}
+				onchange={(e) => commit({ advanceOnClick: e.currentTarget.checked })}
+			/>
+			{t('pptx.ribbon.onMouseClick')}
+		</label>
+		<!-- Two controls under one `<label>`: the label names only its FIRST
+		     labelable descendant, so without these the seconds field had an EMPTY
+		     accessible name and the checkbox took the field's value into its own
+		     ("After 5 seconds"). Both are named explicitly instead. -->
+		<label class="pptx-svelte-transitionstab-field">
+			<input
+				type="checkbox"
+				aria-label={t('pptx.ribbon.afterDuration')}
+				disabled={!editor.editable}
+				checked={draft.advanceAfter}
+				onchange={(e) => commit({ advanceAfter: e.currentTarget.checked })}
+			/>
+			<span>{t('pptx.ribbon.afterDuration')}</span>
+			<!-- Committed on `change`, not `input`: half-typed `mm:ss.hh` text would
+			     otherwise write a stream of nonsense advances (and history steps). -->
+			<input
+				type="text"
+				aria-label={t('pptx.ribbon.advanceAfterSeconds')}
+				class="pptx-svelte-transitionstab-after"
+				title={t('pptx.ribbon.advanceAfterSeconds')}
+				disabled={!editor.editable || !draft.advanceAfter}
+				value={draft.advanceAfterText}
+				oninput={(e) => (draft = { ...draft, advanceAfterText: e.currentTarget.value })}
+				onchange={(e) => commit({ advanceAfterText: e.currentTarget.value })}
+			/>
+		</label>
+	</div>
+
+	<button
+		type="button"
+		class="pptx-svelte-transitionstab-pill"
+		class:pptx-svelte-transitionstab-active={chromeUi?.inspectorOpen}
+		title={t('pptx.ribbon.openInspectorTransitions')}
+		onclick={() => chromeUi?.toggleInspector()}
+	>
+		<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" /><path d="M10 3v10" stroke="currentColor" stroke-width="1.2" /></svg>
+		{t('pptx.ribbon.inspector')}
+	</button>
 </div>
 
 <style>
@@ -82,10 +269,14 @@
 		align-items: center;
 		flex-wrap: wrap;
 		gap: 4px;
-		max-width: 480px;
+		max-width: 420px;
 	}
 
-	.pptx-svelte-transitionstab-gallery button {
+	.pptx-svelte-transitionstab-gallery button,
+	.pptx-svelte-transitionstab-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
 		height: 28px;
 		padding: 0 8px;
 		border: none;
@@ -98,7 +289,13 @@
 		white-space: nowrap;
 	}
 
-	.pptx-svelte-transitionstab-gallery button:hover:not(:disabled) {
+	.pptx-svelte-transitionstab-pill svg {
+		width: 13px;
+		height: 13px;
+	}
+
+	.pptx-svelte-transitionstab-gallery button:hover:not(:disabled),
+	.pptx-svelte-transitionstab-pill:hover:not(:disabled) {
 		background: var(--pptx-accent, #33334d);
 		color: var(--pptx-accent-foreground, #f8fafc);
 	}
@@ -113,18 +310,31 @@
 		outline-offset: -2px;
 	}
 
-	.pptx-svelte-transitionstab-duration,
-	.pptx-svelte-transitionstab-applyall {
+	.pptx-svelte-transitionstab-field {
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
 		font-size: 12px;
 		color: var(--pptx-muted-foreground, #94a3b8);
 		white-space: nowrap;
+		cursor: pointer;
 	}
 
-	.pptx-svelte-transitionstab-duration input {
-		width: 56px;
+	.pptx-svelte-transitionstab-advance {
+		display: inline-flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.pptx-svelte-transitionstab-advance-title {
+		color: var(--pptx-card-foreground, #e2e8f0);
+		font-size: 10px;
+		font-weight: 600;
+	}
+
+	.pptx-svelte-transitionstab-field input[type='number'],
+	.pptx-svelte-transitionstab-field select,
+	.pptx-svelte-transitionstab-after {
 		height: 26px;
 		padding: 0 6px;
 		border: 1px solid var(--pptx-border, #33334d);
@@ -132,10 +342,25 @@
 		background: var(--pptx-background, #11111b);
 		color: inherit;
 		font: inherit;
+		font-size: 11px;
 	}
 
-	.pptx-svelte-transitionstab-duration input:disabled,
-	.pptx-svelte-transitionstab-applyall input:disabled {
+	.pptx-svelte-transitionstab-field input[type='number'] {
+		width: 56px;
+	}
+
+	.pptx-svelte-transitionstab-after {
+		width: 68px;
+		height: 22px;
+		text-align: center;
+	}
+
+	.pptx-svelte-transitionstab-field input:disabled,
+	.pptx-svelte-transitionstab-field select:disabled {
 		opacity: 0.4;
+	}
+
+	.pptx-svelte-transitionstab-sound-file {
+		display: none;
 	}
 </style>

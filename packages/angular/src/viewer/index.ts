@@ -22,6 +22,9 @@ export { Model3DRendererComponent } from './model3d-renderer.component';
 export { ZoomRendererComponent } from './zoom-renderer.component';
 export { PresentationOverlayComponent } from './presentation-overlay.component';
 export { SlideSorterOverlayComponent } from './slide-sorter-overlay.component';
+export { OutlineViewOverlayComponent } from './outline-view-overlay.component';
+export type { OutlineCommit } from './outline-view-overlay.component';
+export { ReadingViewOverlayComponent } from './reading-view-overlay.component';
 export { FindBarComponent } from './find-bar.component';
 export { FindReplaceBarComponent } from './find-replace-bar.component';
 export {
@@ -39,11 +42,24 @@ export { PresentationPropertiesPanelComponent } from './presentation-properties-
 export { PresentationSettingsCardComponent } from './presentation-settings-card.component';
 export { ThemeSelectorCardComponent } from './theme-selector-card.component';
 export { SlideSizeCardComponent } from './slide-size-card.component';
+export { SlideTransitionCardComponent } from './slide-transition-card.component';
+export { SlideBackgroundCardComponent } from './slide-background-card.component';
+export { TransitionDirectionPickerComponent } from './transition-direction-picker.component';
+export { TransitionPreviewComponent } from './transition-preview.component';
 export { NotesHandoutCardComponent } from './notes-handout-card.component';
 export { DocumentPropertiesCardComponent } from './document-properties-card.component';
+export { TagsCardComponent } from './tags-card.component';
 export { GradientPickerComponent } from './gradient-picker.component';
 export { EffectsPanelComponent } from './effects-panel.component';
 export { TextAdvancedPanelComponent } from './text-advanced-panel.component';
+export { Text3DPanelComponent } from './text-3d-panel.component';
+export {
+	TEXT_3D_BOTTOM_BEVEL_KEYS,
+	TEXT_3D_TOP_BEVEL_KEYS,
+	Text3DBevelSectionComponent,
+	bevelSizePatch,
+} from './text-3d-bevel-section.component';
+export type { Text3DBevelKeys } from './text-3d-bevel-section.component';
 export { TableDataEditorComponent } from './table-data-editor.component';
 export { TablePropertiesComponent } from './table-properties.component';
 export { TableCellFormattingComponent } from './table-cell-formatting.component';
@@ -52,6 +68,7 @@ export { TableResizeOverlayComponent } from './table-resize-overlay.component';
 export { TableSelectionService } from './table-selection.service';
 export type { TableCellSelection } from './table-selection.service';
 export { ChartDataEditorComponent } from './chart-data-editor.component';
+export { ChartTypeSelectorComponent } from './chart-type-selector.component';
 export { AdvancedChartEditorComponent } from './advanced-chart-editor.component';
 export { ChartDisplayOptionsComponent } from './chart-display-options.component';
 export { ChartDataLabelOptionsComponent } from './chart-data-label-options.component';
@@ -59,6 +76,7 @@ export { ChartAxisOptionsComponent } from './chart-axis-options.component';
 export { ChartAxisStyleOptionsComponent } from './chart-axis-style-options.component';
 export { ChartMarkerOptionsComponent } from './chart-marker-options.component';
 export { ChartComboTypeOptionsComponent } from './chart-combo-type-options.component';
+export { ChartDatapointMarkerOptionsComponent } from './chart-datapoint-marker-options.component';
 export { ChartDatapointOptionsComponent } from './chart-datapoint-options.component';
 export { ChartTrendlineOptionsComponent } from './chart-trendline-options.component';
 export { ChartErrorBarOptionsComponent } from './chart-error-bar-options.component';
@@ -120,6 +138,7 @@ export { ommlToMathml, convertOmmlToMathMl } from '../internal/shared';
 export { LoadContentService } from './load-content.service';
 
 // Comments
+export { CommentMarkersOverlayComponent } from './comment-markers-overlay.component';
 export { CommentsPanelComponent } from './comments-panel.component';
 export { CommentsService, generateCommentId } from './comments.service';
 export {
@@ -162,6 +181,7 @@ export type { AccessibilityIssueGroup } from './accessibility-helpers';
 
 // Embedded fonts
 export { EmbeddedFontsService } from './embedded-fonts.service';
+export { GoogleWebfontsService, GOOGLE_WEBFONTS_LINK_ID } from './google-webfonts.service';
 export {
 	EMBEDDED_FONTS_STYLE_ID,
 	buildEmbeddedFontStyles,
@@ -181,6 +201,7 @@ export type {
 export { AnimationPanelComponent } from './animation-panel.component';
 export { ActionSettingsPanelComponent } from './action-settings-panel.component';
 export { ImagePropertiesPanelComponent } from './image-properties-panel.component';
+export { AccessibilityTextPanelComponent } from './accessibility-text-panel.component';
 export { MediaPropertiesPanelComponent } from './media-properties-panel.component';
 export { HeaderFooterDialogComponent } from './header-footer-dialog.component';
 export { MediaPreviewComponent } from './media-preview.component';
@@ -311,6 +332,7 @@ export type {
 	ViewerProfile,
 } from '../internal/shared';
 export { KeepAnnotationsDialogComponent } from './keep-annotations-dialog.component';
+export { AutosaveRecoveryDialogComponent } from './autosave-recovery-dialog.component';
 export { SignatureStrippedDialogComponent } from './signature-stripped-dialog.component';
 export {
 	annotationMapToInkInserts,
@@ -351,6 +373,9 @@ export type {
 export { PresentationAnnotationsService } from './presentation-annotations.service';
 export { PresentationAnnotationOverlayComponent } from './presentation-annotation-overlay.component';
 export { PresentationSubtitleBarComponent } from './presentation-subtitle-bar.component';
+export { PresentationToolbarComponent } from './presentation-toolbar.component';
+export type { PresentToolbarAction } from './presentation-toolbar.component';
+export { PresentToolbarAutoHide } from './presentation-toolbar-view';
 export type { AnnotationStroke, PresentationTool } from './presentation-annotations-helpers';
 
 // Presentation transitions + presenter view
@@ -363,17 +388,22 @@ export {
 	SLIDE_TRANSITION_KEYFRAMES,
 } from './transition-helpers';
 export type { SlideTransitionAnimations } from './transition-helpers';
+// `computeTimerProgress` / `TimerProgress` / `TIMER_SEGMENT_MS` were an Angular
+// re-derivation of the console's five-minute progress segment; they are now the
+// shared `presenterTimerProgress` / `PresenterTimerProgress` /
+// `PRESENTER_TIMER_SEGMENT_MS`, which every binding reads.
 export {
 	formatTime,
 	formatElapsed,
 	clampNotesFontSize,
-	computeTimerProgress,
+	presenterTimerProgress,
+	PRESENTER_TIMER_SEGMENT_MS,
 	resolvePresenterNotes,
 } from './presenter-view-helpers';
 export type {
 	NotesSegmentViewModel,
 	PresenterNotes,
-	TimerProgress,
+	PresenterTimerProgress,
 } from './presenter-view-helpers';
 
 // Audience window handoff (opt-in, framework-agnostic; wire-compatible with
@@ -385,6 +415,17 @@ export {
 	loadAudienceContent,
 	clearAudienceContent,
 } from './audience-content-store';
+// Session restore (opt-in, host-driven): remember the deck the host has open,
+// per browser tab, so a page refresh reopens it instead of dropping the user
+// back on the file picker.
+export {
+	forgetSessionDeck,
+	getSessionTabId,
+	loadSessionDeck,
+	rememberSessionDeck,
+	restoreSessionDeck,
+} from '../internal/shared';
+export type { SessionDeck } from '../internal/shared';
 export {
 	PresenterWindowService,
 	PRESENTER_CHANNEL_NAME,

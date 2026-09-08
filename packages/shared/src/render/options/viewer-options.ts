@@ -30,6 +30,15 @@ export interface ViewerGeneralOptions {
 	userName: string;
 	userInitials: string;
 	showStartScreen: boolean;
+	/**
+	 * Lets the user hand a local font file to the viewer so decks authored
+	 * with a font the browser lacks render with the real face.
+	 *
+	 * Off by default. The registration reads a file the user picks and adds it
+	 * to the page's font set for the session, which is a capability a host
+	 * embedding the viewer should opt into rather than inherit.
+	 */
+	enableCustomFontUpload: boolean;
 }
 
 export interface ViewerProofingOptions {
@@ -48,13 +57,25 @@ export interface ViewerProofingOptions {
 	hideSpellingErrors: boolean;
 }
 
+/**
+ * File > Options > Save.
+ *
+ * Font embedding deliberately has NO entry here. It is owned by the File >
+ * Fonts panel, whose toggle is the one the save path reads (see
+ * `render/font-embedding`: `describeFontEmbedding` decides the toggle's start
+ * position and whether it can do anything at all, `embeddedFontSaveOptions`
+ * turns it into the `PptxHandler.save()` slice). This group used to carry a
+ * second `embedFonts` boolean, plus an `embedAllFontCharacters` companion, and
+ * neither was read by anything: the pane moved a switch that changed no saved
+ * byte, while the panel next door moved the real one. Two switches for one
+ * setting, one of them lying, is worse than one switch in a less
+ * PowerPoint-shaped place.
+ */
 export interface ViewerSaveOptions {
 	autoSave: boolean;
 	autoRecoverIntervalMinutes: number;
 	keepLastAutoRecoveredVersion: boolean;
 	defaultExportFormat: DefaultExportFormat;
-	embedFonts: boolean;
-	embedAllFontCharacters: boolean;
 	cacheRetentionDays: number;
 	clearCacheOnClose: boolean;
 }
@@ -81,6 +102,15 @@ export interface ViewerAdvancedOptions {
 	showGrid: boolean;
 	snapToGrid: boolean;
 	disableHardwareAcceleration: boolean;
+	/**
+	 * Force every opt-in interactive 3D scene (SmartArt, bar/line/area/pie/
+	 * surface charts) to fall back to its flat 2D rendering, even when the
+	 * host has enabled that scene via its own `smartArt3D`/`*Chart3D` prop.
+	 * A host opting in says "this deck may want 3D"; this is the viewer
+	 * user's own override for when the WebGL scenes it renders are too much
+	 * for their machine. See `resolve3DRenderingFlags`.
+	 */
+	disable3DRendering: boolean;
 	openDocumentsView: OpenDocumentsView;
 	slideShowShowMenuOnRightClick: boolean;
 	slideShowShowPopupToolbar: boolean;
@@ -140,6 +170,7 @@ export const DEFAULT_VIEWER_OPTIONS: ViewerOptions = {
 		userName: '',
 		userInitials: '',
 		showStartScreen: true,
+		enableCustomFontUpload: false,
 	},
 	proofing: {
 		autoCorrectTwoInitialCapitals: true,
@@ -161,8 +192,6 @@ export const DEFAULT_VIEWER_OPTIONS: ViewerOptions = {
 		autoRecoverIntervalMinutes: 2,
 		keepLastAutoRecoveredVersion: true,
 		defaultExportFormat: 'pptx',
-		embedFonts: false,
-		embedAllFontCharacters: false,
 		cacheRetentionDays: 14,
 		clearCacheOnClose: false,
 	},
@@ -187,6 +216,7 @@ export const DEFAULT_VIEWER_OPTIONS: ViewerOptions = {
 		showGrid: false,
 		snapToGrid: false,
 		disableHardwareAcceleration: false,
+		disable3DRendering: false,
 		openDocumentsView: 'savedView',
 		slideShowShowMenuOnRightClick: true,
 		slideShowShowPopupToolbar: true,

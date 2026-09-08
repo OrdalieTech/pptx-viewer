@@ -14,6 +14,8 @@
 export { isAiAvailable, loadAiSdk, resetAiSdkCache } from './loader';
 export type { AiSdkModule } from './loader';
 
+export { deckDataFieldChanged } from './deck-data-diff';
+
 export { resolveChatTransport } from './config';
 export type {
 	PptxAiConfig,
@@ -93,6 +95,44 @@ export type { GhostStyle } from './change-animation-css';
 
 export { createChatHistoryStore } from './chat-history-store';
 export type { PptxAiChatStore, PptxAiChatSummary, PptxAiStoredChat } from './chat-history-store';
+
+export {
+	buildChatLogExport,
+	buildChatLogMarkdown,
+	collectStoredChats,
+	exportAiChatLogs,
+	toLogChat,
+	toolCallLine,
+} from './chat-log-export';
+export type {
+	AiLogChat,
+	AiLogExport,
+	AiLogFormat,
+	AiLogMessage,
+	AiLogToolCall,
+	BuildChatLogOptions,
+	ExportAiChatLogsMeta,
+	SaveChatLogFile,
+} from './chat-log-export';
+
+export {
+	computeFocusTargets,
+	focusTargetChips,
+	isTwoTableFocus,
+	mergeTablesDirective,
+} from './focus-targets';
+export type { AiCanvasHighlight, FocusChip, FocusSelectionInput } from './focus-targets';
+
+export {
+	createAiChatHistoryController,
+	deckIdFromBridge,
+	deriveChatTitle,
+	newChatId,
+} from './chat-history-controller';
+export type {
+	AiChatHistoryController,
+	AiChatHistoryControllerDeps,
+} from './chat-history-controller';
 
 export { createVanillaChat } from './vanilla-chat';
 export type { VanillaChatController, VanillaChatSnapshot } from './vanilla-chat';

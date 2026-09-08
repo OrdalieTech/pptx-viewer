@@ -25,11 +25,19 @@
 		mediaDataUrls,
 		scale,
 		presenting = false,
+		gridSpacingPx = 12,
 		editingActive = false,
 		editTemplateMode = false,
+		editingElementId = null,
+		selectedElementIds,
 		ontablecellcommit,
 		onsmartartnodecommit,
 		onsmartartnodefill,
+		onchartpointcommit,
+		ontableresizecolumns,
+		ontableresizerow,
+		comments = [],
+		oncommentmarkerclick,
 		onstageholder,
 		onstagepointerdown,
 		onstagepointermove,
@@ -86,11 +94,11 @@
 	class:pptx-svelte-ai-picking={pickActive}
 	data-pptx-ai-active={aiActive ? 'true' : undefined}
 	data-ai-pick-mode={pickActive ? 'true' : undefined}
-	style={`width: ${canvasSize.width * scale}px; height: ${canvasSize.height * scale}px`}
+	style={`width: ${canvasSize.width * scale}px; height: ${canvasSize.height * scale}px; --pptx-grid-size: ${gridSpacingPx}px`}
 	onpointerdown={pickActive ? swallow : editingActive ? onstagepointerdown : undefined}
 	onpointermove={editingActive && !pickActive ? onstagepointermove : undefined}
 	ondblclick={editingActive && !pickActive ? onstagedblclick : undefined}
-	oncontextmenu={editingActive && !pickActive ? onstagecontextmenu : undefined}
+	oncontextmenu={(editingActive && !pickActive) || presenting ? onstagecontextmenu : undefined}
 	onclick={pickActive ? pickFromEvent : onstageclick}
 >
 	<SlideStage
@@ -100,10 +108,18 @@
 		{scale}
 		{presenting}
 		interactive
+		editable={editingActive}
 		{editTemplateMode}
+		{editingElementId}
+		{selectedElementIds}
 		{ontablecellcommit}
 		{onsmartartnodecommit}
 		{onsmartartnodefill}
+		{onchartpointcommit}
+		{ontableresizecolumns}
+		{ontableresizerow}
+		{comments}
+		{oncommentmarkerclick}
 	/>
 	{#if children}{@render children()}{/if}
 </div>

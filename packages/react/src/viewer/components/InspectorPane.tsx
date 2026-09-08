@@ -1,4 +1,3 @@
-import { hasTextProperties } from 'pptx-viewer-core';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -7,9 +6,9 @@ import { cn } from '../utils';
 import { AnimationPanel } from './inspector/AnimationPanel';
 import { ElementInspectorBody } from './inspector/ElementInspectorBody';
 // Extracted inspector modules
-import { HEADING } from './inspector/inspector-pane-constants';
 import type { InspectorPaneProps } from './inspector/inspector-pane-types';
 import { InspectorCommentsSection } from './inspector/InspectorCommentsSection';
+import { InspectorElementsTab } from './inspector/InspectorElementsTab';
 import { InspectorPaneHeader } from './inspector/InspectorPaneHeader';
 import { PresentationPropertiesPanel } from './inspector/PresentationPropertiesPanel';
 import { SlideBackgroundPanel } from './inspector/SlideBackgroundPanel';
@@ -26,6 +25,7 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 		canEdit,
 		activeSlide,
 		slides,
+		customShows,
 		canvasSize,
 		selectedElement,
 		selectedElementIds,
@@ -53,6 +53,8 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 		onApplyTheme,
 		comments,
 		commentDraft,
+		commentDraftMentions,
+		commentAuthors,
 		editingCommentId,
 		commentEditDraft,
 		onSetCommentDraft,
@@ -69,7 +71,10 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 		onSubmitReply,
 		replyingToCommentId,
 		replyDraftByCommentId,
+		replyDraftMentionsByCommentId,
 		onUpdateCanvasSize,
+		slideSizeEmu,
+		onUpdateSlideSize,
 		onUpdateElementStyle,
 		onUpdateTextStyle,
 		onUpdateSlide,
@@ -79,6 +84,9 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 		onGetTemplateBackgroundColor,
 		mediaDataUrls,
 		theme,
+		tableStyleMap,
+		onTableStyleMapChange,
+		onDeleteTableStyle,
 		panelWidth,
 	} = props;
 	const hasSelection = selectedElement !== null;
@@ -103,7 +111,7 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 			{isOpen && (
 				<button
 					type='button'
-					aria-label={t('common.close')}
+					aria-label={t('pptx.common.close')}
 					onClick={onClose}
 					className='md:hidden fixed inset-0 z-20 bg-black/40 backdrop-blur-[2px] animate-in fade-in duration-150'
 				/>
@@ -147,35 +155,14 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 				<div className='flex-1 overflow-y-auto p-3 space-y-3'>
 					{/* ── Elements ── */}
 					{activeTab === 'elements' && (
-						<div className='space-y-1'>
-							<div className={cn(HEADING, 'mb-2')}>{t('pptx.inspector.layerOrder')}</div>
-							{activeSlide ? (
-								[...(activeSlide.elements || [])].reverse().map((el, ri) => {
-									const idx = (activeSlide.elements || []).length - 1 - ri;
-									const sel = selectedElement?.id === el.id || selectedElementIds.includes(el.id);
-									const label =
-										(hasTextProperties(el) ? (el.text || '').slice(0, 24) : undefined) || el.type;
-									return (
-										<div
-											key={el.id}
-											title={`${el.type} — ${el.id}`}
-											className={cn(
-												'flex items-center gap-2 px-2 py-1 rounded cursor-pointer transition-colors',
-												sel ? 'bg-primary/30 text-primary' : 'hover:bg-muted text-foreground',
-											)}
-											onClick={() => onSelectElement(el.id)}
-										>
-											<span className='text-muted-foreground w-4 text-right'>{idx + 1}</span>
-											<span className='flex-1 truncate'>{label}</span>
-										</div>
-									);
-								})
-							) : (
-								<div className='text-muted-foreground italic'>
-									{t('pptx.inspector.noSlideSelected')}
-								</div>
-							)}
-						</div>
+						<InspectorElementsTab
+							activeSlide={activeSlide}
+							selectedElementId={selectedElement?.id ?? null}
+							selectedElementIds={selectedElementIds}
+							canEdit={canEdit}
+							onSelectElement={onSelectElement}
+							onUpdateSlide={onUpdateSlide}
+						/>
 					)}
 
 					{/* ── Properties ── */}
@@ -186,8 +173,12 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 									selectedElement={selectedElement}
 									canEdit={canEdit}
 									slides={slides}
+									customShows={customShows}
 									tableEditorState={tableEditorState}
 									mediaDataUrls={mediaDataUrls}
+									tableStyleMap={tableStyleMap}
+									onTableStyleMapChange={onTableStyleMapChange}
+									onDeleteTableStyle={onDeleteTableStyle}
 									onUpdateElement={onUpdateElement}
 									onUpdateElementStyle={onUpdateElementStyle}
 									onUpdateTextStyle={onUpdateTextStyle}
@@ -216,6 +207,9 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 										tagCollections={tagCollections}
 										onUpdateTagCollections={onUpdateTagCollections}
 										onUpdateCanvasSize={onUpdateCanvasSize}
+										slideSizeEmu={slideSizeEmu}
+										onUpdateSlideSize={onUpdateSlideSize}
+										hasContent={slides.some((slide) => slide.elements.length > 0)}
 										activeSlide={activeSlide}
 										theme={theme}
 										onUpdateSlide={onUpdateSlide}
@@ -247,8 +241,11 @@ export function InspectorPane(props: InspectorPaneProps): React.ReactElement {
 							editingCommentId={editingCommentId}
 							commentEditDraft={commentEditDraft}
 							commentDraft={commentDraft}
+							commentDraftMentions={commentDraftMentions ?? []}
+							commentAuthors={commentAuthors ?? []}
 							replyingToCommentId={replyingToCommentId ?? null}
 							replyDraftByCommentId={replyDraftByCommentId ?? {}}
+							replyDraftMentionsByCommentId={replyDraftMentionsByCommentId ?? {}}
 							onSetCommentDraft={onSetCommentDraft}
 							onAddComment={onAddComment}
 							onDeleteComment={onDeleteComment}

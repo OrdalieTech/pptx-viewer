@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import type { PptxElement, PptxTextWarpPreset, TextStyle } from 'pptx-viewer-core';
 import { hasTextProperties } from 'pptx-viewer-core';
+import type { ThemeColorPickerCommit } from 'pptx-viewer-shared';
+import { textFontSizePatch, textFontSizePtToPx, textFontSizePxToPt } from 'pptx-viewer-shared';
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import { injectRecentColors } from '../../composables/recent-colors-context';
+import RecentColorsRow from '../RecentColorsRow.vue';
 import Text3DProperties from './Text3DProperties.vue';
 import TextEffectsPanel from './TextEffectsPanel.vue';
 import TextWarpGallery from './TextWarpGallery.vue';
+import ThemeColorSwatchGrid from './ThemeColorSwatchGrid.vue';
 
 /**
  * TextPanel: typography inspector for the Vue `pptx-vue-viewer` editor.
@@ -32,6 +37,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const recentColors = injectRecentColors();
 
 const FONT_OPTIONS: ReadonlyArray<string> = [
 	'Arial',
@@ -74,8 +80,11 @@ const textStyle = computed<TextStyle | undefined>(() =>
 );
 
 const fontFamily = computed<string>(() => textStyle.value?.fontFamily ?? '');
-const fontSize = computed<number>(() => textStyle.value?.fontSize ?? 18);
+const fontSize = computed<number>(() =>
+	textStyle.value?.fontSize !== undefined ? textFontSizePxToPt(textStyle.value.fontSize) : 18,
+);
 const color = computed<string>(() => textStyle.value?.color ?? '#000000');
+const colorRef = computed(() => textStyle.value?.colorRef);
 const align = computed<AlignValue | undefined>(() => textStyle.value?.align);
 const vAlign = computed<VAlignValue | undefined>(() => textStyle.value?.vAlign);
 
@@ -90,11 +99,22 @@ function onFontFamily(event: Event): void {
 
 function onFontSize(event: Event): void {
 	const raw = Number.parseFloat((event.target as HTMLInputElement).value);
-	patchTextStyle({ fontSize: Number.isFinite(raw) ? Math.max(1, raw) : 1 });
+	const points = Number.isFinite(raw) ? Math.max(1, raw) : 1;
+	emit('update', textFontSizePatch(props.element, textFontSizePtToPx(points)));
 }
 
 function onColor(event: Event): void {
-	patchTextStyle({ color: (event.target as HTMLInputElement).value });
+	patchTextStyle({ color: (event.target as HTMLInputElement).value, colorRef: undefined });
+}
+
+function onColorPick(hex: string): void {
+	patchTextStyle({ color: hex, colorRef: undefined });
+	recentColors?.push(hex);
+}
+
+function onColorThemePick(commit: ThemeColorPickerCommit): void {
+	patchTextStyle({ color: commit.hex, colorRef: commit.ref });
+	recentColors?.push(commit.hex);
 }
 
 function toggle(key: 'bold' | 'italic' | 'underline' | 'strikethrough'): void {
@@ -140,6 +160,7 @@ function onTextEffectPatch(patch: Partial<TextStyle>): void {
 					t('pptx.textPanel.font')
 				}}</span>
 				<select
+					:aria-label="t('pptx.textPanel.font')"
 					class="pptx-vue-text-input w-full bg-muted border border-border rounded px-2 py-1"
 					:value="fontFamily"
 					@change="onFontFamily"
@@ -163,7 +184,7 @@ function onTextEffectPatch(patch: Partial<TextStyle>): void {
 						type="number"
 						class="pptx-vue-text-input w-full bg-muted border border-border rounded px-2 py-1"
 						min="1"
-						step="1"
+						step="any"
 						:value="fontSize"
 						@input="onFontSize"
 					/>
@@ -177,9 +198,20 @@ function onTextEffectPatch(patch: Partial<TextStyle>): void {
 						class="pptx-vue-text-color w-full h-8 bg-muted border border-border rounded p-0.5"
 						:value="color"
 						@input="onColor"
+						@change="onColorPick(($event.target as HTMLInputElement).value)"
 					/>
 				</label>
 			</div>
+			<ThemeColorSwatchGrid
+				:selected-ref="colorRef"
+				:selected-hex="color"
+				@pick="onColorThemePick"
+			/>
+			<RecentColorsRow
+				v-if="recentColors"
+				:colors="recentColors.recent.value"
+				@pick="onColorPick"
+			/>
 
 			<div class="pptx-vue-text-field flex flex-col gap-1">
 				<span class="pptx-vue-text-label text-muted-foreground">{{

@@ -1,6 +1,18 @@
 import { NgStyle } from '@angular/common';
-import { ChangeDetectionStrategy, Component, inject, input, output } from '@angular/core';
+import {
+	ChangeDetectionStrategy,
+	Component,
+	inject,
+	input,
+	output,
+	viewChild,
+} from '@angular/core';
+import type { ElementRef } from '@angular/core';
 import { TranslateService } from '@ngx-translate/core';
+// The openable-file allow list comes from the binding's public surface, not a
+// local regex: a hand-rolled `.pptx|.ppt|.json` refused a `.pptm` on drop that
+// the viewer's own File > Open accepted.
+import { PPTX_OPEN_ACCEPT, isSupportedPresentationFile } from 'pptx-angular-viewer';
 import type { ViewerTheme } from 'pptx-angular-viewer';
 
 type ColorKey = keyof NonNullable<ViewerTheme['colors']>;
@@ -25,7 +37,12 @@ type ColorKey = keyof NonNullable<ViewerTheme['colors']>;
 			(dragover)="$event.preventDefault()"
 		>
 			<h1 class="sr-only">PPTX Viewer</h1>
-			<div class="demo-card" [ngStyle]="cardStyle()">
+			<div
+				class="demo-card"
+				data-testid="dropzone"
+				[ngStyle]="cardStyle()"
+				(click)="onZoneClick($event)"
+			>
 				@if (urlBroadcast()) {
 					<p class="demo-hint" [style.color]="color('foreground')">
 						{{ tr('demo.dropzone.joiningBroadcast') }}
@@ -50,19 +67,31 @@ type ColorKey = keyof NonNullable<ViewerTheme['colors']>;
 				<p class="demo-sub" [style.color]="color('mutedForeground')">
 					{{ tr('demo.dropzone.processed') }}
 				</p>
-				<button
-					type="button"
-					class="demo-new-btn"
-					[ngStyle]="newButtonStyle()"
-					[disabled]="busy()"
-					(click)="$event.stopPropagation(); create.emit()"
-				>
-					{{ busy() ? tr('demo.dropzone.creating') : tr('demo.dropzone.newPresentation') }}
-				</button>
+				<div class="demo-actions">
+					<button
+						type="button"
+						class="demo-new-btn demo-browse"
+						data-testid="browse-files"
+						[ngStyle]="browseButtonStyle()"
+						(click)="$event.stopPropagation(); openFilePicker()"
+					>
+						{{ tr('demo.dropzone.browse') }}
+					</button>
+					<button
+						type="button"
+						class="demo-new-btn"
+						[ngStyle]="newButtonStyle()"
+						[disabled]="busy()"
+						(click)="$event.stopPropagation(); create.emit()"
+					>
+						{{ busy() ? tr('demo.dropzone.creating') : tr('demo.dropzone.newPresentation') }}
+					</button>
+				</div>
 				<input
+					#fileInput
 					id="file-input"
 					type="file"
-					accept=".pptx"
+					[attr.accept]="acceptedExtensions"
 					[attr.aria-label]="tr('demo.dropzone.uploadAriaLabel')"
 					class="sr-only"
 					(change)="onInputChange($event)"
@@ -82,7 +111,6 @@ type ColorKey = keyof NonNullable<ViewerTheme['colors']>;
 				width: 100vw;
 				padding: 3rem;
 				text-align: center;
-				cursor: pointer;
 			}
 			.demo-card {
 				max-width: 900px;
@@ -90,6 +118,14 @@ type ColorKey = keyof NonNullable<ViewerTheme['colors']>;
 				border: 2px dashed;
 				border-radius: 0.75rem;
 				padding: 3rem;
+				cursor: pointer;
+			}
+			.demo-actions {
+				display: flex;
+				flex-wrap: wrap;
+				align-items: center;
+				justify-content: center;
+				gap: 0.5rem;
 			}
 			.demo-card:hover {
 				filter: brightness(1.05);
@@ -142,7 +178,29 @@ export class DropzoneComponent {
 	/** Emits when the user asks for a blank presentation. */
 	readonly create = output<void>();
 
+	private readonly fileInput = viewChild<ElementRef<HTMLInputElement>>('fileInput');
+
 	private readonly translate = inject(TranslateService);
+
+	/** Open the native picker from the explicit Browse control. */
+	protected openFilePicker(): void {
+		this.fileInput()?.nativeElement.click();
+	}
+
+	/**
+	 * The dashed card paints `cursor: pointer` over its whole area and the copy
+	 * says "click to browse", so the whole area has to open the picker, not just
+	 * the one text line that happens to be a <label>. Clicks that originate on a
+	 * button, on the label, or on the input itself are already handled by those
+	 * elements; re-opening from here would double-fire or loop.
+	 */
+	protected onZoneClick(e: Event): void {
+		const target = e.target as HTMLElement | null;
+		if (target?.closest('button, label[for="file-input"], #file-input')) {
+			return;
+		}
+		this.openFilePicker();
+	}
 
 	/** Translate a key using the active language (instant, no async). */
 	protected tr(key: string): string {
@@ -173,6 +231,19 @@ export class DropzoneComponent {
 		};
 	}
 
+	/** The primary call to action: the explicit "browse" control the copy promises. */
+	protected browseButtonStyle(): Record<string, string> {
+		return {
+			borderColor: this.color('primary'),
+			background: this.color('primary'),
+			color: this.color('primaryForeground'),
+			fontWeight: '500',
+		};
+	}
+
+	/** `accept` list for the file input; the same list the viewer's picker uses. */
+	protected readonly acceptedExtensions = PPTX_OPEN_ACCEPT;
+
 	protected onInputChange(e: Event): void {
 		const picked = (e.target as HTMLInputElement).files?.[0];
 		if (picked) {
@@ -183,7 +254,7 @@ export class DropzoneComponent {
 	protected onDrop(e: DragEvent): void {
 		e.preventDefault();
 		const picked = e.dataTransfer?.files?.[0];
-		if (picked?.name.endsWith('.pptx')) {
+		if (picked && isSupportedPresentationFile(picked.name)) {
 			this.file.emit(picked);
 		}
 	}

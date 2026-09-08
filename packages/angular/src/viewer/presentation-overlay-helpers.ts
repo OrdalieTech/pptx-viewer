@@ -6,7 +6,39 @@
  */
 import type { PptxSlide } from 'pptx-viewer-core';
 
-import { isClickAdvanceAllowed } from '../internal/shared';
+import {
+	attachPresentationVisibilityPause,
+	firstShowSlideIndex,
+	hasShowSlideAfter,
+	isClickAdvanceAllowed,
+	lastShowSlideIndex,
+	nextShowSlideIndex,
+	previousShowSlideIndex,
+	resolveAutoAdvanceDelayMs,
+	resolveShowSlideIndexes,
+	stopAllPersistentAudio,
+} from '../internal/shared';
+import type { AuthoredSlideRange, CanvasSize, ShowOrderCustomShow } from '../internal/shared';
+
+/**
+ * The `p:showPr/p:sldRg` range restriction, when the deck is authored to open
+ * into a slide range (`p:showPr/@showSlidesMode == 'range'`). Every navigation
+ * helper below forwards it to `resolveShowSlideIndexes` alongside
+ * {@link ActiveShow}, so a range restriction is applied the same way a custom
+ * show's membership is: as a filter on the show's slide order, not a
+ * pre-filtered slide array.
+ */
+export type AuthoredRange = AuthoredSlideRange | null | undefined;
+
+/**
+ * The running custom show, when one is active. Every navigation helper below
+ * takes it and forwards it to `resolveShowSlideIndexes`, because "which slide
+ * comes next" is one rule (membership AND hidden slides), not two: Angular used
+ * to pre-filter the slide array to the show's membership and then ask the
+ * shared rule about the filtered array, which is how a hidden slide inside a
+ * custom show still got presented.
+ */
+export type ActiveShow = ShowOrderCustomShow | null | undefined;
 
 /**
  * Whether a click/tap/swipe advance must be swallowed instead of moving to the
@@ -20,6 +52,61 @@ export function shouldBlockClickAdvance(
 	slide: PptxSlide | undefined,
 ): boolean {
 	return playbackComplete && !isClickAdvanceAllowed(slide);
+}
+
+/**
+ * Delay in ms before the show steps to the next slide on its own, or
+ * `undefined` when the current slide waits for input.
+ *
+ * The counterpart to {@link shouldBlockClickAdvance}: PowerPoint's
+ * `p:transition/@advTm` ("Advance slide: After <n>"). A slide authored
+ * `advClick="0" advTm="…"` is advanced ONLY by this timer, so honouring the
+ * click gate without also arming the timer strands the show on that slide with
+ * no visible response to any input. Nothing is scheduled once the end-of-show
+ * screen is up, or when the show is set to advance manually.
+ */
+export function resolveSlideAutoAdvanceMs(
+	slide: PptxSlide | undefined,
+	useTimings: boolean,
+	endOfShow: boolean,
+): number | undefined {
+	if (endOfShow) {
+		return undefined;
+	}
+	return resolveAutoAdvanceDelayMs(slide, { useTimings });
+}
+
+/**
+ * Attach the show's visibility pause: while the tab is hidden the shared
+ * handler pauses the stage's playing media and the cross-slide persistent
+ * audio, and the binding-provided callbacks cancel / re-arm the timed
+ * auto-advance so the deck does not run on unseen. Returns the detach
+ * function. Kept TestBed-free so the wiring can be unit-tested directly.
+ */
+export function attachShowVisibilityPause(deps: {
+	/** The overlay root containing the stage; only media inside it is paused. */
+	root: ParentNode | undefined;
+	/** Cancel the pending auto-advance timer (the tab was hidden). */
+	cancelAutoAdvance: () => void;
+	/** Re-arm the auto-advance timer for the current slide (tab visible again). */
+	rearmAutoAdvance: () => void;
+}): () => void {
+	return attachPresentationVisibilityPause({
+		root: deps.root,
+		onHidden: deps.cancelAutoAdvance,
+		onVisible: deps.rearmAutoAdvance,
+	});
+}
+
+/**
+ * The show has ENDED (never a slide change): stop and remove all cross-slide
+ * "play across slides" persistent audio. Called by the host's exit paths
+ * (`closePresentation` / `exitPresenter`), not by the overlay's own destroy,
+ * because swapping to the presenter console destroys the overlay while the
+ * show, and its background audio, carry on.
+ */
+export function endShowMediaCleanup(): void {
+	stopAllPersistentAudio();
 }
 
 /**
@@ -42,39 +129,41 @@ export function clampIndex(index: number, count: number): number {
 /**
  * Return the next visible (non-hidden) slide index after `current`.
  * Wraps around to `current` if no subsequent visible slide exists.
+ *
+ * Thin adapter over the shared show-order rule: Angular used to own this logic
+ * outright, which is exactly why the other four bindings presented hidden
+ * slides. Kept as a named export because the overlay's tests and the navigator
+ * read better in terms of "next visible slide" than raw index lists.
  */
-export function nextVisibleIndex(current: number, slides: readonly PptxSlide[]): number {
-	const count = slides.length;
-	if (count === 0) {
+export function nextVisibleIndex(
+	current: number,
+	slides: readonly PptxSlide[],
+	activeShow?: ActiveShow,
+	authoredRange?: AuthoredRange,
+): number {
+	if (slides.length === 0) {
 		return 0;
 	}
-	for (let offset = 1; offset < count; offset++) {
-		const candidate = (current + offset) % count;
-		if (!slides[candidate].hidden) {
-			return candidate;
-		}
-	}
-	// All remaining slides are hidden; stay at current.
-	return current;
+	const order = resolveShowSlideIndexes(slides, activeShow, authoredRange);
+	return nextShowSlideIndex(current, order, { loop: true }) ?? current;
 }
 
 /**
  * Return the previous visible (non-hidden) slide index before `current`.
- * Wraps around to `current` if no earlier visible slide exists.
+ * Returns `current` when no earlier visible slide exists: PowerPoint never
+ * wraps backward off the first slide.
  */
-export function prevVisibleIndex(current: number, slides: readonly PptxSlide[]): number {
-	const count = slides.length;
-	if (count === 0) {
+export function prevVisibleIndex(
+	current: number,
+	slides: readonly PptxSlide[],
+	activeShow?: ActiveShow,
+	authoredRange?: AuthoredRange,
+): number {
+	if (slides.length === 0) {
 		return 0;
 	}
-	for (let offset = 1; offset < count; offset++) {
-		const candidate = (((current - offset) % count) + count) % count;
-		if (!slides[candidate].hidden) {
-			return candidate;
-		}
-	}
-	// All preceding slides are hidden; stay at current.
-	return current;
+	const order = resolveShowSlideIndexes(slides, activeShow, authoredRange);
+	return previousShowSlideIndex(current, order) ?? current;
 }
 
 /**
@@ -93,16 +182,69 @@ export function fitZoom(canvasW: number, canvasH: number, vw: number, vh: number
 /**
  * Whether a visible (non-hidden) slide exists strictly AFTER `current`.
  *
- * `nextVisibleIndex` wraps modulo the deck length, which makes a show loop for
- * ever. PowerPoint only loops when "Loop continuously until Esc" is set;
- * otherwise running past the last slide ends the show. Callers use this to tell
- * "there is a next slide" from "we just wrapped".
+ * `nextVisibleIndex` wraps, which would make a show loop for ever. PowerPoint
+ * only loops when "Loop continuously until Esc" is set; otherwise running past
+ * the last slide ends the show. Callers use this to tell "there is a next
+ * slide" from "we just wrapped".
  */
-export function hasVisibleSlideAfter(current: number, slides: readonly PptxSlide[]): boolean {
-	for (let index = current + 1; index < slides.length; index++) {
-		if (!slides[index].hidden) {
-			return true;
-		}
-	}
-	return false;
+export function hasVisibleSlideAfter(
+	current: number,
+	slides: readonly PptxSlide[],
+	activeShow?: ActiveShow,
+	authoredRange?: AuthoredRange,
+): boolean {
+	return hasShowSlideAfter(current, resolveShowSlideIndexes(slides, activeShow, authoredRange));
+}
+
+/** The show's first visible slide (Home), or 0 for an empty deck. */
+export function firstVisibleIndex(
+	slides: readonly PptxSlide[],
+	activeShow?: ActiveShow,
+	authoredRange?: AuthoredRange,
+): number {
+	return firstShowSlideIndex(resolveShowSlideIndexes(slides, activeShow, authoredRange)) ?? 0;
+}
+
+/** The show's last visible slide (End), or 0 for an empty deck. */
+export function lastVisibleIndex(
+	slides: readonly PptxSlide[],
+	activeShow?: ActiveShow,
+	authoredRange?: AuthoredRange,
+): number {
+	return lastShowSlideIndex(resolveShowSlideIndexes(slides, activeShow, authoredRange)) ?? 0;
+}
+
+/**
+ * Style record centring the scaled slide stage in the viewport.
+ *
+ * The offsets are computed numerically ((viewport - scaled size) / 2, exactly
+ * how React's PresentationStage centres) rather than with the historical
+ * `left/top: 50%` + `translate(-50%, -50%)`: a transform makes the stage a
+ * stacking context, which trapped every z-index inside it (the ink annotation
+ * overlay in particular) BELOW the sibling blackout sheet, so blackboard
+ * strokes painted invisibly under the black screen. See the shared
+ * `render/presentation-blackboard` module for the layering rules.
+ */
+export function presentationStageStyle(
+	size: CanvasSize,
+	zoom: number,
+	viewportW: number,
+	viewportH: number,
+): Record<string, string> {
+	const width = size.width * zoom;
+	const height = size.height * zoom;
+	return {
+		position: 'absolute',
+		top: `${(viewportH - height) / 2}px`,
+		left: `${(viewportW - width) / 2}px`,
+		width: `${width}px`,
+		height: `${height}px`,
+		// Motion-path keyframes translate by a fraction of the SLIDE (see
+		// `slideOffset` in the shared timeline helpers), so the presentation
+		// stage publishes the slide size the same way the editing stage does.
+		// Without it every parsed path falls back to the 1280x720 default and a
+		// deck authored at another size under-travels.
+		'--pptx-slide-w': `${size.width}px`,
+		'--pptx-slide-h': `${size.height}px`,
+	};
 }

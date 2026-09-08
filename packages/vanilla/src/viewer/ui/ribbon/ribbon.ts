@@ -27,12 +27,15 @@ import { createDesignTab } from './tabs/design-tab';
 import type { DrawTab } from './tabs/draw-tab';
 import { createDrawTab } from './tabs/draw-tab';
 import { createFileTab } from './tabs/file-tab';
+import { createHelpTab } from './tabs/help-tab';
 import type { InsertTab } from './tabs/insert-tab';
 import { createInsertTab } from './tabs/insert-tab';
+import { createRecordTab } from './tabs/record-tab';
+import { createReviewTab } from './tabs/review-tab';
 import { createSlideShowTab } from './tabs/slide-show-tab';
 import type { TransitionsTab } from './tabs/transitions-tab';
 import { createTransitionsTab } from './tabs/transitions-tab';
-import { createHelpTab, createRecordTab, createReviewTab } from './tabs/utility-tabs';
+import type { ViewToggleState } from './tabs/view-tab';
 import { createViewTab } from './tabs/view-tab';
 
 export interface Ribbon {
@@ -48,10 +51,20 @@ export interface Ribbon {
 	/** Reflect the current Draw tab tool/colour/width (store-driven). */
 	setDrawState(state: RibbonDrawState): void;
 	setTemplateEditing(active: boolean): void;
+	/** Reflect the View tab's Show toggles (rulers/grid/guides/snapping). */
+	setViewOptions(options: ViewToggleState): void;
 	setHasMacros(hasMacros: boolean): void;
 	setSubtitlesVisible(visible: boolean): void;
+	/** Reflect the active slide's `hidden` flag on the Hide Slide toggle. */
+	setHideSlideActive(active: boolean): void;
 	/** Reflect the inspector panel's open state on the quick-access toggle. */
 	setInspectorOpen(open: boolean): void;
+	/**
+	 * Show or hide the docked Find & Replace panel. Same action as Home >
+	 * Editing > Find; exposed so the editor keymap can drive Ctrl/Cmd+F, which
+	 * this binding had no shortcut for at all.
+	 */
+	toggleFindReplace(): void;
 	openEquationEditor(id: string, omml: Record<string, unknown>): void;
 	/**
 	 * Hide ribbon tabs unticked in Options > Customize Ribbon. The File tab
@@ -116,17 +129,39 @@ export function createRibbon(
 			});
 	const insertTab: InsertTab | null = hidden('insert')
 		? null
-		: createInsertTab(doc, t, handlers.insert, () => equationPanel.toggle());
+		: createInsertTab(
+				doc,
+				t,
+				handlers.insert,
+				() => equationPanel.toggle(),
+				() => handlers.nav.openHeaderFooter(),
+				() => handlers.nav.openHyperlink(),
+			);
 	const drawTab: DrawTab | null = hidden('draw') ? null : createDrawTab(doc, t, handlers.draw);
+	let inspectorOpen = false;
+	const openInspector = (): void => handlers.nav.toggleInspector?.();
+	/**
+	 * Design > Slide Size. The only slide-size control this binding has is the
+	 * inspector's SLIDE SIZE card (`inspector/deck-panel.ts`), and the deck panel
+	 * only renders with nothing selected, so reach it by dropping the selection
+	 * and opening the inspector. It used to open Document Properties, a dialog
+	 * with no slide-size control in it at all.
+	 */
+	const openSlideSize = (): void => {
+		handlers.nav.clearSelection?.();
+		if (!inspectorOpen) {
+			openInspector();
+		}
+	};
 	const designTab: DesignTab | null = hidden('design')
 		? null
-		: createDesignTab(doc, t, handlers.design, () => formatBackgroundPanel.toggle());
+		: createDesignTab(doc, t, handlers.design, () => formatBackgroundPanel.toggle(), openSlideSize);
 	const transitionsTab: TransitionsTab | null = hidden('transitions')
 		? null
-		: createTransitionsTab(doc, t, handlers.edit);
+		: createTransitionsTab(doc, t, handlers.transitions, openInspector);
 	const animationsTab: AnimationsTab | null = hidden('animations')
 		? null
-		: createAnimationsTab(doc, t, handlers.edit);
+		: createAnimationsTab(doc, t, handlers.edit, openInspector);
 	const slideShowTab = hidden('slideShow')
 		? null
 		: createSlideShowTab(doc, t, handlers.slideShow, hiddenActions);
@@ -188,7 +223,15 @@ export function createRibbon(
 			formatPainterActive: latestExtra.formatPainterActive ?? false,
 			slideCount: latestExtra.slideCount,
 			selectedCount: latestExtra.selectedCount ?? 0,
+			selectionGroupable: latestExtra.selectionGroupable ?? true,
 			layouts: latestExtra.layouts ?? [],
+			layoutPreviews: latestExtra.layoutPreviews,
+			currentLayoutPath: latestExtra.currentLayoutPath,
+			themeFonts: latestExtra.themeFonts,
+			embeddedFontFamilies: latestExtra.embeddedFontFamilies,
+			customFontFamilies: latestExtra.customFontFamilies,
+			recentColors: latestExtra.recentColors ?? [],
+			themeColorMap: latestExtra.themeColorMap,
 		});
 	};
 	const syncAnimations = (): void => {
@@ -197,6 +240,7 @@ export function createRibbon(
 			hasSelection: latestSelected !== undefined,
 			selectedElementId: latestExtra.selectedElementId,
 			animations: latestExtra.animations ?? [],
+			animationTimelineAnchors: latestExtra.animationTimelineAnchors ?? [],
 		});
 	};
 
@@ -236,20 +280,33 @@ export function createRibbon(
 			formatBackgroundPanel.setEditable(editable);
 			designTab?.setEditable(editable);
 			transitionsTab?.setEditable(editable);
+			// `setEditable` runs on every store change (see `editing-chrome-sync`),
+			// which is what keeps these two tabs reading the deck: the Transitions
+			// draft follows the active slide, and the Slide Show Options checkboxes
+			// follow the show settings even when the Set Up dialog changed them.
+			transitionsTab?.sync();
+			slideShowTab?.syncOptions();
 			syncHome();
 			syncAnimations();
 		},
 		setDrawState: (state) => drawTab?.update(state),
 		setTemplateEditing: (active) => viewTab?.setTemplateEditing(active),
+		setViewOptions: (options) => viewTab?.setViewOptions(options),
 		setHasMacros: (hasMacros) => fileTab?.setHasMacros(hasMacros),
 		setSubtitlesVisible: (visible) => slideShowTab?.setSubtitlesVisible(visible),
-		setInspectorOpen: (open) => primary.setInspectorOpen(open),
+		setHideSlideActive: (active) => slideShowTab?.setHideSlideActive(active),
+		setInspectorOpen: (open) => {
+			inspectorOpen = open;
+			primary.setInspectorOpen(open);
+		},
+		toggleFindReplace: () => findReplace.toggle(),
 		openEquationEditor: (id, omml) => equationPanel.openEdit(id, omml),
 		setHiddenOptionTabs,
 		applyScreenTips: (tip) => tabBar.applyScreenTips(tip),
 		updateSelection(selectedElement, extra) {
 			latestSelected = selectedElement;
 			latestExtra = extra;
+			insertTab?.setHasSelection(selectedElement !== undefined);
 			syncHome();
 			syncAnimations();
 		},

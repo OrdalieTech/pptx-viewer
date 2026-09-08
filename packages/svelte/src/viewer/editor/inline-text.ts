@@ -1,6 +1,14 @@
 import type { PptxElement, TextSegment, TextStyle } from 'pptx-viewer-core';
 import { hasTextProperties } from 'pptx-viewer-core';
-import { remapTextToSegments } from 'pptx-viewer-shared';
+import type { NormAutofitShrinkResult } from 'pptx-viewer-shared';
+import {
+	canInteractWithElement,
+	remapTextToSegments,
+	resolveInlineEditAutoFitHeight,
+	resolveInlineEditNormAutofitShrink,
+} from 'pptx-viewer-shared';
+
+export { readEditableText } from 'pptx-viewer-shared';
 
 /**
  * Pure helpers for inline text editing. The editable surface itself is a
@@ -18,7 +26,11 @@ import { remapTextToSegments } from 'pptx-viewer-shared';
  * the OMML (`textSegments[].equationXml`). Mirrors the vanilla/Vue/React guard.
  */
 export function canInlineEditElement(element: PptxElement | undefined): boolean {
-	if (!element || !hasTextProperties(element) || element.locks?.noTextEdit) {
+	// The lock is asked of shared `canInteractWithElement`, not read off
+	// `locks.noTextEdit` by hand: `noSelect` subsumes `noTextEdit`, and folding
+	// that composition in one place is what stops the five bindings drifting
+	// over which flags imply which.
+	if (!element || !hasTextProperties(element) || !canInteractWithElement(element, 'textEdit')) {
 		return false;
 	}
 	return !element.textSegments?.some((seg) => seg.equationXml);
@@ -36,34 +48,50 @@ export function remapInlineText(
 }
 
 /**
- * Read the plain text of a contenteditable back out, translating `<br>` and
- * block-element boundaries into `\n` (contenteditable normalises Enter into
- * nested blocks or `<br>` depending on the browser).
+ * `a:spAutoFit` ("Resize shape to fit text") editor-commit resize: decide the
+ * element's new height from its text style, current height, and the live
+ * (still-mounted) editor DOM node - `undefined` when the element carries no
+ * text properties, autofit isn't `'shrink'`, or the measured height did not
+ * meaningfully change.
+ *
+ * `EditorElementController#commitInlineText` calls this before it replaces
+ * the element; `editorEl` there is found via
+ * `document.querySelector('[data-inline-editor]')`, which still resolves at
+ * that point because `InlineTextEditor.svelte`'s `close()` invokes `oncommit`
+ * (the call that reaches here) BEFORE `onclose()` - only `onclose()` sets
+ * `editingId = null`, which is what unmounts the editor on Svelte's next
+ * update.
  */
-export function readEditableText(root: HTMLElement): string {
-	let out = '';
-	const walk = (node: Node): void => {
-		for (const child of Array.from(node.childNodes)) {
-			if (child.nodeType === 3) {
-				out += child.nodeValue ?? '';
-				continue;
-			}
-			if (!(child instanceof HTMLElement)) {
-				continue;
-			}
-			if (child.tagName === 'BR') {
-				out += '\n';
-				continue;
-			}
-			const isBlock = child.tagName === 'DIV' || child.tagName === 'P';
-			if (isBlock && out.length > 0 && !out.endsWith('\n')) {
-				out += '\n';
-			}
-			walk(child);
-		}
-	};
-	walk(root);
-	return out;
+export function resolveInlineTextAutoFitHeight(
+	element: PptxElement,
+	editorEl: HTMLElement | null,
+): number | undefined {
+	if (!hasTextProperties(element)) {
+		return undefined;
+	}
+	return resolveInlineEditAutoFitHeight(element.textStyle, element.height, editorEl);
+}
+
+/**
+ * `a:normAutofit` ("Shrink text on overflow") editor-commit recompute: decide
+ * the element's new `fontScale`/`lnSpcReduction` from its text style, current
+ * (fixed) height, and the live editor DOM node - `'unchanged'` when the
+ * element carries no text properties, autofit isn't `'normal'`, or the
+ * measured height did not meaningfully change. Mutually exclusive with
+ * {@link resolveInlineTextAutoFitHeight} (`a:spAutoFit`); both read
+ * `autoFitMode`, only one mode is ever set.
+ *
+ * Called from the same place and for the same DOM-still-mounted reason as
+ * {@link resolveInlineTextAutoFitHeight} (see its doc comment).
+ */
+export function resolveInlineTextNormAutofitShrink(
+	element: PptxElement,
+	editorEl: HTMLElement | null,
+): NormAutofitShrinkResult {
+	if (!hasTextProperties(element)) {
+		return 'unchanged';
+	}
+	return resolveInlineEditNormAutofitShrink(element.textStyle, element.height, editorEl);
 }
 
 /** Initial plain text + optional font style for the inline surface. */

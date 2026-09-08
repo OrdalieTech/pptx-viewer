@@ -7,16 +7,22 @@
  * Angular port of the React `TableCellAdvancedFill`. Emits partial
  * `PptxTableCellStyle` patches through `styleChange`; the parent merges them
  * into the selected cell. Option lists come from `pptx-viewer-shared`
- * (`FILL_MODE_OPTIONS` / `GRADIENT_TYPE_OPTIONS` / `PATTERN_OPTIONS`); a live
+ * (`FILL_MODE_OPTIONS` / `GRADIENT_TYPE_OPTIONS` / `patternPresetOptions`); a live
  * `gradientFillCss` string is rebuilt on every gradient edit so the renderer
  * reflects the change immediately.
  */
-import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input, output } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
 import type { PptxTableCellStyle } from 'pptx-viewer-core';
 
-import { FILL_MODE_OPTIONS, GRADIENT_TYPE_OPTIONS, PATTERN_OPTIONS } from '../internal/shared';
-import { buildGradientFillCss } from './table-properties-helpers';
+import { FILL_MODE_OPTIONS, GRADIENT_TYPE_OPTIONS } from '../internal/shared';
+import { RecentColorsService } from './recent-colors.service';
+import { fillPatternLabelKey } from './schema-token-labels';
+import {
+	buildGradientFillCss,
+	DEFAULT_PATTERN_FILL_PRESET,
+	patternPresetOptions,
+} from './table-properties-helpers';
 
 type GradientStop = { color: string; position: number };
 
@@ -30,13 +36,16 @@ type GradientStop = { color: string; position: number };
 			<label class="pptx-tcaf__field">
 				<span class="pptx-tcaf__lbl">{{ 'pptx.table.fillMode' | translate }}</span>
 				<select
+					[attr.aria-label]="'pptx.table.fillMode' | translate"
 					class="pptx-tcaf__sel"
 					[disabled]="!canEdit()"
 					[value]="fillMode()"
 					(change)="onFillModeChange($event)"
 				>
 					@for (opt of fillModes; track opt.value) {
-						<option [value]="opt.value">{{ opt.i18nKey | translate }}</option>
+						<option [value]="opt.value" [selected]="opt.value === fillMode()">
+							{{ opt.i18nKey | translate }}
+						</option>
 					}
 				</select>
 			</label>
@@ -46,13 +55,16 @@ type GradientStop = { color: string; position: number };
 					<label class="pptx-tcaf__field">
 						<span class="pptx-tcaf__lbl">{{ 'pptx.table.gradientType' | translate }}</span>
 						<select
+							[attr.aria-label]="'pptx.table.gradientType' | translate"
 							class="pptx-tcaf__sel"
 							[disabled]="!canEdit()"
 							[value]="gradType()"
 							(change)="onGradTypeChange($event)"
 						>
 							@for (opt of gradientTypes; track opt.value) {
-								<option [value]="opt.value">{{ opt.i18nKey | translate }}</option>
+								<option [value]="opt.value" [selected]="opt.value === gradType()">
+									{{ opt.i18nKey | translate }}
+								</option>
 							}
 						</select>
 					</label>
@@ -79,6 +91,7 @@ type GradientStop = { color: string; position: number };
 								[disabled]="!canEdit()"
 								[value]="stop.color"
 								(input)="onStopColor(i, $event)"
+								(change)="pushRecentColor($event)"
 							/>
 							<input
 								type="number"
@@ -108,13 +121,16 @@ type GradientStop = { color: string; position: number };
 					<label class="pptx-tcaf__field">
 						<span class="pptx-tcaf__lbl">{{ 'pptx.table.patternPreset' | translate }}</span>
 						<select
+							[attr.aria-label]="'pptx.table.patternPreset' | translate"
 							class="pptx-tcaf__sel"
 							[disabled]="!canEdit()"
-							[value]="cellStyle().patternFillPreset ?? 'ltDnDiag'"
+							[value]="patternPreset()"
 							(change)="onPatternPreset($event)"
 						>
-							@for (p of patterns; track p) {
-								<option [value]="p">{{ p }}</option>
+							@for (p of patterns(); track p) {
+								<option [value]="p" [selected]="p === patternPreset()">
+									{{ patternLabelKey(p) | translate }}
+								</option>
 							}
 						</select>
 					</label>
@@ -127,6 +143,7 @@ type GradientStop = { color: string; position: number };
 								[disabled]="!canEdit()"
 								[value]="cellStyle().patternFillForeground ?? '#000000'"
 								(input)="onPatternFg($event)"
+								(change)="pushRecentColor($event)"
 							/>
 						</label>
 						<label class="pptx-tcaf__field">
@@ -137,6 +154,7 @@ type GradientStop = { color: string; position: number };
 								[disabled]="!canEdit()"
 								[value]="cellStyle().patternFillBackground ?? '#FFFFFF'"
 								(input)="onPatternBg($event)"
+								(change)="pushRecentColor($event)"
 							/>
 						</label>
 					</div>
@@ -230,6 +248,9 @@ export class TableCellAdvancedFillComponent {
 	/** Emits a partial style patch to merge into the cell. */
 	readonly styleChange = output<Partial<PptxTableCellStyle>>();
 
+	/** Optional: absent in a standalone unit test with no viewer-level DI tree. */
+	private readonly recentColors = inject(RecentColorsService, { optional: true });
+
 	protected readonly fillModes = FILL_MODE_OPTIONS.map((o) => ({
 		value: o.value ?? 'solid',
 		i18nKey: o.i18nKey,
@@ -238,7 +259,20 @@ export class TableCellAdvancedFillComponent {
 		value: o.value,
 		i18nKey: o.i18nKey,
 	}));
-	protected readonly patterns = PATTERN_OPTIONS;
+	/** The cell's pattern preset, or the fallback the panel would seed. */
+	protected readonly patternPreset = computed(
+		() => this.cellStyle().patternFillPreset ?? DEFAULT_PATTERN_FILL_PRESET,
+	);
+
+	/**
+	 * Offered presets, widened to include the current one when it sits outside
+	 * the offered slice (the fallback preset does), so the `<select>` cannot show
+	 * a value the cell does not have and then commit it on the next change.
+	 */
+	protected readonly patterns = computed(() => patternPresetOptions(this.patternPreset()));
+
+	/** Spell a preset: the picker used to offer `ltHorz` / `narVert` verbatim. */
+	protected patternLabelKey = fillPatternLabelKey;
 	protected readonly margins: ReadonlyArray<{
 		key: 'marginTop' | 'marginBottom' | 'marginLeft' | 'marginRight';
 		label: string;
@@ -280,7 +314,7 @@ export class TableCellAdvancedFillComponent {
 		} else if (mode === 'pattern') {
 			this.styleChange.emit({
 				fillMode: 'pattern',
-				patternFillPreset: this.cellStyle().patternFillPreset ?? 'ltDnDiag',
+				patternFillPreset: this.patternPreset(),
 				patternFillForeground: this.cellStyle().patternFillForeground ?? '#000000',
 				patternFillBackground: this.cellStyle().patternFillBackground ?? '#FFFFFF',
 				gradientFillCss: undefined,
@@ -334,6 +368,17 @@ export class TableCellAdvancedFillComponent {
 		const value = numberValue(event);
 		if (value !== null) {
 			this.styleChange.emit({ [key]: value });
+		}
+	}
+
+	/**
+	 * Record the committed (native `change`, not the live-preview `input`)
+	 * colour into the shared "Recent colours" list.
+	 */
+	protected pushRecentColor(event: Event): void {
+		const value = inputValue(event);
+		if (value) {
+			this.recentColors?.push(value);
 		}
 	}
 

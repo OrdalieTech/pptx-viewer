@@ -92,6 +92,57 @@ describe('connectorRenderer', () => {
 		expect(marker.attributes('markerWidth')).toBe('6');
 		expect(marker.attributes('markerHeight')).toBe('2.4');
 	});
+
+	// Shared `markerPath` flags the 'arrow' open-chevron type `strokeOnly: true`
+	// because its path has no closing `Z`: filled solid it renders as an
+	// indistinguishable wedge, same as 'triangle'. Pins the fix onto the
+	// element-level marker <path>, not just the shared descriptor.
+	it('renders the "arrow" open-chevron marker stroke-only, not solid-filled', () => {
+		const wrapper = mount(ConnectorRenderer, {
+			props: {
+				element: connector({
+					shapeStyle: { strokeColor: '#ff0000', strokeWidth: 3, connectorEndArrow: 'arrow' },
+				}),
+				zIndex: 0,
+			},
+		});
+		const path = wrapper.get('marker#cxn_1-end path');
+		expect(path.attributes('fill')).toBe('none');
+		expect(path.attributes('stroke')).toBe('#ff0000');
+	});
+
+	it('renders a solid-filled marker (e.g. "triangle") with no stroke attribute', () => {
+		const wrapper = mount(ConnectorRenderer, {
+			props: {
+				element: connector({
+					shapeStyle: { strokeColor: '#ff0000', strokeWidth: 3, connectorEndArrow: 'triangle' },
+				}),
+				zIndex: 0,
+			},
+		});
+		const path = wrapper.get('marker#cxn_1-end path');
+		expect(path.attributes('fill')).toBe('#ff0000');
+		expect(path.attributes('stroke')).toBeUndefined();
+	});
+
+	it('renders connector label model font sizes as CSS pixels', () => {
+		const wrapper = mount(ConnectorRenderer, {
+			props: {
+				element: connector({
+					text: 'Label',
+					textStyle: { fontSize: 64 },
+					textSegments: [{ text: 'Label', style: { fontSize: 32 } }],
+				}),
+				zIndex: 0,
+			},
+		});
+		expect(wrapper.get('.pptx-vue-connector-text__block').attributes('style')).toContain(
+			'font-size: 64px',
+		);
+		expect(wrapper.get('.pptx-vue-connector-text__run').attributes('style')).toContain(
+			'font-size: 32px',
+		);
+	});
 });
 
 // ── Bent connector routing ────────────────────────────────────────────────────
@@ -173,8 +224,59 @@ describe('connectorRenderer - bent connectors', () => {
 				zIndex: 0,
 			},
 		});
-		const path = wrapper.get('path');
+		// Skip the invisible hit target, which paints nothing.
+		const path = wrapper.get('path:not(.pptx-vue-connector-hit)');
 		expect(path.attributes('stroke')).toBe('#0000ff');
+	});
+
+	it('bends around a horizontal mid-line, not a vertical one, when the shapes are stacked', () => {
+		// A connector between vertically-stacked shapes is taller than it is
+		// wide (height > width). Before the fix, the SVG path bent around a
+		// vertical mid-line at `width * adj1` regardless of orientation, so the
+		// rendered connector still exited sideways even though the two shapes
+		// it joins sit one above the other. Assert the actual rendered `d`
+		// attribute, not just segment counts, so this exercises Vue's real
+		// render path end to end rather than just the underlying core function.
+		const wrapper = mount(ConnectorRenderer, {
+			props: {
+				element: connector({
+					shapeType: 'bentConnector3',
+					width: 50,
+					height: 200,
+				}),
+				zIndex: 0,
+			},
+		});
+		const path = wrapper.get('path:not(.pptx-vue-connector-hit)');
+		expect(path.attributes('d')).toBe('M 0 0 L 0 100 L 50 100 L 50 200');
+	});
+});
+
+// ── Pointer hit target ────────────────────────────────────────────────────────
+
+describe('connectorRenderer - hit target', () => {
+	it('opts the line itself back into hit testing so it can be selected', () => {
+		// The wrapper is `pointer-events: none`, so without this stroke no click
+		// on the canvas could ever reach a connector and the inspector's
+		// arrowhead card was unreachable by pointer.
+		const wrapper = mount(ConnectorRenderer, { props: { element: connector(), zIndex: 0 } });
+		const hit = wrapper.get('path.pptx-vue-connector-hit');
+		expect(hit.attributes('stroke')).toBe('transparent');
+		expect(hit.attributes('style')).toContain('pointer-events: stroke');
+		// Wide enough to hit: 3x the stroke, floored at 14px, matching React.
+		expect(Number(hit.attributes('stroke-width'))).toBe(14);
+	});
+
+	it('follows the routed path for a bent connector', () => {
+		const wrapper = mount(ConnectorRenderer, {
+			props: {
+				element: connector({ shapeType: 'bentConnector3', width: 200, height: 100 }),
+				zIndex: 0,
+			},
+		});
+		const hit = wrapper.get('path.pptx-vue-connector-hit');
+		const visible = wrapper.get('path:not(.pptx-vue-connector-hit)');
+		expect(hit.attributes('d')).toBe(visible.attributes('d'));
 	});
 });
 
@@ -287,7 +389,8 @@ describe('connectorRenderer - compound lines', () => {
 				zIndex: 0,
 			},
 		});
-		const paths = wrapper.findAll('path');
+		// Visible strokes only; the invisible hit target is not one of them.
+		const paths = wrapper.findAll('path:not(.pptx-vue-connector-hit)');
 		expect(paths).toHaveLength(2);
 		expect(wrapper.find('line').exists()).toBeFalsy();
 	});

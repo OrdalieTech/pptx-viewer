@@ -1,20 +1,23 @@
 import type { PptxSmartArtNode, SmartArtPptxElement, SmartArtStyle } from 'pptx-viewer-core';
 import type {
-	DiagramBuildState,
+	ElementAnimationState,
 	RenderedNode,
 	RenderedShape,
 	SmartArtLayoutResult,
 	SmartArtNodeA11y,
+	SvgTextLine,
 } from 'pptx-viewer-shared';
 import {
 	buildChromeStyle,
 	buildSmartArtA11y,
 	computeDrawingViewBox,
-	computeSmartArtLayout,
+	computeSmartArtElementLayout,
+	flattenNodes,
 	projectDrawingShapes,
-	resolveDrawingShapeNodeId,
+	resolveRevealedDrawingShapeNodeIds,
 	resolvePalette,
-	revealedSmartArtNodeCount,
+	resolveRevealedDrawingShapes,
+	resolveRevealedSmartArtNodes,
 	styleShadowFilter,
 } from 'pptx-viewer-shared';
 
@@ -29,9 +32,6 @@ import { styleToString } from '../style';
 
 /** Inline style applied to every SmartArt SVG so it fills the element box. */
 export const SMARTART_SVG_STYLE = 'width: 100%; height: 100%; pointer-events: none; display: block';
-
-/** Connector stroke for the fallback layout path. */
-export const SMARTART_CONNECTOR_STROKE = '#94a3b8';
 
 /** Resolved SmartArt view: drawing shapes, engine layout, or a placeholder. */
 export type SmartArtView =
@@ -64,39 +64,32 @@ export function smartArtAriaLabel(element: SmartArtPptxElement): string | undefi
 }
 
 /**
- * Number of leading drawing shapes to reveal for a partial diagram build, kept
- * proportional to the revealed node prefix so the shapes appear in step with the
- * nodes. Mirrors the Vue `SmartArtRenderer` reveal slice.
- */
-function revealedShapeCount(shownNodes: number, totalNodes: number, totalShapes: number): number {
-	return Math.ceil((shownNodes / Math.max(totalNodes, 1)) * totalShapes);
-}
-
-/**
  * Pick the rendering path: pre-computed drawing shapes (preferred), the
  * shared layout engine over the node tree, or an empty placeholder.
  *
- * `build` is the active staged diagram build (`p:bldDgm`) during a running
- * presentation, if any: only the leading nodes / drawing shapes for the current
- * progress are revealed. The view box is still computed from the FULL shape set
- * so the diagram does not rescale as it builds (mirrors React / Vue).
+ * `animationState` is the active native-animation playback state, if any: when
+ * it carries a staged diagram build, only the leading nodes / drawing shapes
+ * for the current progress are revealed, preferring the AUTHORED per-node
+ * `p:graphicEl/@id` reveal set (`animationState.diagramReveal`) over the
+ * click-count estimate when available. The view box is still computed from the
+ * FULL shape set so the diagram does not rescale as it builds (mirrors
+ * React / Vue / Angular).
  */
 export function buildSmartArtView(
 	element: SmartArtPptxElement,
-	build?: DiagramBuildState,
+	animationState?: Pick<ElementAnimationState, 'build' | 'diagramReveal'>,
 ): SmartArtView {
 	const data = element.smartArtData;
 	const nodes: PptxSmartArtNode[] = data?.nodes ?? [];
 	const allDrawingShapes = data?.drawingShapes ?? [];
-	const shownNodeCount = build ? revealedSmartArtNodeCount(nodes, build) : nodes.length;
-	const isPartialBuild = build !== undefined && shownNodeCount < nodes.length;
-	const revealedNodes = isPartialBuild ? nodes.slice(0, shownNodeCount) : nodes;
+	const { nodes: revealedNodes } = resolveRevealedSmartArtNodes(
+		nodes,
+		animationState,
+		data?.presLayoutVars,
+	);
 	const drawingShapes =
-		isPartialBuild && allDrawingShapes.length > 0
-			? allDrawingShapes.slice(
-					0,
-					revealedShapeCount(shownNodeCount, nodes.length, allDrawingShapes.length),
-				)
+		allDrawingShapes.length > 0
+			? resolveRevealedDrawingShapes(allDrawingShapes, nodes, animationState)
 			: allDrawingShapes;
 
 	if (data && allDrawingShapes.length > 0) {
@@ -104,6 +97,10 @@ export function buildSmartArtView(
 		// View box from the FULL shape set so the diagram keeps its size while building.
 		const viewBox = computeDrawingViewBox(allDrawingShapes);
 		const labels = labelMap(buildSmartArtA11y(data).nodes);
+		// Node ids resolve over the FULL shape list, then align with the revealed
+		// subset by identity: a positional lookup over the subset mis-tags a
+		// partial build.
+		const nodeIds = resolveRevealedDrawingShapeNodeIds(allDrawingShapes, drawingShapes, nodes);
 		const shapes = projectDrawingShapes(
 			element.id,
 			drawingShapes,
@@ -115,12 +112,7 @@ export function buildSmartArtView(
 			kind: 'drawing',
 			viewBox: `0 0 ${viewBox.width} ${viewBox.height}`,
 			shapes: shapes.map((shape, index) => {
-				const nodeId = resolveDrawingShapeNodeId(
-					drawingShapes[index]!,
-					index,
-					drawingShapes,
-					nodes,
-				);
+				const nodeId = nodeIds[index];
 				return { ...shape, nodeId, ariaLabel: nodeId ? labels.get(nodeId) : undefined };
 			}),
 			shadow: styleShadowFilter(style),
@@ -128,28 +120,28 @@ export function buildSmartArtView(
 	}
 
 	if (data && nodes.length > 0) {
-		const layout = computeSmartArtLayout(
+		const layout = computeSmartArtElementLayout(
+			data,
 			revealedNodes,
 			{ width: element.width, height: element.height },
 			resolvePalette(data),
 			data.style ?? 'flat',
 			element.id,
-			data.resolvedLayoutType,
-			data.layout,
-			undefined,
-			data.layoutDefinition,
-			data.presLayoutVars,
 		);
-		const labels = buildSmartArtA11y(data).nodes;
+		// Rendered nodes are index-aligned with the FLATTENED source nodes (the
+		// layout engine walks the tree depth-first), so the id mapping has to
+		// flatten too: reading the top-level array mis-labelled every child of a
+		// nested diagram and handed the inline editor the wrong node id.
+		const labels = labelMap(buildSmartArtA11y(data).nodes);
+		const flatIds = flattenNodes([...revealedNodes]).map((node) => node.id);
 		return {
 			kind: 'layout',
 			layout: {
 				...layout,
-				nodes: layout.nodes.map((node, index) => ({
-					...node,
-					nodeId: nodes[index]?.id,
-					ariaLabel: labels[index]?.label,
-				})),
+				nodes: layout.nodes.map((node, index) => {
+					const nodeId = flatIds[index];
+					return { ...node, nodeId, ariaLabel: nodeId ? labels.get(nodeId) : undefined };
+				}),
 			},
 		};
 	}
@@ -157,27 +149,10 @@ export function buildSmartArtView(
 	return { kind: 'placeholder' };
 }
 
-/** One rendered line of a multi-line SVG label; `y` offsets the node centre. */
-export interface SvgTextLine {
-	text: string;
-	y: number;
-}
-
 /**
- * Split node text on `\n` and compute per-line y offsets (in SVG px) that
- * centre the block around the node centre y (offset 0). Single-line text
- * produces one entry with y=0, preserving `dominant-baseline="central"`
- * behaviour exactly (mirrors Vue's / vanilla's `textLines`).
+ * One rendered line of a multi-line SVG label. The fallback layout path gets
+ * its lines (already positioned, with the anchor and baseline resolved) from
+ * the shared `smartArtNodeLabel`; the cached drawing-shape path gets them from
+ * `projectDrawingShapes`. Nothing here recomputes either.
  */
-export function svgTextLines(text: string, fontSize: number): SvgTextLine[] {
-	const raw = text.split('\n').filter((l) => l.length > 0);
-	if (raw.length === 0) {
-		return [{ text: '', y: 0 }];
-	}
-	const lh = fontSize * 1.2;
-	const totalH = raw.length * lh;
-	return raw.map((line, i) => ({
-		text: line,
-		y: -totalH / 2 + lh / 2 + i * lh,
-	}));
-}
+export type { SvgTextLine };

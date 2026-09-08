@@ -1,4 +1,4 @@
-import type { PptxSlide } from 'pptx-viewer-core';
+import type { PptxSlide, PptxTextStyleLevels } from 'pptx-viewer-core';
 import { describe, expect, it, vi } from 'vitest';
 
 import { createTranslator } from '../i18n';
@@ -146,6 +146,60 @@ describe('createNotesPanel', () => {
 		] as const) {
 			expect(panel.el.querySelector(`[aria-label="${t(key)}"]`)).not.toBeNull();
 		}
+	});
+
+	it('prints the current slide notes into a hidden iframe via the shared buildNotesPrintHtml builder', () => {
+		const t = createTranslator();
+		const panel = createNotesPanel(document, t, vi.fn(), vi.fn());
+		panel.update({
+			slide: buildSlide({ notes: 'Remember the demo.', slideNumber: 3 }),
+			editable: true,
+		});
+
+		const printButton = panel.el.querySelector<HTMLButtonElement>(
+			`[aria-label="${t('pptx.notes.printNotes')}"]`,
+		);
+		expect(printButton).not.toBeNull();
+		const framesBefore = document.body.querySelectorAll('iframe[aria-hidden="true"]').length;
+		printButton?.click();
+
+		const frames = document.body.querySelectorAll<HTMLIFrameElement>('iframe[aria-hidden="true"]');
+		expect(frames).toHaveLength(framesBefore + 1);
+		const frame = frames[frames.length - 1];
+		expect(frame.contentDocument?.body.textContent).toContain('Remember the demo.');
+		frame.remove();
+	});
+
+	it('does nothing when the print button is clicked with no slide selected', () => {
+		const t = createTranslator();
+		const panel = createNotesPanel(document, t, vi.fn(), vi.fn());
+		panel.update({ slide: undefined, editable: true });
+
+		const printButton = panel.el.querySelector<HTMLButtonElement>(
+			`[aria-label="${t('pptx.notes.printNotes')}"]`,
+		);
+		const framesBefore = document.body.querySelectorAll('iframe[aria-hidden="true"]').length;
+		printButton?.click();
+
+		expect(document.body.querySelectorAll('iframe[aria-hidden="true"]')).toHaveLength(framesBefore);
+	});
+
+	it('applies the notes-master level-0 font size to segments missing an explicit size', () => {
+		const t = createTranslator();
+		const notesStyle: PptxTextStyleLevels = { 0: { fontSize: 32 } };
+
+		const styledPanel = createNotesPanel(document, t, vi.fn(), vi.fn());
+		styledPanel.update({
+			slide: buildSlide({ notes: 'Remember the demo.' }),
+			editable: true,
+			notesStyle,
+		});
+		// 32px master default -> 24pt inline style on the rich editor's run.
+		expect(richEditor(styledPanel.el).innerHTML).toContain('font-size:24pt');
+
+		const unstyledPanel = createNotesPanel(document, t, vi.fn(), vi.fn());
+		unstyledPanel.update({ slide: buildSlide({ notes: 'Remember the demo.' }), editable: true });
+		expect(richEditor(unstyledPanel.el).innerHTML).not.toContain('font-size');
 	});
 
 	it('toggles expanded/collapsed state and fires onToggle from the header', () => {

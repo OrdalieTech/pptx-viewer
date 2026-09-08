@@ -1,6 +1,12 @@
-import type { PptxSlide } from 'pptx-viewer-core';
+import type { PptxData, PptxSlide } from 'pptx-viewer-core';
 import type { CanvasSize } from 'pptx-viewer-shared';
-import { downloadBlob, downloadDataUrl, exportAbortError } from 'pptx-viewer-shared';
+import {
+	downloadBlob,
+	downloadDataUrl,
+	exportAbortError,
+	exportDeckJson,
+	resolveExportBaseName,
+} from 'pptx-viewer-shared';
 
 import type { ExportGifOptions } from './export-gif';
 import { exportSlidesToGifBlob } from './export-gif';
@@ -11,7 +17,10 @@ import { exportSlidesToWebmBlob } from './export-video';
 
 /** Rasterise the slide at `index` to an `HTMLCanvasElement`. Injected so the
  * controller stays DOM-capture-free and unit-testable. */
-export type RasterizeSlide = (index: number) => Promise<HTMLCanvasElement>;
+export type RasterizeSlide = (
+	index: number,
+	scaleMultiplier?: number,
+) => Promise<HTMLCanvasElement>;
 
 /** Per-slide progress callback: `(currentSlideIndex, totalSlides)`. */
 export type ExportProgress = (current: number, total: number) => void;
@@ -38,14 +47,14 @@ export interface ExportControllerDeps {
 	openPrintWindow?: OpenPrintWindow;
 	/** Base file name (without extension) for downloads. Defaults to `presentation`. */
 	fileName?: string;
-}
-
-function resolveBaseName(fileName: string | undefined): string {
-	if (fileName === undefined) {
-		return 'presentation';
-	}
-	const trimmed = fileName.trim().replace(/\.(?:pptx|pdf|png|gif|webm)$/iu, '');
-	return trimmed === '' ? 'presentation' : trimmed;
+	/** Live presentation data for the deck-JSON export; undefined before a load. */
+	getDeckData?(): PptxData | undefined;
+	/** Source file name for the deck-JSON download (`deck.pptx` -> `deck.json`). */
+	getFileName?(): string | undefined;
+	/** Options > Advanced > "Print hidden slides". Defaults to `false` (excluded). */
+	getIncludeHiddenSlides?(): boolean;
+	/** Options > Advanced > "High quality" raster scale for the print fallback path. */
+	getPrintHighQuality?(): boolean;
 }
 
 /**
@@ -84,7 +93,7 @@ export class ExportController {
 			const canvas = await this.#deps.rasterizeSlide(targetIndex);
 			downloadDataUrl(
 				canvas.toDataURL('image/png'),
-				`${resolveBaseName(this.#deps.fileName)}-slide-${targetIndex + 1}.png`,
+				`${resolveExportBaseName(this.#deps.fileName)}-slide-${targetIndex + 1}.png`,
 			);
 		} finally {
 			this.exporting = false;
@@ -105,10 +114,10 @@ export class ExportController {
 		}
 		this.exporting = true;
 		try {
-			const canvas = await this.#deps.rasterizeSlide(targetIndex);
-			const blob = await new Promise<Blob | null>((resolve) => {
-				canvas.toBlob(resolve, 'image/png');
-			});
+			const canvas = await this.#deps.rasterizeSlide(targetIndex),
+				blob = await new Promise<Blob | null>((resolve) => {
+					canvas.toBlob(resolve, 'image/png');
+				});
 			if (blob) {
 				await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
 			}
@@ -117,19 +126,33 @@ export class ExportController {
 		}
 	}
 
+	/**
+	 * Serialize the live deck to `pptx-viewer-json` and trigger the download.
+	 * Pure data serialization (shared `exportDeckJson`): synchronous, no
+	 * rasterization pipeline, no progress modal, no `exporting` toggle.
+	 */
+	exportJson(): void {
+		const data = this.#deps.getDeckData?.();
+		if (!data) {
+			return;
+		}
+		exportDeckJson(data, this.#deps.getFileName?.() ?? this.#deps.fileName ?? null);
+	}
+
 	/** Export every slide as a multi-page PDF download (one slide per page). */
 	async exportPdf(options: ExportPdfOptions = {}): Promise<void> {
 		const total = this.#deps.getSlideCount();
 		if (this.exporting || total === 0) {
 			return;
 		}
+		// eslint-disable-next-line one-var -- separated from `total` above by a guard clause
 		const { onProgress, signal } = options;
 		this.exporting = true;
 		try {
-			const { jsPDF } = await import('jspdf');
-			const { width, height } = this.#deps.getCanvasSize();
-			const orientation = width >= height ? 'landscape' : 'portrait';
-			const pdf = new jsPDF({ orientation, unit: 'px', format: [width, height], compress: true });
+			const { jsPDF } = await import('jspdf'),
+				{ width, height } = this.#deps.getCanvasSize(),
+				orientation = width >= height ? 'landscape' : 'portrait',
+				pdf = new jsPDF({ orientation, unit: 'px', format: [width, height], compress: true });
 			for (let i = 0; i < total; i++) {
 				if (signal?.aborted) {
 					throw exportAbortError();
@@ -141,7 +164,7 @@ export class ExportController {
 				}
 				pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, width, height);
 			}
-			pdf.save(`${resolveBaseName(this.#deps.fileName)}.pdf`);
+			pdf.save(`${resolveExportBaseName(this.#deps.fileName)}.pdf`);
 		} finally {
 			this.exporting = false;
 		}
@@ -165,7 +188,7 @@ export class ExportController {
 				},
 				options,
 			);
-			downloadBlob(blob, `${resolveBaseName(this.#deps.fileName)}.gif`);
+			downloadBlob(blob, `${resolveExportBaseName(this.#deps.fileName)}.gif`);
 		} finally {
 			this.exporting = false;
 		}
@@ -189,7 +212,7 @@ export class ExportController {
 				},
 				options,
 			);
-			downloadBlob(blob, `${resolveBaseName(this.#deps.fileName)}.webm`);
+			downloadBlob(blob, `${resolveExportBaseName(this.#deps.fileName)}.webm`);
 		} finally {
 			this.exporting = false;
 		}
@@ -212,8 +235,12 @@ export class ExportController {
 					getSlides: () => this.#deps.getSlides(),
 					getCurrent: () => this.#deps.getCurrent(),
 					getCanvasSize: () => this.#deps.getCanvasSize(),
-					rasterizeSlide: (index) => this.#deps.rasterizeSlide(index),
+					rasterizeSlide: (index, scaleMultiplier) =>
+						this.#deps.rasterizeSlide(index, scaleMultiplier),
 					openPrintWindow: this.#deps.openPrintWindow,
+					getIncludeHiddenSlides: this.#deps.getIncludeHiddenSlides,
+					getPrintHighQuality: this.#deps.getPrintHighQuality,
+					getHandoutMaster: () => this.#deps.getDeckData?.()?.handoutMaster,
 				},
 				options,
 			);

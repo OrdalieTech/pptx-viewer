@@ -7,17 +7,25 @@ import type { ElementRenderContext } from '../types';
 import { renderChartElement, resolveChartPalette } from './chart';
 import { registerTableChartRenderers } from './register-table-chart';
 
-function buildContext(): ElementRenderContext {
+function buildContext(
+	presentationStates?: ElementRenderContext['presentationStates'],
+): ElementRenderContext {
 	const registry = createElementRendererRegistry();
 	registerTableChartRenderers(registry);
 	const context: ElementRenderContext = {
 		document,
+		presentationStates,
 		slide: { id: 'slide-1', rId: 'rId1', slideNumber: 1, elements: [] },
 		canvasSize: { width: 1280, height: 720 },
 		scale: 1,
 		mediaDataUrls: new Map<string, string>(),
 		t: createTranslator(),
 		smartArt3D: false,
+		surfaceChart3D: false,
+		barChart3D: false,
+		lineChart3D: false,
+		areaChart3D: false,
+		pieChart3D: false,
 		presenting: false,
 		registry,
 		renderElement(element, zIndex) {
@@ -96,6 +104,55 @@ describe('renderChartElement', () => {
 		expect(southBars[0]?.getAttribute('data-chart-series')).toBe('1');
 	});
 
+	it('reveals only the authored p:graphicEl series via animationState.chartReveal (reverse-order build)', () => {
+		// "Enter by Series, Reverse Order" fires series 1 ("South") before series
+		// 0: the reveal must show exactly {1}, not a forward-count guess.
+		const context = buildContext(
+			new Map([
+				[
+					'el-chart',
+					{
+						visible: true,
+						cssAnimation: undefined,
+						chartReveal: {
+							mode: 'bySeries',
+							descriptor: {
+								background: true,
+								series: new Set([1]),
+								categories: new Set(),
+								points: [],
+							},
+						},
+					},
+				],
+			]),
+		);
+		const node = renderChartElement(buildChartElement(barChartData()), 5, context) as HTMLElement;
+		const svg = node.querySelector('svg') as SVGSVGElement;
+		const bars = svg.querySelectorAll('rect[data-chart-part="dataPoint"]');
+		expect(bars).toHaveLength(3);
+		expect(bars[0]?.getAttribute('data-chart-series')).toBe('0');
+		expect(svg.querySelectorAll('g.pptxv-chart-legend-item')).toHaveLength(1);
+	});
+
+	it('falls back to count-based reveal (animationState.build) when chartReveal is absent', () => {
+		const context = buildContext(
+			new Map([
+				[
+					'el-chart',
+					{
+						visible: true,
+						cssAnimation: undefined,
+						build: { kind: 'chart', mode: 'bySeries', progress: 0.1 },
+					},
+				],
+			]),
+		);
+		const node = renderChartElement(buildChartElement(barChartData()), 5, context) as HTMLElement;
+		const svg = node.querySelector('svg') as SVGSVGElement;
+		expect(svg.querySelectorAll('rect[data-chart-part="dataPoint"]')).toHaveLength(3);
+	});
+
 	it('renders bar chart chrome: title, gridlines, axis + category labels, legend', () => {
 		const svg = renderChart(barChartData()).querySelector('svg') as SVGSVGElement;
 		const texts = Array.from(svg.querySelectorAll('text')).map((t) => t.textContent);
@@ -104,8 +161,10 @@ describe('renderChartElement', () => {
 		expect(texts).toContain('Q3');
 		// Value-axis tick labels (0..max) are present.
 		expect(texts).toContain('0');
-		// Gridlines: 6 ticks for the value axis.
-		expect(svg.querySelectorAll('line').length).toBeGreaterThanOrEqual(6);
+		// Gridlines: one per major unit of the automatic scale, which rounds the
+		// bounds out to round numbers rather than dividing the span into a fixed
+		// count (see `chart-axis-nice.ts` in `pptx-viewer-shared`).
+		expect(svg.querySelectorAll('line').length).toBeGreaterThanOrEqual(4);
 		// Legend: one group per series with a swatch and the series name.
 		const legendItems = svg.querySelectorAll('g.pptxv-chart-legend-item');
 		expect(legendItems).toHaveLength(2);
@@ -137,7 +196,9 @@ describe('renderChartElement', () => {
 	it('renders a labelled placeholder for charts without data', () => {
 		const container = renderChart(undefined);
 		expect(container.querySelector('svg')).toBeNull();
-		expect(container.textContent).toContain('Chart: bar');
+		// The chart kind is spelled through `pptx.chart.type*`, not printed as the
+		// raw OOXML token: a placeholder reading "Chart: bar" was untranslatable.
+		expect(container.textContent).toContain('Chart: Bar');
 	});
 
 	it('is dispatched through the registry via registerTableChartRenderers', () => {
@@ -146,6 +207,31 @@ describe('renderChartElement', () => {
 		expect(context.registry.has('table')).toBeTruthy();
 		const node = context.renderElement(buildChartElement(pieChartData()), 0);
 		expect((node as HTMLElement).querySelector('svg path')).toBeTruthy();
+	});
+});
+
+describe('region map region names', () => {
+	/**
+	 * A choropleth patch carries no label of its own, so the shared descriptor's
+	 * per-region `title` is BOTH its hover tooltip and its accessible name.
+	 * Vanilla projected every other field of the path primitive and dropped that
+	 * one, so a region map announced nothing at all.
+	 */
+	it('projects each region path title as an SVG <title> child', () => {
+		const svg = renderChart({
+			chartType: 'regionMap',
+			title: 'Revenue by country',
+			categories: ['France', 'Germany', 'Spain'],
+			series: [{ name: 'Revenue', values: [12, 34, 21] }],
+			style: { hasTitle: true },
+		}).querySelector('svg') as SVGSVGElement;
+
+		const titles = [...svg.querySelectorAll('path > title')].map((t) => t.textContent ?? '');
+		expect(titles.length).toBeGreaterThan(1);
+		// The matched regions name themselves AND report their value.
+		expect(titles.some((t) => t.startsWith('France:'))).toBeTruthy();
+		// An unmatched region still names itself, without a value.
+		expect(titles.some((t) => !t.includes(':'))).toBeTruthy();
 	});
 });
 

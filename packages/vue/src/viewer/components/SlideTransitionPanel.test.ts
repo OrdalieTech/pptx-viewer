@@ -1,5 +1,6 @@
 import { mount } from '@vue/test-utils';
 import type { PptxSlide, PptxSlideTransition } from 'pptx-viewer-core';
+import { SLIDE_TRANSITION_OPTIONS } from 'pptx-viewer-shared';
 import { describe, expect, it } from 'vitest';
 
 import SlideTransitionPanel from './SlideTransitionPanel.vue';
@@ -88,5 +89,119 @@ describe('slideTransitionPanel', () => {
 		expect(events).toHaveLength(1);
 		const [transition] = events![0] as [PptxSlideTransition | undefined];
 		expect(transition).toMatchObject({ type: 'fade', durationMs: 250 });
+	});
+
+	it('shows the speed selector for every transition, defaulting to fast', () => {
+		const wrapper = mount(SlideTransitionPanel, {
+			props: { slide: slide({ type: 'fade', durationMs: 700 }) },
+		});
+
+		const speed = wrapper.get<HTMLSelectElement>('[data-testid="transition-speed"]');
+		expect(speed.element.value).toBe('fast');
+		expect(speed.element.disabled).toBeFalsy();
+	});
+
+	it('disables the speed selector when there is no active transition', () => {
+		const wrapper = mount(SlideTransitionPanel, { props: { slide: slide(undefined) } });
+
+		const speed = wrapper.get<HTMLSelectElement>('[data-testid="transition-speed"]');
+		expect(speed.element.disabled).toBeTruthy();
+	});
+
+	it('emits an updated speed when the speed input changes', async () => {
+		const wrapper = mount(SlideTransitionPanel, {
+			props: { slide: slide({ type: 'fade', durationMs: 700 }) },
+		});
+
+		const speed = wrapper.get<HTMLSelectElement>('[data-testid="transition-speed"]');
+		await speed.setValue('slow');
+
+		const events = wrapper.emitted('update');
+		expect(events).toHaveLength(1);
+		const [transition] = events![0] as [PptxSlideTransition | undefined];
+		expect(transition).toMatchObject({ type: 'fade', speed: 'slow' });
+	});
+});
+
+/**
+ * Both controls sit INSIDE their `<label>`, which makes the label element's
+ * text - caption plus every option - their accessible label unless they carry
+ * an explicit one. One effect is called "Rotate", so the select announced a
+ * rotate control, and the presentation spec's "no resize/rotate affordance is
+ * reachable over a running show" assertion matched this dropdown in the
+ * inspector. Angular's transition card has always labelled its select; Vue was
+ * the copy that drifted.
+ */
+describe('slideTransitionPanel - accessible labels', () => {
+	it('labels the effect select without swallowing its option list', () => {
+		const wrapper = mount(SlideTransitionPanel, { props: { slide: slide(undefined) } });
+
+		const select = wrapper.get<HTMLSelectElement>('[data-testid="transition-type"]');
+		expect(select.attributes('aria-label')).toBe('Transition');
+		// The leak this guards against: the wrapping label's own text.
+		expect(select.element.closest('label')?.textContent).toContain('Rotate');
+	});
+
+	it('labels the duration input', () => {
+		const wrapper = mount(SlideTransitionPanel, { props: { slide: slide(undefined) } });
+
+		const duration = wrapper.get<HTMLInputElement>('[data-testid="transition-duration"]');
+		expect(duration.attributes('aria-label')).toBe('Duration (ms)');
+	});
+});
+
+/**
+ * The effect select used to print the 45 raw `p:transition` element names
+ * (`randomBar`, `wheelReverse`, `flythrough`) as if they were English. The
+ * option VALUES are the wire tokens the panel emits, so they are asserted
+ * unchanged alongside the new text: the fix may only change spelling, never
+ * which effects the panel offers.
+ */
+describe('slideTransitionPanel - effect names', () => {
+	function typeSelect() {
+		const wrapper = mount(SlideTransitionPanel, { props: { slide: slide(undefined) } });
+		return wrapper.get<HTMLSelectElement>('[data-testid="transition-type"]').findAll('option');
+	}
+
+	it('still offers the same 46 effects plus the None sentinel, by value', () => {
+		const values = typeSelect().map((o) => (o.element as HTMLOptionElement).value);
+		expect(values).toHaveLength(47);
+		expect(values[0]).toBe('__none__');
+		expect(values).toContain('randomBar');
+		expect(values).toContain('wheelReverse');
+		expect(values).toContain('flythrough');
+		expect(values).toContain('orbit');
+		// `box` completes the `p14:prism` family (Cube / Rotate / Box / Orbit),
+		// which the panel already offered three quarters of.
+		expect(values).toContain('box');
+	});
+
+	it('spells each effect instead of printing its wire token', () => {
+		const byValue = new Map(
+			typeSelect().map((o) => [(o.element as HTMLOptionElement).value, o.text()]),
+		);
+		expect(byValue.get('randomBar')).toBe('Random Bars');
+		expect(byValue.get('wheelReverse')).toBe('Reverse Wheel');
+		expect(byValue.get('flythrough')).toBe('Fly Through');
+		expect(byValue.get('newsflash')).toBe('Newsflash');
+		expect(byValue.get('fade')).toBe('Fade');
+	});
+
+	it('leaves no option showing a raw camelCase token', () => {
+		for (const option of typeSelect()) {
+			const value = (option.element as HTMLOptionElement).value;
+			if (value !== '__none__') {
+				expect(option.text()).not.toBe(value);
+			}
+		}
+	});
+
+	it('matches the shared SLIDE_TRANSITION_OPTIONS catalogue exactly, in order', () => {
+		const values = typeSelect()
+			.map((o) => (o.element as HTMLOptionElement).value)
+			.filter((v) => v !== '__none__');
+		expect(values).toStrictEqual(
+			SLIDE_TRANSITION_OPTIONS.filter((o) => o.value !== 'none').map((o) => o.value),
+		);
 	});
 });

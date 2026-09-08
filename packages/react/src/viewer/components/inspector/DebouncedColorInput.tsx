@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
+import { useRecentColors } from './RecentColorsContext';
+
 // ---------------------------------------------------------------------------
 // DebouncedColorInput
 // ---------------------------------------------------------------------------
@@ -29,19 +31,28 @@ export function DebouncedColorInput({
 	const [local, setLocal] = useState(value);
 	const commitRef = useRef(onCommit);
 	commitRef.current = onCommit;
+	const { pushColor } = useRecentColors();
 
-	// Sync external value when the selected element changes
+	// Sync external value when the selected element changes. Not pure derived
+	// state: `local` is then mutated independently by every keystroke until the
+	// next external change, which the "calculate during render" rewrite can't
+	// express.
 	useEffect(() => {
+		// oxlint-disable-next-line react/no-deriving-state-in-effects -- see comment above
 		setLocal(value);
 	}, [value]);
 
 	// Commit live on every change so the canvas updates immediately, while
 	// mirroring the value locally to keep the picker swatch responsive.
-	const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-		const next = e.target.value;
-		setLocal(next);
-		commitRef.current(next);
-	}, []);
+	const handleChange = useCallback(
+		(e: React.ChangeEvent<HTMLInputElement>) => {
+			const next = e.target.value;
+			setLocal(next);
+			commitRef.current(next);
+			pushColor(next);
+		},
+		[pushColor],
+	);
 
 	return (
 		<input

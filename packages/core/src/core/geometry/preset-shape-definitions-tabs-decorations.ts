@@ -20,9 +20,14 @@
  *  • `plus`         – plus sign (cross). `adj1` is the stroke thickness as a
  *    fraction of `ss` / 2 (default 25000).
  *  • `gear6`        – six-toothed gear; `adj1` is the tooth depth as a
- *    fraction of `ss / 2` (default 15000).
+ *    fraction of `ss / 2` (default 15000), `adj2` (default 3526) is the
+ *    tooth-root fillet: a larger `adj2` widens the flat root land and
+ *    narrows the `arcTo` fillet PowerPoint renders between adjacent teeth.
+ *    Spec-exact geometry lives in `preset-shape-definitions-gear6.ts`.
  *  • `gear9`        – nine-toothed gear; same adjust semantics as `gear6`
- *    (default 10000 — teeth are smaller because there are more of them).
+ *    (`adj1` default 10000; teeth are smaller because there are more of
+ *    them; `adj2` default 1763). Spec-exact geometry lives in
+ *    `preset-shape-definitions-gear9.ts`.
  *  • `funnel`       – V-shape narrowing downward; no `avLst`.
  *  • `mathFunction` – math function notation glyph. The ECMA reference does
  *    not enumerate this preset; we emit a stylised cursive-`f` silhouette as
@@ -39,6 +44,8 @@
  * `preset-shape-definitions-table.ts`.
  */
 
+import { gear6 } from './preset-shape-definitions-gear6';
+import { gear9 } from './preset-shape-definitions-gear9';
 import type { PresetShapeGeometryDefinition } from './preset-shape-definitions-table';
 
 // ---------------------------------------------------------------------------
@@ -301,7 +308,11 @@ const plus: PresetShapeGeometryDefinition = {
 		gd('x2', '+- r 0 x1'),
 		gd('y2', '+- b 0 x1'),
 	],
-	rect: { l: 'x1', t: 'x1', r: 'x2', b: 'y2' },
+	// COM-measured at 200x100pt: `t`/`b` (`x1`/`y2`, the horizontal arm's own
+	// band) were already correct, but `l`/`r` are the FULL width, not the
+	// narrower vertical-arm span (`x1`/`x2`) - PowerPoint lays text along the
+	// wide horizontal bar of the cross, not the intersection square.
+	rect: { l: 'l', t: 'x1', r: 'r', b: 'y2' },
 	pathLst: [
 		{
 			commands: [
@@ -326,85 +337,13 @@ const plus: PresetShapeGeometryDefinition = {
 // ---------------------------------------------------------------------------
 // Gears
 // ---------------------------------------------------------------------------
-
-/**
- * Build an N-toothed gear definition. Outer tooth tips lie on the bounding
- * ellipse `(wd2, hd2)`; inner valleys lie on `((1 - adj/50000) * wd2, …)`
- * giving a tooth depth proportional to `adj` (1/100000 of `ss / 2`).
- *
- * The trig table is precomputed so the gdLst stores numeric literals (avoids
- * the evaluator's lack of fractional-angle constants for non-cardinal
- * orientations). Each tooth contributes 4 vertices: outer-leading,
- * outer-trailing, valley-leading, valley-trailing.
- */
-function buildGearN(n: number, defaultAdj: number): PresetShapeGeometryDefinition {
-	// 4N vertices around the gear: each tooth = [out-start, out-end, valley-end].
-	// For simplicity we model the tooth as a trapezoid whose top sits on the
-	// outer ellipse at angles ±halfTooth, and whose feet touch the inner
-	// (valley) ellipse at the same angles offset by halfTooth on each side.
-	const total = n * 4;
-	const step = (Math.PI * 2) / total;
-	// Start angle: place the first tooth's leading edge at -90° so a tooth
-	// points straight up. Use a quarter-step offset so the tooth straddles
-	// the vertical axis symmetrically.
-	const start = -Math.PI / 2 - step / 2;
-	interface V {
-		sin: number;
-		cos: number;
-	}
-	const verts: V[] = [];
-	for (let i = 0; i < total; i++) {
-		const a = start + i * step;
-		verts.push({
-			// sin of polar angle is the x component (right is +); cos is y (down +
-			// in OOXML). Match conventions used by buildStarN in the misc batch.
-			sin: Math.round(Math.cos(a) * 100000),
-			cos: Math.round(Math.sin(a) * 100000),
-		});
-	}
-	const gdLst: ReturnType<typeof gd>[] = [
-		gd('a', `pin 0 adj 50000`),
-		gd('iwd2', '*/ wd2 a 50000'),
-		gd('ihd2', '*/ hd2 a 50000'),
-		// Inner radii: outer minus tooth depth.
-		gd('owd2', 'val wd2'),
-		gd('ohd2', 'val hd2'),
-		gd('inwd2', '+- wd2 0 iwd2'),
-		gd('inhd2', '+- hd2 0 ihd2'),
-	];
-	const commands: PresetShapeGeometryDefinition['pathLst'][number]['commands'] = [];
-	// Walk the vertices: every 4 vertices form one tooth (top-left, top-right,
-	// valley-right, valley-left of the next tooth). Outer (tooth top) points
-	// use `wd2/hd2`; valley points use `inwd2/inhd2`.
-	for (let i = 0; i < total; i++) {
-		const v = verts[i]!;
-		const isOuter = i % 4 === 0 || i % 4 === 1;
-		const rxName = `r${i}x`;
-		const ryName = `r${i}y`;
-		const wd = isOuter ? 'wd2' : 'inwd2';
-		const hd = isOuter ? 'hd2' : 'inhd2';
-		gdLst.push(gd(rxName, `*/ ${wd} ${v.sin} 100000`), gd(ryName, `*/ ${hd} ${v.cos} 100000`));
-		const xVar = `gx${i}`;
-		const yVar = `gy${i}`;
-		gdLst.push(gd(xVar, `+- hc ${rxName} 0`), gd(yVar, `+- vc ${ryName} 0`));
-		if (i === 0) {
-			commands.push({ kind: 'moveTo', x: xVar, y: yVar });
-		} else {
-			commands.push({ kind: 'lnTo', x: xVar, y: yVar });
-		}
-	}
-	commands.push({ kind: 'close' });
-	return {
-		name: `gear${n}`,
-		avLst: { adj: defaultAdj },
-		gdLst,
-		rect: FULL_RECT,
-		pathLst: [{ commands }],
-	};
-}
-
-const gear6 = buildGearN(6, 15000);
-const gear9 = buildGearN(9, 10000);
+//
+// `gear6` and `gear9` are the spec-exact ECMA-376 transcriptions from
+// `preset-shape-definitions-gear6.ts` / `preset-shape-definitions-gear9.ts`
+// (imported above), not built here. Both files' headers document the
+// `adj2` tooth-root fillet (an `arcTo` whose sweep narrows as `adj2` grows)
+// and why the geometry was moved out of this file (LOC budget: ~350 literal
+// guide entries between the two shapes).
 
 // ---------------------------------------------------------------------------
 // Funnel + math function + non-isosceles trapezoid

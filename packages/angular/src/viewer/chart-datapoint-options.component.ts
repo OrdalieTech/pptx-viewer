@@ -40,13 +40,14 @@ import { numFromEvent, selectValue, stringFromEvent } from './chart-event-helper
 					<label class="pptx-chart-card__row">
 						<span class="pptx-chart-card__label">{{ 'pptx.chart.series' | translate }}</span>
 						<select
+							[attr.aria-label]="'pptx.chart.series' | translate"
 							class="pptx-chart-card__input"
 							[disabled]="!canEdit()"
 							[value]="activeIndex()"
 							(change)="onSeries($event)"
 						>
 							@for (s of series(); track $index; let i = $index) {
-								<option [value]="i">{{ s.name }}</option>
+								<option [value]="i" [selected]="i === activeIndex()">{{ s.name }}</option>
 							}
 						</select>
 					</label>

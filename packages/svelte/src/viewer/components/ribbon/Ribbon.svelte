@@ -40,11 +40,11 @@
 	let signaturesOpen = $state(false);
 	// eslint-disable-next-line prefer-const
 	let protectionOpen = $state(false);
-	// eslint-disable-next-line prefer-const
-	let embedFontsEnabled = $state(false);
 	let passwordProtected = $state(false);
-	// eslint-disable-next-line prefer-const
-	let presentationPassword = $state<string | null>(null);
+	// File > Fonts: seeded from (and stored on) the editor, because the save path
+	// reads it there. Held locally this component could move the switch but not
+	// change a single byte of the saved file.
+	const fontEmbedding = $derived(props.editor.fontEmbedding);
 	const usedFontFamilies = $derived(collectUsedFonts(props.editor.slides));
 	const slideCommentCount = $derived(props.slides[props.current]?.comments?.length ?? 0);
 	$effect(() => {
@@ -64,6 +64,21 @@
 
 	function setPropertiesOpen(open: boolean): void {
 		propertiesOpen = open;
+	}
+
+	/**
+	 * Design > Slide Size. The only slide-size control this binding has is the
+	 * inspector's SLIDE SIZE card, which the Properties tab renders when nothing
+	 * is selected, so drop the selection and open the pane there. It used to open
+	 * the Document Properties dialog, which has no slide-size control in it at
+	 * all - the same mis-wiring Angular and Vanilla carried.
+	 */
+	function openSlideSize(): void {
+		props.editor.selection.clear();
+		props.chromeUi?.setInspectorTab('properties');
+		if (props.chromeUi && !props.chromeUi.inspectorOpen) {
+			props.chromeUi.toggleInspector();
+		}
 	}
 </script>
 
@@ -85,6 +100,15 @@
 		aiActive={props.aiActive}
 		exportUi={props.exportUi}
 		hiddenActions={props.hiddenActions}
+		onsaveppsx={props.ondownloadppsx}
+		onsavepptm={props.ondownloadpptm}
+		oninfo={() => setPropertiesOpen(true)}
+		ona11y={() => (activeTab = 'review')}
+		onshortcuts={props.onshortcuts}
+		onversionhistory={props.onversionhistory}
+		onprotect={() => (protectionOpen = true)}
+		onfonts={() => (fontsOpen = true)}
+		onsignatures={() => (signaturesOpen = true)}
 	/>
 	<RibbonTabBar
 		active={activeTab}
@@ -95,44 +119,54 @@
 		hiddenActions={props.hiddenActions}
 	/>
 	<FindReplacePanel findReplace={props.findReplace} editable={props.editor.editable} />
+	<!-- The File backstage is a full-screen `position: fixed` overlay, not a row
+	     of ribbon groups, so it is deliberately a sibling of
+	     `.pptx-svelte-ribbon-content` rather than routed through its
+	     `> :global(*)` alignment rule, which is scoped to ribbon tab content. -->
+	{#if activeTab === 'file'}
+		<FileTab
+			fileName={props.fileName}
+			onclose={() => (activeTab = 'home')}
+			oncreatepresentation={(templateId) => props.editor.setSlides(createBackstagePresentation(templateId))}
+			ondownload={props.ondownload}
+			ondownloadppsx={props.ondownloadppsx}
+			ondownloadpptm={props.ondownloadpptm}
+			hasMacros={props.hasMacros}
+			onopenfile={props.onopenfile}
+			onopenrecent={props.onopenrecent}
+			exportUi={props.exportUi}
+			onproperties={() => setPropertiesOpen(true)}
+			onfonts={() => (fontsOpen = true)}
+			onsignatures={() => (signaturesOpen = true)}
+			onprotect={() => (protectionOpen = true)}
+			onversionhistory={props.onversionhistory}
+			onshare={props.onshare}
+			onprint={props.onprintsettings}
+			onsettings={props.onsettings}
+			accountAuth={props.accountAuth}
+		/>
+	{/if}
 	<div class="pptx-svelte-ribbon-content">
-		{#if activeTab === 'file'}
-				<FileTab
-					fileName={props.fileName}
-					onclose={() => (activeTab = 'home')}
-					oncreatepresentation={(templateId) => props.editor.setSlides(createBackstagePresentation(templateId))}
-					ondownload={props.ondownload}
-					ondownloadppsx={props.ondownloadppsx}
-					ondownloadpptm={props.ondownloadpptm}
-					onpackage={props.onpackage}
-					hasMacros={props.hasMacros}
-				onopenfile={props.onopenfile}
-				onopenrecent={props.onopenrecent}
-					exportUi={props.exportUi}
-				onproperties={() => setPropertiesOpen(true)}
-				onfonts={() => (fontsOpen = true)}
-				onsignatures={() => (signaturesOpen = true)}
-				onprotect={() => (protectionOpen = true)}
-				onversionhistory={props.onversionhistory}
-					onshare={props.onshare}
-					onprint={props.onprintsettings}
-					onsettings={props.onsettings}
-					accountAuth={props.accountAuth}
-			/>
-		{:else if activeTab === 'home'}
+		{#if activeTab === 'home'}
 			<HomeTab editor={props.editor} findReplace={props.findReplace} onnavigateslide={props.onnavigateslide} />
 		{:else if activeTab === 'insert'}
 			<InsertTab editor={props.editor} canvasSize={props.canvasSize} onheaderfooter={props.onheaderfooter} />
 		{:else if activeTab === 'draw'}
 			<DrawTab editor={props.editor} />
 		{:else if activeTab === 'design'}
-			<DesignTab editor={props.editor} theme={props.theme} onsettheme={props.onsettheme} />
+			<DesignTab
+				editor={props.editor}
+				theme={props.theme}
+				onsettheme={props.onsettheme}
+				onslidesize={openSlideSize}
+			/>
 		{:else if activeTab === 'transitions'}
-			<TransitionsTab editor={props.editor} />
+			<TransitionsTab editor={props.editor} chromeUi={props.chromeUi} />
 		{:else if activeTab === 'animations'}
-			<AnimationsTab editor={props.editor} />
+			<AnimationsTab editor={props.editor} chromeUi={props.chromeUi} />
 		{:else if activeTab === 'slideShow'}
 			<SlideShowTab
+				editor={props.editor}
 				onfrombeginning={props.onfrombeginning}
 				onfromcurrent={props.onfromcurrent}
 				onpresenter={props.onpresenter}
@@ -140,6 +174,9 @@
 				onrehearse={props.onrehearse}
 				onsubtitles={props.onsubtitles}
 				oncustomshows={props.oncustomshows}
+				onhideslide={props.onhideslide}
+				activeSlideHidden={Boolean(props.slides?.[props.current]?.hidden)}
+				subtitlesEnabled={props.subtitlesEnabled}
 				onbroadcast={props.onbroadcast}
 			/>
 		{:else if activeTab === 'review'}
@@ -156,20 +193,15 @@
 				snapToShape={props.snapToShape}
 				onsnapToShapechange={props.onsnapToShapechange}
 				onaddguide={props.onaddguide}
-				zoomPercent={props.zoomPercent}
-				onzoomin={props.onzoomin}
-				onzoomout={props.onzoomout}
 				onzoomfit={props.onzoomfit}
-				isFullscreen={props.isFullscreen}
-				onfullscreen={props.onfullscreen}
-				showNotes={props.showNotes}
-				notesExpanded={props.notesExpanded}
-				onnotestoggle={props.onnotestoggle}
+				onnormal={props.onnormal}
 				editTemplateMode={props.editor.editTemplateMode}
 				onsettemplateediting={(enabled) => props.editor.setTemplateEditing(enabled)}
 				onentermasterview={props.onentermasterview}
 				onselectionpane={props.onselectionpane}
 				onslidesorter={props.onslidesorter}
+				onoutlineview={props.onoutlineview}
+				onreadingview={props.onreadingview}
 			/>
 		{:else if activeTab === 'help'}
 			<HelpTab onaccessibility={() => (activeTab = 'review')} onshortcuts={props.onshortcuts} onsettings={props.onsettings} />
@@ -178,13 +210,15 @@
 </div>
 
 {#if fontsOpen}
-	<FontEmbeddingPanel usedFontFamilies={usedFontFamilies} embeddedFonts={props.embeddedFontNames} enabled={embedFontsEnabled} ontoggle={(enabled) => (embedFontsEnabled = enabled)} onclose={() => (fontsOpen = false)} />
+	<FontEmbeddingPanel usedFontFamilies={usedFontFamilies} embeddedFonts={props.embeddedFontNames} enabled={props.editor.embedFonts} canEmbed={fontEmbedding.interactive} unavailableKey={fontEmbedding.disabledReasonKey} ontoggle={(enabled) => (props.editor.embedFonts = enabled)} onclose={() => (fontsOpen = false)} />
 {/if}
 {#if signaturesOpen}
 	<DigitalSignaturesDialog hasSignatures={props.hasDigitalSignatures} signatureCount={props.digitalSignatureCount} onclose={() => (signaturesOpen = false)} />
 {/if}
 {#if protectionOpen}
-	<PasswordProtectionDialog protected={passwordProtected} onset={(password) => { presentationPassword = password; passwordProtected = true; }} onremove={() => { presentationPassword = null; passwordProtected = false; }} onclose={() => (protectionOpen = false)} />
+	<!-- The secret lives on `EditorState`, not this component: the save path
+	     reads it there and routes a protected deck through `saveEncrypted`. -->
+	<PasswordProtectionDialog protected={passwordProtected} onset={(password) => { props.editor.setSavePassword(password); passwordProtected = true; }} onremove={() => { props.editor.clearSavePassword(); passwordProtected = false; }} onclose={() => (protectionOpen = false)} />
 {/if}
 {#if propertiesOpen}<DocumentPropertiesDialog editor={props.editor} onclose={() => setPropertiesOpen(false)} />{/if}
 
@@ -200,13 +234,16 @@
 	}
 
 	/* One horizontal, non-wrapping row of ribbon groups (React parity:
-	   `flex min-h-[82px] items-stretch gap-0 px-1 py-0.5 overflow-x-auto
-	   flex-nowrap`); the tall min-height + stretch lets each tab's groups fill
-	   the row (controls pinned to the top) instead of floating in a short band.
-	   Narrow viewports scroll sideways. */
+	   `flex min-h-[82px] items-center gap-0 px-1 py-0.5 overflow-x-auto
+	   flex-nowrap`). `items-center` (not `stretch`): a plain single-row button
+	   or group has no internal layout that uses extra height, so stretching it
+	   to the row's full 82px just padded it out top and bottom into an
+	   oversized pill. A group that genuinely wants the full height still gets
+	   it via its own explicit sizing (e.g. a stacked icon-over-label button),
+	   unaffected by this default. Narrow viewports scroll sideways. */
 	.pptx-svelte-ribbon-content {
 		display: flex;
-		align-items: stretch;
+		align-items: center;
 		flex-wrap: nowrap;
 		gap: 0;
 		min-height: 82px;
@@ -217,11 +254,18 @@
 	}
 
 	/* Each active tab is the single direct child; stretch it to the full row
-	   height and top-align its groups so controls sit at the top with labels
-	   below (PowerPoint layout), rather than vertically centered. */
+	   height. `align-items: stretch` (not `flex-start`) additionally stretches
+	   EACH of the tab's own `RibbonGroup` sections to that same full height,
+	   so every group's border-right divider and bottom-pinned label
+	   (`RibbonGroup`'s own `justify-content: space-between`) line up at a
+	   consistent height across the row. A tab whose groups vary in natural
+	   content height (e.g. View's five-row "Show" group next to its
+	   two-row "Zoom" group) otherwise left the shorter groups' dividers and
+	   labels stranded partway down the row while the tall group's ran the
+	   full height, reading as broken/clipped rather than merely uneven. */
 	.pptx-svelte-ribbon-content > :global(*) {
 		align-self: stretch;
-		align-items: flex-start;
+		align-items: stretch;
 	}
 
 	/* Shared compact dark select for ribbon dropdowns (font family, change

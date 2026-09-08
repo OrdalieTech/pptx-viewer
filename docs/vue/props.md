@@ -126,14 +126,45 @@ interface PowerPointViewerEmits {
 
 ## Autosave {#autosave}
 
-Autosave is **opt-in and host-driven**: unlike some editors that persist to browser storage on their
-own, `pptx-vue-viewer` debounces slide changes and hands the serialised bytes back to the host via
-`@autosave`; the host decides where they go.
+`pptx-vue-viewer` debounces slide changes, writes a crash-recovery snapshot to the shared IndexedDB
+store, and hands the serialised bytes back to the host via `@autosave`.
 
-| Prop                 | Type      | Default | Description                                                          |
-| -------------------- | --------- | ------- | -------------------------------------------------------------------- |
-| `autosave`           | `boolean` | `false` | Enables the debounced autosave timer. Also requires `canEdit`.       |
-| `autosaveIntervalMs` | `number`  | `2000`  | Debounce window (ms) between the last edit and the `@autosave` emit. |
+| Prop                 | Type      | Default                | Description                                                                      |
+| -------------------- | --------- | ---------------------- | -------------------------------------------------------------------------------- |
+| `autosave`           | `boolean` | `true`                 | Recovery autosave. A policy ceiling over the title-bar toggle; see below.        |
+| `autosaveIntervalMs` | `number`  | File > Options cadence | Debounce window (ms). An explicit value outranks the user's AutoRecover setting. |
+
+### Who decides: the `autosave` prop or the AutoSave toggle? {#autosave-policy}
+
+The rule is the same in **all five bindings** and lives in one shared decision function,
+`resolveAutosaveActivation`:
+
+> **The `autosave` prop is a policy ceiling. The title-bar AutoSave toggle is the user's preference
+> inside it.**
+
+| `autosave` | What runs                                                       | The toggle                    |
+| ---------- | --------------------------------------------------------------- | ----------------------------- |
+| omitted    | Autosave runs; the user's toggle decides, defaulting to **on**. | Works.                        |
+| `true`     | Same as omitted: the host permits it, the user decides.         | Works.                        |
+| `false`    | Autosave is off, and no recovery prompt is offered on load.     | **Inert** (it must not move). |
+
+A preference can never exceed a policy, which is why `autosave: false` also takes the switch away: a
+control that silently does nothing is worse than no control. `canEdit`/`editable` and a `filePath`
+key remain hard requirements either way.
+
+The same rule governs the cadence: an explicit `autosaveIntervalMs` is a host policy honoured as
+given, and omitting it follows the user's **File > Options > Save > "Save AutoRecover information
+every N minutes"** (two minutes by default).
+
+The default is `true` because crash recovery that is off by default is crash recovery nobody has.
+
+### Recovering a snapshot
+
+When a deck finishes loading and a snapshot newer than 24 hours exists for the same key, the viewer
+raises a **"Recover unsaved changes?"** dialog offering Restore or Discard. Restore loads the
+snapshot's bytes; Discard deletes it. It is deliberately not raised for a snapshot this tab has
+already taken delivery of (for example when the host itself restored it through
+`restoreSessionDeck`).
 
 ```vue
 <PowerPointViewer
@@ -150,9 +181,12 @@ new saves without discarding anything already emitted. Each autosave cycle also 
 in-memory, session-scoped version-history snapshot (see the Version History panel), separate from
 the `@autosave` payload itself.
 
-::: warning No built-in persistence or recovery
-This differs from the React binding's IndexedDB-backed autosave/recovery flow: the Vue viewer does
-not write to IndexedDB and has no built-in "recover an unsaved session" prompt. If you need that
-behaviour, persist the `@autosave` bytes yourself (e.g. to IndexedDB, `localStorage`, or your
-backend) and re-supply `content` on reload.
+::: info Persistence and recovery prompt
+Each autosave cycle also writes the bytes to the shared IndexedDB recovery store (the same store
+React, Angular, Svelte and vanilla use), so **File > Open**'s "Recent" list and **File > Account**'s
+Storage &amp; Privacy panel report real data. Those snapshots are stored as a plain ZIP even for a
+password-protected deck, so recovery can read them back without a password.
+
+Vue also shows the "recover an unsaved session" **prompt** on load (`AutosaveRecoveryDialog`),
+matching every other binding.
 :::

@@ -14,10 +14,24 @@ import {
 	LucideRemoveFormatting,
 } from '@lucide/angular';
 import { TranslatePipe } from '@ngx-translate/core';
-import type { PptxElement } from 'pptx-viewer-core';
+import type { PptxElement, PptxThemeColorRef } from 'pptx-viewer-core';
 
+import type { ThemeColorPickerCommit } from '../internal/shared';
+import {
+	COMMON_FONT_SIZES,
+	OFFICE_COLOR_SWATCH_HEXES,
+	textFontSizePatch,
+	textFontSizePtToPx,
+	textFontSizePxToPt,
+} from '../internal/shared';
+import {
+	buildFontCatalog,
+	resolveDefaultFontFamily,
+} from '../internal/shared-src/render/font-catalog';
 import type { ChangeCaseMode } from '../internal/shared-src/render/text-case-transform';
+import { CustomFontsService } from './custom-fonts.service';
 import { EditorStateService } from './editor-state.service';
+import { LoadContentService } from './load-content.service';
 import { RibbonColorPopoverComponent } from './ribbon-color-popover.component';
 import {
 	isTextElement,
@@ -26,31 +40,22 @@ import {
 	transformSelectedTextCase,
 } from './ribbon-text-helpers';
 
-/** Font families offered in the Home tab (mirrors React). */
-const FONT_FAMILIES = [
-	'Segoe UI',
-	'Arial',
-	'Calibri',
-	'Times New Roman',
-	'Georgia',
-	'Courier New',
-	'Verdana',
-	'Tahoma',
-];
-const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 54, 66, 80, 96];
+/**
+ * The Home/Text tab's size dropdown + grow/shrink ladder. Sourced from shared
+ * so it cannot drift from the other bindings' Font control group.
+ */
+export const FONT_SIZES = COMMON_FONT_SIZES;
+
+/** Next PowerPoint point-size preset in the requested direction. */
+export function steppedFontSizePt(current: number, direction: 1 | -1): number {
+	const next =
+		direction === 1
+			? FONT_SIZES.find((size) => size > current)
+			: [...FONT_SIZES].reverse().find((size) => size < current);
+	return next ?? (direction === 1 ? FONT_SIZES[FONT_SIZES.length - 1] : FONT_SIZES[0]) ?? current;
+}
 /** Font-colour swatches in the Home/Text colour popover (mirrors React/Vue). */
-const FONT_COLOR_PRESETS = [
-	'#000000',
-	'#ffffff',
-	'#ff0000',
-	'#00aa00',
-	'#0000ff',
-	'#ff8800',
-	'#8800cc',
-	'#00cccc',
-	'#ff69b4',
-	'#808080',
-];
+const FONT_COLOR_PRESETS = OFFICE_COLOR_SWATCH_HEXES;
 
 /** Text-highlight swatches in the Home/Text highlight popover (mirrors React/Vue). */
 const HIGHLIGHT_COLOR_PRESETS = [
@@ -103,19 +108,35 @@ const CHANGE_CASE_OPTIONS = [
 			<select
 				class="pptx-rb-select w-28"
 				[attr.aria-label]="'pptx.ribbon.fontFamily' | translate"
-				[disabled]="!isText()"
 				(change)="setFontFamily($event)"
 			>
-				@for (f of fontFamilies; track f) {
-					<option [value]="f" [selected]="f === curFontFamily()">{{ f }}</option>
+				@for (group of fontGroups(); track group.id) {
+					<optgroup [label]="group.labelKey | translate">
+						@for (entry of group.entries; track entry.family) {
+							<option
+								[value]="entry.family"
+								[selected]="entry.family === curFontFamily()"
+								[style.font-family]="entry.family"
+							>
+								{{ entry.family
+								}}{{
+									entry.themeRole
+										? ' (' + ('pptx.font.role.' + entry.themeRole | translate) + ')'
+										: ''
+								}}
+							</option>
+						}
+					</optgroup>
 				}
 			</select>
 			<select
 				class="pptx-rb-select w-14"
 				[attr.aria-label]="'pptx.ribbon.fontSize' | translate"
-				[disabled]="!isText()"
 				(change)="setFontSize($event)"
 			>
+				@if (!fontSizes.includes(curFontSize())) {
+					<option [value]="curFontSize()" selected>{{ curFontSize() }}</option>
+				}
 				@for (s of fontSizes; track s) {
 					<option [value]="s" [selected]="s === curFontSize()">{{ s }}</option>
 				}
@@ -126,7 +147,8 @@ const CHANGE_CASE_OPTIONS = [
 				type="button"
 				class="pptx-rb-gb"
 				[disabled]="!isText()"
-				[title]="'pptx.ribbon.growFont' | translate"
+				[title]="'pptx.text.increaseFontSize' | translate"
+				[attr.aria-label]="'pptx.text.increaseFontSize' | translate"
 				(click)="stepFontSize(1)"
 			>
 				<svg lucideAArrowUp class="h-4 w-4"></svg>
@@ -135,7 +157,8 @@ const CHANGE_CASE_OPTIONS = [
 				type="button"
 				class="pptx-rb-gb"
 				[disabled]="!isText()"
-				[title]="'pptx.ribbon.shrinkFont' | translate"
+				[title]="'pptx.text.decreaseFontSize' | translate"
+				[attr.aria-label]="'pptx.text.decreaseFontSize' | translate"
 				(click)="stepFontSize(-1)"
 			>
 				<svg lucideAArrowDown class="h-4 w-4"></svg>
@@ -157,6 +180,7 @@ const CHANGE_CASE_OPTIONS = [
 				[disabled]="!isText()"
 				[ngClass]="curStyle()?.bold ? 'bg-accent' : ''"
 				[title]="'pptx.notes.bold' | translate"
+				[attr.aria-label]="'pptx.notes.bold' | translate"
 				(click)="toggleStyle('bold')"
 			>
 				B
@@ -167,6 +191,7 @@ const CHANGE_CASE_OPTIONS = [
 				[disabled]="!isText()"
 				[ngClass]="curStyle()?.italic ? 'bg-accent' : ''"
 				[title]="'pptx.notes.italic' | translate"
+				[attr.aria-label]="'pptx.notes.italic' | translate"
 				(click)="toggleStyle('italic')"
 			>
 				I
@@ -177,6 +202,7 @@ const CHANGE_CASE_OPTIONS = [
 				[disabled]="!isText()"
 				[ngClass]="curStyle()?.underline ? 'bg-accent' : ''"
 				[title]="'pptx.notes.underline' | translate"
+				[attr.aria-label]="'pptx.notes.underline' | translate"
 				(click)="toggleStyle('underline')"
 			>
 				U
@@ -187,6 +213,7 @@ const CHANGE_CASE_OPTIONS = [
 				[disabled]="!isText()"
 				[ngClass]="curStyle()?.strikethrough ? 'bg-accent' : ''"
 				[title]="'pptx.notes.strikethrough' | translate"
+				[attr.aria-label]="'pptx.notes.strikethrough' | translate"
 				(click)="toggleStyle('strikethrough')"
 			>
 				S
@@ -248,11 +275,14 @@ const CHANGE_CASE_OPTIONS = [
 		<!-- Font colour popover -->
 		<pptx-ribbon-color-popover
 			[current]="curColor()"
+			[currentRef]="curColorRef()"
+			[showThemeColors]="true"
 			[presets]="fontColorPresets"
 			[disabled]="!isText()"
-			titleKey="pptx.ribbon.fontColour"
+			titleKey="pptx.text.fontColor"
 			swatchAriaKey="pptx.ribbon.fontColourValue"
 			(pick)="setColor($event)"
+			(pickThemeColor)="setColorRef($event)"
 		>
 			<svg
 				class="h-3.5 w-3.5"
@@ -271,7 +301,7 @@ const CHANGE_CASE_OPTIONS = [
 			[current]="curHighlight()"
 			[presets]="highlightColorPresets"
 			[disabled]="!isText()"
-			titleKey="pptx.ribbon.textHighlightColour"
+			titleKey="pptx.text.highlightColor"
 			swatchAriaKey="pptx.ribbon.highlightColourValue"
 			(pick)="setHighlight($event)"
 		>
@@ -285,7 +315,33 @@ export class RibbonFontControlsComponent {
 	readonly slideIndex = input<number>(0);
 	readonly selectedElement = input<PptxElement | null>(null);
 
-	protected readonly fontFamilies = FONT_FAMILIES;
+	private readonly loader = inject(LoadContentService, { optional: true });
+	private readonly customFonts = inject(CustomFontsService, { optional: true });
+
+	/**
+	 * Theme major/minor latin faces. Read from DI rather than taken as inputs
+	 * because this component renders in two different ribbon hosts, and both
+	 * would otherwise have to thread the same three values down.
+	 */
+	protected readonly themeFonts = computed(() => ({
+		heading: this.loader?.theme()?.fontScheme?.majorFont?.latin,
+		body: this.loader?.theme()?.fontScheme?.minorFont?.latin,
+	}));
+
+	/**
+	 * The dropdown's contents, grouped the way PowerPoint groups them.
+	 *
+	 * This component used to carry its own eight-entry family list, so Angular
+	 * offered a different set of fonts from the other four bindings. The
+	 * grouping and de-duplication now come from `pptx-viewer-shared`.
+	 */
+	protected readonly fontGroups = computed(() =>
+		buildFontCatalog({
+			themeFonts: this.themeFonts(),
+			embeddedFonts: (this.loader?.embeddedFonts() ?? []).map((font) => font.name),
+			customFonts: this.customFonts?.registeredFamilies() ?? [],
+		}),
+	);
 	protected readonly fontSizes = FONT_SIZES;
 	protected readonly fontColorPresets = FONT_COLOR_PRESETS;
 	protected readonly highlightColorPresets = HIGHLIGHT_COLOR_PRESETS;
@@ -300,15 +356,26 @@ export class RibbonFontControlsComponent {
 	protected readonly curStyle = computed(() => textStyleOf(this.selectedElement()));
 
 	protected curFontFamily(): string {
-		return this.curStyle()?.fontFamily ?? 'Segoe UI';
+		return (
+			this.curStyle()?.fontFamily ??
+			resolveDefaultFontFamily(
+				(this.selectedElement() as { placeholderType?: string } | null)?.placeholderType,
+				this.themeFonts(),
+			)
+		);
 	}
 	protected curFontSize(): number {
 		// Mirror React's HomeSection default (24) shown when nothing is selected.
-		return Math.round(this.curStyle()?.fontSize ?? 24);
+		const fontSize = this.curStyle()?.fontSize;
+		return fontSize === undefined ? 24 : textFontSizePxToPt(fontSize);
 	}
 	/** Current font colour of the selection (for the swatch + active-state ring). */
 	protected curColor(): string {
 		return this.curStyle()?.color ?? '#000000';
+	}
+	/** Current font colour's theme ref, if any (highlights the matching theme swatch). */
+	protected curColorRef(): PptxThemeColorRef | undefined {
+		return this.curStyle()?.colorRef;
 	}
 	/** Current highlight colour of the selection (for the swatch + active-state ring). */
 	protected curHighlight(): string {
@@ -351,8 +418,13 @@ export class RibbonFontControlsComponent {
 	protected toggleStyle(key: 'bold' | 'italic' | 'underline' | 'strikethrough'): void {
 		this.patch({ [key]: !this.curStyle()?.[key] });
 	}
+	/** Preset/recent/custom pick: always clears any previously-stored theme ref. */
 	protected setColor(color: string): void {
-		this.patch({ color });
+		this.patch({ color, colorRef: undefined });
+	}
+	/** Theme-swatch pick: commits BOTH the resolved hex and the ref. */
+	protected setColorRef(commit: ThemeColorPickerCommit): void {
+		this.patch({ color: commit.hex, colorRef: commit.ref });
 	}
 	protected setHighlight(highlightColor: string): void {
 		this.patch({ highlightColor });
@@ -361,20 +433,18 @@ export class RibbonFontControlsComponent {
 		this.patch({ fontFamily: (event.target as HTMLSelectElement).value });
 	}
 	protected setFontSize(event: Event): void {
-		this.patch({ fontSize: Number((event.target as HTMLSelectElement).value) });
+		this.patchFontSize(textFontSizePtToPx(Number((event.target as HTMLSelectElement).value)));
 	}
 	/** Step the selection's font size up or down through the FONT_SIZES ladder. */
 	protected stepFontSize(direction: 1 | -1): void {
-		const current = this.curFontSize();
-		const sizes = FONT_SIZES;
-		let idx = sizes.findIndex((s) => s >= current);
-		if (idx < 0) {
-			idx = sizes.length - 1;
+		this.patchFontSize(textFontSizePtToPx(steppedFontSizePt(this.curFontSize(), direction)));
+	}
+	private patchFontSize(fontSize: number): void {
+		const element = this.selectedElement();
+		if (!element || !isTextElement(element)) {
+			return;
 		}
-		const next = sizes[Math.min(sizes.length - 1, Math.max(0, idx + direction))];
-		if (next !== undefined) {
-			this.patch({ fontSize: next });
-		}
+		this.editor.updateElement(this.slideIndex(), element.id, textFontSizePatch(element, fontSize));
 	}
 	/** Clear character formatting (bold/italic/underline/strikethrough) on the selection. */
 	protected clearFormatting(): void {

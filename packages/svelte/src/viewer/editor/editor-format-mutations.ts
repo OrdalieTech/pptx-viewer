@@ -1,6 +1,14 @@
-import type { PptxElement } from 'pptx-viewer-core';
+import type { PptxElement, PptxThemeColorRef } from 'pptx-viewer-core';
 import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
-import { fontSizeOf, shapeStylePatch, textStylePatch } from 'pptx-viewer-shared';
+import {
+	fontSizeOf,
+	shapeFillChange,
+	shapeOutlineChange,
+	shapeStylePatch,
+	textFontSizePatch,
+	textFontSizePtToPx,
+	textStylePatch,
+} from 'pptx-viewer-shared';
 
 /**
  * Pure patch builders for the formatting toolbar / inspector.
@@ -21,11 +29,11 @@ import { fontSizeOf, shapeStylePatch, textStylePatch } from 'pptx-viewer-shared'
  */
 
 /** Smallest / largest font size (pt) the toolbar will set. */
-const MIN_FONT = 1;
-const MAX_FONT = 400;
+const MIN_FONT = 1,
+	MAX_FONT = 400;
 
 function clampFont(size: number): number {
-	return Math.min(MAX_FONT, Math.max(MIN_FONT, Math.round(size)));
+	return Math.min(MAX_FONT, Math.max(MIN_FONT, size));
 }
 
 /** Toggleable boolean text-style flags. */
@@ -39,17 +47,25 @@ export function toggleTextFlagPatch(el: PptxElement, flag: TextFlag): Partial<Pp
 
 /** Set an absolute font size (clamped to a sane range). */
 export function setFontSizePatch(el: PptxElement, size: number): Partial<PptxElement> {
-	return textStylePatch(el, { fontSize: clampFont(size) });
+	return textFontSizePatch(el, textFontSizePtToPx(clampFont(size)));
 }
 
 /** Nudge the font size by `delta` points (clamped). */
 export function adjustFontSizePatch(el: PptxElement, delta: number): Partial<PptxElement> {
-	return textStylePatch(el, { fontSize: clampFont(fontSizeOf(el) + delta) });
+	return setFontSizePatch(el, fontSizeOf(el) + delta);
 }
 
-/** Set the text (foreground) colour. */
-export function setTextColorPatch(el: PptxElement, color: string): Partial<PptxElement> {
-	return textStylePatch(el, { color });
+/**
+ * Set the text (foreground) colour. Pass `ref` for a theme-swatch pick (wins
+ * on save, so the colour follows a later theme change); omit it to clear a
+ * previously-stored ref for a plain/custom/recent pick.
+ */
+export function setTextColorPatch(
+	el: PptxElement,
+	color: string,
+	ref?: PptxThemeColorRef,
+): Partial<PptxElement> {
+	return textStylePatch(el, { color, colorRef: ref });
 }
 
 /** Read the text highlight colour (empty string when unset). */
@@ -72,16 +88,24 @@ export function setFillColorPatch(el: PptxElement, color: string): Partial<PptxE
  * Set the shape fill colour AND force `fillMode` back to `'solid'`. Picking a
  * flat colour swatch implies solid fill, so it also clears any active
  * gradient (the renderer prefers `fillMode === 'gradient'` over `fillColor`
- * when both are present); mirrors the vanilla binding's `setShapeFill`.
+ * when both are present); the patch itself comes from the shared
+ * `shapeFillChange` decision function (React/Vue/Angular/vanilla parity).
  */
-export function setSolidFillPatch(el: PptxElement, color: string): Partial<PptxElement> {
-	const base = hasShapeProperties(el) ? (el.shapeStyle ?? {}) : {};
-	return { shapeStyle: { ...base, fillColor: color, fillMode: 'solid' } } as Partial<PptxElement>;
+export function setSolidFillPatch(
+	el: PptxElement,
+	color: string,
+	ref?: PptxThemeColorRef,
+): Partial<PptxElement> {
+	return shapeStylePatch(el, shapeFillChange(color, ref));
 }
 
-/** Set the shape stroke (outline) colour. */
-export function setStrokeColorPatch(el: PptxElement, color: string): Partial<PptxElement> {
-	return shapeStylePatch(el, { strokeColor: color });
+/** Set the shape stroke (outline) colour, via the shared decision function. Same `ref` contract as {@link setSolidFillPatch}. */
+export function setStrokeColorPatch(
+	el: PptxElement,
+	color: string,
+	ref?: PptxThemeColorRef,
+): Partial<PptxElement> {
+	return shapeStylePatch(el, shapeOutlineChange(color, ref));
 }
 
 /** Read the shape stroke width (defaults to 1 when unset). */

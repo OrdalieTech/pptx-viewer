@@ -1,5 +1,13 @@
 import type { PptxSmartArtChrome } from 'pptx-viewer-core';
+import { buildChromeStyle, centeredSvgTextLines } from 'pptx-viewer-shared';
+import type { CssStyleMap, RenderedGradient, SvgTextLine } from 'pptx-viewer-shared';
 import React from 'react';
+
+/**
+ * Fraction of a shape's width its label may occupy, leaving the text inset
+ * DiagramML shapes carry. Matches the shared cached-shape projection.
+ */
+const LABEL_WIDTH_FRACTION = 0.82;
 
 // ── Inline-edit node tagging ──────────────────────────────────────────────────
 
@@ -49,98 +57,66 @@ export function smartArtNodeGroupProps(
 
 // ── Font sizing ─────────────────────────────────────────────────────────────
 
-/**
- * Compute the largest font size that will fit `text` within a bounding box
- * defined by `maxWidth` x `maxHeight`, capped at `baseSize`.
- *
- * The heuristic assumes each character is roughly 0.6x the font size in width.
- * The returned value is clamped to a minimum of 6 px to remain legible.
- *
- * @param text      - The string to measure.
- * @param maxWidth  - Available horizontal space in pixels.
- * @param maxHeight - Available vertical space in pixels.
- * @param baseSize  - Maximum (ideal) font size in pixels.
- * @returns The computed font size in pixels (>= 6).
- */
-export function fitFontSize(
-	text: string,
-	maxWidth: number,
-	maxHeight: number,
-	baseSize: number,
-): number {
-	// Approximate: each character is ~0.6x the font size in width
-	const charWidthRatio = 0.6;
-	const maxByWidth = maxWidth / (text.length * charWidthRatio);
-	const maxByHeight = maxHeight * 0.5;
-	return Math.max(6, Math.min(baseSize, maxByWidth, maxByHeight));
-}
+// `fitFontSize` and `chevronPoints` are shared geometry; re-exported here so
+// the historical React import surface is unchanged.
+export { chevronPoints, fitFontSize } from 'pptx-viewer-shared';
 
-// ── SVG shape helpers ───────────────────────────────────────────────────────
+// ── Gradient paint server ───────────────────────────────────────────────────
 
-/**
- * Generate SVG polygon `points` for a chevron / arrow shape inscribed in the
- * bounding box starting at (`x`, `y`) with size `w` x `h`.
- *
- * The chevron has a notch on the left side and an arrow tip on the right.
- *
- * @param x - Left edge x coordinate.
- * @param y - Top edge y coordinate.
- * @param w - Width of the bounding box.
- * @param h - Height of the bounding box.
- * @returns A space-separated list of "x,y" coordinate pairs.
- */
-export function chevronPoints(x: number, y: number, w: number, h: number): string {
-	const depth = Math.min(w * 0.2, h * 0.4);
-	return [
-		`${x},${y}`,
-		`${x + w - depth},${y}`,
-		`${x + w},${y + h / 2}`,
-		`${x + w - depth},${y + h}`,
-		`${x},${y + h}`,
-		`${x + depth},${y + h / 2}`,
-	].join(' ');
+/** Props for {@link SmartArtGradient}. */
+export interface SmartArtGradientProps {
+	/** The gradient as resolved by the shared cached-shape projection. */
+	gradient: RenderedGradient;
 }
 
 /**
- * Generate an SVG path string for a gear shape with teeth.
+ * The SVG paint server for a cached shape's gradient fill.
  *
- * The gear is centred at (`cx`, `cy`). Teeth alternate between `outerR` and
- * `innerR` radii around the centre.
- *
- * @param cx     - Centre x coordinate.
- * @param cy     - Centre y coordinate.
- * @param outerR - Outer (tooth tip) radius.
- * @param innerR - Inner (tooth valley) radius.
- * @param teeth  - Number of teeth around the gear.
- * @returns An SVG path data string (M/L/Z).
+ * Place it inside a `<defs>`; the shape's `fill` already references it by id.
+ * Every value comes from the shared projection, including the axis endpoints
+ * converted from the OOXML angle.
  */
-export function gearPath(
-	cx: number,
-	cy: number,
-	outerR: number,
-	innerR: number,
-	teeth: number,
-): string {
-	const segments: string[] = [];
-	const step = (Math.PI * 2) / (teeth * 2);
-
-	for (let i = 0; i < teeth * 2; i++) {
-		const angle = i * step - Math.PI / 2;
-		const r = i % 2 === 0 ? outerR : innerR;
-		const x = cx + r * Math.cos(angle);
-		const y = cy + r * Math.sin(angle);
-		segments.push(i === 0 ? `M${x},${y}` : `L${x},${y}`);
-	}
-	segments.push('Z');
-	return segments.join(' ');
+export function SmartArtGradient({ gradient }: SmartArtGradientProps): React.ReactElement {
+	const stops = gradient.stops.map((stop, i) => (
+		<stop
+			key={`${gradient.id}-s${i}`}
+			offset={stop.offset}
+			stopColor={stop.color}
+			{...(stop.opacity !== undefined ? { stopOpacity: stop.opacity } : {})}
+		/>
+	));
+	return gradient.kind === 'radial' ? (
+		<radialGradient id={gradient.id} cx={gradient.cx} cy={gradient.cy} r={gradient.r}>
+			{stops}
+		</radialGradient>
+	) : (
+		<linearGradient
+			id={gradient.id}
+			x1={gradient.x1}
+			y1={gradient.y1}
+			x2={gradient.x2}
+			y2={gradient.y2}
+		>
+			{stops}
+		</linearGradient>
+	);
 }
 
 // ── Multi-line SVG node text ─────────────────────────────────────────────────
 
 /** Props for {@link SmartArtNodeText}. */
 export interface SmartArtNodeTextProps {
-	/** Node text content; split on `\n` for multi-line rendering. */
-	text: string;
+	/**
+	 * Node text content; split on `\n` for multi-line rendering. Omitted when
+	 * {@link lines} already carries the resolved layout.
+	 */
+	text?: string;
+	/**
+	 * Lines whose wrapping and baselines were resolved upstream (the shared
+	 * cached-shape projection). When given, nothing here re-measures: the
+	 * component places one `<tspan>` per entry at its own `y`.
+	 */
+	lines?: SvgTextLine[];
 	/** X coordinate of the text block centre. */
 	x: number;
 	/** Y coordinate of the text block centre. */
@@ -153,8 +129,15 @@ export interface SmartArtNodeTextProps {
 	fontWeight?: number | string;
 	/** Optional font style (e.g. `'italic'`). */
 	fontStyle?: string;
+	/** Optional resolved CSS font-family chain. */
+	fontFamily?: string;
 	/** Optional CSS class applied to the outer `<text>` element. */
 	className?: string;
+	/**
+	 * SVG `text-anchor` for the block. Defaults to `'middle'`; `'start'` is used
+	 * by labels parked beside their node (target leaders, gear legend rows).
+	 */
+	textAnchor?: 'start' | 'middle' | 'end';
 	/**
 	 * Axis anchor point for multi-line layout. Defaults to `'middle'`.
 	 *
@@ -168,6 +151,12 @@ export interface SmartArtNodeTextProps {
 	 *   single line.
 	 */
 	anchor?: 'top' | 'middle' | 'bottom';
+	/**
+	 * Width available for the label. When given, long text is word-wrapped to fit
+	 * instead of running past the shape; when omitted only authored line breaks
+	 * split it.
+	 */
+	maxWidth?: number;
 }
 
 /**
@@ -184,20 +173,50 @@ export interface SmartArtNodeTextProps {
  */
 export function SmartArtNodeText({
 	text,
+	lines: positionedLines,
 	x,
 	y,
 	fill,
 	fontSize,
 	fontWeight,
 	fontStyle,
+	fontFamily,
 	className,
+	textAnchor = 'middle',
 	anchor = 'middle',
+	maxWidth,
 }: SmartArtNodeTextProps): React.ReactElement {
-	const lines = text.split('\n').filter((l) => l.length > 0);
-	const lineHeight = fontSize * 1.2;
+	if (positionedLines) {
+		return (
+			<text
+				x={x}
+				textAnchor={textAnchor}
+				dominantBaseline='central'
+				fill={fill}
+				fontSize={fontSize}
+				fontWeight={fontWeight}
+				fontStyle={fontStyle}
+				fontFamily={fontFamily}
+				className={className}
+			>
+				{positionedLines.map((line, i) => (
+					<tspan key={i} x={x} y={line.y}>
+						{line.text}
+					</tspan>
+				))}
+			</text>
+		);
+	}
+	const source = text ?? '',
+		lines =
+			maxWidth !== undefined
+				? centeredSvgTextLines(source, fontSize, { maxWidth: maxWidth * LABEL_WIDTH_FRACTION }).map(
+						(line) => line.text,
+					)
+				: source.split('\n').filter((l) => l.length > 0),
+		lineHeight = fontSize * 1.2;
 
-	let startY: number;
-	let dominantBaseline: 'auto' | 'hanging' | 'central';
+	let startY: number, dominantBaseline: 'auto' | 'hanging' | 'central';
 
 	if (anchor === 'bottom') {
 		// Last line's baseline at y; stack lines upward.
@@ -217,12 +236,13 @@ export function SmartArtNodeText({
 	return (
 		<text
 			x={x}
-			textAnchor='middle'
+			textAnchor={textAnchor}
 			dominantBaseline={dominantBaseline}
 			fill={fill}
 			fontSize={fontSize}
 			fontWeight={fontWeight}
 			fontStyle={fontStyle}
+			fontFamily={fontFamily}
 			className={className}
 		>
 			{lines.map((line, i) => (
@@ -245,9 +265,28 @@ export interface SmartArtChromeA11y {
 }
 
 /**
+ * Adapt the shared `CssStyleMap` (kebab-case CSS property names, the contract
+ * Angular/Svelte/Vanilla consume directly) to React's camelCase
+ * `CSSProperties`. React's style type has no index signature for arbitrary
+ * kebab keys, so a plain cast is not enough; this converts each key instead
+ * of re-deciding the values, which is what `buildChromeStyle` already did.
+ */
+function chromeStyleToReactCss(style: CssStyleMap): React.CSSProperties {
+	const react: Record<string, string | number> = {};
+	for (const [key, value] of Object.entries(style)) {
+		react[key.replace(/-([a-z])/gu, (_match, letter: string) => letter.toUpperCase())] = value;
+	}
+	return react as React.CSSProperties;
+}
+
+/**
  * Wrap SmartArt content in a chrome container that applies optional
  * background colour and outline border from the diagram's chrome settings, plus
  * container-level accessibility (`role="img"` + `aria-label`) when supplied.
+ *
+ * The chrome decision itself comes from the shared `buildChromeStyle`
+ * (`pptx-viewer-shared`), the same function Angular/Svelte/Vanilla call
+ * directly, so a change to the background/outline rule lands once.
  *
  * @param chrome    - Optional chrome styling (background, outline).
  * @param content   - The React element to wrap.
@@ -261,13 +300,7 @@ export function wrapChrome(
 	className: string,
 	a11y?: SmartArtChromeA11y,
 ): React.ReactElement {
-	const wrapperStyle: React.CSSProperties = {};
-	if (chrome?.backgroundColor) {
-		wrapperStyle.backgroundColor = chrome.backgroundColor;
-	}
-	if (chrome?.outlineColor) {
-		wrapperStyle.border = `${chrome.outlineWidth ?? 1}px solid ${chrome.outlineColor}`;
-	}
+	const wrapperStyle = chromeStyleToReactCss(buildChromeStyle(chrome));
 
 	return (
 		<div

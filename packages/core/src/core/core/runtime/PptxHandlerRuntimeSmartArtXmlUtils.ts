@@ -5,7 +5,10 @@ import type {
 	PptxSmartArtNodeStyle,
 	PptxSmartArtTextRun,
 } from '../../types';
-import { buildSmartArtColorLists } from '../../utils/smartart-color-lists';
+import {
+	buildSmartArtColorLists,
+	buildSmartArtColorRoleMap,
+} from '../../utils/smartart-color-lists';
 import {
 	parseSmartArtColorStyleLabels,
 	parseSmartArtDefinitionMetadata,
@@ -156,6 +159,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const bgColor = this.parseColor(solidFill);
 			if (bgColor) {
 				chrome.backgroundColor = bgColor;
+			} else {
+				// No solid fill: approximate a gradient/pattern background rather
+				// than silently dropping it (a gradient `dgm:bg` previously loaded
+				// with NO visible background at all). `backgroundFillXml` preserves
+				// the original so `applySmartArtChrome` can re-emit it verbatim on
+				// save instead of flattening it to the approximated solid colour.
+				const approximated = this.approximateSmartArtBackgroundFill(bg);
+				if (approximated) {
+					chrome.backgroundColor = approximated.color;
+					chrome.backgroundFillXml = { localName: approximated.localName, xml: approximated.xml };
+				}
 			}
 		}
 
@@ -175,6 +189,33 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		return chrome.backgroundColor || chrome.outlineColor ? chrome : undefined;
+	}
+
+	/**
+	 * Approximate a non-solid `dgm:bg` fill (gradient or pattern) as a single
+	 * display colour, matching the "approximate over drop" precedent used
+	 * elsewhere for SmartArt/shape fills: a gradient's own
+	 * `extractGradientFillColor` blend (the same helper shape/text gradient
+	 * fills already reduce to one colour with), or a pattern's foreground
+	 * colour. Returns `undefined` when `bg` has neither (e.g. a blip/picture
+	 * fill, or `a:noFill`) - still a silent drop, but no worse than before this
+	 * change, and rarer in practice for a diagram background.
+	 */
+	private approximateSmartArtBackgroundFill(
+		bg: XmlObject,
+	): { color: string; localName: 'gradFill' | 'pattFill'; xml: XmlObject } | undefined {
+		const gradFill = this.xmlLookupService.getChildByLocalName(bg, 'gradFill');
+		if (gradFill) {
+			const color = this.colorStyleCodec.extractGradientFillColor(gradFill);
+			return color ? { color, localName: 'gradFill', xml: gradFill } : undefined;
+		}
+		const pattFill = this.xmlLookupService.getChildByLocalName(bg, 'pattFill');
+		if (pattFill) {
+			const fgClr = this.xmlLookupService.getChildByLocalName(pattFill, 'fgClr');
+			const color = fgClr ? this.parseColor(fgClr) : undefined;
+			return color ? { color, localName: 'pattFill', xml: pattFill } : undefined;
+		}
+		return undefined;
 	}
 
 	/**
@@ -219,17 +260,32 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			// "colorful" schemes spread across nodes instead of collapsing to the
 			// first accent. See {@link buildSmartArtColorLists}.
 			const styleLbls = this.xmlLookupService.getChildrenArrayByLocalName(colorsDef, 'styleLbl');
-			const colorLists = buildSmartArtColorLists(styleLbls, {
-				getChild: (node, childName) => this.xmlLookupService.getChildByLocalName(node, childName),
-				parseColorChoice: (colorChoice) => this.parseColor(colorChoice),
-				resolveScheme: (colorNode) => this.resolveSmartArtSchemeColor(colorNode),
-			});
+			const colorListDeps = {
+				getChild: (node: XmlObject | undefined, childName: string) =>
+					this.xmlLookupService.getChildByLocalName(node, childName),
+				parseColorChoice: (colorChoice: XmlObject | undefined) => this.parseColor(colorChoice),
+				resolveScheme: (colorNode: XmlObject | undefined) =>
+					this.resolveSmartArtSchemeColor(colorNode),
+			};
+			const colorLists = buildSmartArtColorLists(styleLbls, colorListDeps);
 
 			if (colorLists.fillColors.length === 0 && colorLists.lineColors.length === 0) {
 				return undefined;
 			}
 
-			return { ...metadata, name, ...colorLists, labels };
+			// Every styleLbl's OWN resolved colour list (not just the collapsed
+			// "primary" one `colorLists` carries), so a node can be coloured from
+			// its own quick-style role (`node.styleRole`) instead of the generic
+			// cycled palette. See `applySmartArtRoleColors`.
+			const roleColors = buildSmartArtColorRoleMap(styleLbls, colorListDeps);
+
+			return {
+				...metadata,
+				name,
+				...colorLists,
+				...(Object.keys(roleColors).length > 0 ? { roleColors } : {}),
+				labels,
+			};
 		} catch {
 			return undefined;
 		}

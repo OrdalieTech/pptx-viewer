@@ -1,12 +1,23 @@
 import type { PptxSlide } from 'pptx-viewer-core';
-import { PresentationAnimationController } from 'pptx-viewer-shared';
+import type { PlaybackContext } from 'pptx-viewer-shared';
+import {
+	advanceMainSequence,
+	cancelBuildReveal,
+	clearPlaybackTimers,
+	createActiveAnimationGroup,
+	PresentationAnimationController,
+	playGroup,
+	resolveMediaTimeNodeElementIds,
+} from 'pptx-viewer-shared';
 import { useRef, useState, useCallback, useEffect } from 'react';
 
 import type { PresentationAnimationRuntime } from '../../types';
-import type { ElementAnimationState, TimelineClickGroup } from '../../utils/animation-timeline';
-import { computeEntranceAnimationDelay } from '../usePresentationSetup-helpers';
-import { applyAnimationGroupSteps } from './animation-helpers';
-import { driveBuildReveal, cancelBuildReveal } from './build-playback';
+import { playAnimationSound, stopAnimationSound } from '../../utils/animation-sound';
+import type { ElementAnimationState } from '../../utils/animation-timeline';
+import {
+	scheduleEntranceAnimationTimers,
+	scheduleOpeningAutoPlayGroup,
+} from './entrance-animation-timers';
 
 // ---------------------------------------------------------------------------
 // Sub-hook interface
@@ -17,6 +28,28 @@ export interface UseAnimationPlaybackInput {
 	onPlayActionSound?: (soundPath: string) => void;
 	/** When false, all animations are skipped (elements shown immediately). */
 	showWithAnimation?: boolean;
+	/**
+	 * The slide canvas size (px), in the same unit the elements' own
+	 * `x`/`y`/`width`/`height` are authored in. Lets `PresentationAnimationController
+	 * .fromSlide` resolve a `p:anim` formula that needs the animated shape's real
+	 * box (e.g. Grow And Turn's `-#ppt_w/2` fly-in) instead of falling back.
+	 */
+	canvasSize?: { width: number; height: number };
+	/** The deck's resolved theme colour map, for a scheme-colour (`a:schemeClr`) animation stop. */
+	themeColorMap?: Readonly<Record<string, string>>;
+}
+
+/** How a slide's animation timeline should be seeded when it becomes active. */
+export interface SeedSlideAnimationOptions {
+	/**
+	 * Seed the slide as fully built instead of playing it from the start.
+	 *
+	 * PowerPoint shows a slide you step BACKWARD onto with its builds already
+	 * complete; a further back press then walks them off. Replaying from zero
+	 * made a deck whose opening build auto-starts restart every time the
+	 * presenter stepped back onto it.
+	 */
+	completed?: boolean;
 }
 
 export interface UseAnimationPlaybackResult {
@@ -30,7 +63,29 @@ export interface UseAnimationPlaybackResult {
 	handleInteractiveShapeClick: (shapeId: string) => boolean;
 	handleHoverStart: (shapeId: string) => boolean;
 	handleHoverEnd: (shapeId: string) => void;
-	runPresentationEntranceAnimations: (slideIndex: number) => void;
+	runPresentationEntranceAnimations: (
+		slideIndex: number,
+		options?: SeedSlideAnimationOptions,
+	) => void;
+	/**
+	 * Seed a slide's animation timeline WITHOUT starting playback: builds the
+	 * controller and applies the initial element states (entrance-animated
+	 * elements hidden). Must run synchronously with the slide swap so the new
+	 * slide's first paint never shows animated elements at their final state.
+	 */
+	seedSlideAnimations: (slideIndex: number, options?: SeedSlideAnimationOptions) => void;
+	/**
+	 * Start playback for a previously seeded slide: schedules the opening
+	 * auto-play group and the legacy entrance-animation timers. Called after the
+	 * slide's transition has finished (or immediately for instant transitions).
+	 */
+	startSlideAnimations: (slideIndex: number) => void;
+	/**
+	 * True while the active slide is showing its builds as already complete
+	 * because the presenter stepped backward onto it. The next backward press
+	 * replays the slide instead of leaving it (PowerPoint's behaviour).
+	 */
+	isSeededCompleted: () => boolean;
 	/** Exposed so the orchestrator can schedule additional timers (e.g. auto-advance). */
 	presentationTimersRef: React.RefObject<number[]>;
 }
@@ -40,7 +95,7 @@ export interface UseAnimationPlaybackResult {
 // ---------------------------------------------------------------------------
 
 export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnimationPlaybackResult {
-	const { slides, onPlayActionSound, showWithAnimation } = input;
+	const { slides, onPlayActionSound, showWithAnimation, canvasSize, themeColorMap } = input;
 	const animationsEnabled = showWithAnimation !== false;
 
 	// State
@@ -61,27 +116,50 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 	const controllerRef = useRef<PresentationAnimationController | null>(null);
 	/** In-flight requestAnimationFrame id for the active staged-build reveal. */
 	const buildRafRef = useRef<number | null>(null);
-
-	// -----------------------------------------------------------------------
-	// Staged chart / SmartArt build reveal (RAF-driven)
-	// -----------------------------------------------------------------------
-
 	/**
-	 * Start (or restart) the requestAnimationFrame loop that ramps a click-group's
-	 * staged-build `progress` from 0 -> 1. No-op when the group carries no build
-	 * step, so ordinary click-advance is unchanged.
+	 * Main-timeline group whose authored active window has not elapsed yet: the
+	 * shared `advanceMainSequence` seeks it on a second click when the deck says
+	 * `p:seq/@nextAc="seek"`. Mutated in place by the shared helpers.
 	 */
-	const startBuildReveal = useCallback(
-		(controller: PresentationAnimationController, group: TimelineClickGroup) => {
-			driveBuildReveal(
-				controller,
-				PresentationAnimationController.collectBuildStepIds(group),
-				setPresentationElementStates,
-				buildRafRef,
-			);
-		},
-		[],
-	);
+	const activeAnimationGroupRef = useRef(createActiveAnimationGroup());
+	/** Whether the active slide was seeded as fully built (backward entry). */
+	const seededCompletedRef = useRef(false);
+	/**
+	 * Maps a `p:audio`/`p:video` animation's own timing-tree node id to the
+	 * element id it plays, for the active slide (see
+	 * `resolveMediaTimeNodeElementIds`). Lets `applyAnimationGroupSteps` gate a
+	 * `p:cond/@evt="onStopAudio"` step on the REAL media element's `ended`
+	 * event instead of only its estimated `delayMs`.
+	 */
+	const mediaTimeNodeElementIdsRef = useRef<ReadonlyMap<number, string>>(new Map());
+	/**
+	 * Whether the last seed REQUESTED completed entry (even when the slide had
+	 * no builds): a completed entry never starts playback of any kind.
+	 */
+	const lastSeedCompletedRef = useRef(false);
+
+	// -----------------------------------------------------------------------
+	// Shared playback context
+	//
+	// The click-group step application, staged-build RAF loop, and auto-advance
+	// chain live in the shared `animation-playback-engine`; this hook only
+	// supplies the React state setters, timer bookkeeping, and sound callbacks
+	// the engine needs. `ctx.timers` IS `presentationTimersRef.current`, which is
+	// only ever cleared in place (`clearPlaybackTimers`), never reassigned, so
+	// a context built before a clear stays valid afterwards.
+	// -----------------------------------------------------------------------
+
+	const buildPlaybackContext = useCallback((): PlaybackContext => {
+		return {
+			setStates: setPresentationElementStates,
+			timers: presentationTimersRef.current,
+			buildHandle: buildRafRef,
+			onPlayActionSound,
+			playSound: playAnimationSound,
+			stopSound: stopAnimationSound,
+			mediaTimeNodeElementIds: mediaTimeNodeElementIdsRef.current,
+		};
+	}, [onPlayActionSound]);
 
 	// Stop the build loop on unmount so a detached RAF never touches state.
 	useEffect(() => {
@@ -95,62 +173,8 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 	// -----------------------------------------------------------------------
 
 	const clearPresentationTimers = useCallback(() => {
-		presentationTimersRef.current.forEach((timer) => {
-			window.clearTimeout(timer);
-		});
-		presentationTimersRef.current = [];
-		cancelBuildReveal(buildRafRef);
-	}, []);
-
-	// -----------------------------------------------------------------------
-	// Auto-advance scheduling
-	// -----------------------------------------------------------------------
-
-	/**
-	 * After playing a click-group, check if the next group should auto-advance
-	 * and schedule it accordingly. This chains through consecutive auto-advance
-	 * groups so sequences like onClick -> afterPrevious -> afterPrevious all
-	 * play without additional clicks.
-	 */
-	const scheduleAutoAdvanceChain = useCallback(
-		(controller: PresentationAnimationController) => {
-			if (!controller.shouldAutoAdvance()) {
-				return;
-			}
-
-			const delay = controller.getAutoAdvanceDelay();
-			const previousGroup = controller.peekNext();
-			if (!previousGroup) {
-				return;
-			}
-
-			const totalDelay = delay + (previousGroup.autoAdvanceDelayMs ?? 0);
-
-			const timer = window.setTimeout(
-				() => {
-					const group = controller.advance();
-					if (!group) {
-						return;
-					}
-
-					applyAnimationGroupSteps(
-						group,
-						onPlayActionSound,
-						setPresentationElementStates,
-						presentationTimersRef,
-					);
-					startBuildReveal(controller, group);
-
-					// Continue the chain if more auto-advance groups follow
-					scheduleAutoAdvanceChain(controller);
-				},
-				Math.max(0, totalDelay),
-			);
-
-			presentationTimersRef.current.push(timer);
-		},
-		[onPlayActionSound, startBuildReveal],
-	);
+		clearPlaybackTimers(buildPlaybackContext(), activeAnimationGroupRef.current);
+	}, [buildPlaybackContext]);
 
 	// -----------------------------------------------------------------------
 	// Slide timeline reset
@@ -162,6 +186,7 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 			const slide = slides[slideIndex];
 			if (!slide) {
 				controllerRef.current = null;
+				mediaTimeNodeElementIdsRef.current = new Map();
 				setPresentationElementStates(new Map());
 				setPresentationKeyframesCss('');
 				setInteractiveTriggerShapeIds(new Set());
@@ -172,8 +197,18 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 			// The controller builds the timeline engine (expanding text-build
 			// animations into sub-element animations) and derives the keyframes CSS,
 			// trigger-shape id sets, and the full tracked element id list.
-			const controller = PresentationAnimationController.fromSlide(slide);
+			// `canvasSize`/`themeColorMap` let it resolve a `p:anim` formula that
+			// needs the animated shape's real box (Grow And Turn's `-#ppt_w/2`
+			// fly-in) and a scheme-colour ramp stop instead of falling back.
+			const controller = PresentationAnimationController.fromSlide(slide, {
+				slideHeightPx: canvasSize?.height,
+				slideWidthPx: canvasSize?.width,
+				themeColorMap,
+			});
 			controllerRef.current = controller;
+			mediaTimeNodeElementIdsRef.current = resolveMediaTimeNodeElementIds(
+				slide.nativeAnimations ?? [],
+			);
 			setPresentationKeyframesCss(controller.keyframesCss);
 
 			// Expose interactive and hover trigger shape IDs for cursor styling
@@ -182,7 +217,7 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 
 			setPresentationElementStates(controller.computeStates());
 		},
-		[slides],
+		[slides, canvasSize, themeColorMap],
 	);
 
 	// -----------------------------------------------------------------------
@@ -193,29 +228,14 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 		if (!animationsEnabled) {
 			return false;
 		}
-		const controller = controllerRef.current;
-		if (!controller || !controller.hasMoreSteps()) {
-			return false;
-		}
-
-		const group = controller.advance();
-		if (!group) {
-			return false;
-		}
-
-		applyAnimationGroupSteps(
-			group,
-			onPlayActionSound,
-			setPresentationElementStates,
-			presentationTimersRef,
+		// Seek-or-advance (`p:seq/@nextAc="seek"`) plus the auto-advance chain
+		// live in shared, so the branch is identical in all five bindings.
+		return advanceMainSequence(
+			controllerRef.current,
+			buildPlaybackContext(),
+			activeAnimationGroupRef.current,
 		);
-		startBuildReveal(controller, group);
-
-		// Schedule auto-advance for consecutive non-click groups
-		scheduleAutoAdvanceChain(controller);
-
-		return true;
-	}, [animationsEnabled, onPlayActionSound, scheduleAutoAdvanceChain, startBuildReveal]);
+	}, [animationsEnabled, buildPlaybackContext]);
 
 	// -----------------------------------------------------------------------
 	// Interactive shape-click animation
@@ -233,17 +253,11 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 				return false;
 			}
 
-			applyAnimationGroupSteps(
-				group,
-				onPlayActionSound,
-				setPresentationElementStates,
-				presentationTimersRef,
-			);
-			startBuildReveal(controller, group);
+			playGroup(controller, group, buildPlaybackContext());
 
 			return true;
 		},
-		[onPlayActionSound, startBuildReveal],
+		[buildPlaybackContext],
 	);
 
 	// -----------------------------------------------------------------------
@@ -268,17 +282,11 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 				return false;
 			}
 
-			applyAnimationGroupSteps(
-				group,
-				onPlayActionSound,
-				setPresentationElementStates,
-				presentationTimersRef,
-			);
-			startBuildReveal(controller, group);
+			playGroup(controller, group, buildPlaybackContext());
 
 			return true;
 		},
-		[animationsEnabled, onPlayActionSound, startBuildReveal],
+		[animationsEnabled, buildPlaybackContext],
 	);
 
 	const handleHoverEnd = useCallback((shapeId: string): void => {
@@ -295,14 +303,22 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 	// Entrance animations (legacy animation[] array on a slide)
 	// -----------------------------------------------------------------------
 
-	const runPresentationEntranceAnimations = useCallback(
-		(slideIndex: number) => {
+	/**
+	 * Seed the slide's timeline and initial element states WITHOUT starting
+	 * playback. Runs synchronously with the slide swap so the incoming slide's
+	 * very first paint already has entrance-animated elements hidden; deferring
+	 * this (the old behaviour deferred it past the slide transition) rendered
+	 * every animated element at its FINAL state for the whole transition, then
+	 * visibly snapped them back to replay ("end state flash", issue #132).
+	 */
+	const seedSlideAnimations = useCallback(
+		(slideIndex: number, options?: SeedSlideAnimationOptions) => {
 			clearPresentationTimers();
+			setPresentationAnimations([]);
 
 			// When animations are disabled, skip timeline and entrance animations
 			if (!animationsEnabled) {
 				controllerRef.current = null;
-				setPresentationAnimations([]);
 				setPresentationElementStates(new Map());
 				setPresentationKeyframesCss('');
 				setInteractiveTriggerShapeIds(new Set());
@@ -311,76 +327,60 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 			}
 
 			resetSlideTimeline(slideIndex);
-			const slide = slides[slideIndex];
-			if (!slide) {
-				setPresentationAnimations([]);
-				return;
-			}
 
-			// After resetting the timeline, check if the first group should auto-play
-			// (e.g. when the slide starts with withPrevious/afterPrevious animations)
-			const controller = controllerRef.current;
-			if (controller && controller.hasMoreSteps()) {
-				const firstGroup = controller.peekNext();
-				if (firstGroup && firstGroup.autoAdvance) {
-					// Auto-play the first group after a brief delay
-					const timer = window.setTimeout(() => {
-						const group = controller.advance();
-						if (group) {
-							applyAnimationGroupSteps(
-								group,
-								onPlayActionSound,
-								setPresentationElementStates,
-								presentationTimersRef,
-							);
-							startBuildReveal(controller, group);
-							scheduleAutoAdvanceChain(controller);
-						}
-					}, firstGroup.autoAdvanceDelayMs ?? 0);
-					presentationTimersRef.current.push(timer);
+			// Stepping backward onto a slide shows it with every build already
+			// complete, the way PowerPoint does; nothing plays and nothing is
+			// scheduled, so a further back press can walk the builds off.
+			seededCompletedRef.current = false;
+			lastSeedCompletedRef.current = options?.completed === true;
+			if (options?.completed) {
+				const seeded = controllerRef.current;
+				if (seeded) {
+					// Only a slide that actually has builds can be "already built": on
+					// a slide with none, a back press should just keep going back.
+					seededCompletedRef.current = seeded.hasMoreSteps();
+					seeded.completeAll();
+					setPresentationElementStates(seeded.computeStates());
 				}
 			}
+		},
+		[animationsEnabled, clearPresentationTimers, resetSlideTimeline],
+	);
 
-			const entranceAnimations = [...(slide.animations || [])]
-				.filter((animation) => Boolean(animation.entrance))
-				.sort(
-					(left, right) =>
-						(left.order || Number.MAX_SAFE_INTEGER) - (right.order || Number.MAX_SAFE_INTEGER),
-				);
-			if (entranceAnimations.length === 0) {
-				setPresentationAnimations([]);
+	/**
+	 * Start playback for a slide previously seeded by {@link seedSlideAnimations}:
+	 * schedule the opening auto-play group and the legacy entrance timers. A
+	 * slide seeded as already-complete (backward entry) starts nothing.
+	 */
+	const startSlideAnimations = useCallback(
+		(slideIndex: number) => {
+			if (!animationsEnabled || lastSeedCompletedRef.current) {
+				return;
+			}
+			const slide = slides[slideIndex];
+			if (!slide) {
 				return;
 			}
 
-			setPresentationAnimations(
-				entranceAnimations.map((animation) => ({
-					elementId: animation.elementId,
-					state: 'hidden',
-					animation,
-				})),
-			);
+			// The slide's opening click-group, when the deck auto-starts it.
+			const controller = controllerRef.current;
+			if (controller) {
+				const ctx = buildPlaybackContext();
+				scheduleOpeningAutoPlayGroup(controller, ctx);
+			}
 
-			entranceAnimations.forEach((animation, animationIndex) => {
-				const delay = computeEntranceAnimationDelay(animation.delayMs, animationIndex);
-				const timer = window.setTimeout(() => {
-					setPresentationAnimations((previousAnimations) =>
-						previousAnimations.map((entry) =>
-							entry.elementId === animation.elementId ? { ...entry, state: 'visible' } : entry,
-						),
-					);
-				}, delay);
-				presentationTimersRef.current.push(timer);
-			});
+			// Legacy preset (`slide.animations`) entrance timers.
+			scheduleEntranceAnimationTimers(slide, setPresentationAnimations, presentationTimersRef);
 		},
-		[
-			animationsEnabled,
-			clearPresentationTimers,
-			resetSlideTimeline,
-			slides,
-			onPlayActionSound,
-			scheduleAutoAdvanceChain,
-			startBuildReveal,
-		],
+		[animationsEnabled, slides, buildPlaybackContext],
+	);
+
+	const runPresentationEntranceAnimations = useCallback(
+		(slideIndex: number, options?: SeedSlideAnimationOptions) => {
+			seedSlideAnimations(slideIndex, options);
+			startSlideAnimations(slideIndex);
+		},
+		[seedSlideAnimations, startSlideAnimations],
 	);
 
 	return {
@@ -395,6 +395,9 @@ export function useAnimationPlayback(input: UseAnimationPlaybackInput): UseAnima
 		handleHoverStart,
 		handleHoverEnd,
 		runPresentationEntranceAnimations,
+		seedSlideAnimations,
+		startSlideAnimations,
+		isSeededCompleted: () => seededCompletedRef.current,
 		presentationTimersRef,
 	};
 }

@@ -9,15 +9,21 @@
 // Slide, presentation data, and export types
 // ==========================================================================
 
-import type { PptxElementAnimation, PptxNativeAnimation } from './animation';
+import type {
+	PptxAnimationTimelineAnchor,
+	PptxElementAnimation,
+	PptxNativeAnimation,
+} from './animation';
 import type { XmlObject, PptxDrawingGuide } from './common';
 import type { PptxElement } from './elements';
 import type { PptxEmbeddedFontList } from './embedded-font';
+import type { PptxImageProperties } from './image';
 import type {
 	PptxThemeOption,
 	PptxNotesMaster,
 	PptxHandoutMaster,
 	PptxSlideMaster,
+	PptxTextStyleLevels,
 } from './masters';
 import type {
 	PptxComment,
@@ -73,6 +79,22 @@ export interface PptxActiveXControl {
 	name?: string;
 	/** Shape ID this control is linked to (from @spid). */
 	shapeId?: string;
+	/**
+	 * `p:control/@showAsIcon` (CT_Control, ECMA-376 S19.3.1.2): whether the
+	 * control renders as its static icon rather than its live appearance.
+	 * `undefined` when the source authored no explicit value (schema default
+	 * `false`).
+	 */
+	showAsIcon?: boolean;
+	/**
+	 * `p:control/@imgW` in EMU (ST_PositiveCoordinate32): the width the host
+	 * reserves for the control's icon/preview image. Distinct from
+	 * {@link width}, which is the fallback `p:pic`'s own `a:ext/@cx` in px;
+	 * `imgW`/`imgH` are direct attributes on `p:control` itself.
+	 */
+	imgWidthEmu?: number;
+	/** `p:control/@imgH` in EMU (ST_PositiveCoordinate32). @see imgWidthEmu */
+	imgHeightEmu?: number;
 	/** X position (px) of the control's fallback picture, if present. */
 	x?: number;
 	/** Y position (px) of the control's fallback picture, if present. */
@@ -141,8 +163,24 @@ export interface PptxSlideBackgroundPattern {
 export interface PptxSlide {
 	id: string;
 	rId: string; // Relationship ID
+	/**
+	 * `p:sldIdLst/p:sldId/@id` (ST_SlideId, 256..2147483647): the numeric key
+	 * that sections (`p14:sldIdLst/p14:sldId/@id`) and section/summary zooms
+	 * name slides by.
+	 *
+	 * It lives in `presentation.xml`, NOT in the slide part, so it cannot be
+	 * recovered from `rawXml`. Without it on the model, code that writes a
+	 * section's membership has nothing correct to write and falls back to the
+	 * slide NUMBER, which is 1-based and therefore never matches a real deck's
+	 * ids: the section reloads with no slides in it.
+	 */
+	slideId?: string;
 	sourceSlideId?: string; // Optional source slide path when creating new slides
-	/** Optional author-supplied slide name (set via `SlideBuilder.setName`). */
+	/**
+	 * The slide name, `p:cSld/@name`: loaded from the part, written back on
+	 * save (an empty string clears the attribute), and settable via
+	 * `SlideBuilder.setName`.
+	 */
 	name?: string;
 	layoutPath?: string;
 	layoutName?: string;
@@ -153,6 +191,8 @@ export interface PptxSlide {
 	elements: PptxElement[];
 	backgroundColor?: string;
 	backgroundImage?: string; // base64 data URL for background image
+	/** Crop, tiling and image effects authored on the background blip fill. */
+	backgroundImageProperties?: PptxImageProperties;
 	backgroundGradient?: string; // CSS gradient string for background
 	/**
 	 * Pattern fill on the slide background (`<a:pattFill>` inside `<p:bgPr>`).
@@ -166,16 +206,30 @@ export interface PptxSlide {
 	 */
 	backgroundPattern?: PptxSlideBackgroundPattern;
 	/**
-	 * `<p:bgPr/@shadeToTitle>` — boolean flag instructing the renderer to
-	 * shade the background toward the title placeholder colour. Captured
-	 * for lossless round-trip; the React renderer currently treats it as
-	 * a passthrough hint.
+	 * `<p:bgPr/@shadeToTitle>`: boolean flag instructing the renderer to
+	 * anchor the background gradient on the title placeholder as a
+	 * rectangular path gradient (COM-measured against real PowerPoint;
+	 * it does NOT recolour toward the title's text colour, despite the
+	 * attribute's name). Parsed and round-tripped here on the core model;
+	 * the actual visual effect is applied by `pptx-viewer-shared`'s
+	 * `getSlideBackgroundStyle` (see `render/background-shade-to-title.ts`),
+	 * consumed by all five bindings, not by core itself. Legacy PowerPoint
+	 * 97-2003 hint, not observed in any real-world corpus file this project
+	 * has collected and not settable from any modern PowerPoint UI; see
+	 * `docs/guide/limitations.md`.
 	 *
 	 * ECMA-376 §19.3.1.2 (CT_BackgroundProperties).
 	 */
 	backgroundShadeToTitle?: boolean;
 	transition?: PptxSlideTransition;
 	animations?: PptxElementAnimation[];
+	/**
+	 * Read-only anchors for the deck's own (non-editor-authored) effect
+	 * groups, merged with `animations` by the authoring UI so drag-to-reorder
+	 * can target any position in the full sequence. See
+	 * {@link PptxAnimationTimelineAnchor}.
+	 */
+	animationTimelineAnchors?: PptxAnimationTimelineAnchor[];
 	/** Native OOXML animation data parsed from `p:timing`. */
 	nativeAnimations?: PptxNativeAnimation[];
 	/** Preserved raw `p:timing` XML for lossless round-trip of native animations. */
@@ -208,6 +262,13 @@ export interface PptxSlide {
 	backgroundShowAnimation?: boolean;
 	/** Whether master slide shapes should be shown on this slide (`p:sld/@showMasterSp`). */
 	showMasterShapes?: boolean;
+	/**
+	 * Whether inherited master placeholder animations should replay on this
+	 * slide (`p:sld/@showMasterPhAnim`). Distinct from {@link showMasterShapes}:
+	 * this governs animation timing, not shape visibility. Mirrors
+	 * `p:sldLayout/@showMasterPhAnim`, ECMA-376 §19.3.1.38.
+	 */
+	showMasterPhAnim?: boolean;
 	/** Drawing guides parsed from slide extension list. */
 	guides?: PptxDrawingGuide[];
 	/** When explicitly `false`, the slide is unmodified and save can skip re-serialization. */
@@ -338,12 +399,53 @@ export interface PptxPresentationProperties {
 	printProperties?: PptxPresentationPrintProperties | null;
 	/** Most-recently-used colours from the presentation palette. */
 	mruColors?: string[];
-	/** Grid spacing in EMUs (cx, cy). Default is 914400 / 8 = 114300. */
-	gridSpacing?: { cx: number; cy: number };
-	/** Pen colour for presentation mode annotations (from `p:showPr/p:penClr`). */
+	/**
+	 * Pen colour for presentation mode annotations (from `p:showPr/p:penClr`).
+	 * `p:penClr` is a full `EG_ColorChoice` (P1-G2): a scheme/preset/system
+	 * swatch resolves to a hex string here just like a direct `a:srgbClr`.
+	 */
 	penColor?: string;
+	/**
+	 * The resolved hex value {@link penColor} had at parse time, and the
+	 * original `p:penClr` colour-choice XML node, preserved so a save that
+	 * never touches the pen colour re-emits the original scheme/preset
+	 * reference verbatim instead of flattening it to a baked `a:srgbClr`.
+	 * Internal round-trip bookkeeping; not meant to be set by API callers.
+	 */
+	penColorOriginal?: string;
+	/** @see penColorOriginal */
+	penColorXml?: XmlObject;
 	/** Kiosk auto-restart interval in milliseconds (from `p:kiosk/@restart`). Only meaningful when showType is "kiosk". */
 	kioskRestartTime?: number;
+	/**
+	 * `p:showPr/p:browse/@showScrollbar` (CT_ShowInfoBrowse §19.2.1.10 /
+	 * §19.3.1.43), the "Show scrollbar" checkbox in PowerPoint's Set Up Show
+	 * dialog. Only meaningful when `showType` is `"browsed"`; the schema
+	 * default is `true`. `undefined` means the source authored no explicit
+	 * value (or `showType` is not `"browsed"`).
+	 */
+	showScrollbar?: boolean;
+}
+
+/**
+ * Slide dimensions from `p:sldSz` (CT_SlideSize, ECMA-376 §19.2.1.39).
+ *
+ * @example
+ * ```ts
+ * const size: PptxSlideSize = { widthEmu: 9144000, heightEmu: 6858000, type: 'screen4x3' };
+ * // => satisfies PptxSlideSize
+ * ```
+ */
+export interface PptxSlideSize {
+	/** `@cx` in EMU. Omitted or non-positive values leave the loaded width alone. */
+	widthEmu?: number;
+	/** `@cy` in EMU. Omitted or non-positive values leave the loaded height alone. */
+	heightEmu?: number;
+	/**
+	 * `@type` (ST_SlideSizeType). The schema default is `custom`, which is
+	 * why PowerPoint omits the attribute for a non-preset size.
+	 */
+	type?: string;
 }
 
 /**
@@ -461,6 +563,35 @@ export interface PptxPhotoAlbum {
 	layout?: string;
 	/** Frame style applied to each photo (e.g. "frameStyle1"). */
 	frame?: string;
+	/**
+	 * `p:photoAlbum/@isPhoto` (ECMA-376 S19.2.1.27, CT_PhotoAlbum): whether
+	 * the pictures placed by the album wizard are real photographs, as
+	 * opposed to clip art or other embedded images. `undefined` when the
+	 * source authored no explicit value (schema default `false`); this is a
+	 * purely declarative wizard-provenance flag, not something this library
+	 * gates any layout/frame behaviour on.
+	 */
+	isPhoto?: boolean;
+}
+
+/**
+ * A recognizer-owned `p:smartTags` reference from `presentation.xml`
+ * (CT_SmartTags, ECMA-376 S19.2.1.42): a bare relationship id pointing at a
+ * legacy Office "Smart Tags" recognizer part, distinct from the
+ * user-authored `p:tags` construct (see {@link PptxTagCollection}).
+ *
+ * This library has no data model for recognizer part CONTENT (there is no
+ * way to create, inspect, or edit one through the public API), so this type
+ * only captures enough to preserve an authored reference losslessly: the
+ * relationship id and, when resolvable, the target part path.
+ */
+export interface PptxSmartTagsReference {
+	/** Relationship id from `p:smartTags/@r:id`. */
+	relId: string;
+	/** Resolved ZIP path of the referenced recognizer part, when resolvable. */
+	targetPath?: string;
+	/** Raw `p:smartTags` XML retained for lossless round-trip. */
+	rawXml?: XmlObject;
 }
 
 /**
@@ -527,12 +658,42 @@ export interface PptxData {
 	themeOptions?: PptxThemeOption[];
 	/** Parsed table style definitions from `ppt/tableStyles.xml`. */
 	tableStyleMap?: ParsedTableStyleMap;
+	/**
+	 * The current default table style GUID (`ppt/tableStyles.xml`'s
+	 * `a:tblStyleLst/@def`): the style PowerPoint applies to a newly inserted
+	 * table. Matches `PptxSaveOptions.tableStylesDefaultId` so a save call
+	 * that omits it can fall back to what was loaded.
+	 */
+	tableStylesDefaultId?: string;
 	/** Whether the presentation is password-protected. */
 	isPasswordProtected?: boolean;
 	/** Embedded font data (name + binary data URL) extracted from the presentation. */
 	embeddedFonts?: PptxEmbeddedFont[];
 	/** Typed `p:embeddedFontLst` package metadata, including unresolved variants. */
 	embeddedFontList?: PptxEmbeddedFontList;
+	/**
+	 * `p:presentation/@embedTrueTypeFonts` (ECMA-376 §19.2.1.26): the author's
+	 * saved preference that TrueType fonts referenced by the deck be embedded.
+	 * `undefined` when the attribute is absent (spec default `false`).
+	 *
+	 * This is purely declarative in this library: fonts are only ever embedded
+	 * when the caller explicitly supplies `embeddedFontList`/`embeddedFonts`
+	 * (there is no automatic embed-on-save), so toggling this flag does not
+	 * gate any embedding behaviour of its own here - it only round-trips the
+	 * author's stated preference, the same way real PowerPoint reads it back
+	 * as a checkbox state rather than a trigger. See `@saveSubsetFonts`,
+	 * which is a separate, deliberately unimplemented flag (no glyph
+	 * subsetting) that does not interact with this one.
+	 */
+	embedTrueTypeFonts?: boolean;
+	/**
+	 * Presentation-level default text style (`p:defaultTextStyle`): the
+	 * last-resort paragraph/run-property fallback for every shape (placeholder
+	 * or not) whose local and inherited cascade leaves a field undefined.
+	 * Keyed the same way as {@link PptxMasterTextStyles} categories: `-1` is
+	 * `a:defPPr`, `0`-`8` are `a:lvl1pPr`-`a:lvl9pPr`.
+	 */
+	defaultTextStyle?: PptxTextStyleLevels;
 	/** Most-recently-used colour list from presentation properties. */
 	mruColors?: string[];
 	/** Parsed notes master data if present in the PPTX. */
@@ -563,6 +724,14 @@ export interface PptxData {
 	modifyVerifier?: PptxModifyVerifier;
 	/** Photo album metadata from `p:photoAlbum` in `presentation.xml`. */
 	photoAlbum?: PptxPhotoAlbum;
+	/**
+	 * Legacy Smart Tags recognizer reference from `p:smartTags` in
+	 * `presentation.xml`. Read-only: there is no data model for the
+	 * recognizer part's own content, so this exists to make the reference
+	 * inspectable and to prove it survives a save (the owning part and its
+	 * relationship are preserved passively, like any other unmodelled part).
+	 */
+	smartTags?: PptxSmartTagsReference;
 	/** East Asian line-break settings from `p:kinsoku` in `presentation.xml`. */
 	kinsoku?: PptxKinsoku;
 	/** Custom XML data parts from `customXml/` in the OPC package. */

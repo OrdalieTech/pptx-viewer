@@ -66,7 +66,7 @@ export interface ViewerOptionsSection {
 	/** Optional explanatory paragraph under the section title. */
 	descriptionKey?: string;
 	/** Marks a bespoke block a binding renders itself (e.g. the theme picker). */
-	special?: 'themePicker' | 'clearCache' | 'shortcutReference';
+	special?: 'themePicker' | 'clearCache' | 'shortcutReference' | 'customFonts';
 	controls: readonly ViewerOptionsControl[];
 }
 
@@ -107,6 +107,21 @@ export function numberControl(
 	unitKey?: string,
 ): ViewerOptionsNumberControl {
 	return { kind: 'number', group, key, labelKey, min, max, unitKey };
+}
+
+/**
+ * Clamp a File > Options number-control edit into its schema range.
+ *
+ * Returns `undefined` when `raw` does not parse to a finite number, so the
+ * caller can skip the commit and leave the field's prior value in place
+ * (matches the behaviour every binding except one already had).
+ */
+export function clampOptionNumber(raw: string, min: number, max: number): number | undefined {
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed)) {
+		return undefined;
+	}
+	return Math.min(max, Math.max(min, parsed));
 }
 
 export function textControl(

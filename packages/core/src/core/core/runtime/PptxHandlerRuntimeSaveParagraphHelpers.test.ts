@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 
 import type { TextStyle, TextSegment, XmlObject } from '../../types';
+import { createAutoNumberSequence } from './auto-number-sequence';
+import { PptxHandlerRuntime } from './PptxHandlerRuntimeImplementation';
 import {
 	EMU_PER_PX,
 	buildParagraphPropertiesXml,
@@ -9,6 +11,24 @@ import {
 	computeUniformSegmentOverrides,
 } from './PptxHandlerRuntimeSaveParagraphHelpers';
 import type { ParagraphSpacingConfig } from './PptxHandlerRuntimeSaveParagraphHelpers';
+
+// Thin wrapper exposing the protected real parser so the round-trip test
+// below exercises the actual load path, not a re-implementation of it.
+class ParagraphContentRuntime extends PptxHandlerRuntime {
+	public collect(p: XmlObject, pIdx: number, paraCount: number) {
+		return this.collectShapeParagraphContent(p, pIdx, paraCount, 'left', {}, {
+			txBody: undefined,
+			inheritedTxBody: undefined,
+			bodyDefaultRunStyle: {},
+			slideRelationshipMap: undefined,
+			placeholderInfo: undefined,
+			phDefaults: undefined,
+			slidePath: 'ppt/slides/slide1.xml',
+			effectiveLevelStyles: undefined,
+			autoNumbering: createAutoNumberSequence(),
+		} as never);
+	}
+}
 
 // ---------------------------------------------------------------------------
 // buildParagraphPropertiesXml
@@ -150,6 +170,147 @@ describe('buildParagraphPropertiesXml', () => {
 		expect(result['@_fontAlgn']).toBe('base');
 		expect(result['@_hangingPunct']).toBe('1');
 	});
+
+	// -------------------------------------------------------------------------
+	// CT_TextParagraphProperties child order
+	// -------------------------------------------------------------------------
+	/**
+	 * ECMA-376 21.1.2.2.7 sequences the children of `a:pPr` as
+	 *   lnSpc, spcBef, spcAft, <bullet group>, tabLst, defRPr, extLst.
+	 * PowerPoint's own output agrees: the notes body of
+	 * `e2e/fixtures/solution-explorer.pptx` emits
+	 *   ...spcAft, buClrTx, buSzTx, buFontTx, buNone, tabLst, defRPr.
+	 * `tabLst` and `defRPr` used to be written BEFORE the bullet group, under a
+	 * comment asserting the schema put `defRPr` first, which it does not.
+	 *
+	 * PowerPoint does not refuse the mis-ordered file, it silently DISCARDS the
+	 * whole bullet group: COM on a deck saved with the old order reported
+	 * `ParagraphFormat.Bullet.Visible = 0`, no bullet font and `RelativeSize =
+	 * 1`, where the same deck in schema order reported a visible Arial bullet at
+	 * 0.9. So the bug cost authored bullets, quietly.
+	 */
+	it('emits the bullet group before a:tabLst and a:defRPr', () => {
+		const textStyle: TextStyle = {
+			tabStops: [{ position: 100, align: 'l' }],
+			paragraphDefaultRunPropertiesXml: { '@_sz': '1800' },
+			paragraphPropertiesExtLstXml: { 'a:ext': { '@_uri': '{X}' } },
+		};
+		const result = buildParagraphPropertiesXml(
+			textStyle,
+			undefined,
+			{ char: '•', fontFamily: 'Arial' },
+			{
+				spacingBefore: { 'a:spcPts': { '@_val': '600' } },
+				spacingAfter: undefined,
+				lineSpacing: { 'a:spcPct': { '@_val': '100000' } },
+				lineSpacingExactPt: undefined,
+			},
+		);
+		const keys = Object.keys(result).filter((k) => !k.startsWith('@_'));
+		expect(keys).toStrictEqual([
+			'a:lnSpc',
+			'a:spcBef',
+			'a:buFont',
+			'a:buChar',
+			'a:tabLst',
+			'a:defRPr',
+			'a:extLst',
+		]);
+	});
+
+	// -------------------------------------------------------------------------
+	// Authored-property gate
+	// -------------------------------------------------------------------------
+	/**
+	 * The style reaching the builder is the SHAPE-level style merged with the
+	 * paragraph's own `a:pPr`, and the shape-level half is resolved through the
+	 * text body's `a:lstStyle` and the inherited layout/master placeholder. Left
+	 * ungated it stamped those inherited values onto every paragraph as
+	 * explicitly authored ones, which overrides the inheritance that would
+	 * otherwise resolve per paragraph.
+	 */
+	describe('authored-property gate', () => {
+		const shapeLevel: TextStyle = {
+			paragraphMarginLeft: 36,
+			paragraphIndent: -18,
+			align: 'center',
+			rtl: false,
+			defaultTabSize: 96,
+			tabStops: [{ position: 100, align: 'l' }],
+		};
+
+		it('emits the whole shape-level style when the paragraph authored nothing', () => {
+			const result = buildParagraphPropertiesXml(shapeLevel, 'ctr', undefined, emptySpacing);
+			expect(result['@_marL']).toBe(String(36 * EMU_PER_PX));
+			expect(result['@_algn']).toBe('ctr');
+			expect(result['@_defTabSz']).toBe(String(96 * EMU_PER_PX));
+			expect(result['a:tabLst']).toBeDefined();
+		});
+
+		it('emits only the keys the paragraph authored', () => {
+			// The paragraph authored `algn` alone; `marL` / `indent` / `defTabSz`
+			// / `tabLst` came from the shape and must be left to inherit.
+			const result = buildParagraphPropertiesXml(
+				{ ...shapeLevel, align: 'right' },
+				'r',
+				undefined,
+				emptySpacing,
+				0,
+				{ align: 'right' },
+			);
+			expect(result['@_algn']).toBe('r');
+			expect(result['@_marL']).toBeUndefined();
+			expect(result['@_indent']).toBeUndefined();
+			expect(result['@_rtl']).toBeUndefined();
+			expect(result['@_defTabSz']).toBeUndefined();
+			expect(result['a:tabLst']).toBeUndefined();
+		});
+
+		it('gates the spacing children on the authored set too', () => {
+			const spacing: ParagraphSpacingConfig = {
+				spacingBefore: { 'a:spcPts': { '@_val': '600' } },
+				spacingAfter: { 'a:spcPts': { '@_val': '300' } },
+				lineSpacing: { 'a:spcPct': { '@_val': '150000' } },
+				lineSpacingExactPt: undefined,
+			};
+			const result = buildParagraphPropertiesXml(shapeLevel, undefined, undefined, spacing, 0, {
+				paragraphSpacingBefore: 8,
+			});
+			expect(result['a:spcBef']).toBeDefined();
+			expect(result['a:spcAft']).toBeUndefined();
+			expect(result['a:lnSpc']).toBeUndefined();
+		});
+
+		it('withholds the shape-level style from a NESTED paragraph that authored nothing', () => {
+			// The shape-level style is filled first-paragraph-wins, so it
+			// describes outline level 0. Broadcasting its `marL` to a level-3
+			// bullet replaced that bullet's own `a:lvl4pPr` indent. A bare
+			// `<a:pPr lvl="3"/>` authors no properties, so it lands here.
+			const result = buildParagraphPropertiesXml(
+				shapeLevel,
+				'ctr',
+				undefined,
+				emptySpacing,
+				3,
+				undefined,
+			);
+			expect(result['@_lvl']).toBe('3');
+			expect(result['@_marL']).toBeUndefined();
+			expect(result['@_algn']).toBeUndefined();
+		});
+
+		it('still honours a nested paragraph that authored its own properties', () => {
+			const result = buildParagraphPropertiesXml(
+				{ ...shapeLevel, paragraphMarginLeft: 72 },
+				'ctr',
+				undefined,
+				emptySpacing,
+				3,
+				{ paragraphMarginLeft: 72 },
+			);
+			expect(result['@_marL']).toBe(String(72 * EMU_PER_PX));
+		});
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -194,6 +355,18 @@ describe('applyBulletProperties', () => {
 		});
 	});
 
+	it('a bullet colorRef wins over color/colorXml', () => {
+		const props: XmlObject = {};
+		applyBulletProperties(props, {
+			color: '#4472C4',
+			colorXml: { 'a:srgbClr': { '@_val': '4472C4' } },
+			colorRef: { scheme: 'accent1', lumMod: 0.75 },
+		});
+		expect(props['a:buClr']).toStrictEqual({
+			'a:schemeClr': { '@_val': 'accent1', 'a:lumMod': { '@_val': '75000' } },
+		});
+	});
+
 	it('should set bullet char', () => {
 		const props: XmlObject = {};
 		applyBulletProperties(props, { char: '\u2022' });
@@ -226,6 +399,60 @@ describe('applyBulletProperties', () => {
 		applyBulletProperties(props, { imageRelId: 'rId5' });
 		expect(props['a:buBlip']).toStrictEqual({
 			'a:blip': { '@_r:embed': 'rId5' },
+		});
+	});
+
+	it('re-emits the captured a:buBlip subtree verbatim, preserving tile/stretch/srcRect', () => {
+		// Bug: the writer used to reconstruct a bare `a:blip[@r:embed]`,
+		// discarding every other child the parser had preserved on
+		// `imageBlipFillXml` (tile, stretch, srcRect, blip extLst).
+		const capturedBuBlip: XmlObject = {
+			'a:blip': {
+				'@_r:embed': 'rId5',
+				'a:extLst': { 'a:ext': { '@_uri': '{some-uri}' } },
+			},
+			'a:srcRect': { '@_l': '1000', '@_t': '2000', '@_r': '3000', '@_b': '4000' },
+			'a:stretch': { 'a:fillRect': {} },
+		};
+		const props: XmlObject = {};
+		applyBulletProperties(props, {
+			imageRelId: 'rId5',
+			imageBlipFillXml: capturedBuBlip,
+		});
+		expect(props['a:buBlip']).toBe(capturedBuBlip);
+		expect(props['a:buBlip']).toStrictEqual(capturedBuBlip);
+	});
+
+	it('load -> save round-trip: a picture bullet with a:tile survives verbatim', () => {
+		// Full round-trip using the real parser (collectShapeParagraphContent,
+		// exercised via ParagraphContentRuntime below) feeding straight into the
+		// real writer (applyBulletProperties), proving the modifiers a
+		// picture-bullet author set (here `a:tile`) are neither dropped by parse
+		// nor reconstructed away by save.
+		const sourceBuBlip: XmlObject = {
+			'a:blip': { '@_r:embed': 'rId9' },
+			'a:tile': { '@_tx': '0', '@_ty': '0', '@_sx': '100000', '@_sy': '100000' },
+		};
+		const { segments } = new ParagraphContentRuntime().collect(
+			{
+				'a:pPr': { 'a:buBlip': sourceBuBlip },
+				'a:r': { 'a:t': 'Item text' },
+			},
+			0,
+			1,
+		);
+		const bulletInfo = segments[0].bulletInfo;
+		expect(bulletInfo?.imageRelId).toBe('rId9');
+		expect(bulletInfo?.imageBlipFillXml).toStrictEqual(sourceBuBlip);
+
+		const props: XmlObject = {};
+		applyBulletProperties(props, bulletInfo!);
+		expect(props['a:buBlip']).toStrictEqual(sourceBuBlip);
+		expect((props['a:buBlip'] as XmlObject)['a:tile']).toStrictEqual({
+			'@_tx': '0',
+			'@_ty': '0',
+			'@_sx': '100000',
+			'@_sy': '100000',
 		});
 	});
 });
@@ -516,5 +743,63 @@ describe('computeUniformSegmentOverrides', () => {
 		const result = computeUniformSegmentOverrides({ bold: true }, []);
 		// With empty segments, every(segment => ...) returns true vacuously
 		expect(result.bold).toBeTruthy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// assembleParagraphXml: authored sibling order
+// ---------------------------------------------------------------------------
+/**
+ * A paragraph's runs, fields and breaks interleave freely, but a single object
+ * key can only hold one array, so grouping them by tag silently moved every
+ * field to the end of its paragraph: `"Slide " #fld " - " titlefld` saved back
+ * as `"Slide " " - " #fld titlefld`. Interleaved sequences therefore use core's
+ * `#pptx-order-N` key markers, which the XMLBuilder strips on serialisation.
+ */
+describe('assembleParagraphXml sibling order', () => {
+	const literal = (text: string): XmlObject => ({ 'a:t': text });
+	const field = (type: string): XmlObject => ({ __isField: true, '@_type': type });
+
+	it('keeps an inline field between the runs it was authored between', () => {
+		const result = assembleParagraphXml(
+			[literal('Slide '), field('slidenum'), literal(' - '), field('slidetitle')],
+			{},
+		);
+		expect(Object.keys(result)).toStrictEqual([
+			'a:pPr',
+			'a:r#pptx-order-0',
+			'a:fld#pptx-order-1',
+			'a:r#pptx-order-2',
+			'a:fld#pptx-order-3',
+			'a:endParaRPr',
+		]);
+		expect(result['a:r#pptx-order-0']).toStrictEqual({ 'a:t': 'Slide ' });
+		expect(result['a:fld#pptx-order-3']).toStrictEqual({ '@_type': 'slidetitle' });
+	});
+
+	it('keeps a soft break in its authored position between runs', () => {
+		const result = assembleParagraphXml(
+			[literal('one'), { __isLineBreak: true }, literal('two')],
+			{},
+		);
+		expect(Object.keys(result)).toStrictEqual([
+			'a:pPr',
+			'a:r#pptx-order-0',
+			'a:br',
+			'a:r#pptx-order-2',
+			'a:endParaRPr',
+		]);
+	});
+
+	it('leaves an already-grouped paragraph on plain keys', () => {
+		const result = assembleParagraphXml([literal('a'), literal('b'), field('slidenum')], {});
+		expect(Object.keys(result)).toStrictEqual(['a:pPr', 'a:r', 'a:fld', 'a:endParaRPr']);
+		expect(result['a:r']).toStrictEqual([{ 'a:t': 'a' }, { 'a:t': 'b' }]);
+	});
+
+	it('emits a grouped paragraph in its authored key order, not a fixed one', () => {
+		// A field-first footer ("#fld of N") must not be re-ordered to runs-first.
+		const result = assembleParagraphXml([field('slidenum'), literal(' of 10')], {});
+		expect(Object.keys(result)).toStrictEqual(['a:pPr', 'a:fld', 'a:r', 'a:endParaRPr']);
 	});
 });

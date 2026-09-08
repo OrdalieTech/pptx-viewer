@@ -1,7 +1,12 @@
+/* oxlint-disable eslint/one-var -- each hook call below is its own independent
+   piece of state/memoization; merging them into one `const` statement would
+   hurt readability (and has previously broken the React compiler's ability to
+   track separate hook boundaries), not help it. */
 import type {
 	PptxElement,
 	PptxSlide,
 	PptxElementAnimation,
+	PptxAfterAnimationAction,
 	PptxAnimationPreset,
 	PptxAnimationDirection,
 	PptxAnimationRepeatMode,
@@ -10,6 +15,16 @@ import type {
 	PptxAnimationTrigger,
 } from 'pptx-viewer-core';
 import { hasTextProperties } from 'pptx-viewer-core';
+import {
+	applyMotionPathPreset,
+	buildAnimationTimelineBars,
+	buildAnimationTimelineRows,
+	clearMotionPath,
+	getEffectSoundState,
+	setAfterAnimation,
+	setAfterAnimationColor,
+	setEffectSound,
+} from 'pptx-viewer-shared';
 import React, { useCallback, useMemo } from 'react';
 
 import { getElementLabel } from '../../utils';
@@ -46,6 +61,17 @@ export function useAnimationHandlers({
 		[activeSlide.animations],
 	);
 
+	// Merges the editor's own animations with the deck's read-only native
+	// anchors into one full-sequence drag-and-drop timeline.
+	const timelineRows = useMemo(
+		() =>
+			buildAnimationTimelineRows(
+				activeSlide.animations ?? [],
+				activeSlide.animationTimelineAnchors ?? [],
+			),
+		[activeSlide.animations, activeSlide.animationTimelineAnchors],
+	);
+
 	// ── Core updater ──
 
 	const updateAnimations = useCallback(
@@ -77,7 +103,9 @@ export function useAnimationHandlers({
 				const idx = anims.findIndex((a) => a.elementId === selectedElement.id);
 				const hasEffect = entrance || exit || emphasis;
 				if (idx >= 0) {
-					if (!hasEffect) {
+					// A motion path outlives the preset buckets: clearing the last
+					// preset must not delete the path drawn on the canvas with it.
+					if (!hasEffect && !anims[idx].motionPath) {
 						return anims.filter((a) => a.elementId !== selectedElement.id);
 					}
 					anims[idx] = {
@@ -139,6 +167,27 @@ export function useAnimationHandlers({
 			);
 		},
 		[setAnimationPreset, selectedElementAnimation],
+	);
+
+	// ── Motion path ──
+
+	const handleMotionPathChange = useCallback(
+		(presetId: string) => {
+			if (!canEdit) {
+				return;
+			}
+			// `custom` is the read-only marker for a hand-dragged path; selecting it
+			// again is a no-op rather than a reset to some catalogue entry.
+			if (presetId === 'custom') {
+				return;
+			}
+			updateAnimations((anims) =>
+				presetId === 'none'
+					? clearMotionPath(anims, selectedElement.id)
+					: applyMotionPathPreset(anims, selectedElement.id, presetId),
+			);
+		},
+		[canEdit, updateAnimations, selectedElement.id],
 	);
 
 	// ── Timing handlers ──
@@ -206,6 +255,45 @@ export function useAnimationHandlers({
 		[updateAnimationField],
 	);
 
+	// ── Effect sound ──
+
+	const effectSoundState = useMemo(
+		() => getEffectSoundState(activeSlide.animations ?? [], selectedElement.id),
+		[activeSlide.animations, selectedElement.id],
+	);
+
+	const handleEffectSoundPick = useCallback(
+		(pick: { dataUrl: string; fileName?: string } | undefined) => {
+			if (!canEdit) {
+				return;
+			}
+			updateAnimations((anims) => setEffectSound(anims, selectedElement.id, pick));
+		},
+		[canEdit, updateAnimations, selectedElement.id],
+	);
+
+	// ── After animation ──
+
+	const handleAfterAnimationChange = useCallback(
+		(action: PptxAfterAnimationAction) => {
+			if (!canEdit) {
+				return;
+			}
+			updateAnimations((anims) => setAfterAnimation(anims, selectedElement.id, action));
+		},
+		[canEdit, updateAnimations, selectedElement.id],
+	);
+
+	const handleAfterAnimationColorChange = useCallback(
+		(color: string) => {
+			if (!canEdit) {
+				return;
+			}
+			updateAnimations((anims) => setAfterAnimationColor(anims, selectedElement.id, color));
+		},
+		[canEdit, updateAnimations, selectedElement.id],
+	);
+
 	// ── Sub-hooks ──
 
 	const preview = useAnimationPreview({
@@ -213,7 +301,7 @@ export function useAnimationHandlers({
 		selectedElementAnimation,
 	});
 
-	const dragDrop = useAnimationDragDrop({ canEdit, updateAnimations });
+	const dragDrop = useAnimationDragDrop({ canEdit, rows: timelineRows, updateAnimations });
 
 	const getTimelineLabel = useCallback(
 		(anim: PptxElementAnimation): string => {
@@ -227,12 +315,30 @@ export function useAnimationHandlers({
 		[activeSlide.elements],
 	);
 
+	// Label for a read-only native row: the element name(s) its effects
+	// target, so the deck's own effects read the same way as editor rows.
+	const getNativeRowLabel = useCallback(
+		(targetIds: string[]): string =>
+			targetIds
+				.map((id) => {
+					const el = activeSlide.elements?.find((e) => e.id === id);
+					if (!el) {
+						return id.slice(0, 8);
+					}
+					const text = hasTextProperties(el) ? el.text : undefined;
+					return text || getElementLabel(el);
+				})
+				.join(', '),
+		[activeSlide.elements],
+	);
+
 	// ── Derived state ──
 
 	const hasAnimation = Boolean(
 		selectedElementAnimation?.entrance ||
 		selectedElementAnimation?.exit ||
-		selectedElementAnimation?.emphasis,
+		selectedElementAnimation?.emphasis ||
+		selectedElementAnimation?.motionPath,
 	);
 
 	const showDirectionPicker =
@@ -241,30 +347,18 @@ export function useAnimationHandlers({
 			DIRECTIONAL_PRESETS.has(selectedElementAnimation?.exit ?? ''));
 
 	const timelineBarData = useMemo(() => {
-		if (sortedAnimations.length === 0) {
-			return [];
-		}
-		let maxEndMs = 0;
-		const entries = sortedAnimations.map((anim) => {
-			const startMs = anim.delayMs ?? 0;
-			const durationMs = anim.durationMs ?? 500;
-			const endMs = startMs + durationMs;
-			if (endMs > maxEndMs) {
-				maxEndMs = endMs;
-			}
-			return { anim, startMs, durationMs, endMs };
+		const bars = buildAnimationTimelineBars(sortedAnimations);
+		const barsByElementId = new Map(bars.map((bar) => [bar.elementId, bar]));
+		return sortedAnimations.flatMap((anim) => {
+			const bar = barsByElementId.get(anim.elementId);
+			return bar ? [{ anim, leftPercent: bar.leftPercent, widthPercent: bar.widthPercent }] : [];
 		});
-		const totalMs = Math.max(maxEndMs, 1);
-		return entries.map((entry) => ({
-			anim: entry.anim,
-			leftPercent: (entry.startMs / totalMs) * 100,
-			widthPercent: (entry.durationMs / totalMs) * 100,
-		}));
 	}, [sortedAnimations]);
 
 	return {
 		selectedElementAnimation,
 		sortedAnimations,
+		timelineRows,
 		hasAnimation,
 		showDirectionPicker,
 		timelineBarData,
@@ -280,7 +374,13 @@ export function useAnimationHandlers({
 		handleRepeatModeChange,
 		handleDirectionChange,
 		handleSequenceChange,
+		handleMotionPathChange,
+		effectSoundState,
+		handleEffectSoundPick,
+		handleAfterAnimationChange,
+		handleAfterAnimationColorChange,
 		getTimelineLabel,
+		getNativeRowLabel,
 		...preview,
 		...dragDrop,
 	};

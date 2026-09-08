@@ -1,38 +1,70 @@
-import { defaultCssVars } from 'pptx-viewer-shared';
+import {
+	defaultCssVars,
+	HIDDEN_SLIDE_DIM_OPACITY,
+	HIDDEN_SLIDE_SLASH_GRADIENT,
+	STATUS_BAR_METRICS,
+	TITLE_BAR_METRICS,
+} from 'pptx-viewer-shared';
 
 import { ACCOUNT_CSS } from './account-css';
 import { AI_CSS } from './ai-css';
 import { AI_FOCUS_CSS } from './ai-focus-css';
+import { AI_HISTORY_CSS } from './ai-history-css';
 import { ANIMATION_AUTHORING_CSS } from './animation-authoring-css';
 import { COLLAB_CSS } from './collab-css';
 import { DOCUMENT_PROPERTIES_CSS } from './document-properties-css';
 import { EDITOR_CSS } from './editor-css';
 import { EQUATION_DIALOG_CSS } from './equation-dialog-css';
+import { EXPORT_PROGRESS_CSS } from './export-progress-css';
 import { FILE_INFO_CSS } from './file-info-css';
+import { INSPECTOR_FORMAT_CSS } from './inspector-format-css';
 import { INSPECTOR_PANELS_CSS } from './inspector-panels-css';
 import { MASTER_VIEW_CSS } from './master-view-css';
 import { MOBILE_SHEET_CSS } from './mobile-sheet-css';
 import { OPTIONS_DIALOG_CSS } from './options-dialog-css';
+import { OUTLINE_VIEW_CSS } from './outline-view-css';
+import { PARITY_BANNERS_CSS } from './parity-banners-css';
 import { PARITY_DIALOG_CSS } from './parity-dialog-css';
+import { PRESENTATION_TOOLBAR_CSS } from './presentation-toolbar-css';
 import { PRESENTATION_TOUCH_CSS } from './presentation-touch-css';
+import { PRESENTER_VIEW_CSS } from './presenter-view-css';
+import { READING_VIEW_CSS } from './reading-view-css';
 import { RIBBON_CSS } from './ribbon-css';
 import { RIBBON_QUICK_CSS } from './ribbon-quick-css';
+import { SLIDE_TEMPLATE_DIALOG_CSS } from './slide-template-dialog-css';
 import { SMARTART_DIALOG_CSS } from './smartart-dialog-css';
 
 /**
  * The viewer stylesheet, scoped under the `.pptxv` root class.
  *
  * All chrome colors come from the shared `--pptx-*` theme custom properties
- * (see `pptx-viewer-shared/theme`): the defaults are emitted onto `.pptxv`
- * from the shared `defaultCssVars()`, and a host `ViewerTheme` overrides them
+ * (see `pptx-viewer-shared/theme`): the defaults are emitted at zero
+ * specificity onto the page root from the shared `defaultCssVars()` (see
+ * {@link defaultVarsBlock} for why), and a host `ViewerTheme` overrides them
  * per instance via inline style (see `themeToCssVars`).
  */
 
+/**
+ * The title/status bar measurements React, Vue and Angular get from Tailwind
+ * utilities. This binding has no Tailwind, so it interpolates the same shared
+ * numbers straight into its stylesheet; that is what stops the hand-ported bar
+ * drifting off the other four (it had reached 34px tall with a `#d24726` logo).
+ */
+const TB = TITLE_BAR_METRICS;
+
+/**
+ * The built-in theme tokens as a LAST-RESORT layer, matching the other four
+ * bindings: `:where(:root)` has zero specificity, so any `--pptx-*` value the
+ * host page declares (a `:root` rule or inline vars on `<html>`) wins over
+ * these defaults. They used to be declared on `.pptxv` itself, which shadowed
+ * the host's own declarations and made the "Default" catalog entry resolve to
+ * the built-in dark palette instead of clearing to the host chrome.
+ */
 function defaultVarsBlock(): string {
 	const vars = Object.entries(defaultCssVars())
 		.map(([key, value]) => `\t${key}: ${value};`)
 		.join('\n');
-	return `.pptxv {\n${vars}\n}`;
+	return `:where(:root) {\n${vars}\n}`;
 }
 
 const CHROME_CSS = `
@@ -77,6 +109,32 @@ const CHROME_CSS = `
 	color: inherit;
 	cursor: pointer;
 }
+/* Breathing room around a text label. Deliberately at .pptxv-btn's own
+ * specificity and just after it, so it beats the padding: 0 above (a label
+ * touching the button edge reads as one run of words in a ribbon row) while any
+ * context that already dresses its own buttons, e.g. .pptxv-eqdlg-footer
+ * button, still wins and keeps its dialog metrics. */
+.pptxv-btn-text { padding: 0 6px; }
+/* Hit-area contract for a button whose content is a TEXT label rather than a
+ * 16px icon (makeButton's "text" option). The 28x28 box above cannot hold a
+ * word and .pptxv-btn does not clip, so without this the label is painted, and
+ * HIT-TESTED, outside the button's own rect and on top of its neighbours: a
+ * click at one button's centre then activates the button beside it, because the
+ * later sibling paints last. Sizing the box to its label, and refusing to
+ * flex-shrink below it (which would re-create the overflow the moment a tab row
+ * runs out of width), keeps every button's ink inside its own bounding rect, so
+ * a coordinate click always reaches the control it looks like it is over. This
+ * is authoritative on purpose; the specialisations that give a text button its
+ * own metrics (.pptxv-btn-pill, .pptxv-animation-preset,
+ * .pptxv-motion-path-preset, .pptxv-theme-gallery,
+ * .pptxv-presentation-touch-controls) are declared later in the sheet at equal
+ * specificity and keep winning. */
+.pptxv-btn.pptxv-btn-text {
+	width: auto;
+	min-width: 28px;
+	flex: none;
+	white-space: nowrap;
+}
 .pptxv-btn:hover:not(:disabled) { background: var(--pptx-accent); color: var(--pptx-accent-foreground); }
 .pptxv-btn:disabled { opacity: 0.4; cursor: default; }
 .pptxv-btn.is-active { background: var(--pptx-accent); color: var(--pptx-accent-foreground); }
@@ -97,37 +155,44 @@ const CHROME_CSS = `
 .pptxv-autosave-status.is-saving { color: var(--pptx-accent-foreground); opacity: 0.8; }
 .pptxv-autosave-status.is-error { color: #dc2626; }
 
+/* Crash-recovery prompt (\`autosave/autosave-recovery-dialog\`). It reuses the
+   \`pptxv-parity-*\` dialog shell, so only its own three classes are declared
+   here; the shell rules live in \`parity-dialog-css\`. */
+.pptxv-autosave-recovery .pptxv-parity-dialog { width: min(420px, calc(100vw - 32px)); }
+.pptxv-autosave-recovery-message { margin: 0; line-height: 1.45; }
+.pptxv-autosave-recovery-age { margin: 0; color: var(--pptx-muted-foreground); font-size: 11px; }
+
 /* ── PowerPoint-style title bar ─────────────────────────────────────── */
 .pptxv-titlebar {
 	position: relative;
 	display: flex;
 	align-items: center;
-	gap: 6px;
-	min-height: 34px;
-	padding: 4px 10px;
+	gap: ${TB.gap}px;
+	height: ${TB.height}px;
+	padding: 0 ${TB.paddingX}px;
 	border-bottom: 1px solid var(--pptx-border);
 	background: var(--pptx-card);
 	color: var(--pptx-card-foreground);
-	font-size: 11px;
+	font-size: ${TB.fontSize}px;
 	user-select: none;
 }
 .pptxv-titlebar-logo {
 	display: inline-grid;
-	width: 20px;
-	height: 20px;
+	width: ${TB.logoSize}px;
+	height: ${TB.logoSize}px;
 	place-items: center;
-	border-radius: 3px;
-	background: #d24726;
+	border-radius: ${TB.logoRadius}px;
+	background: ${TB.logoBackground};
 	color: #fff;
-	font-size: 13px;
+	font-size: ${TB.logoFontSize}px;
 	font-weight: 700;
 }
 .pptxv-titlebar-autosave, .pptxv-titlebar-file { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
 .pptxv-titlebar-autosave-label, .pptxv-titlebar-status { color: var(--pptx-muted-foreground); white-space: nowrap; }
 .pptxv-titlebar-switch {
 	position: relative;
-	width: 27px;
-	height: 14px;
+	width: ${TB.switchTrackWidth}px;
+	height: ${TB.switchTrackHeight}px;
 	padding: 0;
 	border: 0;
 	border-radius: 999px;
@@ -135,19 +200,32 @@ const CHROME_CSS = `
 	cursor: pointer;
 }
 .pptxv-titlebar-switch.is-on { background: var(--pptx-primary); }
-.pptxv-titlebar-switch-knob { position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: #fff; transition: transform 120ms ease; }
-.pptxv-titlebar-switch.is-on .pptxv-titlebar-switch-knob { transform: translateX(13px); }
+/* The host passed \`autosave: false\`: the switch is a policy the user cannot
+   override, so it reads as unavailable instead of silently doing nothing. */
+.pptxv-titlebar-switch.is-disabled { opacity: .45; cursor: not-allowed; }
+.pptxv-titlebar-switch-knob { position: absolute; top: ${TB.switchKnobOffsetOff}px; left: ${TB.switchKnobOffsetOff}px; width: ${TB.switchKnobSize}px; height: ${TB.switchKnobSize}px; border-radius: 50%; background: #fff; transition: transform 120ms ease; }
+/* The knob is parked at its "off" offset, so the travel is the difference
+   between the two offsets, not the "on" offset itself. */
+.pptxv-titlebar-switch.is-on .pptxv-titlebar-switch-knob { transform: translateX(${TB.switchKnobOffsetOn - TB.switchKnobOffsetOff}px); }
 .pptxv-titlebar-switch:focus-visible, .pptxv-titlebar-btn:focus-visible { outline: 2px solid var(--pptx-ring); outline-offset: 1px; }
 .pptxv-titlebar-btn { width: 24px; height: 24px; }
 .pptxv-titlebar-btn:hover:not(:disabled) { background: var(--pptx-accent); color: var(--pptx-accent-foreground); }
-.pptxv-titlebar-sep { width: 1px; height: 16px; background: var(--pptx-border); }
-.pptxv-titlebar-filename { overflow: hidden; max-width: 180px; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.pptxv-titlebar-sep { width: 1px; height: ${TB.separatorHeight}px; background: var(--pptx-border); }
+.pptxv-titlebar-filename { overflow: hidden; max-width: 180px; text-overflow: ellipsis; white-space: nowrap; font-size: ${TB.fileNameFontSize}px; font-weight: ${TB.fileNameFontWeight}; }
 .pptxv-titlebar-dot { color: var(--pptx-muted-foreground); }
 .pptxv-titlebar-status.is-error { color: #dc2626; }
 .pptxv-titlebar-status.is-saving { color: #ca8a04; }
-.pptxv-titlebar-search { position: absolute; left: 50%; width: min(320px, 30vw); transform: translateX(-50%); }
-.pptxv-titlebar-spacer { flex: 1; min-width: 20px; }
-.pptxv-cmdsearch { position: relative; width: 100%; }
+/*
+ * Flex-based centering (not position:absolute + left:50%): an absolutely
+ * positioned box centers on the FULL bar width regardless of how much room
+ * the file name / status text on the left actually uses, so a longer status
+ * message (e.g. "Saved to this PC") gets visually covered by the search box
+ * instead of the two ever sharing space. flex:1 here reserves the real
+ * remaining width between the file group and the bar's end, and centers the
+ * search box within that.
+ */
+.pptxv-titlebar-search { flex: 1 1 auto; display: flex; justify-content: center; min-width: 20px; }
+.pptxv-cmdsearch { position: relative; width: min(320px, 30vw); }
 .pptxv-cmdsearch-box { display: flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border: 1px solid var(--pptx-border); border-radius: 4px; background: var(--pptx-muted); color: var(--pptx-muted-foreground); }
 .pptxv-cmdsearch-box svg { width: 13px; height: 13px; flex: none; }
 .pptxv-cmdsearch-input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--pptx-foreground); font: inherit; }
@@ -156,7 +234,47 @@ const CHROME_CSS = `
 .pptxv-cmdsearch-item { cursor: pointer; }
 .pptxv-cmdsearch-item:hover { background: var(--pptx-accent); color: var(--pptx-accent-foreground); }
 .pptxv-cmdsearch-empty { color: var(--pptx-muted-foreground); }
-@media (max-width: 767px), (max-width: 1023px) and (max-height: 520px) { .pptxv-titlebar { display: none; } }
+@media (max-width: 767px), (max-width: 1023px) and (max-height: 520px) { .pptxv-titlebar, .pptxv-qat-row { display: none; } }
+
+/* Quick Access Toolbar docked below the Ribbon (Options > Quick Access
+   Toolbar > position); hidden and empty until the strip is moved in. */
+.pptxv-qat-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-height: ${TB.height}px;
+	padding: 0 ${TB.paddingX}px;
+	border-bottom: 1px solid var(--pptx-border);
+	background: var(--pptx-card);
+}
+.pptxv-qat-row .pptxv-qat { display: flex; align-items: center; gap: 4px; }
+
+/* Trust Center > Protected View banner: PowerPoint's persistent "this file
+   is read-only until you Enable Editing" bar under the Ribbon. */
+.pptxv-protected-view {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px ${TB.paddingX}px;
+	background: #fef3c7;
+	color: #78350f;
+	border-bottom: 1px solid #fcd34d;
+	font-size: ${TB.fontSize}px;
+}
+.pptxv-protected-view svg { width: 16px; height: 16px; flex: none; }
+.pptxv-protected-view-text { flex: 1 1 auto; }
+.pptxv-protected-view-enable {
+	flex: none;
+	padding: 3px 10px;
+	border: 1px solid #b45309;
+	border-radius: 4px;
+	background: #fff;
+	color: #78350f;
+	font: inherit;
+	font-weight: 600;
+	cursor: pointer;
+}
+.pptxv-protected-view-enable:hover { background: #fde68a; }
 
 /* ── Body: thumbnail rail + viewport ─────────────────────────────────── */
 .pptxv-body { display: flex; flex: 1; min-height: 0; }
@@ -234,6 +352,31 @@ const CHROME_CSS = `
 }
 .pptxv-thumb.is-active .pptxv-thumb-frame { border-color: var(--pptx-primary); }
 .pptxv-thumb:focus-visible .pptxv-thumb-frame { outline: 2px solid var(--pptx-ring); }
+/* Hidden slide (PowerPoint's Hide Slide): dim the preview and strike the slide
+   number with the shared diagonal slash. The slash carries the meaning on its
+   own, because dimming is a colour signal and a dark thumbnail looks dim too. */
+.pptxv-thumb[data-pptx-slide-hidden] .pptxv-thumb-frame > :first-child { opacity: ${HIDDEN_SLIDE_DIM_OPACITY}; }
+.pptxv-thumb[data-pptx-slide-hidden] .pptxv-thumb-num { background-image: ${HIDDEN_SLIDE_SLASH_GRADIENT}; }
+.pptxv-thumb-hidden {
+	position: absolute;
+	right: 2px;
+	bottom: 2px;
+	z-index: 10;
+	display: inline-flex;
+	color: var(--pptx-muted-foreground);
+}
+.pptxv-thumb-hidden svg { width: 12px; height: 12px; }
+.pptxv-sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+}
 .pptxv-thumb-section { display: flex; flex-direction: column; gap: 6px; }
 .pptxv-thumb-section-header { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .pptxv-thumb-section-toggle {
@@ -247,6 +390,8 @@ const CHROME_CSS = `
 	text-align: left;
 	cursor: pointer;
 }
+/* React's SectionBlock paints the same 10px p15:sectionPr/@clr dot. */
+.pptxv-thumb-section-color { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; }
 .pptxv-thumb-section-actions { display: flex; gap: 1px; }
 .pptxv-thumb-section-actions button {
 	width: 18px;
@@ -268,7 +413,13 @@ const CHROME_CSS = `
 	min-width: 0;
 	overflow: auto;
 	display: grid;
-	place-items: center;
+	/*
+	 * Centred both ways, matching every other binding's canvas viewport
+	 * (React/Vue/Angular now flex + 'margin: auto', Svelte flex + 'margin:
+	 * auto'): the slide sits in the middle of the scroll area rather than
+	 * pinned under the toolbar.
+	 */
+	place-items: center center;
 	padding: 16px;
 	background: var(--pptx-muted);
 }
@@ -278,22 +429,36 @@ const CHROME_CSS = `
 	flex: none;
 	box-shadow: 0 2px 12px rgb(0 0 0 / 0.25);
 }
-.pptxv-stage { background: #fff; }
+/* The slide surface must NOT inherit the chrome's typography. The .pptxv root
+   sets font-size 14px for the ribbon/panels, and that cascaded into slide
+   content that authors no size of its own (table cells are the visible case),
+   so the same deck rendered its table text 14px here and 16px in the other
+   four bindings, which take the document default. Restating the baseline on
+   the stage keeps slide content independent of chrome styling. */
+.pptxv-stage { background: #fff; font-size: 16px; }
 /* In editor mode the slide surface must own all pointer/touch gestures so a
    finger drag/resize/rotate isn't stolen by the browser for panning or
    pinch-zoom. View-only mode keeps default touch behaviour so the deck scrolls. */
 .pptxv-editable .pptxv-stage-wrap { touch-action: none; }
 .pptxv-stage-wrap[data-draw-tool="pen"],
+.pptxv-stage-wrap[data-draw-tool="freeform"],
 .pptxv-stage-wrap[data-draw-tool="highlighter"] { cursor: crosshair; }
 .pptxv-stage-wrap[data-draw-tool="eraser"] { cursor: cell; }
 .pptxv-para { margin: 0; }
 
 /* ── Selection overlay (editing) ─────────────────────────────────────── */
+/* Every slide element carries an explicit numeric z-index (index-based, see
+   element-styles.ts), so on a slide with more than 5 elements this host used
+   to paint BEHIND later ones, hiding the selected element's own resize/rotate
+   handles behind its own fill (worst on a rotated shape, where the rotate
+   knob deliberately overlaps the box) and stealing their clicks. Pinned above
+   any realistic per-slide element count, matching the React binding's
+   'SelectionHandleOverlay' (z-index 58). */
 .pptxv-editor-overlay {
 	position: absolute;
 	inset: 0;
 	pointer-events: none;
-	z-index: 5;
+	z-index: 58;
 }
 .pptxv-sel-box {
 	position: absolute;
@@ -315,6 +480,39 @@ const CHROME_CSS = `
 	/* The handle must own its touch gesture (no scroll/zoom stealing). */
 	touch-action: none;
 	box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+}
+/*
+ * The contenteditable surface double-click opens over a text element.
+ *
+ * It is mounted in the editor overlay, which is pointer-events: none, so it
+ * has to take pointer events back or a click inside it never reaches the caret.
+ * The position matters just as much: the surface is placed with left/top in
+ * the overlay's space, and without this it laid out statically at the overlay's
+ * origin - the right size, a whole slide away from the text it was editing.
+ * Scoped to the text surface: the table-cell editor shares
+ * .pptxv-inline-editor but is an input stretched inside its own cell.
+ */
+.pptxv-inline-text-editor {
+	position: absolute;
+	z-index: 6;
+	box-sizing: border-box;
+	outline: none;
+	cursor: text;
+	pointer-events: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+	touch-action: none;
+}
+/*
+ * While an element's own inline text editor is open (see
+ * editor-stage-interactions.ts), suppress THIS element's static text render:
+ * the editor surface above it has no opaque background of its own, so the two
+ * rendering simultaneously produced a duplicated, offset "text shadow"
+ * (issue #182).
+ */
+.pptxv-inline-editing-source > .pptxv-text,
+.pptxv-inline-editing-source > .pptxv-wordart {
+	visibility: hidden;
 }
 .pptxv-rotate-stem {
 	position: absolute;
@@ -340,11 +538,73 @@ const CHROME_CSS = `
 	touch-action: none;
 	box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
 }
+/* PowerPoint's shape-adjustment handle: the amber diamond that reshapes a
+   preset (a:avLst) instead of resizing its box. Rotated 45deg rather than
+   drawn as a path so it scales with the coarse-pointer bump below. */
+.pptxv-adjust-handle {
+	position: absolute;
+	width: 10px;
+	height: 10px;
+	margin: -5px 0 0 -5px;
+	padding: 0;
+	border: 1px solid #b45309;
+	border-radius: 1px;
+	background: #fbbf24;
+	transform: rotate(45deg);
+	cursor: ew-resize;
+	pointer-events: auto;
+	/* The handle must own its touch gesture (no scroll/zoom stealing). */
+	touch-action: none;
+	box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+}
 /* On coarse (touch) pointers a 10px handle is far too small to grab reliably;
-   grow the resize/rotate hit targets to a finger-friendly size. */
+   grow the resize/rotate/adjust hit targets to a finger-friendly size. */
 @media (pointer: coarse) {
 	.pptxv-sel-handle { width: 22px; height: 22px; margin: -11px 0 0 -11px; }
 	.pptxv-rotate-knob { width: 24px; height: 24px; margin: -12px 0 0 -12px; }
+	.pptxv-adjust-handle { width: 20px; height: 20px; margin: -10px 0 0 -10px; }
+}
+/* Connector endpoint authoring: the two handles on a selected connector, and
+   the candidate connection sites revealed while one is being dragged. A bound
+   end is filled, a loose one hollow, so "is this connector actually attached?"
+   is answerable at a glance. */
+.pptxv-connector-endpoints {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	z-index: 6;
+}
+.pptxv-connector-endpoint {
+	position: absolute;
+	width: 10px;
+	height: 10px;
+	margin: -5px 0 0 -5px;
+	padding: 0;
+	border: 2px solid #fff;
+	border-radius: 9999px;
+	background: #fff;
+	box-shadow: 0 0 0 1px #16a34a;
+	cursor: crosshair;
+	pointer-events: auto;
+	touch-action: none;
+}
+.pptxv-connector-endpoint.is-attached {
+	background: #16a34a;
+}
+.pptxv-connection-site {
+	position: absolute;
+	width: 8px;
+	height: 8px;
+	margin: -4px 0 0 -4px;
+	border: 2px solid #3b82f6;
+	border-radius: 9999px;
+	background: rgb(96 165 250 / 0.6);
+}
+.pptxv-connection-site.is-snapped {
+	background: #3b82f6;
+}
+@media (pointer: coarse) {
+	.pptxv-connector-endpoint { width: 20px; height: 20px; margin: -10px 0 0 -10px; }
 }
 .pptxv-snap-layer {
 	position: absolute;
@@ -430,7 +690,9 @@ const CHROME_CSS = `
 	display: flex;
 	align-items: center;
 	gap: 4px;
-	min-height: 20px;
+	/* Pinned from the shared metric rather than left to emerge from the padding
+	   + button box, which is how this row ended up 2px shorter than the others. */
+	min-height: ${STATUS_BAR_METRICS.height}px;
 	padding: 2px 8px;
 	border-top: 1px solid var(--pptx-border);
 	background: color-mix(in srgb, var(--pptx-secondary) 50%, transparent);
@@ -503,6 +765,41 @@ const CHROME_CSS = `
 	border-radius: 4px;
 }
 
+/* ── Media fallback chrome (authoring canvas only, see mediaFallbackVisual) ── */
+.pptxv-media-badge {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 4px;
+	font-size: 11px;
+	color: rgb(255 255 255 / 0.8);
+	filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.5));
+	pointer-events: none;
+}
+.pptxv-media-badge svg {
+	width: 48px;
+	height: 48px;
+}
+.pptxv-media-badge-missing {
+	color: rgb(255 255 255 / 0.6);
+}
+.pptxv-media-badge-missing svg {
+	width: 32px;
+	height: 32px;
+}
+.pptxv-media-placeholder {
+	flex-direction: column;
+	gap: 4px;
+	color: var(--pptx-muted-foreground);
+}
+.pptxv-media-placeholder svg {
+	width: 32px;
+	height: 32px;
+}
+
 /* ── Overlays ────────────────────────────────────────────────────────── */
 .pptxv-overlay {
 	position: absolute;
@@ -517,11 +814,38 @@ const CHROME_CSS = `
 .pptxv-error-message { color: var(--pptx-destructive); padding: 0 24px; text-align: center; }
 .pptxv-empty { color: var(--pptx-muted-foreground); }
 
+/* ── In-content loading (e.g. a 3D chart scene probing/mounting three.js) ── */
+.pptxv-chart3d-loading {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	color: var(--pptx-muted-foreground);
+	font-size: 12px;
+}
+.pptxv-spinner {
+	width: 1.25rem;
+	height: 1.25rem;
+	border: 3px solid var(--pptx-border);
+	border-top-color: var(--pptx-primary);
+	border-radius: 50%;
+	animation: pptxv-spin 0.8s linear infinite;
+}
+@keyframes pptxv-spin {
+	to { transform: rotate(360deg); }
+}
+
 /* ── Presentation (fullscreen) mode ──────────────────────────────────── */
 .pptxv.pptxv-presenting .pptxv-ribbon,
 .pptxv.pptxv-presenting .pptxv-thumbs,
+.pptxv.pptxv-presenting .pptxv-qat-row,
+.pptxv.pptxv-presenting .pptxv-protected-view,
 .pptxv.pptxv-presenting .pptxv-titlebar { display: none; }
-.pptxv.pptxv-presenting .pptxv-viewport { background: #000; padding: 0; }
+/* A show letterboxes the slide in the middle of the black, so the editing
+   canvas's top alignment is overridden back to centred here. */
+.pptxv.pptxv-presenting .pptxv-viewport { background: #000; padding: 0; place-items: center; }
 .pptxv.pptxv-presenting .pptxv-stage-wrap { box-shadow: none; }
 /* A slide show is not a document: dragging across it must not select text the
    way it does on the editing canvas. */
@@ -531,5 +855,33 @@ const CHROME_CSS = `
 
 /** The full stylesheet text (theme-var defaults + chrome rules + editor + collab chrome). */
 export function buildViewerCss(): string {
-	return `${defaultVarsBlock()}\n${CHROME_CSS}\n${EDITOR_CSS}\n${RIBBON_CSS}\n${RIBBON_QUICK_CSS}\n${DOCUMENT_PROPERTIES_CSS}\n${FILE_INFO_CSS}\n${SMARTART_DIALOG_CSS}\n${EQUATION_DIALOG_CSS}\n${COLLAB_CSS}\n${PRESENTATION_TOUCH_CSS}\n${MOBILE_SHEET_CSS}\n${MASTER_VIEW_CSS}\n${PARITY_DIALOG_CSS}\n${OPTIONS_DIALOG_CSS}\n${ANIMATION_AUTHORING_CSS}\n${INSPECTOR_PANELS_CSS}\n${ACCOUNT_CSS}\n${AI_CSS}\n${AI_FOCUS_CSS}`;
+	return `${defaultVarsBlock()}
+${CHROME_CSS}
+${EDITOR_CSS}
+${RIBBON_CSS}
+${RIBBON_QUICK_CSS}
+${DOCUMENT_PROPERTIES_CSS}
+${FILE_INFO_CSS}
+${SMARTART_DIALOG_CSS}
+${SLIDE_TEMPLATE_DIALOG_CSS}
+${EQUATION_DIALOG_CSS}
+${COLLAB_CSS}
+${PRESENTATION_TOUCH_CSS}
+${PRESENTATION_TOOLBAR_CSS}
+${PRESENTER_VIEW_CSS}
+${MOBILE_SHEET_CSS}
+${MASTER_VIEW_CSS}
+${PARITY_DIALOG_CSS}
+${OPTIONS_DIALOG_CSS}
+${ANIMATION_AUTHORING_CSS}
+${INSPECTOR_PANELS_CSS}
+${INSPECTOR_FORMAT_CSS}
+${ACCOUNT_CSS}
+${AI_CSS}
+${AI_HISTORY_CSS}
+${AI_FOCUS_CSS}
+${READING_VIEW_CSS}
+${OUTLINE_VIEW_CSS}
+${EXPORT_PROGRESS_CSS}
+${PARITY_BANNERS_CSS}`;
 }

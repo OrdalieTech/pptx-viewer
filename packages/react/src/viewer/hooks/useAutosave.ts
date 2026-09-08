@@ -1,10 +1,11 @@
-import { saveAutosaveSnapshot } from 'pptx-viewer-shared';
-import { useCallback, useEffect, useRef, useState } from 'react';
-
 import {
-	computeAutosaveIntervalMs,
-	DEFAULT_AUTOSAVE_INTERVAL_SECONDS,
-} from './useAutosave-helpers';
+	autosaveSnapshotMark,
+	resolveAutosaveIntervalMs,
+	saveAutosaveSnapshot,
+	shouldWriteAutosaveSnapshot,
+} from 'pptx-viewer-shared';
+import type { AutosaveSnapshotMark } from 'pptx-viewer-shared';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,10 +25,37 @@ export interface UseAutosaveInput {
 	filePath: string | undefined;
 	/** Serialise current editor state to a Uint8Array. */
 	serializeSlides: () => Promise<Uint8Array | null>;
-	/** Autosave interval in seconds (default 120). */
+	/**
+	 * Autosave interval in seconds.
+	 *
+	 * @deprecated Pass {@link intervalMs} instead. Seconds cannot express the
+	 * short cadence a host may legitimately ask for, and the shared clamp it went
+	 * through raised anything under 10s back to 10s, so an explicit host policy
+	 * was silently overruled. Ignored when `intervalMs` is given.
+	 */
 	intervalSeconds?: number;
-	/** Whether autosave is enabled. */
+	/**
+	 * Autosave interval in milliseconds, already resolved by the shared
+	 * `resolveAutosaveIntervalMs` (host prop > File > Options > Save AutoRecover
+	 * cadence > 120s default). Wins over {@link intervalSeconds}.
+	 */
+	intervalMs?: number;
+	/**
+	 * Whether autosave is enabled: the resolved `active` from the shared
+	 * `resolveAutosaveActivation`, NOT the raw title-bar toggle.
+	 */
 	enabled?: boolean;
+	/**
+	 * The values a snapshot is built from, read fresh on each tick.
+	 *
+	 * `isDirty` stays true from the first edit until the user performs a real
+	 * save, so on its own it makes the timer re-serialize and rewrite an
+	 * identical deck every N seconds forever. Vue, Svelte and Vanilla never had
+	 * that problem because they debounce on the slides array being reassigned;
+	 * this is the same trigger, and `shouldWriteAutosaveSnapshot` writes
+	 * whenever it is unsure. Omit it and every tick writes, as before.
+	 */
+	getChangeSources?: () => readonly unknown[];
 }
 
 export interface UseAutosaveResult {
@@ -42,13 +70,13 @@ export interface UseAutosaveResult {
 // ---------------------------------------------------------------------------
 
 export function useAutosave(input: UseAutosaveInput): UseAutosaveResult {
-	const {
-		isDirty,
-		filePath,
-		serializeSlides,
-		intervalSeconds = DEFAULT_AUTOSAVE_INTERVAL_SECONDS,
-		enabled = true,
-	} = input;
+	const { isDirty, filePath, serializeSlides, enabled = true, getChangeSources } = input;
+	// One rule for all five bindings: an explicit interval is honoured as given,
+	// anything else falls back to the user's AutoRecover cadence.
+	const intervalMs = resolveAutosaveIntervalMs({
+		hostIntervalMs: input.intervalMs,
+		optionsIntervalSeconds: input.intervalSeconds,
+	});
 
 	const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>({
 		state: 'idle',
@@ -59,6 +87,8 @@ export function useAutosave(input: UseAutosaveInput): UseAutosaveResult {
 	const filePathRef = useRef(filePath);
 	const serializeRef = useRef(serializeSlides);
 	const isSavingRef = useRef(false);
+	const changeSourcesRef = useRef(getChangeSources);
+	const lastSnapshotRef = useRef<AutosaveSnapshotMark | undefined>(undefined);
 
 	useEffect(() => {
 		isDirtyRef.current = isDirty;
@@ -69,16 +99,30 @@ export function useAutosave(input: UseAutosaveInput): UseAutosaveResult {
 	useEffect(() => {
 		serializeRef.current = serializeSlides;
 	}, [serializeSlides]);
+	useEffect(() => {
+		changeSourcesRef.current = getChangeSources;
+	}, [getChangeSources]);
 
 	// ── Core save logic ─────────────────────────────────────────────
-	const doAutosave = useCallback(async () => {
-		if (!filePathRef.current) {
+	// `polled` distinguishes the interval from an explicit `triggerAutosave()`:
+	// a poll may be skipped as redundant, a request never is. It is an options
+	// object rather than a positional boolean so that wiring the trigger
+	// straight to a DOM handler cannot smuggle an event in as `true`.
+	const doAutosave = useCallback(async (options?: { polled?: boolean }) => {
+		const path = filePathRef.current;
+		if (!path) {
 			return;
 		}
-		if (!isDirtyRef.current) {
-			return;
-		}
-		if (isSavingRef.current) {
+		const sources = changeSourcesRef.current?.() ?? [];
+		if (
+			!shouldWriteAutosaveSnapshot({
+				filePath: path,
+				isDirty: isDirtyRef.current,
+				saving: isSavingRef.current,
+				sources: options?.polled === true ? sources : [],
+				lastSnapshot: lastSnapshotRef.current,
+			})
+		) {
 			return;
 		}
 
@@ -93,7 +137,11 @@ export function useAutosave(input: UseAutosaveInput): UseAutosaveResult {
 				return;
 			}
 
-			await saveAutosaveSnapshot(filePathRef.current, data);
+			await saveAutosaveSnapshot(path, data);
+			// Mark AFTER the write, and from the sources read before it, so an
+			// edit made while serialising is not mistaken for one already
+			// captured: the next tick sees a different reference and writes.
+			lastSnapshotRef.current = autosaveSnapshotMark(path, sources);
 			setAutosaveStatus({ state: 'saved', timestamp: Date.now() });
 		} catch (err) {
 			setAutosaveStatus({
@@ -122,16 +170,15 @@ export function useAutosave(input: UseAutosaveInput): UseAutosaveResult {
 		// Requirements met; reset to idle if currently disabled.
 		setAutosaveStatus((prev) => (prev.state === 'disabled' ? { state: 'idle' } : prev));
 
-		const ms = computeAutosaveIntervalMs(intervalSeconds);
 		const id = setInterval(() => {
-			void doAutosave();
-		}, ms);
+			void doAutosave({ polled: true });
+		}, intervalMs);
 
 		return () => clearInterval(id);
-	}, [enabled, filePath, intervalSeconds, doAutosave]);
+	}, [enabled, filePath, intervalMs, doAutosave]);
 
 	return {
 		autosaveStatus,
-		triggerAutosave: doAutosave,
+		triggerAutosave: () => doAutosave(),
 	};
 }

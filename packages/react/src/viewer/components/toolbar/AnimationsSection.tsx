@@ -1,4 +1,6 @@
 import type { PptxElement } from 'pptx-viewer-core';
+import { DEFAULT_MOTION_PATH_PRESET_ID } from 'pptx-viewer-shared';
+import type { AnimationApplyGroup } from 'pptx-viewer-shared';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -13,6 +15,8 @@ import {
 	LuTrash2,
 } from 'react-icons/lu';
 
+import { AnimationPresetGallery } from './AnimationPresetGallery';
+import { MotionPathGallery } from './MotionPathGallery';
 import { RibbonCommand, RibbonCommandStack, RibbonGroup } from './PowerPointRibbonControls';
 
 export interface AnimationsSectionProps {
@@ -21,18 +25,9 @@ export interface AnimationsSectionProps {
 	isInspectorPaneOpen: boolean;
 	onToggleInspector: () => void;
 	onOpenAnimationPanel?: () => void;
-	onAddAnimation?: (preset: string, group: 'entrance' | 'emphasis' | 'exit') => void;
+	onAddAnimation?: (preset: string, group: AnimationApplyGroup) => void;
 	onRemoveAnimation?: () => void;
 }
-
-const GALLERY = [
-	{ value: 'appear', label: 'Appear', group: 'entrance', tone: 'text-emerald-500' },
-	{ value: 'fadeIn', label: 'Fade In', group: 'entrance', tone: 'text-emerald-500' },
-	{ value: 'flyIn', label: 'Fly In', group: 'entrance', tone: 'text-emerald-500' },
-	{ value: 'pulse', label: 'Pulse', group: 'emphasis', tone: 'text-amber-500' },
-	{ value: 'spin', label: 'Spin', group: 'emphasis', tone: 'text-amber-500' },
-	{ value: 'fadeOut', label: 'Fade Out', group: 'exit', tone: 'text-red-500' },
-] as const;
 
 export function AnimationsSection(p: AnimationsSectionProps): React.ReactElement {
 	const { t } = useTranslation();
@@ -54,33 +49,20 @@ export function AnimationsSection(p: AnimationsSectionProps): React.ReactElement
 					onClick={preview}
 					disabled={disabled}
 					active={previewActive}
-					title='Preview animation on selected element'
+					title={t('pptx.animations.previewTooltip')}
 				/>
 			</RibbonGroup>
 			<RibbonGroup
 				label={t('pptx.animations.animation', { defaultValue: 'Animation' })}
-				className='max-w-[430px] overflow-hidden'
+				className='max-w-[500px] overflow-hidden'
 			>
-				<div
-					className='flex h-[58px] items-stretch overflow-hidden rounded-sm border border-border/60 bg-muted/30'
-					title='Add animation to selected element'
-					aria-label='Add Animation: Entrance, Emphasis, and Exit effects'
-				>
-					<span className='sr-only'>Add Animation Entrance Emphasis Exit</span>
-					{GALLERY.map((item) => (
-						<button
-							key={item.value}
-							type='button'
-							disabled={disabled}
-							onClick={() => p.onAddAnimation?.(item.value, item.group)}
-							className='flex w-[62px] shrink-0 flex-col items-center justify-center gap-0.5 border-r border-border/40 px-1 text-[9px] leading-3 text-foreground hover:bg-accent disabled:opacity-35'
-							title={item.label}
-						>
-							<LuStar className={`h-6 w-6 fill-current ${item.tone}`} aria-hidden='true' />
-							<span>{item.label}</span>
-						</button>
-					))}
-				</div>
+				<AnimationPresetGallery disabled={disabled} onAddAnimation={p.onAddAnimation} />
+			</RibbonGroup>
+			<RibbonGroup label={t('pptx.animation.motionPath')} className='max-w-[420px] overflow-hidden'>
+				<MotionPathGallery
+					disabled={disabled}
+					onApplyMotionPath={(presetId) => p.onAddAnimation?.(presetId, 'motionPath')}
+				/>
 			</RibbonGroup>
 			<RibbonGroup label={t('pptx.animations.advanced', { defaultValue: 'Advanced Animation' })}>
 				<RibbonCommand
@@ -92,7 +74,9 @@ export function AnimationsSection(p: AnimationsSectionProps): React.ReactElement
 				<RibbonCommand
 					label={t('pptx.animations.pathAnimation', { defaultValue: 'Path Animation' })}
 					icon={<LuMoveRight />}
-					onClick={() => p.onAddAnimation?.('flyIn', 'entrance')}
+					// One-click default path (Lines: Right). It used to apply a Fly In
+					// entrance, which is not a path at all.
+					onClick={() => p.onAddAnimation?.(DEFAULT_MOTION_PATH_PRESET_ID, 'motionPath')}
 					disabled={disabled}
 				/>
 				<RibbonCommandStack>
@@ -109,7 +93,7 @@ export function AnimationsSection(p: AnimationsSectionProps): React.ReactElement
 						icon={<LuPanelRight />}
 						onClick={p.onOpenAnimationPanel ?? p.onToggleInspector}
 						active={p.isInspectorPaneOpen}
-						title='Open Animation Panel in Inspector'
+						title={t('pptx.animations.openPanelTooltip')}
 					/>
 				</RibbonCommandStack>
 				<RibbonCommandStack>
@@ -132,7 +116,7 @@ export function AnimationsSection(p: AnimationsSectionProps): React.ReactElement
 					icon={<LuTrash2 />}
 					onClick={p.onRemoveAnimation}
 					disabled={disabled}
-					title='Remove animation from selected element'
+					title={t('pptx.animations.removeTooltip')}
 				/>
 			</RibbonGroup>
 			<RibbonGroup label={t('pptx.animations.timing', { defaultValue: 'Timing' })}>
@@ -160,6 +144,9 @@ export function AnimationsSection(p: AnimationsSectionProps): React.ReactElement
 						step='0.1'
 						defaultValue='0.5'
 						disabled
+						// The caption beside it is a plain <span>, not a <label>, so nothing
+						// named this field: it read as an anonymous number box.
+						aria-label={t('pptx.animations.duration', { defaultValue: 'Duration' })}
 						className='h-6 rounded-sm border border-border bg-muted px-1 text-[10px]'
 					/>
 				</div>

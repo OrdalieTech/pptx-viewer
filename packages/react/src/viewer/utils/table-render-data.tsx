@@ -1,14 +1,21 @@
 import type { TablePptxElement, PptxTableCell } from 'pptx-viewer-core';
+import type { TableCellCss } from 'pptx-viewer-shared';
+import {
+	canDrillDown,
+	DEFAULT_FONT_FAMILY,
+	tableCellCss,
+	tableContainerCss,
+} from 'pptx-viewer-shared';
 import React from 'react';
 
 import { cn } from '../../utils';
 import type { TableCellEditorState } from '../types';
 import type { TableStyleContext } from './table-band-style';
+import { renderTableCellContent } from './table-cell-runs';
 import { getCellDiagonalBorders, TableCellDiagonalBorders } from './table-diagonal-borders';
 import { computeSelectionRect, isCellInRect, rectToCells } from './table-merge-utils';
 import type { CellRect } from './table-merge-utils';
 import { TableCellInput } from './table-render-cell-input';
-import { cellStyleToCss } from './table-render-helpers';
 import { TableResizeOverlay } from './table-render-resize';
 
 /* ------------------------------------------------------------------ */
@@ -32,8 +39,28 @@ export function renderTableFromTableData(
 	const rowCount = tableData.rows.length;
 	const columnCount = tableData.columnWidths.length;
 	const selectedCell = options?.selectedCell || null;
-	const isEditable = Boolean(options?.editable);
+	// G8: `a:graphicFrameLocks/@noDrilldown` forbids selecting/editing this
+	// table's individual cells, even on an otherwise-editable deck.
+	const isEditable = Boolean(options?.editable) && canDrillDown(element);
 	const hasCellSelectionHandler = typeof options?.onSelectCell === 'function';
+	// The band / header / emphasis layer this path used to skip entirely: it
+	// imported `TableStyleContext` as a type and called nothing with it, so a
+	// table inserted from the ribbon or built by the AI panel rendered flat here
+	// while the other four bindings banded it. `textStyle` stays the lowest
+	// layer, so the element's own resolved text colour is preserved.
+	const sharedCtx = {
+		tableStyleMap: options?.styleCtx?.tableStyleMap,
+		colorScheme: options?.styleCtx?.theme?.colorScheme,
+		fontScheme: options?.styleCtx?.theme?.fontScheme,
+	};
+	const cellCss = (cell: PptxTableCell, rowIndex: number, cellIndex: number): TableCellCss =>
+		tableCellCss(
+			tableData,
+			cell,
+			{ rowIndex, cellIndex, rowCount, columnCount },
+			sharedCtx,
+			textStyle as unknown as TableCellCss,
+		);
 
 	// Compute multi-selection highlight rectangle
 	const selectionRect: CellRect | undefined = (() => {
@@ -58,7 +85,21 @@ export function renderTableFromTableData(
 					isEditable && hasCellSelectionHandler ? 'pointer-events-auto' : 'pointer-events-none',
 				)}
 			>
-				<table className='w-full h-full border-collapse table-fixed'>
+				{/* The explicit family is load-bearing: an unstyled cell otherwise
+				    inherits the HOST chrome's font, so the same table measured a
+				    different stack (and different metrics) in every binding. All
+				    five declare the same shared default on the table root;
+				    authored cell/run/table-style fonts still win below it. */}
+				<table
+					className='w-full h-full border-collapse table-fixed'
+					style={
+						{
+							fontFamily: DEFAULT_FONT_FAMILY,
+							// `a:tblPr@rtl` mirrors the column order for RTL decks.
+							...tableContainerCss(tableData),
+						} as React.CSSProperties
+					}
+				>
 					{tableData.columnWidths.length > 0 && (
 						<colgroup>
 							{tableData.columnWidths.map((w, ci) => (
@@ -105,8 +146,7 @@ export function renderTableFromTableData(
 											colSpan={cell.gridSpan && cell.gridSpan > 1 ? cell.gridSpan : undefined}
 											rowSpan={cell.rowSpan && cell.rowSpan > 1 ? cell.rowSpan : undefined}
 											style={{
-												...textStyle,
-												...cellStyleToCss(cell.style),
+												...(cellCss(cell, rowIndex, cellIndex) as React.CSSProperties),
 												...(diag ? { position: 'relative' } : undefined),
 											}}
 											onClick={(event) => {
@@ -150,10 +190,7 @@ export function renderTableFromTableData(
 											{isCellEditing ? (
 												<TableCellInput
 													initialText={cell.text ?? ''}
-													style={{
-														...textStyle,
-														...cellStyleToCss(cell.style),
-													}}
+													style={cellCss(cell, rowIndex, cellIndex) as React.CSSProperties}
 													onCommit={(text) => {
 														options?.onCommitCellEdit?.(rowIndex, cellIndex, text);
 													}}
@@ -165,7 +202,7 @@ export function renderTableFromTableData(
 													}}
 												/>
 											) : (
-												cell.text || '\u00a0'
+												renderTableCellContent(cell, cell.text || '\u00a0')
 											)}
 										</td>
 									);

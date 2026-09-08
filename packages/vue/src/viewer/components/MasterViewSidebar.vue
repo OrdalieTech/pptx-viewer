@@ -23,11 +23,13 @@ import type {
 	PptxHandoutMaster,
 	MasterViewTab,
 } from 'pptx-viewer-core';
+import type { MasterViewCrudAction, MasterViewCrudActionId } from 'pptx-viewer-shared';
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import type { CanvasSize } from '../types';
 import HandoutMasterPanel from './HandoutMasterPanel.vue';
+import MasterViewCrudRow from './MasterViewCrudRow.vue';
 import NotesMasterPanel from './NotesMasterPanel.vue';
 import SlideMastersList from './SlideMastersList.vue';
 
@@ -41,6 +43,13 @@ defineProps<{
 	notesMaster: PptxNotesMaster | undefined;
 	handoutMaster: PptxHandoutMaster | undefined;
 	handoutSlidesPerPage: number;
+	/** Background of the selected slide master or layout (Slides tab). */
+	slidesBackground?: string | undefined;
+	canEdit?: boolean;
+	/** Insert/Duplicate/Delete/Rename Layout and Slide Master commands (Slides tab). */
+	crudActions?: MasterViewCrudAction[];
+	/** i18n key for the last CRUD command's failure, or null. */
+	crudError?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -51,6 +60,8 @@ const emit = defineEmits<{
 	'handout-slides-per-page-change': [count: number];
 	'notes-background-change': [color: string];
 	'handout-background-change': [color: string];
+	'slides-background-change': [color: string];
+	'crud-run': [id: MasterViewCrudActionId];
 }>();
 
 const { t } = useI18n();
@@ -101,6 +112,32 @@ const TITLES = computed<Record<MasterViewTab, string>>(() => ({
 		</div>
 
 		<div class="pptx-vue-master-sidebar__body">
+			<!--
+				Format Background for the selected master or layout. PowerPoint
+				writes an explicit `p:bgPr` here, deliberately replacing a themed
+				`p:bgRef`; the shared rule decides which part it lands on.
+			-->
+			<section v-if="masterViewTab === 'slides' && canEdit" class="pptx-vue-master-sidebar__card">
+				<div class="pptx-vue-master-sidebar__card-label">
+					{{ t('pptx.master.notesMasterBackground') }}
+				</div>
+				<input
+					type="color"
+					class="pptx-vue-master-sidebar__swatch"
+					:aria-label="t('pptx.master.backgroundColorLabel')"
+					data-testid="master-slides-bg-swatch"
+					:value="slidesBackground ?? '#ffffff'"
+					@input="emit('slides-background-change', ($event.target as HTMLInputElement).value)"
+				/>
+			</section>
+
+			<MasterViewCrudRow
+				v-if="masterViewTab === 'slides' && canEdit"
+				:actions="crudActions ?? []"
+				:error="crudError"
+				@run="emit('crud-run', $event)"
+			/>
+
 			<SlideMastersList
 				v-if="masterViewTab === 'slides'"
 				:slide-masters="slideMasters"
@@ -210,5 +247,30 @@ const TITLES = computed<Record<MasterViewTab, string>>(() => ({
 	flex: 1;
 	overflow-y: auto;
 	padding: 4px 6px 8px;
+}
+
+.pptx-vue-master-sidebar__card {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 8px;
+	padding: 8px;
+	border: 1px solid var(--pptx-vue-border, #e5e7eb);
+	border-radius: 6px;
+}
+
+.pptx-vue-master-sidebar__card-label {
+	font-size: 11px;
+	color: var(--pptx-vue-muted-foreground, #6b7280);
+}
+
+.pptx-vue-master-sidebar__swatch {
+	width: 100%;
+	height: 28px;
+	padding: 0;
+	border: 1px solid var(--pptx-vue-border, #e5e7eb);
+	border-radius: 4px;
+	background: transparent;
+	cursor: pointer;
 }
 </style>

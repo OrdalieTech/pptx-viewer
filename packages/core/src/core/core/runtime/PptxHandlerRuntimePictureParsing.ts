@@ -1,8 +1,16 @@
 import { XmlObject, PptxElement } from '../../types';
 import type { MediaPptxElement } from '../../types';
+import { cropShapeForPresetGeometry } from '../../utils/crop-shape-geometry';
+import { isCNvPrMarkedDecorative } from '../../utils/decorative-extension';
 import { parseDrawingMediaReference } from '../../utils/drawing-media-reference';
 import { xmlAttr, xmlChild } from '../../utils/xml-access';
+import {
+	resolveExternalOrPackagePath,
+	resolveP14MediaForPicture,
+} from './media-p14-extension-resolve';
+import { parsePreferRelativeResize } from './picture-non-visual-parse';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeShapeParsing';
+import { parseShapeLocksFromNode, SHAPE_LOCK_CONTAINERS } from './shape-lock-containers';
 
 /** EMU values are int32 per ECMA-376 §22.1.2.4. Clamp parsed values to this range. */
 const INT32_MIN = -2_147_483_648;
@@ -56,10 +64,18 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				return null;
 			}
 
-			const x = Math.round(parseEmuInt(xmlAttr(off, 'x')) / PptxHandlerRuntime.EMU_PER_PX);
-			const y = Math.round(parseEmuInt(xmlAttr(off, 'y')) / PptxHandlerRuntime.EMU_PER_PX);
-			const width = Math.round(parseEmuInt(xmlAttr(ext, 'cx')) / PptxHandlerRuntime.EMU_PER_PX);
-			const height = Math.round(parseEmuInt(xmlAttr(ext, 'cy')) / PptxHandlerRuntime.EMU_PER_PX);
+			// Exact EMU alongside the rounded pixel value; see the matching
+			// comment in `PptxHandlerRuntimeShapeParsing.ts` and
+			// `xfrm-emu-resolution.ts` for why this is safe to record even from
+			// an inherited (placeholder-merged) transform.
+			const xEmu = parseEmuInt(xmlAttr(off, 'x'));
+			const yEmu = parseEmuInt(xmlAttr(off, 'y'));
+			const widthEmu = parseEmuInt(xmlAttr(ext, 'cx'));
+			const heightEmu = parseEmuInt(xmlAttr(ext, 'cy'));
+			const x = Math.round(xEmu / PptxHandlerRuntime.EMU_PER_PX);
+			const y = Math.round(yEmu / PptxHandlerRuntime.EMU_PER_PX);
+			const width = Math.round(widthEmu / PptxHandlerRuntime.EMU_PER_PX);
+			const height = Math.round(heightEmu / PptxHandlerRuntime.EMU_PER_PX);
 			const rotation = xfrm['@_rot'] ? parseEmuInt(xfrm['@_rot']) / 60000 : undefined;
 			const skewX = xfrm['@_skewX'] ? parseEmuInt(xfrm['@_skewX']) / 60000 : undefined;
 			const skewY = xfrm['@_skewY'] ? parseEmuInt(xfrm['@_skewY']) / 60000 : undefined;
@@ -72,6 +88,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const mediaReference = parseDrawingMediaReference(nvPr, this.externalRelsMap.get(slidePath));
 
 			if (mediaReference) {
+				// `p:nvPicPr/p:cNvPr/@descr` / `@title`: the same alt-text pair a
+				// picture's own `p:cNvPr` carries (see `altTextRaw` further below).
+				// A `p:pic`-shaped media element (real PowerPoint's usual form, as
+				// opposed to the SDK's `p:graphicFrame`-shaped media) never read
+				// these, so accessibility text authored on a video/audio placeholder
+				// was silently dropped on load even though the generic save writer
+				// (`applyGraphicFrameAltTextToCnvPr`) already re-emits it for both
+				// shapes.
+				const mediaCNvPr = (pic?.['p:nvPicPr'] as XmlObject | undefined)?.['p:cNvPr'] as
+					| XmlObject
+					| undefined;
+				const mediaAltText = String(mediaCNvPr?.['@_descr'] || '').trim() || undefined;
+				const mediaTitle = String(mediaCNvPr?.['@_title'] || '').trim() || undefined;
 				this.compatibilityService.inspectMediaReferenceCompatibility(
 					mediaReference.kind,
 					slidePath,
@@ -85,6 +114,24 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					mediaPath = this.mediaDataParser.resolveRelationshipTarget(slidePath, mediaRelId);
 					mediaMimeType = this.mediaDataParser.getMediaMimeType(mediaPath);
 				}
+
+				// `p14:media` (G18): read off the picture's own `p:nvPr/p:extLst`,
+				// NOT the animation timing tree (see `walkMediaTimingTree` in
+				// `PptxHandlerRuntimeMediaTimingParsing.ts`, which no longer reads
+				// it), falling back to `@r:embed` when the legacy reference above
+				// has no usable path.
+				const p14Media = resolveP14MediaForPicture(
+					nvPr,
+					id,
+					(v: unknown) => this.ensureArray(v),
+					mediaPath,
+					mediaMimeType,
+					(relationshipId) =>
+						this.mediaDataParser.resolveRelationshipTarget(slidePath, relationshipId),
+					(path) => this.mediaDataParser.getMediaMimeType(path),
+				);
+				mediaPath = p14Media.mediaPath;
+				mediaMimeType = p14Media.mediaMimeType;
 
 				// Extract the poster frame from the picture's blipFill
 				let posterFramePath: string | undefined;
@@ -125,6 +172,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					y,
 					width,
 					height,
+					xEmu,
+					yEmu,
+					widthEmu,
+					heightEmu,
 					rotation,
 					skewX,
 					skewY,
@@ -140,8 +191,23 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					audioCdEnd: mediaReference.audioCdEnd,
 					rawMediaReferenceXml: mediaReference.rawXml,
 					isLinked: mediaReference.isLinked,
+					trimStartMs: p14Media.trimStartMs,
+					trimEndMs: p14Media.trimEndMs,
+					fadeInDuration: p14Media.fadeInDuration,
+					fadeOutDuration: p14Media.fadeOutDuration,
+					playbackSpeed: p14Media.playbackSpeed,
+					bookmarks: p14Media.bookmarks,
 					posterFramePath,
 					posterFrameData,
+					...(mediaAltText !== undefined ? { altText: mediaAltText } : {}),
+					...(mediaTitle !== undefined ? { title: mediaTitle } : {}),
+					...this.readImageCropFromBlipFill(posterBlipFill),
+					// Real PowerPoint media is `p:pic`-shaped even though the
+					// `media` type buckets as `p:graphicFrame`, so its locks live
+					// in `a:picLocks`. The writer resolves the same container from
+					// the markup; leaving this unparsed would hand it an empty bag
+					// and delete the authored lock on the first save.
+					locks: parseShapeLocksFromNode(pic, SHAPE_LOCK_CONTAINERS['p:pic']),
 					rawXml: pic,
 				} as MediaPptxElement;
 			}
@@ -151,9 +217,24 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				effectiveSpPr?.['a:prstGeom'] as XmlObject | undefined,
 			);
 			let shapeType = prstGeom || 'rect';
+			const cropShape = xmlChild(effectiveSpPr, 'a:custGeom')
+				? undefined
+				: cropShapeForPresetGeometry(prstGeom);
 			let pathData: string | undefined;
 			let pathWidth: number | undefined;
 			let pathHeight: number | undefined;
+			let customGeometryRawData: ReturnType<typeof this.extractCustomGeometryRawData>;
+			let customGeometryAdjustHandlesXY: ReturnType<
+				typeof this.extractCustomGeometryAdjustHandles
+			>['xy'];
+			let customGeometryAdjustHandlesPolar: ReturnType<
+				typeof this.extractCustomGeometryAdjustHandles
+			>['polar'];
+			let customGeometryConnectionSites: ReturnType<
+				typeof this.extractCustomGeometryConnectionSites
+			>;
+			let customGeometryTextRect: ReturnType<typeof this.extractCustomGeometryTextRect>;
+			let customGeometryPaths: ReturnType<typeof this.buildStructuredCustomGeometryPaths>;
 
 			const custGeom = effectiveSpPr?.['a:custGeom'];
 			if (custGeom) {
@@ -167,6 +248,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					pathData = customPath.pathData;
 					pathWidth = customPath.pathWidth;
 					pathHeight = customPath.pathHeight;
+					customGeometryPaths = this.buildStructuredCustomGeometryPaths(
+						custGeom as XmlObject,
+						customPath.pathWidth,
+						customPath.pathHeight,
+					);
+					customGeometryRawData = this.extractCustomGeometryRawData(custGeom as XmlObject);
+					const typedHandles = this.extractCustomGeometryAdjustHandles(custGeom as XmlObject);
+					customGeometryAdjustHandlesXY = typedHandles.xy;
+					customGeometryAdjustHandlesPolar = typedHandles.polar;
+					customGeometryConnectionSites = this.extractCustomGeometryConnectionSites(
+						custGeom as XmlObject,
+					);
+					customGeometryTextRect = this.extractCustomGeometryTextRect(custGeom as XmlObject);
 				}
 			}
 
@@ -218,6 +312,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				}
 			}
 
+			// Print-resolution hint (`a:blipFill/@dpi`): round-trip only, no
+			// on-screen rendering effect. See `PptxImageProperties.dpi`.
+			const dpiRaw = Number.parseInt(
+				String((blipFill as XmlObject | undefined)?.['@_dpi'] || ''),
+				10,
+			);
+			if (Number.isFinite(dpiRaw) && dpiRaw > 0) {
+				tileProps.dpi = dpiRaw;
+			}
+
 			this.compatibilityService.inspectPictureCompatibility(
 				blipFill as XmlObject | undefined,
 				blip as XmlObject | undefined,
@@ -235,8 +339,18 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				const slideRelsForSvg = this.slideRelsMap.get(slidePath);
 				const svgTarget = slideRelsForSvg?.get(svgRelId);
 				if (svgTarget) {
-					svgPath = this.resolveImagePath(slidePath, svgTarget);
-					if (this.eagerDecodeImages && svgPath) {
+					// G17: a LINKED (TargetMode="External") svgBlip variant is an
+					// absolute URL, not a package-relative path; resolving it
+					// through `resolveImagePath` produces the same nonsense join
+					// the primary blip fix below guards against. Mirror that gate.
+					const resolvedSvg = resolveExternalOrPackagePath(
+						svgTarget,
+						this.allowExternalImages === true,
+						(target) => this.resolveImagePath(slidePath, target),
+					);
+					svgPath = resolvedSvg.path;
+					svgData = resolvedSvg.data;
+					if (!svgData && this.eagerDecodeImages && svgPath) {
 						svgData = await this.getImageData(svgPath);
 					}
 				}
@@ -299,6 +413,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				(picCNvPicPr?.['a:picLocks'] ?? picCNvPicPr?.['a:spLocks']) as XmlObject | undefined,
 			);
 
+			// `a:cNvPicPr/@preferRelativeResize` (issue G13): a picture-only
+			// non-visual property, distinct from `a:picLocks`.
+			const preferRelativeResize = parsePreferRelativeResize(
+				picCNvPicPr?.['@_preferRelativeResize'],
+			);
+
+			// "Mark as decorative" (issue G16): PowerPoint writes
+			// `p:cNvPr/a:extLst/a:ext[@uri='{C183D7F6-...}']/adec:decorative`.
+			const isDecorative = isCNvPrMarkedDecorative(picCNvPr);
+
 			return {
 				id,
 				name: picElementName || undefined,
@@ -307,6 +431,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				y,
 				width,
 				height,
+				xEmu,
+				yEmu,
+				widthEmu,
+				heightEmu,
 				imageData,
 				imagePath,
 				svgData,
@@ -316,11 +444,20 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				...crop,
 				...tileProps,
 				shapeType,
+				// "Crop to Shape" is the picture's own preset geometry; surface the
+				// typed view only when the preset expresses one (never for custGeom).
+				...(cropShape !== undefined ? { cropShape } : {}),
 				shapeAdjustments,
 				adjustmentHandles,
 				pathData,
 				pathWidth,
 				pathHeight,
+				customGeometryPaths,
+				customGeometryRawData,
+				customGeometryAdjustHandlesXY,
+				customGeometryAdjustHandlesPolar,
+				customGeometryConnectionSites,
+				customGeometryTextRect,
 				shapeStyle: this.extractShapeStyle(effectiveSpPr, styleNode),
 				rotation,
 				skewX,
@@ -331,6 +468,8 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				actionClick: picActionClick,
 				actionHover: picActionHover,
 				locks: picLocks,
+				...(preferRelativeResize !== undefined ? { preferRelativeResize } : {}),
+				...(isDecorative !== undefined ? { isDecorative } : {}),
 			};
 		} catch (e) {
 			console.warn(`[pptx] Skipping picture element (${id}):`, e);

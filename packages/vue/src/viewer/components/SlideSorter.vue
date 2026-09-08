@@ -16,6 +16,12 @@
  */
 import { X } from 'lucide-vue-next';
 import type { PptxSlide } from 'pptx-viewer-core';
+import {
+	HIDDEN_SLIDE_SLASH_GRADIENT,
+	hiddenSlideCue,
+	isEditorTextInputTarget,
+	mapSlideSorterKey,
+} from 'pptx-viewer-shared';
 import type { CSSProperties } from 'vue';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -54,6 +60,14 @@ const stageWrapStyle = computed<CSSProperties>(() => ({
 	width: `${TILE_WIDTH}px`,
 	height: `${tileHeight.value}px`,
 }));
+
+/**
+ * The shared rail/sorter cue. The tile already dimmed and already showed the
+ * word, but dimming is a colour-only signal and nothing announced the state, so
+ * the tile now also carries the slash across its number and a description.
+ */
+const hiddenCue = hiddenSlideCue;
+const slashGradient = HIDDEN_SLIDE_SLASH_GRADIENT;
 
 /** Index of the tile currently being dragged, or `null` when idle. */
 const dragIndex = ref<number | null>(null);
@@ -106,12 +120,18 @@ const contextMenu = ref<{ open: boolean; x: number; y: number; index: number }>(
 	index: 0,
 });
 
+/**
+ * Deliberately does not also `emit('select', index)`: the host's `select`
+ * handler navigates the canvas AND closes this whole overlay
+ * (`deckViews.onSorterSelect`), which would tear the menu down again on the
+ * very right-click that opened it, before a single mouse action against it
+ * was reachable.
+ */
 function openContextMenu(index: number, event: MouseEvent): void {
 	if (!props.canEdit) {
 		return;
 	}
 	event.preventDefault();
-	emit('select', index);
 	contextMenu.value = { open: true, x: event.clientX, y: event.clientY, index };
 }
 
@@ -137,26 +157,31 @@ function onContextSelect(id: string): void {
 	}
 }
 
-// ── Keyboard shortcuts (Delete / Ctrl+D / Escape) ─────────────────────
+// ── Keyboard shortcuts ────────────────────────────────────────────────
+// Resolution is the shared `mapSlideSorterKey`, the one sorter keymap every
+// binding answers to. Only the commands this overlay can actually perform are
+// dispatched: it has no slide clipboard, no multi-selection and no thumbnail
+// zoom, so copy / paste / select-all / Ctrl+plus fall through to the host
+// rather than being swallowed by a handler that would do nothing with them.
 function onKeyDown(event: KeyboardEvent): void {
 	if (contextMenu.value.open) {
 		contextMenu.value.open = false;
 	}
-	const isCtrl = event.ctrlKey || event.metaKey;
-	if (event.key === 'Escape') {
+	const { action } = mapSlideSorterKey(event, {
+		canEdit: Boolean(props.canEdit),
+		isTextInputTarget: isEditorTextInputTarget(event.target),
+	});
+	if (action === 'close') {
 		event.stopPropagation();
 		emit('close');
 		return;
 	}
-	if (!props.canEdit) {
-		return;
-	}
-	if (event.key === 'Delete' || event.key === 'Backspace') {
+	if (action === 'delete') {
 		event.preventDefault();
 		emit('delete', props.activeIndex);
 		return;
 	}
-	if (isCtrl && (event.key === 'd' || event.key === 'D')) {
+	if (action === 'duplicate') {
 		event.preventDefault();
 		emit('duplicate', props.activeIndex);
 	}
@@ -193,11 +218,14 @@ onBeforeUnmount(() => {
 					'is-active': index === activeIndex,
 					'is-dragging': index === dragIndex,
 					'is-drop-target': index === dragOverIndex && index !== dragIndex,
+					'is-hidden': Boolean(slide.hidden),
 				}"
 				draggable="true"
 				:data-index="index"
+				:data-pptx-slide-hidden="hiddenCue(slide.hidden, 'sorter', index).marker"
 				:aria-label="t('pptx.notes.slideN', { n: index + 1 })"
 				:aria-current="index === activeIndex ? 'true' : undefined"
+				:aria-describedby="hiddenCue(slide.hidden, 'sorter', index).labelId"
 				@click="onSelect(index)"
 				@contextmenu="openContextMenu(index, $event)"
 				@dragstart="onDragStart(index, $event)"
@@ -213,10 +241,17 @@ onBeforeUnmount(() => {
 						:scale="tileScale"
 					/>
 				</div>
-				<span class="pptx-vue-sorter-index">{{ index + 1 }}</span>
-				<span v-if="slide.hidden" class="pptx-vue-sorter-hidden">{{
-					t('pptx.slideSorter.hidden')
-				}}</span>
+				<span
+					class="pptx-vue-sorter-index"
+					:style="slide.hidden ? { backgroundImage: slashGradient } : undefined"
+					>{{ index + 1 }}</span
+				>
+				<span
+					v-if="slide.hidden"
+					:id="hiddenCue(slide.hidden, 'sorter', index).labelId"
+					class="pptx-vue-sorter-hidden"
+					>{{ t('pptx.slideSorter.hidden') }}</span
+				>
 			</div>
 		</div>
 

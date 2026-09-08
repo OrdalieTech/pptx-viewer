@@ -7,6 +7,8 @@ import type {
 	PptxEmbeddedFont,
 	PptxHeaderFooter,
 	PptxHandoutMaster,
+	PptxModifyVerifier,
+	PptxModernCommentAuthor,
 	PptxNotesMaster,
 	PptxSlide,
 	PptxSlideMaster,
@@ -16,9 +18,24 @@ import type {
 	PptxSection,
 	PptxPresentationProperties,
 	PptxTagCollection,
+	PptxViewProperties,
 	ParsedTableStyleMap,
 } from 'pptx-viewer-core';
 import { PptxHandler, EncryptedFileError } from 'pptx-viewer-core';
+import type {
+	CompatibilityWarningToast,
+	ReadOnlyRecommendation,
+	SlideSizeEmu,
+} from 'pptx-viewer-shared';
+import {
+	applyImagePathPatches,
+	compatibilityWarningToasts,
+	readOnlyRecommendation,
+	resolveAuthoredCustomShowId,
+	resolveTableCellImageUrls,
+	resolveTableStyleImageUrls,
+	seedRecentColors,
+} from 'pptx-viewer-shared';
 /**
  * useLoadContent: Handles loading/parsing PPTX content into viewer state.
  *
@@ -34,6 +51,7 @@ import {
 	collectMediaElements,
 	collectImagePaths,
 	buildInitialGuides,
+	resolveMediaElementSource,
 } from './load-content-helpers';
 import type { EditorHistoryResult } from './useEditorHistory';
 
@@ -49,15 +67,29 @@ export interface UseLoadContentInput {
 	setTemplateElementsBySlideId: React.Dispatch<React.SetStateAction<Record<string, PptxElement[]>>>;
 	mediaDataUrls: Map<string, string>;
 	setCanvasSize: React.Dispatch<React.SetStateAction<CanvasSize>>;
+	/** Seeds the EMU `p:sldSz` that a save persists (see `ViewerCoreState.slideSizeEmu`). */
+	setSlideSizeEmu: React.Dispatch<React.SetStateAction<SlideSizeEmu | undefined>>;
 	setHeaderFooter: React.Dispatch<React.SetStateAction<PptxHeaderFooter>>;
 	setLayoutOptions: React.Dispatch<React.SetStateAction<Array<{ path: string; name: string }>>>;
 	setSlideMasters: React.Dispatch<React.SetStateAction<PptxSlideMaster[]>>;
+	setModernCommentAuthors: React.Dispatch<React.SetStateAction<PptxModernCommentAuthor[]>>;
+	/** Seeds the "Recent Colors" row (`p:clrMru`) every colour picker shares. */
+	setRecentColors: React.Dispatch<React.SetStateAction<string[]>>;
 	setTheme: React.Dispatch<React.SetStateAction<PptxTheme | undefined>>;
 	setTableStyleMap: React.Dispatch<React.SetStateAction<ParsedTableStyleMap | undefined>>;
+	setTableStylesDefaultId: React.Dispatch<React.SetStateAction<string | undefined>>;
+	setTableStylesToDelete: React.Dispatch<React.SetStateAction<string[]>>;
 	setThemeOptions: React.Dispatch<React.SetStateAction<PptxThemeOption[]>>;
 	setCustomShows: React.Dispatch<React.SetStateAction<PptxCustomShow[]>>;
+	/**
+	 * Seeds the running show from `p:showPr/p:custShow/@id`, so a deck authored
+	 * to open into a custom show plays that subset instead of the whole deck.
+	 * A later manual pick still wins: this only fires on load.
+	 */
+	setActiveCustomShowId: React.Dispatch<React.SetStateAction<string | null>>;
 	setSections: React.Dispatch<React.SetStateAction<PptxSection[]>>;
 	setPresentationProperties: React.Dispatch<React.SetStateAction<PptxPresentationProperties>>;
+	setViewProperties: React.Dispatch<React.SetStateAction<PptxViewProperties | undefined>>;
 	setNotesMaster: React.Dispatch<React.SetStateAction<PptxNotesMaster | undefined>>;
 	setHandoutMaster: React.Dispatch<React.SetStateAction<PptxHandoutMaster | undefined>>;
 	setNotesCanvasSize: React.Dispatch<React.SetStateAction<CanvasSize | undefined>>;
@@ -73,6 +105,16 @@ export interface UseLoadContentInput {
 	setGuides: React.Dispatch<
 		React.SetStateAction<Array<{ id: string; axis: 'h' | 'v'; position: number }>>
 	>;
+	/** Whether the loaded deck recommends opening read-only (`p:modifyVerifier` / "Mark as Final"). */
+	setReadOnlyRecommendation: React.Dispatch<React.SetStateAction<ReadOnlyRecommendation>>;
+	/**
+	 * The deck's raw `p:modifyVerifier`, kept alongside the recommendation
+	 * above so the read-only banner's password prompt can check a candidate
+	 * password against it (`checkModifyPassword`, `pptx-viewer-shared`).
+	 */
+	setModifyVerifier: React.Dispatch<React.SetStateAction<PptxModifyVerifier | undefined>>;
+	/** Deck + slide compatibility-warning toast stack for this load. */
+	setCompatToasts: React.Dispatch<React.SetStateAction<CompatibilityWarningToast[]>>;
 	setLoading: React.Dispatch<React.SetStateAction<boolean>>;
 	setError: React.Dispatch<React.SetStateAction<string | null>>;
 	setIsDirty: React.Dispatch<React.SetStateAction<boolean>>;
@@ -83,6 +125,13 @@ export interface UseLoadContentInput {
 	 * load lands mid-session and would otherwise clobber remotely-synced state.
 	 */
 	onContentApplied?: () => void;
+	/**
+	 * File > Options > Trust Center > "Allow external content". Forwarded to
+	 * `PptxHandler.load` as `allowExternalImages`; core defaults this to
+	 * `false` (drop `http(s)://` image sources) regardless of what this flag
+	 * says unless it is passed through explicitly.
+	 */
+	allowExternalImages?: boolean;
 }
 
 export interface UseLoadContentResult {
@@ -101,15 +150,22 @@ export function useLoadContent({
 	setTemplateElementsBySlideId,
 	mediaDataUrls,
 	setCanvasSize,
+	setSlideSizeEmu,
 	setHeaderFooter,
 	setLayoutOptions,
 	setSlideMasters,
+	setModernCommentAuthors,
+	setRecentColors,
 	setTheme,
 	setTableStyleMap,
+	setTableStylesDefaultId,
+	setTableStylesToDelete,
 	setThemeOptions,
 	setCustomShows,
+	setActiveCustomShowId,
 	setSections,
 	setPresentationProperties,
+	setViewProperties,
 	setNotesMaster,
 	setHandoutMaster,
 	setNotesCanvasSize,
@@ -123,11 +179,15 @@ export function useLoadContent({
 	setHasDigitalSignatures,
 	setDigitalSignatureCount,
 	setGuides,
+	setReadOnlyRecommendation,
+	setModifyVerifier,
+	setCompatToasts,
 	setLoading,
 	setError,
 	setIsDirty,
 	setIsEncrypted,
 	onContentApplied,
+	allowExternalImages,
 }: UseLoadContentInput): UseLoadContentResult {
 	const handlerRef = useRef<PptxHandler | null>(null);
 	const originalBufferRef = useRef<ArrayBuffer | null>(null);
@@ -170,7 +230,10 @@ export function useLoadContent({
 				const previousHandler = handlerRef.current;
 
 				const handler = new PptxHandler();
-				const parsed = await handler.load(buffer as ArrayBuffer);
+				// Trust Center > "Allow external content" (default off, matching
+				// core's own SSRF/privacy-safe default): only pass `true` through
+				// when the option is explicitly on.
+				const parsed = await handler.load(buffer as ArrayBuffer, { allowExternalImages });
 				if (cancelled || token !== renderTokenRef.current) {
 					handler.dispose();
 					return;
@@ -194,37 +257,21 @@ export function useLoadContent({
 					}
 				}
 				mediaDataUrls.clear();
+				// Shared with the other four bindings (G17): a LINKED media
+				// element's `mediaPath` is already the verbatim external URL by
+				// the time it reaches here, and `resolveMediaElementSource` hands
+				// it straight back instead of attempting an archive lookup that
+				// can only ever find embedded parts.
 				await Promise.all(
 					mediaElements.map(async (mediaElement) => {
-						const mediaPath = mediaElement.mediaPath;
-						if (!mediaPath) {
+						const resolved = await resolveMediaElementSource(mediaElement, handler);
+						if (resolved.missing || !resolved.mediaPath || !resolved.url) {
 							mediaElement.mediaMissing = true;
 							return;
 						}
-						try {
-							const isAudioVideo =
-								mediaElement.mediaType === 'audio' || mediaElement.mediaType === 'video';
-							if (isAudioVideo) {
-								const arrayBuffer = await handler.getMediaArrayBuffer(mediaPath);
-								if (arrayBuffer) {
-									const mimeType = mediaElement.mediaMimeType || 'application/octet-stream';
-									const blob = new Blob([arrayBuffer], { type: mimeType });
-									const blobUrl = URL.createObjectURL(blob);
-									loadBlobUrls.push(blobUrl);
-									mediaDataUrls.set(mediaPath, blobUrl);
-								} else {
-									mediaElement.mediaMissing = true;
-								}
-							} else {
-								const dataUrl = await handler.getImageData(mediaPath);
-								if (dataUrl) {
-									mediaDataUrls.set(mediaPath, dataUrl);
-								} else {
-									mediaElement.mediaMissing = true;
-								}
-							}
-						} catch {
-							mediaElement.mediaMissing = true;
+						mediaDataUrls.set(resolved.mediaPath, resolved.url);
+						if (resolved.isBlobUrl) {
+							loadBlobUrls.push(resolved.url);
 						}
 					}),
 				);
@@ -250,48 +297,30 @@ export function useLoadContent({
 							}
 						}),
 					);
-					// Build a per-element-id patch map (id → { field: url, ... })
-					// outside the transform loop so we don't repeat lookups.
-					const elementPatches = new Map<string, Record<string, string>>();
-					for (const ref of imageRefs) {
-						const url = resolvedMap.get(ref.path);
-						if (!url) {
-							continue;
-						}
-						const id = ref.element.id;
-						const existing = elementPatches.get(id) ?? {};
-						existing[ref.field] = url;
-						elementPatches.set(id, existing);
-					}
-
-					if (elementPatches.size > 0) {
-						const patchElements = (elements: PptxElement[]): PptxElement[] => {
-							let mutated = false;
-							const next = elements.map((el) => {
-								let updated = el;
-								const patch = elementPatches.get(el.id);
-								if (patch) {
-									updated = { ...el, ...patch } as PptxElement;
-								}
-								if (updated.type === 'group' && updated.children?.length) {
-									const newChildren = patchElements(updated.children);
-									if (newChildren !== updated.children) {
-										updated = { ...updated, children: newChildren };
-									}
-								}
-								if (updated !== el) {
-									mutated = true;
-								}
-								return updated;
-							});
-							return mutated ? next : elements;
-						};
-						nextSlides = parsed.slides.map((s) => {
-							const newElements = patchElements(s.elements);
-							return newElements === s.elements ? s : { ...s, elements: newElements };
-						});
-					}
+					// The per-element-id patch map + group-recursing tree walk are the
+					// shared `applyImagePathPatches` / `walkAndPatchElements`
+					// (loader/element-patch-walker.ts), which every binding's
+					// `useLoadContent` used to hand-roll identically.
+					nextSlides = parsed.slides.map((s) => {
+						const newElements = applyImagePathPatches(s.elements, resolvedMap, imageRefs);
+						return newElements === s.elements ? s : { ...s, elements: newElements };
+					});
 				}
+
+				// ── Resolve table cell + whole-table-STYLE image-fill Blob URLs ──
+				// Same lazy-load story as picture elements above: a cell's
+				// `a:tcPr/a:blipFill` (per-slide) and a `a:tcStyle/a:fill/a:blipFill`
+				// on `ppt/tableStyles.xml` (presentation-level) each parse to an
+				// archive path, resolved here to a displayable URL. The collect +
+				// resolve + patch orchestration is the shared
+				// `resolveTableCellImageUrls` / `resolveTableStyleImageUrls`
+				// (loader/lazy-image-resolution.ts).
+				nextSlides = await resolveTableCellImageUrls(nextSlides, (path) =>
+					handler.getImageData(path),
+				);
+				const nextTableStyleMap = await resolveTableStyleImageUrls(parsed.tableStyleMap, (path) =>
+					handler.getImageData(path),
+				);
 
 				handlerRef.current = handler;
 				// Separate the inherited master/layout (template) elements that the
@@ -305,15 +334,40 @@ export function useLoadContent({
 					width: parsed.width ?? DEFAULT_CANVAS_WIDTH,
 					height: parsed.height ?? DEFAULT_CANVAS_HEIGHT,
 				});
+				// Keep the authored `p:sldSz` in EMU alongside the pixel canvas: the
+				// pixels are what the stage renders, the EMU is what a save writes.
+				setSlideSizeEmu(
+					typeof parsed.widthEmu === 'number' &&
+						typeof parsed.heightEmu === 'number' &&
+						parsed.widthEmu > 0 &&
+						parsed.heightEmu > 0
+						? {
+								widthEmu: parsed.widthEmu,
+								heightEmu: parsed.heightEmu,
+								type: parsed.slideSizeType ?? '',
+							}
+						: undefined,
+				);
 				setHeaderFooter(parsed.headerFooter ?? {});
 				setLayoutOptions(parsed.layoutOptions ?? []);
 				setSlideMasters(parsed.slideMasters ?? []);
+				setModernCommentAuthors(parsed.modernCommentAuthors ?? []);
+				setRecentColors(seedRecentColors({ mruColors: parsed.mruColors }));
 				setTheme(parsed.theme);
-				setTableStyleMap(parsed.tableStyleMap);
+				setTableStyleMap(nextTableStyleMap);
+				setTableStylesDefaultId(parsed.tableStylesDefaultId);
+				setTableStylesToDelete([]);
 				setThemeOptions(parsed.themeOptions ?? []);
 				setCustomShows(parsed.customShows ?? []);
+				// "Set Up Slide Show > Custom show" is authored intent, not decoration:
+				// honour `p:showPr/p:custShow/@id` so the deck opens into the show it
+				// names. An id naming no surviving show falls back to the whole deck.
+				setActiveCustomShowId(
+					resolveAuthoredCustomShowId(parsed.presentationProperties, parsed.customShows) ?? null,
+				);
 				setSections(parsed.sections ?? []);
 				setPresentationProperties(parsed.presentationProperties ?? {});
+				setViewProperties(parsed.viewProperties);
 				setNotesMaster(parsed.notesMaster);
 				setHandoutMaster(parsed.handoutMaster);
 				if (
@@ -341,6 +395,18 @@ export function useLoadContent({
 				// Initialize drawing guides from parsed presentation + slide data
 				setGuides(buildInitialGuides(parsed.presentationGuides, parsed.slides[0]?.guides));
 
+				// Whether this deck asks to be opened read-only, and the deck + slide
+				// compatibility-warning toast stack: both reset wholesale on every
+				// load, matching every other setter here.
+				setReadOnlyRecommendation(readOnlyRecommendation(parsed));
+				setModifyVerifier(parsed.modifyVerifier ?? undefined);
+				setCompatToasts(
+					compatibilityWarningToasts([
+						...(parsed.warnings ?? []),
+						...parsed.slides.flatMap((slide) => slide.warnings ?? []),
+					]),
+				);
+
 				setActiveSlideIndex(0);
 				clearSelection();
 				setIsDirty(false);
@@ -351,6 +417,11 @@ export function useLoadContent({
 					if (err instanceof EncryptedFileError) {
 						setIsEncrypted(true);
 					} else {
+						// Log unexpected load failures to the console: `setError` only
+						// surfaces the message if a UI surface renders it, and a silent
+						// swallow here has previously masked real bugs (e.g. a caller
+						// missing a newly-required setter) as inexplicable hangs.
+						console.error('[pptx] Failed to load presentation content:', err);
 						setError(err instanceof Error ? err.message : String(err));
 					}
 				}

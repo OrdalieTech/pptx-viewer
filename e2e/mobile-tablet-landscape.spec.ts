@@ -16,12 +16,17 @@ import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
+import { resetTabSession } from './support/deck';
+
 const deck = resolve(fileURLToPath(new URL('../.github/assets/sample-deck.pptx', import.meta.url)));
 const shotDir = fileURLToPath(new URL('../test-results/mobile-tablet-landscape/', import.meta.url));
 
 // Every binding emits the mobile chrome hooks used by this spec.
 
 async function load(page: Page): Promise<void> {
+	// Forget any restored session first, or the deck reopens and the landing
+	// dropzone (the only place #file-input exists) never mounts.
+	await resetTabSession(page);
 	await page.goto('/');
 	await page.locator('#file-input').setInputFiles(deck);
 	await page.locator('[data-pptx-element="true"]').first().waitFor();
@@ -59,7 +64,7 @@ test.describe('tablet portrait (820×1180, touch)', () => {
 		});
 		expect(overflow.scrollW).toBeLessThanOrEqual(overflow.clientW + 1);
 
-		// Tablet keeps the desktop chrome (no mobile bottom bar) — it's tall
+		// Tablet keeps the desktop chrome (no mobile bottom bar) - it's tall
 		// enough for the ribbon + panels.
 		await expect(bottomBarNav(page)).not.toBeVisible();
 	});
@@ -85,7 +90,7 @@ test.describe('landscape phone (915×412, touch)', () => {
 		});
 		expect(overflow.scrollW).toBeLessThanOrEqual(overflow.clientW + 1);
 
-		// A short landscape phone must get the mobile chrome — both the bottom
+		// A short landscape phone must get the mobile chrome - both the bottom
 		// action bar and the compact top toolbar (not the desktop ribbon).
 		await expect(bottomBarNav(page)).toBeVisible();
 		await expect(page.getByRole('button', { name: 'Menu' })).toBeVisible();

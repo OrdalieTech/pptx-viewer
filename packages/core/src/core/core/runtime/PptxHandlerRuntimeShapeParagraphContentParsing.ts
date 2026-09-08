@@ -1,7 +1,23 @@
 import { XmlObject, TextSegment, TextStyle } from '../../types';
 import { xmlText } from '../../utils';
+import { parseParagraphLevel } from '../../utils/paragraph-properties-parser';
+import { xmlHasChild } from '../../utils/xml-access';
+import { breakAutoNumberRun, nextAutoNumber } from './auto-number-sequence';
+import { paragraphContentEntries } from './paragraph-sibling-order';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeShapeTextParsing';
 import type { ShapeTextParsingContext, ParagraphContentResult } from './PptxHandlerRuntimeTypes';
+
+/** `a:p` children that contribute renderable content, in no particular order. */
+const PARAGRAPH_CONTENT_TAGS: ReadonlySet<string> = new Set([
+	'a:r',
+	'a:fld',
+	'a:t',
+	'a14:m',
+	'm:oMathPara',
+	'm:oMath',
+	'mc:AlternateContent',
+	'a:br',
+]);
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	/**
@@ -28,6 +44,22 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			}
 		};
 
+		// Every run style below is `{...inherited, ...authored}`. Recording the
+		// two halves alongside the flat result is what lets the writer emit a
+		// sparse `a:rPr` again instead of baking the whole resolved cascade into
+		// the run (see `authored-run-style.ts`). Both are stored by REFERENCE:
+		// the baseline is this paragraph's single `mergedDefaultRunStyle`, so
+		// the split costs two pointers per run, not two objects. A run with no
+		// `a:rPr` of its own gets an EMPTY authored half, which is the whole
+		// point: it authored nothing and must round-trip as `<a:rPr lang=".."/>`.
+		const withAuthoredSplit = (authored: TextStyle): TextStyle =>
+			({
+				...mergedDefaultRunStyle,
+				...authored,
+				authoredRunStyle: authored,
+				inheritedRunStyle: mergedDefaultRunStyle,
+			}) as TextStyle;
+
 		// Bullet info
 		const isBodyPlaceholder =
 			ctx.placeholderInfo?.type === 'body' || ctx.placeholderInfo?.type === 'obj';
@@ -40,32 +72,99 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			ctx.slidePath,
 			ctx.effectiveLevelStyles,
 		);
+		const paragraphLevel = parseParagraphLevel(p['a:pPr'] as XmlObject | undefined);
+		const autoNumScheme =
+			paragraphBulletInfo && !paragraphBulletInfo.none && !paragraphBulletInfo.char
+				? paragraphBulletInfo.autoNumType
+				: undefined;
+		// Anything that is not a continuation of the list running at this level
+		// ends that list, so the next numbered paragraph counts from its own
+		// `startAt` again rather than from the top of the text body.
+		let autoNumOrdinal: number | undefined;
+		if (autoNumScheme) {
+			autoNumOrdinal = nextAutoNumber(
+				ctx.autoNumbering,
+				paragraphLevel,
+				autoNumScheme,
+				paragraphBulletInfo?.autoNumStartAt ?? 1,
+			);
+			if (paragraphBulletInfo) {
+				// Consumers that re-derive the marker from `BulletInfo` alone
+				// (the renderer's `resolveParagraphBullet`, the Markdown
+				// converter's `resolveListMarker`) compute
+				// `autoNumStartAt + paragraphIndex`. Publishing the ordinal's
+				// OFFSET here rather than the raw paragraph position is what
+				// makes them land on the sequence resolved above, which is the
+				// only one that accounts for a list interrupted by an unnumbered
+				// paragraph. With the raw position, a list that did not start at
+				// the first paragraph of the body numbered one way here and
+				// another way in the renderer, and BOTH markers were painted
+				// ("3.1. Item"), since the paragraph builder drops the parsed
+				// marker segment only when the two strings agree.
+				paragraphBulletInfo.paragraphIndex =
+					autoNumOrdinal - (paragraphBulletInfo.autoNumStartAt ?? 1);
+			}
+		} else {
+			breakAutoNumberRun(ctx.autoNumbering, paragraphLevel);
+		}
+
 		if (paragraphBulletInfo && !paragraphBulletInfo.none) {
 			let bulletText: string;
 			if (paragraphBulletInfo.char) {
 				bulletText = `${paragraphBulletInfo.char} `;
-			} else if (paragraphBulletInfo.autoNumType) {
-				const startAt = paragraphBulletInfo.autoNumStartAt ?? 1;
-				bulletText = this.formatAutoNumber(paragraphBulletInfo.autoNumType, startAt + pIdx);
-			} else if (paragraphBulletInfo.imageRelId) {
-				bulletText = '\u{1F4CE} ';
+			} else if (autoNumScheme && autoNumOrdinal !== undefined) {
+				bulletText = this.formatAutoNumber(autoNumScheme, autoNumOrdinal);
+			} else if (paragraphBulletInfo.imageRelId || paragraphBulletInfo.imageDataUrl) {
+				// A picture bullet HAS no text marker: the image is the marker,
+				// and every renderer paints it from `bulletInfo` (an `<img>`, or
+				// the '•' fallback when the image cannot be resolved). Stamping
+				// a stand-in glyph here (it used to be a paperclip emoji) simply
+				// added a second, competing marker: the paragraph builder drops
+				// the parsed marker segment only when its text equals the marker
+				// the renderer resolved, and a paperclip never equals a picture,
+				// so every picture-bullet paragraph painted "📎" next to the
+				// image in all five bindings. The segment itself is kept: it
+				// carries `bulletInfo` for the renderers and the writer.
+				bulletText = '';
 			} else {
 				bulletText = '• ';
 			}
-			parts.push(bulletText);
+			// With no `a:buSzPct` / `a:buSzPts`, PowerPoint draws the bullet at
+			// 100% of the FIRST TEXT RUN's size, not at the text body's default.
+			// Using `mergedDefaultRunStyle` alone made a bullet on an 8pt run
+			// render at the 18pt body default - a ~2.2x oversized glyph, and
+			// visibly inconsistent between paragraphs (one that happened to carry
+			// an `a:endParaRPr sz` picked the right size up by accident).
+			const bulletStyle = { ...mergedDefaultRunStyle } as TextStyle;
+			if (
+				paragraphBulletInfo.sizePercent === undefined &&
+				paragraphBulletInfo.sizePts === undefined
+			) {
+				const firstRunSize = this.resolveFirstRunFontSize(p, paraAlign, ctx);
+				if (firstRunSize !== undefined) {
+					bulletStyle.fontSize = firstRunSize;
+				}
+			}
+			if (bulletText) {
+				parts.push(bulletText);
+			}
 			segments.push({
 				text: bulletText,
-				style: { ...mergedDefaultRunStyle },
+				style: bulletStyle,
 				bulletInfo: paragraphBulletInfo,
 			});
-			maybeSeed(mergedDefaultRunStyle);
+			// The marker itself authored no `a:rPr`, and this is also what seeds
+			// `element.textStyle` on a bulleted shape, which the writer falls back
+			// to for any run it rebuilds from the flat text. Seeding it WITHOUT
+			// the authored split would have re-flattened the whole cascade for
+			// exactly the decks that need it most (every bulleted body).
+			maybeSeed(withAuthoredSplit({}));
 		}
 
 		const appendRun = (runText: string, runProps: XmlObject | undefined) => {
-			const runStyle = {
-				...mergedDefaultRunStyle,
-				...this.extractTextRunStyle(runProps, paraAlign, ctx.slideRelationshipMap),
-			} as TextStyle;
+			const runStyle = withAuthoredSplit(
+				this.extractTextRunStyle(runProps, paraAlign, ctx.slideRelationshipMap),
+			);
 			// #83: annotate a per-script fallback face when the run's text is
 			// dominantly CJK / Arabic / Hebrew / Thai and the theme declares a
 			// `<a:font script=...>` override. Rendering hint only — never
@@ -113,14 +212,13 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				return;
 			}
 			const fieldText = xmlText(field['a:t']) ?? '';
-			const fieldRunStyle = {
-				...mergedDefaultRunStyle,
-				...this.extractTextRunStyle(
+			const fieldRunStyle = withAuthoredSplit(
+				this.extractTextRunStyle(
 					field['a:rPr'] as XmlObject | undefined,
 					paraAlign,
 					ctx.slideRelationshipMap,
 				),
-			} as TextStyle;
+			);
 			const fldType = String(field['@_type'] || '').trim() || undefined;
 			const uuidAttr = String(field['@_uuid'] || '').trim();
 			const idAttr = String(field['@_id'] || '').trim();
@@ -184,96 +282,128 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		};
 
 		// ── Process paragraph children in document order ──
-		// Iterate over object keys to preserve the interleaving order of
-		// runs (a:r), fields (a:fld), inline math (a14:m / m:oMathPara /
-		// m:oMath), mc:AlternateContent, line breaks (a:br), and direct
-		// text (a:t). Each key's array items are consumed sequentially,
-		// maintaining the positions of inline math relative to text runs.
-		const contentTagSet = new Set([
-			'a:r',
-			'a:fld',
-			'a:t',
-			'a14:m',
-			'm:oMathPara',
-			'm:oMath',
-			'mc:AlternateContent',
-			'a:br',
-		]);
+		// Runs (a:r), fields (a:fld), inline math (a14:m / m:oMathPara /
+		// m:oMath), mc:AlternateContent, line breaks (a:br) and direct text
+		// (a:t) all interleave freely in CT_TextParagraph, but fast-xml-parser
+		// collapses same-tag siblings under one key, so iterating the parsed
+		// keys re-emits them GROUPED BY TAG: an authored
+		// `"Slide " <a:fld/> " - " <a:fld/>` came back as both literal runs and
+		// only then both fields, i.e. every inline field jumped to the end of
+		// its paragraph. `paragraphContentEntries` replays the order recovered
+		// from the raw XML at parse time, and reports `authored: false` when
+		// there was nothing to recover (already grouped, or SDK-built).
+		const { entries, authored } = paragraphContentEntries(p, PARAGRAPH_CONTENT_TAGS, (value) =>
+			this.ensureArray(value),
+		);
+		const runCount = this.ensureArray(p['a:r']).length;
+		const breakCount = this.ensureArray(p['a:br']).length;
+		// Legacy repair, kept for the grouped case only: with the true order
+		// unknown, breaks were spread one-per-gap between the runs. When the
+		// authored order IS known it is used verbatim instead, which is both
+		// correct and avoids the synthetic break the repair would add.
+		const insertCollapsedBreaks = !authored && runCount > 1 && breakCount > 0;
+		let runIndex = 0;
 
-		for (const key of Object.keys(p)) {
-			if (!contentTagSet.has(key)) {
-				continue;
-			}
-
-			const items = this.ensureArray(p[key]);
-			const rawBreaks = p['a:br'];
-			const breakCount = Array.isArray(rawBreaks)
-				? rawBreaks.length
-				: rawBreaks === undefined
-					? 0
-					: 1;
-			const insertCollapsedBreaks = key === 'a:r' && items.length > 1 && breakCount > 0;
-			for (const [itemIndex, item] of items.entries()) {
-				switch (key) {
-					case 'a:r': {
-						processRun(item);
-						if (insertCollapsedBreaks && itemIndex < Math.min(items.length - 1, breakCount)) {
-							parts.push('\n');
-							segments.push({
-								text: '\n',
-								style: { ...mergedDefaultRunStyle },
-								isLineBreak: true,
-							});
-						}
-						break;
-					}
-					case 'a:fld':
-						processField(item as XmlObject);
-						break;
-					case 'a:t': {
-						const directText =
-							typeof item === 'string' ? item : item !== undefined ? String(item) : '';
-						appendRun(directText, p['a:rPr'] as XmlObject | undefined);
-						break;
-					}
-					case 'a14:m':
-					case 'm:oMathPara':
-					case 'm:oMath':
-						processMathElement(item);
-						break;
-					case 'mc:AlternateContent':
-						processAlternateContent(item);
-						break;
-					case 'a:br': {
-						if (insertCollapsedBreaks) {
-							break;
-						}
-						const brNode = (item ?? {}) as XmlObject;
-						const brRunProps = brNode['a:rPr'] as XmlObject | undefined;
-						const brStyle = {
-							...mergedDefaultRunStyle,
-							...this.extractTextRunStyle(brRunProps, paraAlign, ctx.slideRelationshipMap),
-						} as TextStyle;
+		for (const [key, item] of entries) {
+			switch (key) {
+				case 'a:r': {
+					processRun(item as XmlObject);
+					if (insertCollapsedBreaks && runIndex < Math.min(runCount - 1, breakCount)) {
 						parts.push('\n');
-						const brSegment: TextSegment = {
+						segments.push({
 							text: '\n',
-							style: brStyle,
+							style: { ...mergedDefaultRunStyle },
 							isLineBreak: true,
-						};
-						if (brRunProps && typeof brRunProps === 'object') {
-							// Preserve the raw a:rPr for round-trip serialisation.
-							brSegment.breakRunProperties = { ...(brRunProps as Record<string, unknown>) };
-						}
-						segments.push(brSegment);
-						break;
+						});
 					}
+					runIndex++;
+					break;
+				}
+				case 'a:fld':
+					processField(item as XmlObject);
+					break;
+				case 'a:t': {
+					const directText =
+						typeof item === 'string' ? item : item !== undefined ? String(item) : '';
+					appendRun(directText, p['a:rPr'] as XmlObject | undefined);
+					break;
+				}
+				case 'a14:m':
+				case 'm:oMathPara':
+				case 'm:oMath':
+					processMathElement(item);
+					break;
+				case 'mc:AlternateContent':
+					processAlternateContent(item);
+					break;
+				case 'a:br': {
+					const brNode = (item ?? {}) as XmlObject;
+					const brRunProps = brNode['a:rPr'] as XmlObject | undefined;
+					const brStyle = withAuthoredSplit(
+						this.extractTextRunStyle(brRunProps, paraAlign, ctx.slideRelationshipMap),
+					);
+					parts.push('\n');
+					const brSegment: TextSegment = {
+						text: '\n',
+						style: brStyle,
+						isLineBreak: true,
+					};
+					if (brRunProps && typeof brRunProps === 'object') {
+						// Preserve the raw a:rPr for round-trip serialisation.
+						brSegment.breakRunProperties = { ...(brRunProps as Record<string, unknown>) };
+					}
+					segments.push(brSegment);
+					break;
 				}
 			}
 		}
 
 		if (pIdx < paraCount - 1) {
+			// The paragraph terminator authored no `a:rPr` of its own, so it takes
+			// an EMPTY authored half. Without it, the empty run the writer
+			// backfills for a blank paragraph came out carrying the whole
+			// resolved cascade (`sz`, `a:solidFill`, `a:latin`): on
+			// `issue-132-hr-deck.pptx` slide 1 that was 38 runs' worth of
+			// flattening on a slide whose source declared 7 `a:rPr` in total.
+			const separatorStyle = withAuthoredSplit({}) as TextStyle;
+			// An EMPTY paragraph's line box takes its size from `a:endParaRPr sz`
+			// (PowerPoint sizes the blank line the way it would size a caret on
+			// it). The paragraph has no run to carry that size, so stamp it on
+			// the terminating separator segment; the renderers read it back when
+			// they build the blank line's strut (issue #131, slides 13-14: a
+			// 10pt blank line rendered at the 10.5pt body default, and the error
+			// accumulated down the panel).
+			if (segments.length === 0) {
+				const endParaSz = (p['a:endParaRPr'] as XmlObject | undefined)?.['@_sz'];
+				const endParaPoints = endParaSz !== undefined ? parseInt(String(endParaSz)) / 100 : NaN;
+				if (Number.isFinite(endParaPoints) && endParaPoints > 0) {
+					separatorStyle.fontSize = endParaPoints * (96 / 72);
+				}
+			}
 			parts.push('\n');
-			segments.push({ text: '\n', style: { ...mergedDefaultRunStyle } });
+			segments.push({ text: '\n', style: separatorStyle });
+		} else if (segments.length === 0 && this.paragraphCarriesOwnMetadata(p)) {
+			// The LAST paragraph of a body gets no terminating separator, so an
+			// empty one produced no segment at all and its `a:endParaRPr` /
+			// `a:pPr` were captured nowhere: the writer then rebuilt it as the
+			// bare `<a:endParaRPr lang="en-US"/>` stub, destroying the size,
+			// weight, underline (`a:uLnTx` / `a:uFillTx`), colour and typeface
+			// PowerPoint uses to lay out that BLANK line. A whole text body that
+			// is one empty paragraph (very common: decorative auto-layout
+			// rectangles) lost its end properties outright.
+			//
+			// A zero-length segment carries them instead. It adds no run to the
+			// saved paragraph that was not already there (the writer emits one
+			// empty run for an empty paragraph either way) and no text to the
+			// element, and it takes the blank line's size from `a:endParaRPr sz`
+			// exactly as the separator above does.
+			const emptyParagraphStyle = withAuthoredSplit({}) as TextStyle;
+			const endParaSz = (p['a:endParaRPr'] as XmlObject | undefined)?.['@_sz'];
+			const endParaPoints = endParaSz !== undefined ? parseInt(String(endParaSz)) / 100 : NaN;
+			if (Number.isFinite(endParaPoints) && endParaPoints > 0) {
+				emptyParagraphStyle.fontSize = endParaPoints * (96 / 72);
+			}
+			segments.push({ text: '', style: emptyParagraphStyle });
 		}
 
 		// Attach paragraph-level metadata to the first segment of this
@@ -282,6 +412,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const firstSegmentIndex = segments.length === 0 ? -1 : 0;
 		if (firstSegmentIndex >= 0) {
 			const pPrRaw = p['a:pPr'] as XmlObject | undefined;
+			// A paragraph that explicitly suppressed its bullet produces no marker
+			// segment, so nothing carried `bulletInfo` and the writer had no way to
+			// know: `a:buNone` was dropped on save and the paragraph inherited a
+			// bullet back from the list style, painting markers where the author
+			// had removed them (56 lost on the Arabic RTL corpus deck alone).
+			//
+			// Only the paragraph's OWN `a:buNone` counts. `resolveParagraphBulletInfo`
+			// also reports `none` when the suppression is INHERITED from a layout or
+			// master list style, and writing that back onto the slide paragraph would
+			// add markup the author never authored.
+			if (xmlHasChild(pPrRaw, 'a:buNone') && segments[firstSegmentIndex].bulletInfo === undefined) {
+				segments[firstSegmentIndex].bulletInfo = { none: true };
+			}
 			const lvlRaw = pPrRaw?.['@_lvl'];
 			if (lvlRaw !== undefined) {
 				const lvlParsed = Number.parseInt(String(lvlRaw), 10);
@@ -312,6 +455,48 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		return { parts, segments, seedStyle };
+	}
+
+	/**
+	 * True when a paragraph authored properties of its own that only a segment
+	 * can carry through the model: its end-paragraph run properties
+	 * (`a:endParaRPr`) or its paragraph properties (`a:pPr`). Used to decide
+	 * whether an EMPTY trailing paragraph is worth a zero-length segment; a
+	 * genuinely bare `<a:p/>` gets none.
+	 */
+	protected paragraphCarriesOwnMetadata(p: XmlObject): boolean {
+		return p['a:endParaRPr'] !== undefined || p['a:pPr'] !== undefined;
+	}
+
+	/**
+	 * Font size (px) of the first text run in a paragraph, or `undefined` when
+	 * the paragraph has no run that declares one.
+	 *
+	 * Used to size an unsized bullet the way PowerPoint does: `a:buChar` /
+	 * `a:buAutoNum` with no `a:buSzPct`/`a:buSzPts` inherits the first run's
+	 * size. Only `a:r` and `a:fld` carry renderable text; `a:br` does not.
+	 */
+	protected resolveFirstRunFontSize(
+		p: XmlObject,
+		paraAlign: TextStyle['align'],
+		ctx: ShapeTextParsingContext,
+	): number | undefined {
+		for (const key of ['a:r', 'a:fld'] as const) {
+			const node = p[key];
+			if (!node) {
+				continue;
+			}
+			const first = (this.ensureArray(node) as XmlObject[])[0];
+			const runProps = first?.['a:rPr'] as XmlObject | undefined;
+			if (!runProps) {
+				continue;
+			}
+			const style = this.extractTextRunStyle(runProps, paraAlign, ctx.slideRelationshipMap);
+			if (typeof style.fontSize === 'number') {
+				return style.fontSize;
+			}
+		}
+		return undefined;
 	}
 
 	/**

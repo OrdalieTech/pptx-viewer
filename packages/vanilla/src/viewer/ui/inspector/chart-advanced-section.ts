@@ -1,3 +1,11 @@
+/**
+ * chart-advanced-section.ts: the axis-scale and per-series formatting block of
+ * the vanilla chart inspector.
+ *
+ * The control primitives come from `chart-exhaustive-controls`, which the
+ * sibling exhaustive section also uses; this file used to carry byte-identical
+ * private copies of all seven of them.
+ */
 import type {
 	PptxChartAxisFormatting,
 	PptxChartData,
@@ -5,8 +13,30 @@ import type {
 	PptxChartMarkerSymbol,
 	PptxChartTrendlineType,
 } from 'pptx-viewer-core';
+import {
+	CHART_AXIS_TYPE_LABEL_KEYS,
+	CHART_MARKER_SYMBOL_LABEL_KEYS,
+	DISPLAY_UNITS_OPTIONS,
+	ERROR_BAR_VALTYPE_OPTIONS,
+	schemaLabel,
+	TRENDLINE_TYPE_OPTIONS,
+	upsertDataPoint,
+} from 'pptx-viewer-shared';
 
 import type { Translator } from '../../i18n';
+import {
+	checkbox,
+	color,
+	number,
+	optionSelect,
+	select,
+	set,
+	setOptions,
+	tokenSelect,
+	value as optionalNumber,
+} from './chart-exhaustive-controls';
+import type { ChartPointIndexField } from './chart-point-index';
+import { createChartPointIndexField } from './chart-point-index';
 
 export interface ChartAdvancedSection {
 	el: HTMLElement;
@@ -17,6 +47,14 @@ export function createChartAdvancedSection(
 	doc: Document,
 	t: Translator,
 	onChange: (data: PptxChartData) => void,
+	/**
+	 * The point picker to obey. The chart section passes the SAME instance to
+	 * the exhaustive section so a single box drives every per-point control;
+	 * omitting it (as the unit tests do) gives this section a private one.
+	 */
+	pointIndex: ChartPointIndexField = createChartPointIndexField(doc, t),
+	/** B6: pushes a committed colour into the deck's "Recent colours" MRU list. */
+	pushRecentColor?: (hex: string) => void,
 ): ChartAdvancedSection {
 	const el = doc.createElement('div');
 	el.className = 'pptxv-chart-advanced';
@@ -24,50 +62,44 @@ export function createChartAdvancedSection(
 	const min = number(doc, t('pptx.chart.axisMinimum'));
 	const max = number(doc, t('pptx.chart.axisMaximum'));
 	const majorUnit = number(doc, t('pptx.chart.majorUnit'));
+	// Sits with the scale controls, as it does in React's `ChartAxisOptions`:
+	// `c:dispUnits` divides the plotted values and appends the unit label, so it
+	// belongs next to min/max/major rather than with the cosmetic axis styling.
+	const displayUnits = optionSelect(doc, t('pptx.chart.displayUnits'), DISPLAY_UNITS_OPTIONS, t);
 	const logScale = checkbox(doc, t('pptx.chart.logScale'));
 	const reverse = checkbox(doc, t('pptx.chart.reverseOrder'));
 	const gridlines = checkbox(doc, t('pptx.chart.majorGridlines'));
 	const seriesSelect = select(doc, t('pptx.chart.series'), []);
-	const trendline = select(doc, t('pptx.chart.trendlines'), [
-		'',
-		'linear',
-		'exponential',
-		'logarithmic',
-		'polynomial',
-		'power',
-		'movingAvg',
-	]);
+	// The trendline and error-bar value lists were local literals that happened to
+	// match `chart-editor-options` entry for entry, so driving them from the
+	// shared catalogues changes nothing about what is offered while giving the
+	// options words instead of `movingAvg` and `stdErr`.
+	const trendline = optionSelect(doc, t('pptx.chart.trendlines'), TRENDLINE_TYPE_OPTIONS, t);
 	const equation = checkbox(doc, t('pptx.chart.trendlineEquation'));
 	const rSquared = checkbox(doc, t('pptx.chart.trendlineRSquared'));
-	const errorType = select(doc, t('pptx.chart.errorBars'), [
-		'',
-		'fixedVal',
-		'percentage',
-		'stdDev',
-		'stdErr',
-	]);
+	const errorType = optionSelect(doc, t('pptx.chart.errorBars'), ERROR_BAR_VALTYPE_OPTIONS, t);
 	const errorAmount = number(doc, t('pptx.chart.errorBarAmount'));
-	const marker = select(doc, t('pptx.chart.marker'), [
-		'none',
-		'auto',
-		'circle',
-		'diamond',
-		'square',
-		'star',
-		'triangle',
-		'x',
-		'plus',
-	]);
+	// Not `MARKER_SYMBOL_OPTIONS`: this select offers an explicit `auto` value
+	// where the shared list spells "auto" as the empty string, so switching
+	// catalogues would silently rewrite what the control writes to `c:symbol`.
+	// Only the spelling is taken from shared.
+	const marker = tokenSelect(
+		doc,
+		t('pptx.chart.marker'),
+		['none', 'auto', 'circle', 'diamond', 'square', 'star', 'triangle', 'x', 'plus'],
+		CHART_MARKER_SYMBOL_LABEL_KEYS,
+		t,
+	);
 	const markerSize = number(doc, t('pptx.chart.markerSize'));
-	const seriesColor = color(doc, t('pptx.chart.seriesColor'));
-	const pointIndex = number(doc, t('pptx.chart.dataPointIndex'));
-	const pointColor = color(doc, t('pptx.chart.dataPointColor'));
-	const pointExplosion = number(doc, t('pptx.chart.explosion'));
+	const seriesColor = color(doc, t('pptx.chart.seriesColor'), pushRecentColor);
+	const pointColor = color(doc, t('pptx.chart.dataPointColor'), pushRecentColor);
+	const pointExplosion = number(doc, t('pptx.chart.pointExplosion'));
 	el.append(
 		axisSelect.label,
 		min.label,
 		max.label,
 		majorUnit.label,
+		displayUnits.label,
 		logScale.label,
 		reverse.label,
 		gridlines.label,
@@ -99,6 +131,10 @@ export function createChartAdvancedSection(
 			min: optionalNumber(min.control),
 			max: optionalNumber(max.control),
 			majorUnit: optionalNumber(majorUnit.control),
+			// '' is the "None" entry: clear `c:dispUnits` rather than writing an
+			// empty token the schema does not accept.
+			displayUnits: (displayUnits.control.value ||
+				undefined) as PptxChartAxisFormatting['displayUnits'],
 			logScale: logScale.control.checked,
 			orientation: reverse.control.checked ? 'maxMin' : 'minMax',
 			majorGridlines: gridlines.control.checked,
@@ -113,22 +149,13 @@ export function createChartAdvancedSection(
 		const previous = series[seriesIndex()];
 		const trendlineType = trendline.control.value as PptxChartTrendlineType | '';
 		const valType = errorType.control.value as PptxChartErrBars['valType'] | '';
-		const point = Math.max(0, (pointIndex.control.valueAsNumber || 1) - 1);
-		const dataPoints = [...(previous.dataPoints ?? [])];
-		const pointPosition = dataPoints.findIndex(({ idx }) => idx === point);
-		const nextPoint = {
-			...(pointPosition >= 0 ? dataPoints[pointPosition] : { idx: point }),
-			spPr: {
-				...(pointPosition >= 0 ? dataPoints[pointPosition].spPr : {}),
-				fillColor: pointColor.control.value,
-			},
+		const point = pointIndex.selected();
+		const existing = previous.dataPoints?.find(({ idx }) => idx === point);
+		const dataPoints = upsertDataPoint(previous.dataPoints, {
+			...(existing ?? { idx: point }),
+			spPr: { ...existing?.spPr, fillColor: pointColor.control.value },
 			explosion: optionalNumber(pointExplosion.control),
-		};
-		if (pointPosition >= 0) {
-			dataPoints[pointPosition] = nextPoint;
-		} else {
-			dataPoints.push(nextPoint);
-		}
+		});
 		series[seriesIndex()] = {
 			...previous,
 			color: seriesColor.control.value,
@@ -156,6 +183,7 @@ export function createChartAdvancedSection(
 		min.control,
 		max.control,
 		majorUnit.control,
+		displayUnits.control,
 		logScale.control,
 		reverse.control,
 		gridlines.control,
@@ -171,7 +199,6 @@ export function createChartAdvancedSection(
 		marker.control,
 		markerSize.control,
 		seriesColor.control,
-		pointIndex.control,
 		pointColor.control,
 		pointExplosion.control,
 	]) {
@@ -179,13 +206,21 @@ export function createChartAdvancedSection(
 	}
 	axisSelect.control.addEventListener('change', () => current && sync(current));
 	seriesSelect.control.addEventListener('change', () => current && sync(current));
+	// Picking a different point RE-READS it; it must not commit, or the colour
+	// still showing for the previous point would be stamped onto the new one.
+	pointIndex.subscribe(() => current && sync(current));
 
 	const sync = (data: PptxChartData): void => {
 		current = data;
 		setOptions(
 			doc,
 			axisSelect.control,
-			(data.axes ?? []).map((axis, index) => [String(index), axis.titleText ?? axis.axisType]),
+			// An untitled axis falls back to its element name, which used to reach
+			// the user as the literal `valAx`; spell it through the shared map.
+			(data.axes ?? []).map((axis, index) => [
+				String(index),
+				axis.titleText ?? schemaLabel(CHART_AXIS_TYPE_LABEL_KEYS, axis.axisType, t),
+			]),
 		);
 		setOptions(
 			doc,
@@ -193,9 +228,10 @@ export function createChartAdvancedSection(
 			data.series.map((item, index) => [String(index), item.name]),
 		);
 		const axis = data.axes?.[axisIndex()];
-		setNumber(min.control, axis?.min);
-		setNumber(max.control, axis?.max);
-		setNumber(majorUnit.control, axis?.majorUnit);
+		set(min.control, axis?.min);
+		set(max.control, axis?.max);
+		set(majorUnit.control, axis?.majorUnit);
+		displayUnits.control.value = axis?.displayUnits ?? '';
 		logScale.control.checked = axis?.logScale ?? false;
 		reverse.control.checked = axis?.orientation === 'maxMin';
 		gridlines.control.checked = axis?.majorGridlines ?? false;
@@ -204,68 +240,13 @@ export function createChartAdvancedSection(
 		equation.control.checked = item?.trendlines?.[0]?.displayEq ?? false;
 		rSquared.control.checked = item?.trendlines?.[0]?.displayRSq ?? false;
 		errorType.control.value = item?.errBars?.[0]?.valType ?? '';
-		setNumber(errorAmount.control, item?.errBars?.[0]?.val);
+		set(errorAmount.control, item?.errBars?.[0]?.val);
 		marker.control.value = item?.marker?.symbol ?? 'none';
-		setNumber(markerSize.control, item?.marker?.size);
+		set(markerSize.control, item?.marker?.size);
 		seriesColor.control.value = item?.color ?? '#4472c4';
-		const point = item?.dataPoints?.find(
-			({ idx }) => idx === Math.max(0, (pointIndex.control.valueAsNumber || 1) - 1),
-		);
+		const point = item?.dataPoints?.find(({ idx }) => idx === pointIndex.selected());
 		pointColor.control.value = point?.spPr?.fillColor ?? item?.color ?? '#4472c4';
-		setNumber(pointExplosion.control, point?.explosion);
+		set(pointExplosion.control, point?.explosion);
 	};
 	return { el, update: sync };
-}
-
-function field<T extends HTMLElement>(doc: Document, text: string, control: T) {
-	const label = doc.createElement('label');
-	label.textContent = text;
-	label.appendChild(control);
-	return { label, control };
-}
-function number(doc: Document, text: string) {
-	const control = doc.createElement('input');
-	control.type = 'number';
-	return field(doc, text, control);
-}
-function color(doc: Document, text: string) {
-	const control = doc.createElement('input');
-	control.type = 'color';
-	return field(doc, text, control);
-}
-function checkbox(doc: Document, text: string) {
-	const control = doc.createElement('input');
-	control.type = 'checkbox';
-	return field(doc, text, control);
-}
-function select(doc: Document, text: string, values: readonly string[]) {
-	const control = doc.createElement('select');
-	setOptions(
-		doc,
-		control,
-		values.map((value) => [value, value]),
-	);
-	return field(doc, text, control);
-}
-function setOptions(
-	doc: Document,
-	control: HTMLSelectElement,
-	values: Array<[string, string]>,
-): void {
-	const selected = control.value;
-	control.replaceChildren(
-		...values.map(([value, text]) => {
-			const option = doc.createElement('option');
-			option.value = value;
-			option.textContent = text;
-			return option;
-		}),
-	);
-	control.value = selected;
-}
-function optionalNumber(control: HTMLInputElement): number | undefined {
-	return control.value === '' ? undefined : control.valueAsNumber;
-}
-function setNumber(control: HTMLInputElement, value: number | undefined): void {
-	control.value = value === undefined ? '' : String(value);
 }

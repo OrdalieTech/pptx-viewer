@@ -75,12 +75,18 @@ assign(
 		preserve: 'native',
 		edit: 'partial',
 		serialize: 'partial',
-		note: 'Pivot indexes are typed; DrawingML formatting children remain editable raw XML.',
+		note: "Pivot indexes are typed. Since wave 4 (W4-D), each entry's DrawingML formatting children are ALSO independently modeled fields, not only editable raw XML: spPr (fill/stroke colour, stroke width, dash style), txPr (paragraph defRPr font family/size/bold/italic/colour), and marker (symbol/size/spPr), via chart-pivot-format-fields.ts's parseTypedShapeProps/parseTypedTextStyle/parseTypedMarker, each with a lossless fallback to its raw *Xml sibling (markerXml/txPrXml/shapePropertiesXml) for whatever the typed projection does not cover. A literal a:srgbClr always resolves to a typed colour; since wave 5 (W5-E) an a:schemeClr theme reference (with its lumMod/lumOff/tint/shade modifiers) resolves too whenever the caller supplies a ChartColorParser (the runtime hands in its theme-aware parseColor, so a loaded deck gets themed hex values), while a caller without one still sees the theme reference only through the raw XML fallback; a typed edit that does not touch the colour leaves the authored schemeClr fill in place rather than baking the resolved hex. A typed field is compared against what would parse back off the existing node before deciding to rewrite it, so an untouched entry survives byte-for-byte and only a genuine typed edit forces a rebuild (resolveSpPrOverride/resolveTxPrOverride/resolveMarkerOverride), with an explicit raw override still winning when the typed field itself is untouched.",
 		evidence: [
 			testEvidence('src/core/utils/chart-pivot-formats.test.ts', [
 				'parses, edits, serializes, and reparses typed pivot formats',
 				'inserts in chart schema order and supports removal',
 				'rejects invalid indexes and empty collections',
+				'parses spPr/marker into typed fields alongside their raw XML',
+				'leaves an unedited entry byte-equivalent (typed fields unchanged is not an edit signal)',
+				'merges a typed shapeProperties edit onto the existing spPr, preserving unmodeled children',
+				'creates a fresh txPr from a typed textStyle when none is authored',
+				'rebuilds marker from a typed edit even when markerXml is stale',
+				'lets an explicit raw override win when the typed field is untouched',
 			]),
 			testEvidence('src/__tests__/integration/chart-protection-roundtrip.test.ts', [
 				'loads, edits, saves, and reloads pivot formats without losing extensions',
@@ -119,7 +125,7 @@ assign(
 		preserve: 'native',
 		edit: 'partial',
 		serialize: 'partial',
-		note: 'Iterator and condition data is typed; nested layout actions and enum unions remain raw.',
+		note: "Iterator and condition data is typed; nested layout actions and enum unions remain raw. All 8 documented ST_FunctionType/ST_FunctionValue values (cnt, var, pos, revPos, posEven, posOdd, depth, maxDepth) are implemented in the layout interpreter's dgm:if evaluator; since wave 2 (W2-E), the real discoverArrangement call site also supplies a visited dgm:choose node's sibling position, sibling count, depth, and the tree's max depth (core/utils/smartart-layout-interpreter-tree-location.ts, walkWithTreeLocation/treeMaxDepth), so pos/revPos/posEven/posOdd/depth/maxDepth are actually decidable in production, not just cnt/var as before. This is an interpreter-reachability improvement with no facet of its own in this manifest, which continues to grade only how the choose/forEach/if XML itself is typed.",
 		evidence: [
 			testEvidence('src/core/utils/smartart-layout-definition.test.ts', [
 				'parses CT_DiagramDefinition and recursive CT_LayoutNode with arbitrary prefixes',
@@ -127,6 +133,16 @@ assign(
 				'creates and removes typed forEach and choose branches',
 				'rejects invalid required values and unsigned integer facets',
 			]),
+			testEvidence(
+				'src/core/utils/smartart-layout-interpreter-model.test.ts',
+				[
+					"decides a choose branch from the declaring node's own sibling position",
+					'decides func="revPos" from the sibling count and position',
+					'decides func="depth" from the declaring node\\\'s distance from the root',
+					'decides func="maxDepth" from the whole tree\\\'s deepest node',
+				],
+				['parse', 'edit'],
+			),
 		],
 	},
 );

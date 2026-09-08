@@ -11,6 +11,7 @@ import {
 	resolveAudienceScreenPlacement,
 	storePresentationDeck,
 	mergePresentationSnapshot,
+	swapPresentationWindows,
 } from 'pptx-viewer-shared';
 import type { PresentationSnapshot } from 'pptx-viewer-shared';
 
@@ -51,8 +52,9 @@ export class PresenterSession {
 				} else if (message.type === 'presenter-slide-change') {
 					this.options.onAudienceSlide(message.slideIndex);
 				} else if (message.type === 'presenter-exit') {
+					// The host decides what an ended session looks like (close the tab,
+					// else show the end screen). It must never land in the editor.
 					this.options.onAudienceExit();
-					window.close();
 				}
 			} else if (
 				message.type === 'audience-ready' &&
@@ -95,6 +97,21 @@ export class PresenterSession {
 			.then(() => popup.location.replace(url))
 			.catch(() => this.closeAudience());
 		return true;
+	}
+
+	/**
+	 * Move the console to the audience screen and the audience display to this
+	 * one (the presenter console's "Swap Displays"). Resolves `false` when there
+	 * is no audience window, when the browser withholds the Window Management
+	 * permission, or when both windows already sit on the same screen, which is
+	 * why the strip's control is disabled until a display is open.
+	 */
+	async swapDisplays(): Promise<boolean> {
+		const audience = this.audienceWindow;
+		if (!audience || audience.closed) {
+			return false;
+		}
+		return swapPresentationWindows(window, audience);
 	}
 
 	sync(slideIndex = this.options.getSlideIndex()): void {

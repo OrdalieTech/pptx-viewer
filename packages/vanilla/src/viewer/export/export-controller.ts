@@ -1,4 +1,10 @@
-import { downloadDataUrl, exportAbortError } from 'pptx-viewer-shared';
+import type { PptxData } from 'pptx-viewer-core';
+import {
+	downloadDataUrl,
+	exportAbortError,
+	exportDeckJson,
+	resolveExportBaseName,
+} from 'pptx-viewer-shared';
 
 import type { Store, ViewerState } from '../state';
 import type { ExportGifOptions } from './export-gif';
@@ -26,6 +32,12 @@ export interface ExportControllerDeps {
 	rasterizeSlide: RasterizeSlide;
 	/** Base file name (without extension) for downloads. Defaults to `presentation`. */
 	fileName?: string;
+	/** Live translator (host-supplied), for the print path's own UI text. */
+	getTranslator?: ExportCaptureDeps['getTranslator'];
+	/** Options > Advanced > "Print hidden slides". */
+	getIncludeHiddenSlides?: ExportCaptureDeps['getIncludeHiddenSlides'];
+	/** Options > Advanced > "High quality" raster scale for the print fallback path. */
+	getPrintHighQuality?: ExportCaptureDeps['getPrintHighQuality'];
 }
 
 export interface ExportController {
@@ -41,14 +53,46 @@ export interface ExportController {
 	exportVideo(options?: ExportVideoOptions): Promise<void>;
 	/** Assemble the printable document and open it in a print window. */
 	print(options?: PrintOptions): Promise<boolean>;
+	/** Serialize the deck to `pptx-viewer-json` and download it. */
+	exportJson(): void;
 }
 
-function resolveBaseName(fileName: string | undefined): string {
-	if (fileName === undefined) {
-		return 'presentation';
-	}
-	const trimmed = fileName.trim().replace(/\.(?:pptx|pdf|png|gif|webm)$/iu, '');
-	return trimmed === '' ? 'presentation' : trimmed;
+/**
+ * Assemble the live {@link PptxData} for the deck-JSON export from the store
+ * (the store, not the load-time handler, is the source of truth once edits
+ * land). Mirrors the AI bridge's `readDeckData` seam: fields the vanilla state
+ * does not track are simply omitted from the JSON.
+ */
+function deckDataFromState(state: ViewerState): PptxData {
+	return {
+		slides: state.slides,
+		width: state.canvasSize.width,
+		height: state.canvasSize.height,
+		sections: state.sections,
+		presentationProperties: state.presentationProperties,
+		headerFooter: state.headerFooter,
+		coreProperties: state.coreProperties,
+		appProperties: state.appProperties,
+		customProperties: state.customProperties,
+		customShows: state.customShows,
+		embeddedFonts: state.embeddedFonts,
+		slideMasters: state.slideMasters,
+		themeOptions: state.themeOptions,
+		notesMaster: state.notesMaster,
+		handoutMaster: state.handoutMaster,
+		hasMacros: state.hasMacros,
+		tableStyleMap: state.tableStyleMap,
+		tableStylesDefaultId: state.tableStylesDefaultId,
+		tags: state.tagCollections,
+		theme:
+			state.colorScheme || state.fontScheme || state.themeName
+				? {
+						name: state.themeName,
+						colorScheme: state.colorScheme,
+						fontScheme: state.fontScheme,
+					}
+				: undefined,
+	};
 }
 
 /**
@@ -71,7 +115,10 @@ export function createExportController(deps: ExportControllerDeps): ExportContro
 	const capture: ExportCaptureDeps = {
 		store: deps.store,
 		rasterizeSlide: deps.rasterizeSlide,
-		baseName: resolveBaseName(deps.fileName),
+		baseName: resolveExportBaseName(deps.fileName),
+		getTranslator: deps.getTranslator,
+		getIncludeHiddenSlides: deps.getIncludeHiddenSlides,
+		getPrintHighQuality: deps.getPrintHighQuality,
 	};
 
 	/** Run one export at a time; a call while one is in flight gets `fallback`. */
@@ -88,8 +135,8 @@ export function createExportController(deps: ExportControllerDeps): ExportContro
 	}
 
 	async function exportSlidePng(index?: number): Promise<void> {
-		const state = deps.store.get();
-		const targetIndex = index ?? state.currentSlide;
+		const state = deps.store.get(),
+			targetIndex = index ?? state.currentSlide;
 		if (targetIndex < 0 || targetIndex >= state.slides.length) {
 			return;
 		}
@@ -103,8 +150,8 @@ export function createExportController(deps: ExportControllerDeps): ExportContro
 	}
 
 	async function copySlideAsImage(index?: number): Promise<void> {
-		const state = deps.store.get();
-		const targetIndex = index ?? state.currentSlide;
+		const state = deps.store.get(),
+			targetIndex = index ?? state.currentSlide;
 		if (
 			targetIndex < 0 ||
 			targetIndex >= state.slides.length ||
@@ -114,10 +161,10 @@ export function createExportController(deps: ExportControllerDeps): ExportContro
 			return;
 		}
 		return guarded(undefined, async () => {
-			const canvas = await deps.rasterizeSlide(targetIndex);
-			const blob = await new Promise<Blob | null>((resolve) => {
-				canvas.toBlob(resolve, 'image/png');
-			});
+			const canvas = await deps.rasterizeSlide(targetIndex),
+				blob = await new Promise<Blob | null>((resolve) => {
+					canvas.toBlob(resolve, 'image/png');
+				});
 			if (blob) {
 				await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
 			}
@@ -129,13 +176,14 @@ export function createExportController(deps: ExportControllerDeps): ExportContro
 		if (state.slides.length === 0) {
 			return;
 		}
+		// eslint-disable-next-line one-var -- separated from `state` above by a guard clause
 		const { onProgress, signal } = options;
 		return guarded(undefined, async () => {
-			const { jsPDF } = await import('jspdf');
-			const { width, height } = state.canvasSize;
-			const orientation = width >= height ? 'landscape' : 'portrait';
-			const pdf = new jsPDF({ orientation, unit: 'px', format: [width, height], compress: true });
-			const total = state.slides.length;
+			const { jsPDF } = await import('jspdf'),
+				{ width, height } = state.canvasSize,
+				orientation = width >= height ? 'landscape' : 'portrait',
+				pdf = new jsPDF({ orientation, unit: 'px', format: [width, height], compress: true }),
+				total = state.slides.length;
 			for (let i = 0; i < total; i++) {
 				if (signal?.aborted) {
 					throw exportAbortError();
@@ -151,10 +199,20 @@ export function createExportController(deps: ExportControllerDeps): ExportContro
 		});
 	}
 
+	/**
+	 * Deck-as-JSON export: pure serialization of the live state, no
+	 * rasterisation, so it neither needs nor takes the single-export guard.
+	 * The shared helper derives `deck.json` from the raw source file name.
+	 */
+	function exportJson(): void {
+		exportDeckJson(deckDataFromState(deps.store.get()), deps.fileName);
+	}
+
 	return {
 		exportSlidePng,
 		copySlideAsImage,
 		exportPdf,
+		exportJson,
 		exportGif: (options) => guarded(undefined, () => runGifExport(capture, options)),
 		exportVideo: (options) => guarded(undefined, () => runVideoExport(capture, options)),
 		print: (options) => guarded(false, () => runPrint(capture, options)),

@@ -1,13 +1,19 @@
 import type { PptxElement } from 'pptx-viewer-core';
+import {
+	clampZoomScale,
+	createViewerZoomStore,
+	createWheelStepBuffer,
+	mapEditingWheel,
+} from 'pptx-viewer-shared';
+import type { ViewerZoomState, ViewerZoomStore } from 'pptx-viewer-shared';
 import { useRef, useState, useMemo, useCallback, useEffect } from 'react';
 
-import {
-	MIN_ZOOM_SCALE,
-	MAX_ZOOM_SCALE,
-	MIN_ELEMENT_SIZE,
-	ZOOM_TO_SELECTION_PADDING,
-} from '../constants';
+import { MIN_ELEMENT_SIZE, ZOOM_TO_SELECTION_PADDING } from '../constants';
 import type { CanvasSize } from '../types';
+import { useViewerStore } from './useViewerStore';
+
+/** Module scope so the selector identity is stable across renders. */
+const selectZoom = (state: ViewerZoomState): number => state.zoom;
 
 /** Axis-aligned bounding box used by zoom / viewport helpers. */
 interface SelectionBounds {
@@ -56,9 +62,22 @@ export function useZoomViewport({
 	const canvasStageRef = useRef<HTMLDivElement>(null);
 	const canvasViewportRef = useRef<HTMLDivElement>(null);
 	const renderScaleRef = useRef(1);
+	// Partial wheel charge, shared with the editing-wheel mapper.
+	const wheelBufferRef = useRef(createWheelStepBuffer());
 
 	// ── State ─────────────────────────────────────────────────────────────
-	const [scale, setScale] = useState(1);
+	// The user's zoom factor lives in the shared zoom store, so the zoom MODEL
+	// (not merely the step size) is one definition across all five bindings.
+	// Reading it through a selector subscription also means this hook re-renders
+	// for a zoom change and not for anything else in the store (issue #145).
+	const storeRef = useRef<ViewerZoomStore | null>(null);
+	storeRef.current ??= createViewerZoomStore();
+	const store = storeRef.current;
+	const scale = useViewerStore(store, selectZoom);
+	const setScale = useCallback(
+		(next: number) => store.dispatch({ type: 'set-zoom', zoom: next }),
+		[store],
+	);
 	const [editorDimensions, setEditorDimensions] = useState<CanvasSize | null>(null);
 
 	// ── Derived ───────────────────────────────────────────────────────────
@@ -82,6 +101,13 @@ export function useZoomViewport({
 	useEffect(() => {
 		renderScaleRef.current = editorScale;
 	}, [editorScale]);
+
+	// Publish the measured viewport fit into the store, so consumers can select
+	// the effective on-screen scale from one place. A repeated measurement is
+	// dropped by the reducer, so a ResizeObserver settling costs nothing.
+	useEffect(() => {
+		store.dispatch({ type: 'set-fit-scale', fitScale });
+	}, [store, fitScale]);
 
 	// Measure the available editor area (the scrollable canvas viewport) so
 	// `fitScale` reflects reality and the slide is fit-to-contain by default.
@@ -127,7 +153,7 @@ export function useZoomViewport({
 				return;
 			}
 
-			const boundedScale = Math.min(Math.max(nextScale, MIN_ZOOM_SCALE), MAX_ZOOM_SCALE);
+			const boundedScale = clampZoomScale(nextScale);
 			const nextEditorScale = fitScale * boundedScale;
 			const centerX = (bounds.minX + bounds.maxX) / 2;
 			const centerY = (bounds.minY + bounds.maxY) / 2;
@@ -145,21 +171,23 @@ export function useZoomViewport({
 		[fitScale],
 	);
 
+	// The step itself lives in pptx-viewer-shared so all five bindings move the
+	// stage by the same amount per press (two of them stepped by 1.25x instead).
 	const handleZoomIn = useCallback(() => {
-		setScale((currentScale) => Math.min(currentScale + 0.1, MAX_ZOOM_SCALE));
-	}, []);
+		store.dispatch({ type: 'zoom-in' });
+	}, [store]);
 
 	const handleZoomOut = useCallback(() => {
-		setScale((currentScale) => Math.max(currentScale - 0.1, MIN_ZOOM_SCALE));
-	}, []);
+		store.dispatch({ type: 'zoom-out' });
+	}, [store]);
 
 	const handleResetZoom = useCallback(() => {
-		setScale(1);
-	}, []);
+		store.dispatch({ type: 'zoom-to-fit' });
+	}, [store]);
 
 	const handleZoomToFit = useCallback(() => {
-		setScale(1);
-	}, []);
+		store.dispatch({ type: 'zoom-to-fit' });
+	}, [store]);
 
 	const handleZoomToSelection = useCallback(() => {
 		if (selectedElements.length === 0) {
@@ -204,10 +232,7 @@ export function useZoomViewport({
 			availableHeight / boundsHeight,
 		);
 		const safeFitScale = fitScale > Number.EPSILON ? fitScale : Number.EPSILON;
-		const nextScale = Math.min(
-			Math.max(targetEditorScale / safeFitScale, MIN_ZOOM_SCALE),
-			MAX_ZOOM_SCALE,
-		);
+		const nextScale = clampZoomScale(targetEditorScale / safeFitScale);
 
 		setScale(nextScale);
 
@@ -222,29 +247,55 @@ export function useZoomViewport({
 		effectiveEditorDimensions.width,
 		fitScale,
 		selectedElements,
+		setScale,
 	]);
 
-	const handleWheel = useCallback((event: WheelEvent) => {
-		if (!event.ctrlKey) {
-			return;
-		}
-		event.preventDefault();
-		const delta = event.deltaY * -0.001;
-		setScale((currentScale) =>
-			Math.min(Math.max(currentScale + delta, MIN_ZOOM_SCALE), MAX_ZOOM_SCALE),
-		);
-	}, []);
+	const handleWheel = useCallback(
+		(event: WheelEvent) => {
+			// `canScrollFurther: true` keeps a plain wheel scrolling the viewport
+			// natively; only Ctrl+wheel is claimed here. Slide-stepping at the scroll
+			// extent needs navigation this hook does not own - see wheel-intent.
+			const mapped = mapEditingWheel(event, wheelBufferRef.current, true);
+			if (mapped.intent !== 'zoom') {
+				return;
+			}
+			event.preventDefault();
+			// Read the live value from the store rather than closing over `scale`:
+			// wheel events arrive faster than React commits, so a captured value
+			// would quantise the gesture to the last rendered scale.
+			store.dispatch({
+				type: 'set-zoom',
+				zoom: clampZoomScale(store.getState().zoom + mapped.deltaScale),
+			});
+		},
+		[store],
+	);
 
 	// Attach the wheel listener natively with { passive: false } so that
 	// preventDefault() works. React's onWheel is passive since React 17+.
+	//
+	// The viewport does not exist on the viewer's first commit (with no deck
+	// loaded `SlideCanvas` is unmounted), and `handleWheel` is stable because
+	// `store` is a ref, so a plain effect ran ONCE against a null ref and never
+	// re-ran: the listener was never attached at all and Ctrl+wheel zoom was
+	// dead. Retry on an animation frame until the node exists, exactly as the
+	// ResizeObserver above does.
 	useEffect(() => {
-		const viewport = canvasViewportRef.current;
-		if (!viewport) {
-			return;
-		}
-		viewport.addEventListener('wheel', handleWheel, { passive: false });
+		let raf = 0;
+		let attached: HTMLDivElement | null = null;
+		const attach = (): void => {
+			const viewport = canvasViewportRef.current;
+			if (!viewport) {
+				raf = requestAnimationFrame(attach);
+				return;
+			}
+			attached = viewport;
+			viewport.addEventListener('wheel', handleWheel, { passive: false });
+		};
+		attach();
 		return () => {
-			viewport.removeEventListener('wheel', handleWheel);
+			cancelAnimationFrame(raf);
+			attached?.removeEventListener('wheel', handleWheel);
 		};
 	}, [handleWheel]);
 

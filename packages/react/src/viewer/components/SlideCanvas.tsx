@@ -1,20 +1,35 @@
-import { getShapeAdjustmentHandleDescriptor } from '../utils';
+import { motionPathFor, setMotionPath, shouldShowElementHandles } from 'pptx-viewer-shared';
+import { useCallback } from 'react';
+
+import type { ShapeAdjustmentHandleDescriptor } from '../types';
+import { getShapeAdjustmentHandleDescriptors, isConnectorOrLineElement } from '../utils';
 import { getReactSlideBackgroundStyle } from '../utils/slide-background-style';
 /** SlideCanvas: Central canvas area for the PowerPoint editor. */
 import type { SlideCanvasProps } from './canvas/canvas-types';
 import { CanvasGuides, MarqueeOverlay, SnapLinesOverlay } from './canvas/CanvasOverlays';
 import { CommentMarkersOverlay } from './canvas/CommentMarkersOverlay';
+import { ConnectorEndpointOverlay } from './canvas/ConnectorEndpointOverlay';
 import { ConnectorOverlay } from './canvas/ConnectorOverlay';
 import { DrawingOverlaySvg } from './canvas/DrawingOverlaySvg';
 import { GridOverlay } from './canvas/GridOverlay';
+import { MotionPathOverlay } from './canvas/MotionPathOverlay';
 import { Ruler } from './canvas/Ruler';
 import { RULER_THICKNESS } from './canvas/ruler-utils';
+import { SelectionHandleOverlay } from './canvas/SelectionHandleOverlay';
 import { useCanvasEventHandlers } from './canvas/useCanvasEventHandlers';
 import { useConnectorCreation } from './canvas/useConnectorCreation';
 import { useDrawingOverlay } from './canvas/useDrawingOverlay';
 import { useStableCallbacks } from './canvas/useStableCallbacks';
 import { ElementRenderer } from './ElementRenderer';
 import { ActiveXControlOverlay } from './elements/ActiveXControlOverlay';
+import { SlideBackgroundImageLayer } from './SlideBackgroundImageLayer';
+
+/**
+ * A stable empty array for the un-selected case: a fresh `[]` on every render
+ * would make `ElementRenderer`'s props change identity for every element on the
+ * slide, defeating its memoisation.
+ */
+const EMPTY_ADJUSTMENT_HANDLES: ShapeAdjustmentHandleDescriptor[] = [];
 
 export type { SlideCanvasProps } from './canvas/canvas-types';
 
@@ -79,6 +94,7 @@ export function SlideCanvas({
 	onCreateGuideFromRuler,
 	connectorCreationMode = false,
 	onCreateConnector,
+	onUpdateSlideAnimations,
 	allSlides,
 	onZoomClick,
 	sourceSlideIndex,
@@ -150,6 +166,24 @@ export function SlideCanvas({
 		onMoveGuide,
 	});
 
+	/* ── Motion path overlay ───────────────────────────────────────── */
+	// The path lives on the SLIDE's animation entry for the selected element, so
+	// the overlay only needs the id to find it and a commit callback to edit it.
+	const selectedMotionPath = selectedElement
+		? motionPathFor(activeSlide?.animations ?? [], selectedElement.id)
+		: undefined;
+	const handleMotionPathChange = useCallback(
+		(path: string) => {
+			if (!selectedElement || !onUpdateSlideAnimations) {
+				return;
+			}
+			onUpdateSlideAnimations(
+				setMotionPath(activeSlide?.animations ?? [], selectedElement.id, path),
+			);
+		},
+		[activeSlide?.animations, onUpdateSlideAnimations, selectedElement],
+	);
+
 	/* ── Connector creation ────────────────────────────────────────── */
 	const {
 		connectorDragState,
@@ -164,6 +198,7 @@ export function SlideCanvas({
 		isDrawing,
 		isStrokeActive,
 		liveStrokeD,
+		liveStrokeView,
 		handleDrawPointerDown,
 		handleDrawPointerMove,
 		handleDrawPointerUp,
@@ -185,13 +220,13 @@ export function SlideCanvas({
 		<div
 			ref={zoom.canvasViewportRef}
 			data-pptx-viewport
-			className='flex-1 overflow-auto relative'
+			className='flex-1 flex overflow-auto relative'
 			style={{ touchAction: 'pan-x pan-y' }}
 			onMouseDown={handleViewportMouseDown}
 		>
 			<div
 				ref={zoom.editWrapperRef}
-				className='relative mx-auto my-4'
+				className='relative m-auto'
 				style={{
 					width: canvasSize.width * zoom.editorScale + rulerOffset,
 					height: canvasSize.height * zoom.editorScale + rulerOffset,
@@ -218,6 +253,10 @@ export function SlideCanvas({
 						height: canvasSize.height,
 						transform: `scale(${zoom.editorScale})`,
 						transformOrigin: 'top left',
+						// Motion-path keyframes translate by a fraction of the SLIDE, so
+						// the stage publishes its own size for those calc() offsets.
+						['--pptx-slide-w' as string]: `${canvasSize.width}px`,
+						['--pptx-slide-h' as string]: `${canvasSize.height}px`,
 						marginTop: rulerOffset,
 						marginLeft: rulerOffset,
 						// In edit/master mode the stage must own all touch gestures so
@@ -225,7 +264,10 @@ export function SlideCanvas({
 						// pinch-zoom. View/present mode keeps the default so the slide can
 						// still be scrolled and swipe-navigated.
 						touchAction: isEditableCanvas ? 'none' : undefined,
-						...getReactSlideBackgroundStyle(activeSlide),
+						...getReactSlideBackgroundStyle(activeSlide, {
+							widthPx: canvasSize.width,
+							heightPx: canvasSize.height,
+						}),
 					}}
 					onClick={handleStageClick}
 					onDoubleClick={handleStageDblClick}
@@ -235,6 +277,7 @@ export function SlideCanvas({
 					onPointerMove={handleStagePointerMove}
 					onPointerUp={handleStagePointerUp}
 				>
+					<SlideBackgroundImageLayer slide={activeSlide} />
 					{presentationKeyframesCss && <style>{presentationKeyframesCss}</style>}
 					<GridOverlay canvasSize={canvasSize} gridSpacingPx={gridSpacingPx} visible={showGrid} />
 					<CanvasGuides
@@ -256,22 +299,24 @@ export function SlideCanvas({
 							mediaDataUrls={mediaDataUrls}
 							selectionColorClass='blue-400'
 							showHoverBorder={false}
-							opacity={0.95}
+							// No opacity override: PowerPoint paints layout/master content at
+							// full opacity, and the other four bindings agree. The 0.95
+							// "template" transparency comes from the templateEditing
+							// affordance below, only while edit-template mode is on.
 							templateEditing={editTemplateMode}
 							zIndex={index}
 							imageAltText='Template element'
-							showResizeHandles={
-								isEditableCanvas &&
-								selectedElementIdSet.has(element.id) &&
-								selectedElementIdSet.size <= 1 &&
-								!inlineEditingElementId
-							}
+							showResizeHandles={shouldShowElementHandles(
+								isEditableCanvas,
+								selectedElementIdSet.has(element.id),
+								selectedElementIdSet.size,
+							)}
 							renderInk={false}
 							renderGroups
-							adjustmentHandleDescriptor={
+							adjustmentHandles={
 								isEditableCanvas && selectedElement?.id === element.id
-									? getShapeAdjustmentHandleDescriptor(element)
-									: null
+									? getShapeAdjustmentHandleDescriptors(element)
+									: EMPTY_ADJUSTMENT_HANDLES
 							}
 							onResizePointerDown={stableResizePointerDown}
 							onAdjustmentPointerDown={stableAdjustmentPointerDown}
@@ -310,18 +355,17 @@ export function SlideCanvas({
 							showHoverBorder
 							zIndex={templateElements.length + index}
 							imageAltText='Slide element'
-							showResizeHandles={
-								isEditableCanvas &&
-								selectedElementIdSet.has(element.id) &&
-								selectedElementIdSet.size <= 1 &&
-								!inlineEditingElementId
-							}
+							showResizeHandles={shouldShowElementHandles(
+								isEditableCanvas,
+								selectedElementIdSet.has(element.id),
+								selectedElementIdSet.size,
+							)}
 							renderInk
 							renderGroups
-							adjustmentHandleDescriptor={
+							adjustmentHandles={
 								isEditableCanvas && selectedElement?.id === element.id
-									? getShapeAdjustmentHandleDescriptor(element)
-									: null
+									? getShapeAdjustmentHandleDescriptors(element)
+									: EMPTY_ADJUSTMENT_HANDLES
 							}
 							onResizePointerDown={stableResizePointerDown}
 							onAdjustmentPointerDown={stableAdjustmentPointerDown}
@@ -348,6 +392,34 @@ export function SlideCanvas({
 						/>
 					))}
 
+					{/* Resize/rotate/adjustment handles for the single selected
+					    element, unclipped: see `SelectionHandleOverlay` for why they
+					    cannot be `ElementRenderer`'s own children (its container
+					    carries the shape's `clip-path`, which excludes every
+					    descendant from hit-testing outside the preset's silhouette).
+					    Connectors keep their own (already-unclipped) handles inside
+					    `ConnectorElementRenderer`. Rendered even while inline-editing
+					    text (PowerPoint keeps a text box's handles live and draggable
+					    mid-edit): the host's `pointerEvents: 'none'` plus each handle
+					    button's own small `forcePointerEvents` hit area (see
+					    `ResizeHandles`) already confine every click that isn't
+					    precisely on a handle to the shape/caret underneath, so nothing
+					    extra is needed to keep caret placement working. */}
+					{selectedElement &&
+						shouldShowElementHandles(isEditableCanvas, true, selectedElementIdSet.size) &&
+						!isConnectorOrLineElement(selectedElement) && (
+							<SelectionHandleOverlay
+								element={selectedElement}
+								adjustmentHandles={getShapeAdjustmentHandleDescriptors(selectedElement)}
+								onResizePointerDown={stableResizePointerDown}
+								onAdjustmentPointerDown={stableAdjustmentPointerDown}
+								onRotate={stableRotate}
+								onClick={onClick}
+								onDoubleClick={onDoubleClick}
+								onContextMenu={onContextMenu}
+							/>
+						)}
+
 					<MarqueeOverlay marqueeSelectionState={marqueeSelectionState} />
 
 					{activeSlide?.activeXControls && activeSlide.activeXControls.length > 0 && (
@@ -364,6 +436,21 @@ export function SlideCanvas({
 
 					<SnapLinesOverlay snapLines={snapLines} />
 
+					{/* Connector endpoint authoring: attach an end to a shape's
+					    connection point, or drag it clear to detach. Shown for the
+					    selected connector, so it needs no separate mode toggle (which
+					    is why the older `connectorCreationMode` overlay below has
+					    always been unreachable: nothing ever set that prop). */}
+					{isEditableCanvas && selectedElement?.type === 'connector' && activeSlide && (
+						<ConnectorEndpointOverlay
+							connector={selectedElement}
+							elements={activeSlide.elements}
+							editorScale={zoom.editorScale}
+							canvasStageRef={zoom.canvasStageRef}
+							onUpdateElement={stableUpdateSmartArtElement}
+						/>
+					)}
+
 					{connectorCreationMode && activeSlide && (
 						<ConnectorOverlay
 							activeSlide={activeSlide}
@@ -377,6 +464,17 @@ export function SlideCanvas({
 						/>
 					)}
 
+					{isEditableCanvas && selectedElement && selectedMotionPath && (
+						<MotionPathOverlay
+							element={selectedElement}
+							path={selectedMotionPath}
+							canvasSize={canvasSize}
+							scale={zoom.editorScale}
+							canEdit={canEdit}
+							onChangePath={handleMotionPathChange}
+						/>
+					)}
+
 					{isDrawing && (
 						<DrawingOverlaySvg
 							canvasSize={canvasSize}
@@ -385,6 +483,7 @@ export function SlideCanvas({
 							drawingWidth={drawingWidth}
 							isStrokeActive={isStrokeActive}
 							liveStrokeD={liveStrokeD}
+							liveStrokeView={liveStrokeView}
 							onPointerDown={handleDrawPointerDown}
 							onPointerMove={handleDrawPointerMove}
 							onPointerUp={handleDrawPointerUp}

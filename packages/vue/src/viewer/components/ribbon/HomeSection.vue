@@ -10,13 +10,21 @@ import { ChevronDown, ClipboardPaste, Copy, Paintbrush, Scissors } from 'lucide-
  * the copied/cut feedback flashes use a `ref` + `setTimeout`.
  */
 import { hasTextProperties } from 'pptx-viewer-core';
-import type { PptxElement, TextStyle } from 'pptx-viewer-core';
+import type { PptxElement, PptxLayoutPreview, TextStyle } from 'pptx-viewer-core';
+import {
+	DEFAULT_FONT_SIZE,
+	resolveDefaultFontFamily,
+	textFontSizePtToPx,
+	textFontSizePxToPt,
+} from 'pptx-viewer-shared';
+import type { SlideTemplateId } from 'pptx-viewer-shared';
 import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { cn } from '../../../utils';
+import { vAnchoredPopup } from './anchored-popup';
+import FontFamilyMenu from './FontFamilyMenu.vue';
 import {
-	COMMON_FONTS,
 	COMMON_SIZES,
 	gB,
 	gL,
@@ -41,40 +49,69 @@ interface Props {
 	onPaste: () => void;
 	onToggleFormatPainter?: () => void;
 	layoutOptions: LayoutOption[];
+	/** Marks the active tile in the Layout menu. */
+	currentLayoutPath?: string;
+	/** Supplies gallery artwork; without it the menus stay name-only. */
+	loadLayoutPreviews?: () => Promise<PptxLayoutPreview[]>;
 	onInsertSlideFromLayout: (path: string, name?: string) => void;
+	onInsertSlideFromTemplate?: (templateId: SlideTemplateId) => void;
+	/** Deck scheme map so template previews show the deck's theme colours. */
+	templateScheme?: Record<string, string>;
 	onApplyLayout?: (path: string) => void;
 	onResetSlide?: () => void;
 	onAddSection?: () => void;
 	selectedElement?: PptxElement | null;
 	onUpdateTextStyle?: (style: Partial<TextStyle>) => void;
+	/** Theme major/minor latin faces, leading the font dropdown. */
+	themeFonts?: { heading?: string; body?: string };
+	/** Families the deck embeds, offered as their own dropdown group. */
+	embeddedFontFamilies?: readonly string[];
+	/** Families registered this session via File > Options > Fonts. */
+	customFontFamilies?: readonly string[];
 }
 
 const props = defineProps<Props>();
 
 const { t } = useI18n();
 
+/**
+ * With nothing overriding it on the element, the font box shows the family the
+ * deck would actually render: the theme's major font inside a title
+ * placeholder and its minor font elsewhere. It used to show a hardcoded
+ * "Segoe UI", which misreported every themed deck.
+ *
+ * Explicit model font sizes are CSS pixels, while the control displays
+ * PowerPoint points. An element without an explicit size keeps the existing
+ * 18pt presentation fallback.
+ */
 function extractFontInfo(element?: PptxElement | null): { fontFamily: string; fontSize: string } {
-	const defaults = { fontFamily: 'Segoe UI', fontSize: '24' };
+	const placeholderType = (element as { placeholderType?: string } | null | undefined)
+		?.placeholderType;
+	const fontFamilyDefault = resolveDefaultFontFamily(placeholderType, props.themeFonts);
 	if (!element) {
-		return defaults;
+		return { fontFamily: fontFamilyDefault, fontSize: String(DEFAULT_FONT_SIZE) };
 	}
 	if (!hasTextProperties(element)) {
-		return defaults;
+		return { fontFamily: fontFamilyDefault, fontSize: String(DEFAULT_FONT_SIZE) };
 	}
 
 	const segStyle = element.textSegments?.[0]?.style;
 	const textStyle = element.textStyle;
 
-	const fontFamily = segStyle?.fontFamily ?? textStyle?.fontFamily ?? defaults.fontFamily;
+	const fontFamily = segStyle?.fontFamily ?? textStyle?.fontFamily ?? fontFamilyDefault;
 	const fontSize = segStyle?.fontSize ?? textStyle?.fontSize;
 
 	return {
 		fontFamily,
-		fontSize: fontSize !== undefined && fontSize !== null ? String(fontSize) : defaults.fontSize,
+		fontSize:
+			fontSize !== undefined ? String(textFontSizePxToPt(fontSize)) : String(DEFAULT_FONT_SIZE),
 	};
 }
 
 const fontInfo = computed(() => extractFontInfo(props.selectedElement));
+// Cut and Copy act on the selection, so with nothing selected they are no-ops.
+// They used to render live anyway, offering a button that could not do anything.
+const hasSelection = computed(() => Boolean(props.selectedElement));
 const fontFamily = computed(() => fontInfo.value.fontFamily);
 const fontSize = computed(() => fontInfo.value.fontSize);
 
@@ -106,7 +143,10 @@ function handlePickFont(f: string): void {
 }
 
 function handlePickSize(s: number): void {
-	props.onUpdateTextStyle?.({ fontSize: s });
+	props.onUpdateTextStyle?.({
+		fontSize:
+			props.selectedElement && hasTextProperties(props.selectedElement) ? textFontSizePtToPx(s) : s,
+	});
 	sizeMenu.close();
 }
 </script>
@@ -126,7 +166,7 @@ function handlePickSize(s: number): void {
 			</button>
 			<button
 				type="button"
-				:disabled="!props.canEdit"
+				:disabled="!props.canEdit || !hasSelection"
 				:class="cn(gB, cutFeedback && 'bg-green-600/20 text-green-400')"
 				:title="t('pptx.arrange.cut')"
 				@click="handleCut()"
@@ -135,6 +175,7 @@ function handlePickSize(s: number): void {
 			</button>
 			<button
 				type="button"
+				:disabled="!hasSelection"
 				:class="cn(gB, copiedFeedback && 'bg-green-600/20 text-green-400')"
 				:title="t('pptx.arrange.copy')"
 				@click="handleCopy()"
@@ -169,7 +210,11 @@ function handlePickSize(s: number): void {
 	<SlidesGroup
 		:can-edit="props.canEdit"
 		:layout-options="props.layoutOptions"
+		:current-layout-path="props.currentLayoutPath"
+		:load-layout-previews="props.loadLayoutPreviews"
 		:on-insert-slide-from-layout="props.onInsertSlideFromLayout"
+		:on-insert-slide-from-template="props.onInsertSlideFromTemplate"
+		:template-scheme="props.templateScheme"
 		:on-apply-layout="props.onApplyLayout"
 		:on-reset-slide="props.onResetSlide"
 		:on-add-section="props.onAddSection"
@@ -183,33 +228,26 @@ function handlePickSize(s: number): void {
 			<div :ref="fontMenu.root" class="relative">
 				<button
 					type="button"
+					:aria-label="t('pptx.ribbon.fontFamily')"
 					class="inline-flex items-center justify-between px-2 py-1 rounded-sm border border-border/60 bg-background/60 text-[11px] text-foreground min-w-[120px] truncate hover:bg-accent/40 transition-colors cursor-pointer"
 					@click="fontMenu.toggle()"
 				>
 					<span class="truncate">{{ fontFamily }}</span>
 					<ChevronDown class="w-3 h-3 ml-1 shrink-0 text-muted-foreground" />
 				</button>
-				<div
+				<FontFamilyMenu
 					v-if="fontMenu.open.value"
-					class="absolute left-0 top-full z-50 flex flex-col w-48 pt-1"
-				>
-					<div :class="MENU_PANEL">
-						<button
-							v-for="f in COMMON_FONTS"
-							:key="f"
-							type="button"
-							:class="MENU_ITEM"
-							:style="{ fontFamily: f }"
-							@click="handlePickFont(f)"
-						>
-							{{ f }}
-						</button>
-					</div>
-				</div>
+					:anchor="fontMenu.root.value"
+					:theme-fonts="props.themeFonts"
+					:embedded-fonts="props.embeddedFontFamilies"
+					:custom-fonts="props.customFontFamilies"
+					@select="handlePickFont"
+				/>
 			</div>
 			<div :ref="sizeMenu.root" class="relative">
 				<button
 					type="button"
+					:aria-label="t('pptx.ribbon.fontSize')"
 					class="inline-flex items-center justify-between px-2 py-1 rounded-sm border border-border/60 bg-background/60 text-[11px] text-foreground min-w-[50px] text-center hover:bg-accent/40 transition-colors cursor-pointer"
 					@click="sizeMenu.toggle()"
 				>
@@ -218,7 +256,8 @@ function handlePickSize(s: number): void {
 				</button>
 				<div
 					v-if="sizeMenu.open.value"
-					class="absolute left-0 top-full z-50 flex flex-col w-48 pt-1"
+					class="z-50 flex flex-col w-48 pt-1"
+					v-anchored-popup="{ anchor: sizeMenu.root.value }"
 				>
 					<div :class="MENU_PANEL">
 						<button

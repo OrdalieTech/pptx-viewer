@@ -142,4 +142,150 @@ describe('createInspectorDeckActions', () => {
 		]);
 		expect(editor.dirty).toBeTruthy();
 	});
+
+	/**
+	 * The SLIDE BACKGROUND card's template rows: React/Vue/Angular's shortcut
+	 * to edit a layout/master's background colour directly from the slide
+	 * inspector, without leaving the slide for Master Views. Svelte had no
+	 * path to this at all before.
+	 */
+	describe('setTemplateBackground / getTemplateBackgroundColor', () => {
+		it('writes through the handler and mirrors the colour back onto editor.slideMasters', () => {
+			const { handler } = makeFakeHandler();
+			const setTemplateBackground = vi.fn();
+			(
+				handler as unknown as { setTemplateBackground: typeof setTemplateBackground }
+			).setTemplateBackground = setTemplateBackground;
+			const editor = makeEditor(handler);
+			const loader = new PresentationLoader();
+			loader.handler = handler;
+			const deck = createInspectorDeckActions({ loader, editor });
+
+			deck.setTemplateBackground('ppt/slideMasters/slideMaster1.xml', '#ff0000');
+
+			expect(setTemplateBackground).toHaveBeenCalledWith(
+				'ppt/slideMasters/slideMaster1.xml',
+				'#ff0000',
+			);
+			expect(editor.slideMasters[0]?.backgroundColor).toBe('#ff0000');
+			expect(editor.slideMasters[1]?.backgroundColor).toBeUndefined();
+			expect(editor.dirty).toBeTruthy();
+		});
+
+		it('does nothing without a loaded handler', () => {
+			const editor = makeEditor();
+			const deck = createInspectorDeckActions({ loader: new PresentationLoader(), editor });
+
+			deck.setTemplateBackground('ppt/slideMasters/slideMaster1.xml', '#ff0000');
+
+			expect(editor.slideMasters[0]?.backgroundColor).toBeUndefined();
+			expect(editor.dirty).toBeFalsy();
+		});
+
+		it('reads the colour straight from the handler', () => {
+			const { handler } = makeFakeHandler();
+			const getTemplateBackgroundColor = vi.fn().mockReturnValue('#123456');
+			(
+				handler as unknown as { getTemplateBackgroundColor: typeof getTemplateBackgroundColor }
+			).getTemplateBackgroundColor = getTemplateBackgroundColor;
+			const editor = makeEditor(handler);
+			const loader = new PresentationLoader();
+			loader.handler = handler;
+			const deck = createInspectorDeckActions({ loader, editor });
+
+			expect(deck.getTemplateBackgroundColor('ppt/slideMasters/slideMaster1.xml')).toBe('#123456');
+			expect(getTemplateBackgroundColor).toHaveBeenCalledWith('ppt/slideMasters/slideMaster1.xml');
+		});
+
+		it('returns undefined without a loaded handler', () => {
+			const editor = makeEditor();
+			const deck = createInspectorDeckActions({ loader: new PresentationLoader(), editor });
+
+			expect(deck.getTemplateBackgroundColor('ppt/slideMasters/slideMaster1.xml')).toBeUndefined();
+		});
+	});
+
+	/**
+	 * Wave 4 #4: the Maximize/Ensure Fit rescale, applied through
+	 * `updateSlideSize`'s optional `rescaleMode` as ONE undo step alongside the
+	 * size change.
+	 */
+	describe('updateSlideSize rescale', () => {
+		it('hasContent is false for a deck with no elements on any slide', () => {
+			const editor = makeEditor();
+			const deck = createInspectorDeckActions({ loader: new PresentationLoader(), editor });
+
+			expect(deck.hasContent).toBeFalsy();
+		});
+
+		it('hasContent is true once a slide carries an element', () => {
+			const editor = makeEditor();
+			editor.setSlides([
+				{
+					id: 's1',
+					rId: 'rId1',
+					slideNumber: 1,
+					elements: [{ type: 'shape', id: 'el1', x: 0, y: 0, width: 100, height: 100 }],
+				},
+			]);
+			const deck = createInspectorDeckActions({ loader: new PresentationLoader(), editor });
+
+			expect(deck.hasContent).toBeTruthy();
+		});
+
+		it('without a rescaleMode, applies the size directly and does not touch element geometry', () => {
+			const editor = makeEditor();
+			editor.setSlides([
+				{
+					id: 's1',
+					rId: 'rId1',
+					slideNumber: 1,
+					elements: [{ type: 'shape', id: 'el1', x: 0, y: 0, width: 100, height: 100 }],
+				},
+			]);
+			const loader = new PresentationLoader();
+			const deck = createInspectorDeckActions({ loader, editor });
+
+			deck.updateSlideSize({ widthEmu: 6096000, heightEmu: 6858000, type: 'custom' });
+
+			expect(loader.slideSize).toStrictEqual({
+				widthEmu: 6096000,
+				heightEmu: 6858000,
+				type: 'custom',
+			});
+			expect(editor.slides[0]?.elements[0]?.width).toBe(100);
+			expect(editor.canUndo).toBeFalsy();
+		});
+
+		it('with rescaleMode "ensureFit", scales element geometry as one undo step alongside the size', () => {
+			const editor = makeEditor();
+			editor.setSlides([
+				{
+					id: 's1',
+					rId: 'rId1',
+					slideNumber: 1,
+					elements: [{ type: 'shape', id: 'el1', x: 0, y: 0, width: 100, height: 100 }],
+				},
+			]);
+			const loader = new PresentationLoader();
+			// Default canvas is 1280x720px = 12192000x6858000 EMU (widescreen).
+			const deck = createInspectorDeckActions({ loader, editor });
+
+			// Half the width, same height: ensureFit scales by the SMALLER ratio (0.5).
+			deck.updateSlideSize({ widthEmu: 6096000, heightEmu: 6858000, type: 'custom' }, 'ensureFit');
+
+			expect(loader.slideSize).toStrictEqual({
+				widthEmu: 6096000,
+				heightEmu: 6858000,
+				type: 'custom',
+			});
+			expect(editor.slides[0]?.elements[0]?.width).toBe(50);
+			expect(editor.dirty).toBeTruthy();
+
+			// One undo step: the rescale (content) and the size change land together.
+			expect(editor.canUndo).toBeTruthy();
+			editor.undo();
+			expect(editor.slides[0]?.elements[0]?.width).toBe(100);
+		});
+	});
 });

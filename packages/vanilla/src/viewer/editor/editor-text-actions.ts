@@ -1,6 +1,7 @@
-import type { TextStyle } from 'pptx-viewer-core';
+import type { PptxThemeColorRef, TextStyle } from 'pptx-viewer-core';
 import type { ChangeCaseMode } from 'pptx-viewer-shared';
 
+import type { Store, ViewerState } from '../state';
 import type { ApplyToSelected } from './editor-apply-to-selected';
 import {
 	adjustFontSize,
@@ -16,10 +17,13 @@ import {
 } from './editor-format-mutations';
 import {
 	adjustIndent,
+	setColumnCount,
 	setLineSpacing,
 	setTextAlign,
+	setTextDirection,
 	toggleListType,
 } from './editor-paragraph-mutations';
+import { recordRecentColor } from './editor-recent-colors';
 
 /**
  * Character + paragraph formatting actions for the ribbon's Home > Font and
@@ -37,7 +41,7 @@ export interface TextActions {
 	changeFontSize(delta: number): void;
 	setFontSize(size: number): void;
 	setFontFamily(family: string): void;
-	setTextColor(color: string): void;
+	setTextColor(color: string, ref?: PptxThemeColorRef): void;
 	setHighlightColor(color: string): void;
 	setCharacterSpacing(value: number): void;
 	changeCase(mode: ChangeCaseMode): void;
@@ -48,9 +52,14 @@ export interface TextActions {
 	decreaseIndent(): void;
 	setTextAlign(align: TextStyle['align']): void;
 	setLineSpacing(value: number): void;
+	setTextDirection(direction: TextStyle['textDirection']): void;
+	setColumnCount(count: number): void;
 }
 
-export function createTextActions(applyToSelected: ApplyToSelected): TextActions {
+export function createTextActions(
+	store: Store<ViewerState>,
+	applyToSelected: ApplyToSelected,
+): TextActions {
 	return {
 		toggleBold: () => applyToSelected((el) => toggleTextProp(el, 'bold')),
 		toggleItalic: () => applyToSelected((el) => toggleTextProp(el, 'italic')),
@@ -60,8 +69,14 @@ export function createTextActions(applyToSelected: ApplyToSelected): TextActions
 		changeFontSize: (delta) => applyToSelected((el) => adjustFontSize(el, delta)),
 		setFontSize: (size) => applyToSelected((el) => setFontSize(el, size)),
 		setFontFamily: (family) => applyToSelected((el) => setFontFamily(el, family)),
-		setTextColor: (color) => applyToSelected((el) => setTextColor(el, color)),
-		setHighlightColor: (color) => applyToSelected((el) => setHighlightColor(el, color)),
+		setTextColor: (color, ref) => {
+			recordRecentColor(store, color);
+			applyToSelected((el) => setTextColor(el, color, ref));
+		},
+		setHighlightColor: (color) => {
+			recordRecentColor(store, color);
+			applyToSelected((el) => setHighlightColor(el, color));
+		},
 		setCharacterSpacing: (value) => applyToSelected((el) => setCharacterSpacing(el, value)),
 		changeCase: (mode) => applyToSelected((el) => changeTextCase(el, mode)),
 		clearFormatting: () => applyToSelected((el) => clearFormatting(el)),
@@ -71,5 +86,7 @@ export function createTextActions(applyToSelected: ApplyToSelected): TextActions
 		decreaseIndent: () => applyToSelected((el) => adjustIndent(el, -1)),
 		setTextAlign: (align) => applyToSelected((el) => setTextAlign(el, align)),
 		setLineSpacing: (value) => applyToSelected((el) => setLineSpacing(el, value)),
+		setTextDirection: (direction) => applyToSelected((el) => setTextDirection(el, direction)),
+		setColumnCount: (count) => applyToSelected((el) => setColumnCount(el, count)),
 	};
 }

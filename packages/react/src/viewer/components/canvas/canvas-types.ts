@@ -3,6 +3,7 @@ import type {
 	PptxAction,
 	PptxComment,
 	PptxElement,
+	PptxElementAnimation,
 	PptxSlide,
 	InkPptxElement,
 	ShapePptxElement,
@@ -15,6 +16,7 @@ import type {
 	MarqueeSelectionState,
 	TableCellEditorState,
 	ViewerMode,
+	ShapeAdjustmentHandleDescriptor,
 } from '../../types';
 import type { DrawingTool } from '../../types-ui';
 import type { ElementAnimationState } from '../../utils/animation-timeline';
@@ -87,7 +89,11 @@ export interface SlideCanvasProps {
 	/** Called when the user presses mouse down on empty canvas space. */
 	onCanvasMouseDown?: (e: React.MouseEvent) => void;
 	onResizePointerDown: (elementId: string, e: React.MouseEvent, handle: string) => void;
-	onAdjustmentPointerDown: (elementId: string, e: React.MouseEvent) => void;
+	onAdjustmentPointerDown: (
+		elementId: string,
+		e: React.MouseEvent,
+		descriptor: ShapeAdjustmentHandleDescriptor,
+	) => void;
 	/** Commit a new rotation (degrees) when the on-canvas rotate handle is dragged. */
 	onRotate?: (elementId: string, rotationDeg: number) => void;
 	onInlineEditChange: (text: string) => void;
@@ -160,6 +166,14 @@ export interface SlideCanvasProps {
 	onMoveGuide?: (guideId: string, position: number) => void;
 	onDeleteGuide?: (guideId: string) => void;
 	onCreateGuideFromRuler?: (axis: 'h' | 'v', positionPx: number) => void;
+
+	/* ── Motion-path authoring ───────────────────────────────────────── */
+	/**
+	 * Commits the slide's animation list after an on-canvas motion-path edit
+	 * (dragging the path's end handle). Absent means the path is drawn but
+	 * read-only.
+	 */
+	onUpdateSlideAnimations?: (animations: PptxElementAnimation[]) => void;
 
 	/* ── Connector creation props ────────────────────────────────────── */
 	/** When true, shows connection sites on shapes and enables connector drawing. */

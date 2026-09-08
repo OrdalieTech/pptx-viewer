@@ -1,12 +1,22 @@
 import type { PptxElement, ShapeStyle, TextStyle } from 'pptx-viewer-core';
 import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
+import {
+	shouldShowAccessibilitySection,
+	textFontSizePtToPx,
+	textFontSizePxToPt,
+} from 'pptx-viewer-shared';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { SHAPE_PRESETS } from '../../constants';
-import { cn, normalizeHexColor } from '../../utils';
+import { cn, normalizeHexColor, sanitizeGradientStops } from '../../utils';
+import { AccessibilityTextSection } from './AccessibilityTextSection';
 import { DebouncedColorInput } from './DebouncedColorInput';
+import { FillStrokeProperties } from './FillStrokeProperties';
 import { CARD, HEADING, INPUT } from './inspector-pane-constants';
+import { RecentColorsRow } from './RecentColorsRow';
+import { TextAdvancedSections } from './TextAdvancedSections';
+import { ThemeColorSwatchGrid } from './ThemeColorSwatchGrid';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -58,50 +68,36 @@ export function ShapeTextPanels({
 				</div>
 			)}
 
-			{/* Fill & Stroke */}
+			{/* Fill & Stroke: the full panel (fill MODE, gradient stops, pattern,
+			    picture fill, dash/join/cap, effects, quick styles), not just a
+			    pair of colour swatches. Vue's FillPanel and Svelte's
+			    FillStrokeSection already ship this; React rendered a cut-down
+			    card while the complete one sat unreferenced. */}
 			{hasShapeProperties(selectedElement) && (
-				<div className={CARD}>
+				<div className={CARD} data-pptx-fill-stroke>
 					<div className={HEADING}>{t('pptx.shape.fillStroke', 'Fill & Stroke')}</div>
-					<div className='grid grid-cols-2 gap-1.5 text-[11px]'>
-						<label className='flex flex-col gap-1'>
-							<span className='text-muted-foreground'>Fill</span>
-							<DebouncedColorInput
-								disabled={!canEdit}
-								value={normalizeHexColor(selectedElement.shapeStyle?.fillColor, '#3b82f6')}
-								className='w-full h-7 rounded border border-border bg-transparent cursor-pointer'
-								onCommit={(hex) => onUpdateElementStyle({ fillColor: hex, fillMode: 'solid' })}
-							/>
-						</label>
-						<label className='flex flex-col gap-1'>
-							<span className='text-muted-foreground'>Stroke</span>
-							<DebouncedColorInput
-								disabled={!canEdit}
-								value={normalizeHexColor(selectedElement.shapeStyle?.strokeColor, '#1f2937')}
-								className='w-full h-7 rounded border border-border bg-transparent cursor-pointer'
-								onCommit={(hex) => onUpdateElementStyle({ strokeColor: hex })}
-							/>
-						</label>
-						<label className='flex items-center gap-1 col-span-2'>
-							<span className='w-16 text-muted-foreground'>
-								{t('pptx.shapeText.strokeWidthAbbrev')}
-							</span>
-							<input
-								type='number'
-								disabled={!canEdit}
-								className={INPUT}
-								min={0}
-								max={20}
-								value={selectedElement.shapeStyle?.strokeWidth ?? 1}
-								onChange={(e) => onUpdateElementStyle({ strokeWidth: Number(e.target.value) })}
-							/>
-						</label>
-					</div>
+					<FillStrokeProperties
+						selectedElement={selectedElement}
+						selectedShapeStyle={selectedElement.shapeStyle}
+						selectedShapeType={selectedElement.shapeType}
+						selectedGradientStops={sanitizeGradientStops(
+							selectedElement.shapeStyle?.fillGradientStops,
+						)}
+						canEdit={canEdit}
+						onUpdateShapeStyle={onUpdateElementStyle}
+						onSetFillColor={(hex, ref) =>
+							onUpdateElementStyle({ fillColor: hex, fillMode: 'solid', fillColorRef: ref })
+						}
+						onSetStrokeColor={(hex, ref) =>
+							onUpdateElementStyle({ strokeColor: hex, strokeColorRef: ref })
+						}
+					/>
 				</div>
 			)}
 
 			{/* Text Color & Font Size */}
 			{hasTextProperties(selectedElement) && (
-				<div className={CARD}>
+				<div className={CARD} data-pptx-text-card>
 					<div className={HEADING}>{t('pptx.text.title', 'Text')}</div>
 					<div className='grid grid-cols-2 gap-1.5 text-[11px]'>
 						<label className='flex flex-col gap-1'>
@@ -112,19 +108,43 @@ export function ShapeTextPanels({
 								className={INPUT}
 								min={6}
 								max={200}
-								value={selectedElement.textStyle?.fontSize ?? 18}
-								onChange={(e) => onUpdateTextStyle({ fontSize: Number(e.target.value) })}
+								step='any'
+								value={
+									selectedElement.textStyle?.fontSize !== undefined
+										? textFontSizePxToPt(selectedElement.textStyle.fontSize)
+										: 18
+								}
+								onChange={(e) =>
+									onUpdateTextStyle({ fontSize: textFontSizePtToPx(Number(e.target.value)) })
+								}
 							/>
 						</label>
 						<label className='flex flex-col gap-1'>
 							<span className='text-muted-foreground'>Color</span>
 							<DebouncedColorInput
 								disabled={!canEdit}
+								ariaLabel='Text Color'
 								value={normalizeHexColor(selectedElement.textStyle?.color, '#000000')}
 								className='w-full h-7 rounded border border-border bg-transparent cursor-pointer'
-								onCommit={(hex) => onUpdateTextStyle({ color: hex })}
+								onCommit={(hex) => onUpdateTextStyle({ color: hex, colorRef: undefined })}
 							/>
 						</label>
+						<div className='col-span-2'>
+							<ThemeColorSwatchGrid
+								prefix='text-color'
+								disabled={!canEdit}
+								selectedRef={selectedElement.textStyle?.colorRef}
+								selectedHex={selectedElement.textStyle?.color}
+								onPick={(c) => onUpdateTextStyle({ color: c.hex, colorRef: c.ref })}
+							/>
+						</div>
+						<div className='col-span-2'>
+							<RecentColorsRow
+								prefix='text-color'
+								disabled={!canEdit}
+								onCommit={(hex) => onUpdateTextStyle({ color: hex, colorRef: undefined })}
+							/>
+						</div>
 						<div className='flex gap-1 col-span-2'>
 							<TextFormatToggle
 								label='B'
@@ -157,6 +177,28 @@ export function ShapeTextPanels({
 						</div>
 					</div>
 				</div>
+			)}
+
+			{/* Warp / effects / 3D text: gated on the same text-capable check as
+			    the card above, so they appear alongside the other text sections. */}
+			<TextAdvancedSections
+				selectedElement={selectedElement}
+				canEdit={canEdit}
+				onUpdateTextStyle={onUpdateTextStyle}
+			/>
+
+			{/* Accessibility (alt text / title): a picture's own field lives in
+			    ImagePropertiesPanel; shared's `shouldShowAccessibilitySection`
+			    decides everything else, a plain shape, text box, connector, and
+			    every graphic-frame kind (table/chart/smartArt/media/ole), so this
+			    stays in sync with the other four bindings without a hard-coded
+			    type list here. */}
+			{shouldShowAccessibilitySection(selectedElement) && (
+				<AccessibilityTextSection
+					selectedElement={selectedElement}
+					canEdit={canEdit}
+					onUpdateElement={onUpdateElement}
+				/>
 			)}
 		</>
 	);

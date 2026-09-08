@@ -4,16 +4,30 @@ import type {
 	PptxSmartArtChrome,
 	PptxSmartArtDrawingShape,
 	PptxSmartArtNode,
-	SmartArtColorScheme,
 	SmartArtStyle,
 } from 'pptx-viewer-core';
 import { setSmartArtNodeStyle } from 'pptx-viewer-core';
 import {
+	buildChromeStyle,
 	buildSmartArtA11y,
-	revealedSmartArtNodeCount,
+	canDrillDown,
+	computeDrawingViewBox,
+	projectDrawingShapes,
+	resolveRevealedDrawingShapeNodeIds,
+	resolvePalette,
+	resolveRevealedDrawingShapes,
+	resolveRevealedSmartArtNodes,
 	shouldCommitSmartArtNodeText,
+	smartArtConnectorPaint,
+	smartArtNodeLabel,
+	styleShadowFilter,
 } from 'pptx-viewer-shared';
-import type { ElementAnimationState } from 'pptx-viewer-shared';
+import type {
+	ElementAnimationState,
+	RenderedShape,
+	SmartArtConnectorPaint,
+	SmartArtNodeLabel,
+} from 'pptx-viewer-shared';
 import type { CSSProperties } from 'vue';
 import { computed, nextTick, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -22,7 +36,6 @@ import { getContainerStyle } from '../composables/element-style';
 import {
 	inlineEditorRect,
 	nodeIdsInRenderOrder,
-	textNodeIdsInRenderOrder,
 	useSmartArtInlineEditState,
 } from '../composables/smartart-inline-edit';
 import type {
@@ -31,7 +44,7 @@ import type {
 	RenderedRectNode,
 	SmartArtLayoutResult as ComputedLayout,
 } from '../composables/smartart-layout';
-import { computeSmartArtLayout } from '../composables/smartart-layout';
+import { computeSmartArtElementLayout } from '../composables/smartart-layout';
 import { injectSmartArtNodeEdit } from '../composables/smartart-node-edit';
 import { useSmartArtHoverRect } from '../composables/useSmartArtHoverRect';
 import SmartArtNodeStyleBar from './SmartArtNodeStyleBar.vue';
@@ -66,76 +79,24 @@ const props = defineProps<{
 	 * break single-element test locators.
 	 */
 	interactive?: boolean;
+	/** Emit the data-pptx-element marker even when not interactive (template layer). */
+	marked?: boolean;
 	/**
 	 * Native-animation playback state. A staged diagram build
 	 * (`build.kind === 'diagram'`) reveals the leading nodes / drawing shapes for
 	 * the current progress; absent or non-diagram state renders every node.
 	 */
 	animationState?: ElementAnimationState;
+	/**
+	 * Scoped `!important` CSS override for an active font-style emphasis effect
+	 * (Bold Flash, Bold Reveal, Underline, Change Font Style/Size), built by the
+	 * parent `ElementRenderer` (`buildTextStyleOverrideCss`) so a SmartArt node
+	 * caption animates the same way a shape's text does.
+	 */
+	textStyleOverrideCss?: string;
 }>();
 
 const { t } = useI18n();
-
-// ── Palette / style helpers (ported from smartart-helpers.tsx) ───────────────
-
-const PALETTES: Record<SmartArtColorScheme, string[]> = {
-	colorful1: ['#3b82f6', '#22c55e', '#f97316', '#eab308', '#a855f7', '#ec4899'],
-	colorful2: ['#6366f1', '#14b8a6', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4'],
-	colorful3: ['#0ea5e9', '#84cc16', '#f43e5e', '#a855f7', '#f97316', '#10b981'],
-	monochromatic1: ['#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe', '#2563eb', '#1d4ed8'],
-	monochromatic2: ['#6366f1', '#818cf8', '#a5b4fc', '#c7d2fe', '#4f46e5', '#4338ca'],
-};
-const DEFAULT_PALETTE = PALETTES.colorful1;
-
-function colour(index: number, palette: string[]): string {
-	return palette[index % palette.length];
-}
-
-function styleShadow(style: SmartArtStyle): string | undefined {
-	if (style === 'intense') {
-		return 'drop-shadow(0 2px 6px rgba(0,0,0,0.35))';
-	}
-	if (style === 'moderate') {
-		return 'drop-shadow(0 1px 3px rgba(0,0,0,0.2))';
-	}
-	return undefined;
-}
-
-function styleStroke(style: SmartArtStyle): number {
-	if (style === 'intense') {
-		return 2;
-	}
-	if (style === 'moderate') {
-		return 1.5;
-	}
-	return 0;
-}
-
-function truncate(text: string, max: number): string {
-	if (text.length <= max) {
-		return text;
-	}
-	return `${text.slice(0, max - 1)}…`;
-}
-
-/**
- * Split node text on `\n` and compute per-line y offsets (in SVG px) that
- * centre the block around the node centre y (offset 0). Single-line text
- * produces one entry with y=0, preserving the existing
- * `dominant-baseline="central"` behaviour exactly.
- */
-function textLines(text: string, fontSize: number): Array<{ text: string; y: number }> {
-	const raw = (text ?? '').split('\n').filter((l) => l.length > 0);
-	if (raw.length === 0) {
-		return [{ text: '', y: 0 }];
-	}
-	const lh = fontSize * 1.2;
-	const totalH = raw.length * lh;
-	return raw.map((line, i) => ({
-		text: line,
-		y: -totalH / 2 + lh / 2 + i * lh,
-	}));
-}
 
 // ── Resolved SmartArt data ───────────────────────────────────────────────────
 
@@ -169,17 +130,7 @@ function nodeLabel(nodeId: string | undefined): string | undefined {
 	return nodeId ? nodeLabels.value.get(nodeId) : undefined;
 }
 
-const palette = computed<string[]>(() => {
-	const data = smartArtData.value;
-	if (!data) {
-		return DEFAULT_PALETTE;
-	}
-	const ctFills = data.colorTransform?.fillColors;
-	if (ctFills && ctFills.length > 0) {
-		return ctFills;
-	}
-	return PALETTES[data.colorScheme ?? 'colorful1'] ?? DEFAULT_PALETTE;
-});
+const palette = computed<string[]>(() => resolvePalette(smartArtData.value));
 
 const style = computed<SmartArtStyle>(() => smartArtData.value?.style ?? 'flat');
 
@@ -189,20 +140,28 @@ const containerStyle = computed<CSSProperties>(() =>
 	getContainerStyle(props.element, props.zIndex),
 );
 
-const chromeStyle = computed<CSSProperties>(() => {
-	const c = chrome.value;
-	const s: CSSProperties = { width: '100%', height: '100%' };
-	if (!c) {
-		return s;
-	}
-	if (c.backgroundColor) {
-		s.backgroundColor = c.backgroundColor;
-	}
-	if (c.outlineColor) {
-		s.border = `${c.outlineWidth ?? 1}px solid ${c.outlineColor}`;
-	}
-	return s;
-});
+/**
+ * `pointer-events: none` on the root while not interactive, mirroring
+ * React's `pointer-events-none` class / Angular's `rootPointerEvents`. The
+ * inner `.pptx-vue-smartart-svg` is already `pointer-events: none` by default
+ * CSS (with editable node groups opting back in via
+ * `.pptx-vue-smartart-editable`), but nothing previously gated the OUTER
+ * `pptx-vue-smartart` box itself, so its background/chrome area stayed
+ * clickable even while `marked` locked the element (e.g. a template/master
+ * diagram with `editTemplateMode` off). `null` while interactive so the
+ * style-array merge leaves any pre-existing `pointerEvents` untouched.
+ */
+const rootPointerEvents = computed<CSSProperties | null>(() =>
+	props.interactive ? null : { pointerEvents: 'none' },
+);
+
+/**
+ * The chrome wrapper's background/outline decision, from the shared
+ * `buildChromeStyle` (same function Angular/Svelte/Vanilla call directly).
+ * Its `CssStyleMap` return is kebab-case; Vue's `CSSProperties` accepts both
+ * kebab and camelCase keys, so this only needs a type cast, not a converter.
+ */
+const chromeStyle = computed<CSSProperties>(() => buildChromeStyle(chrome.value) as CSSProperties);
 
 // ── Drawing-shape path (mirrors smartart-drawing.tsx) ────────────────────────
 
@@ -215,145 +174,66 @@ const hasDrawingShapes = computed(() => drawingShapes.value.length > 0);
 // ── Staged diagram build (p:bldDgm) reveal ──────────────────────────────────
 //
 // When an active native animation carries a staged diagram build, reveal only
-// the leading nodes / drawing shapes for the current progress; the view box is
-// still computed from the FULL shape set so the diagram does not rescale as it
-// builds. Mirrors React's `SmartArtRenderer` reveal slice.
+// the leading nodes / drawing shapes for the current progress, preferring the
+// AUTHORED per-node `p:graphicEl/@id` reveal set (`animationState.diagramReveal`)
+// over the click-count estimate when available; the view box is still computed
+// from the FULL shape set so the diagram does not rescale as it builds.
+// Mirrors React's `SmartArtRenderer` reveal slice.
 
-const diagramBuild = computed(() => {
-	const build = props.animationState?.build;
-	return build?.kind === 'diagram' ? build : undefined;
-});
-
-const shownNodeCount = computed(() =>
-	diagramBuild.value
-		? revealedSmartArtNodeCount(nodes.value, diagramBuild.value)
-		: nodes.value.length,
-);
-
-const isPartialBuild = computed(
-	() => diagramBuild.value !== undefined && shownNodeCount.value < nodes.value.length,
+const diagramReveal = computed(() =>
+	resolveRevealedSmartArtNodes(
+		nodes.value,
+		props.animationState,
+		smartArtData.value?.presLayoutVars,
+	),
 );
 
 /** Leading node prefix revealed so far (full list when no partial build). */
-const revealedNodes = computed<PptxSmartArtNode[]>(() =>
-	isPartialBuild.value ? nodes.value.slice(0, shownNodeCount.value) : nodes.value,
+const revealedNodes = computed<PptxSmartArtNode[]>(() => diagramReveal.value.nodes);
+
+/** Revealed drawing-shape subset, preferring the authored node-id set. */
+const revealedShapeList = computed<PptxSmartArtDrawingShape[]>(() =>
+	drawingShapes.value.length === 0
+		? drawingShapes.value
+		: resolveRevealedDrawingShapes(drawingShapes.value, nodes.value, props.animationState),
 );
 
-/** Leading drawing-shape prefix revealed so far (proportional to nodes). */
-const revealedShapeList = computed<PptxSmartArtDrawingShape[]>(() => {
-	if (!isPartialBuild.value || drawingShapes.value.length === 0) {
-		return drawingShapes.value;
-	}
-	const count = Math.ceil(
-		(shownNodeCount.value / Math.max(nodes.value.length, 1)) * drawingShapes.value.length,
-	);
-	return drawingShapes.value.slice(0, count);
+/** Shape descriptor plus the source node id used for inline editing. */
+type EditableShape = RenderedShape & { nodeId?: string };
+
+const drawingViewBox = computed(() => computeDrawingViewBox(drawingShapes.value));
+
+const renderedShapes = computed<EditableShape[]>(() => {
+	// Each shape maps back to its source node id via the shared best-effort
+	// resolver (positional / reflow-suffix / unique-text), rather than a
+	// running index into `nodes` in original order: a staged build's revealed
+	// shape SUBSET is not necessarily a leading prefix (the authored-index
+	// diagramReveal descriptor can reveal an out-of-order set), so the two
+	// lists are no longer guaranteed to walk in lockstep.
+	const revealed = revealedShapeList.value;
+	const nodeIds = resolveRevealedDrawingShapeNodeIds(drawingShapes.value, revealed, nodes.value);
+	return projectDrawingShapes(
+		props.element.id,
+		revealed,
+		drawingViewBox.value,
+		palette.value,
+		style.value,
+	).map((shape, i) => ({
+		...shape,
+		nodeId: nodeIds[i],
+	}));
 });
 
-interface RenderedShape {
-	key: string;
-	/** Source SmartArt node id for inline editing, when this shape carries text. */
-	nodeId?: string;
-	isEllipse: boolean;
-	x: number;
-	y: number;
-	width: number;
-	height: number;
-	rx: number;
-	cx: number;
-	cy: number;
-	fill: string;
-	stroke: string;
-	strokeWidth: number;
-	transform?: string;
-	text?: string;
-	textX: number;
-	textY: number;
-	fontColor: string;
-	fontSize: number;
+/**
+ * Seed text for an inline edit. The rendered lines are a wrapped view of the
+ * authored string, so they are joined back with spaces rather than newlines to
+ * avoid writing the wrap points into the node.
+ */
+function shapeEditText(shape: EditableShape): string {
+	return shape.textLines.map((line) => line.text).join(' ');
 }
 
-const drawingViewBox = computed(() => {
-	const shapes = drawingShapes.value;
-	let minX = Infinity;
-	let minY = Infinity;
-	let maxX = -Infinity;
-	let maxY = -Infinity;
-	for (const s of shapes) {
-		if (s.x < minX) {
-			minX = s.x;
-		}
-		if (s.y < minY) {
-			minY = s.y;
-		}
-		if (s.x + s.width > maxX) {
-			maxX = s.x + s.width;
-		}
-		if (s.y + s.height > maxY) {
-			maxY = s.y + s.height;
-		}
-	}
-	if (!Number.isFinite(minX)) {
-		minX = 0;
-		minY = 0;
-		maxX = 1;
-		maxY = 1;
-	}
-	return {
-		minX,
-		minY,
-		width: maxX - minX || 1,
-		height: maxY - minY || 1,
-	};
-});
-
-const renderedShapes = computed<RenderedShape[]>(() => {
-	const shapes = revealedShapeList.value;
-	const { minX, minY } = drawingViewBox.value;
-	const sw = styleStroke(style.value);
-	const pal = palette.value;
-	// Text-bearing shapes map positionally to text-bearing source nodes so a
-	// double-click on a labelled shape targets the right node id.
-	const textIds = textNodeIdsInRenderOrder(nodes.value);
-	let textShapeIndex = 0;
-
-	return shapes.map((shape, i): RenderedShape => {
-		const fill = shape.fillColor ?? colour(i, pal);
-		const relX = shape.x - minX;
-		const relY = shape.y - minY;
-		const isEllipse = shape.shapeType === 'ellipse';
-		const rx = shape.shapeType === 'roundRect' ? Math.min(shape.width, shape.height) * 0.1 : 0;
-		const cx = relX + shape.width / 2;
-		const cy = relY + shape.height / 2;
-		const stroke = shape.strokeColor ?? (sw > 0 ? 'rgba(255,255,255,0.3)' : 'none');
-		const transform = shape.rotation ? `rotate(${shape.rotation} ${cx} ${cy})` : undefined;
-		const nodeId = shape.text ? textIds[textShapeIndex++] : undefined;
-
-		return {
-			key: `${props.element.id}-dsp-${shape.id}-${i}`,
-			nodeId,
-			isEllipse,
-			x: relX,
-			y: relY,
-			width: shape.width,
-			height: shape.height,
-			rx,
-			cx,
-			cy,
-			fill,
-			stroke,
-			strokeWidth: shape.strokeWidth ?? sw,
-			transform,
-			text: shape.text ? truncate(shape.text, 30) : undefined,
-			textX: cx,
-			textY: cy,
-			fontColor: shape.fontColor ?? 'white',
-			fontSize: shape.fontSize ?? Math.max(8, Math.min(14, shape.height * 0.2)),
-		};
-	});
-});
-
-const shadowFilter = computed(() => styleShadow(style.value));
+const shadowFilter = computed(() => styleShadowFilter(style.value));
 
 // ── SVG layout fallback (no drawing shapes) ──────────────────────────────────
 //
@@ -365,19 +245,32 @@ const fallbackLayout = computed<ComputedLayout | undefined>(() => {
 		return undefined;
 	}
 	const data = smartArtData.value;
-	return computeSmartArtLayout(
+	return computeSmartArtElementLayout(
+		data ?? {},
 		revealedNodes.value,
 		{ width: props.element.width, height: props.element.height },
 		palette.value,
 		style.value,
 		props.element.id,
-		data?.resolvedLayoutType,
-		data?.layout,
-		undefined,
-		data?.layoutDefinition,
-		data?.presLayoutVars,
 	);
 });
+
+// ── Fallback-layout label / connector paint ──────────────────────────────────
+//
+// The layout descriptor's optional fields (per-node font colour / weight /
+// style, off-centre label anchors for target leaders, gear legend rows and
+// timeline captions, and per-connector stroke) are resolved by the shared
+// decision functions below. The template binds the result and computes nothing.
+
+/** Resolved connector paint, index-aligned with `fallbackLayout.connectors`. */
+const fallbackConnectors = computed<SmartArtConnectorPaint[]>(() =>
+	(fallbackLayout.value?.connectors ?? []).map((conn) => smartArtConnectorPaint(conn)),
+);
+
+/** Resolved label descriptors, index-aligned with `fallbackLayout.nodes`. */
+const fallbackLabels = computed<SmartArtNodeLabel[]>(() =>
+	(fallbackLayout.value?.nodes ?? []).map((node) => smartArtNodeLabel(node)),
+);
 
 const isEmpty = computed(() => nodes.value.length === 0 && !hasDrawingShapes.value);
 
@@ -389,11 +282,17 @@ const isEmpty = computed(() => nodes.value.length === 0 && !hasDrawingShapes.val
 // `updateElement`), so undo/redo and save round-trip are identical.
 
 const nodeEdit = injectSmartArtNodeEdit();
-const editable = computed(() => Boolean(nodeEdit?.canEdit()));
+// G8: `a:graphicFrameLocks/@noDrilldown` forbids entering this SmartArt's
+// individual nodes for editing.
+const editable = computed(() => Boolean(nodeEdit?.canEdit()) && canDrillDown(props.element));
 
-/** Source node ids in fallback render order (index-aligned with layout nodes). */
+/**
+ * Source node ids in fallback render order (index-aligned with layout nodes).
+ * Flattened over the REVEALED prefix, since that is what the layout engine was
+ * handed: a staged diagram build otherwise mapped ids past the reveal point.
+ */
 const fallbackNodeIds = computed<string[]>(() =>
-	fallbackLayout.value ? nodeIdsInRenderOrder(nodes.value) : [],
+	fallbackLayout.value ? nodeIdsInRenderOrder(revealedNodes.value) : [],
 );
 
 const edit = useSmartArtInlineEditState();
@@ -503,11 +402,17 @@ function onEditorKeydown(event: KeyboardEvent): void {
 <template>
 	<div
 		class="pptx-vue-element pptx-vue-smartart"
-		:style="containerStyle"
+		:style="[containerStyle, rootPointerEvents]"
 		:data-element-id="element.id"
-		:data-pptx-element="props.interactive ? 'true' : undefined"
+		:data-pptx-element="props.interactive || props.marked ? 'true' : undefined"
 		aria-roledescription="diagram"
 	>
+		<!--
+			`<style>` is a forbidden side-effect tag in an SFC template, so the
+			override is rendered through the dynamic `<component :is>` escape
+			hatch instead (see `ElementRenderer.vue`).
+		-->
+		<component :is="'style'" v-if="textStyleOverrideCss">{{ textStyleOverrideCss }}</component>
 		<div
 			ref="rootEl"
 			class="pptx-vue-smartart-chrome"
@@ -540,12 +445,55 @@ function onEditorKeydown(event: KeyboardEvent): void {
 					:role="nodeLabel(shape.nodeId) ? 'img' : undefined"
 					:aria-label="nodeLabel(shape.nodeId)"
 					:style="shadowFilter ? { filter: shadowFilter } : undefined"
-					@dblclick="beginEdit(shape.nodeId, shape.text ?? '', $event)"
-					@keydown.enter.prevent="beginEdit(shape.nodeId, shape.text ?? '', $event)"
+					@dblclick="beginEdit(shape.nodeId, shapeEditText(shape), $event)"
+					@keydown.enter.prevent="beginEdit(shape.nodeId, shapeEditText(shape), $event)"
 				>
 					<title v-if="nodeLabel(shape.nodeId)">{{ nodeLabel(shape.nodeId) }}</title>
+					<defs v-if="shape.gradient">
+						<radialGradient
+							v-if="shape.gradient.kind === 'radial'"
+							:id="shape.gradient.id"
+							:cx="shape.gradient.cx"
+							:cy="shape.gradient.cy"
+							:r="shape.gradient.r"
+						>
+							<stop
+								v-for="(stop, si) in shape.gradient.stops"
+								:key="si"
+								:offset="stop.offset"
+								:stop-color="stop.color"
+								:stop-opacity="stop.opacity"
+							/>
+						</radialGradient>
+						<linearGradient
+							v-else
+							:id="shape.gradient.id"
+							:x1="shape.gradient.x1"
+							:y1="shape.gradient.y1"
+							:x2="shape.gradient.x2"
+							:y2="shape.gradient.y2"
+						>
+							<stop
+								v-for="(stop, si) in shape.gradient.stops"
+								:key="si"
+								:offset="stop.offset"
+								:stop-color="stop.color"
+								:stop-opacity="stop.opacity"
+							/>
+						</linearGradient>
+					</defs>
+					<image
+						v-if="shape.kind === 'image'"
+						:x="shape.x"
+						:y="shape.y"
+						:width="shape.width"
+						:height="shape.height"
+						:href="shape.imageUrl"
+						preserveAspectRatio="xMidYMid meet"
+						:transform="shape.transform"
+					/>
 					<ellipse
-						v-if="shape.isEllipse"
+						v-else-if="shape.kind === 'ellipse'"
 						:cx="shape.cx"
 						:cy="shape.cy"
 						:rx="shape.width / 2"
@@ -554,6 +502,14 @@ function onEditorKeydown(event: KeyboardEvent): void {
 						:stroke="shape.stroke"
 						:stroke-width="shape.strokeWidth"
 						:transform="shape.transform"
+					/>
+					<path
+						v-else-if="shape.kind === 'path'"
+						:d="shape.pathData"
+						:fill="shape.fill"
+						:stroke="shape.stroke"
+						:stroke-width="shape.strokeWidth"
+						:transform="shape.pathTransform"
 					/>
 					<rect
 						v-else
@@ -568,19 +524,17 @@ function onEditorKeydown(event: KeyboardEvent): void {
 						:transform="shape.transform"
 					/>
 					<text
-						v-if="shape.text"
+						v-if="shape.textLines.length > 0"
 						:x="shape.textX"
 						text-anchor="middle"
 						dominant-baseline="central"
 						:fill="shape.fontColor"
 						:font-size="shape.fontSize"
+						:font-family="shape.fontFamily"
+						:font-weight="shape.fontWeight"
+						:font-style="shape.fontStyle"
 					>
-						<tspan
-							v-for="(line, li) in textLines(shape.text, shape.fontSize)"
-							:key="li"
-							:x="shape.textX"
-							:y="shape.textY + line.y"
-						>
+						<tspan v-for="(line, li) in shape.textLines" :key="li" :x="shape.textX" :y="line.y">
 							{{ line.text }}
 						</tspan>
 					</text>
@@ -598,13 +552,14 @@ function onEditorKeydown(event: KeyboardEvent): void {
 			>
 				<!-- Connectors (render first so they appear behind nodes) -->
 				<path
-					v-for="conn in fallbackLayout.connectors"
+					v-for="(conn, ci) in fallbackLayout.connectors"
 					:key="conn.key"
-					:d="conn.d"
+					:d="fallbackConnectors[ci]!.d"
 					fill="none"
-					stroke="#94a3b8"
-					stroke-width="1.5"
-					opacity="0.5"
+					:stroke="fallbackConnectors[ci]!.stroke"
+					:stroke-width="fallbackConnectors[ci]!.strokeWidth"
+					:opacity="fallbackConnectors[ci]!.opacity"
+					:stroke-dasharray="fallbackConnectors[ci]!.dash"
 				/>
 				<!-- Rendered nodes -->
 				<g
@@ -621,90 +576,64 @@ function onEditorKeydown(event: KeyboardEvent): void {
 					@keydown.enter.prevent="beginEdit(fallbackNodeIds[i], node.text, $event)"
 				>
 					<title v-if="nodeLabel(fallbackNodeIds[i])">{{ nodeLabel(fallbackNodeIds[i]) }}</title>
-					<!-- Circle nodes (cycle, radial, venn, target) -->
-					<template v-if="node.kind === 'circle'">
-						<circle
-							:cx="(node as RenderedCircleNode).cx"
-							:cy="(node as RenderedCircleNode).cy"
-							:r="(node as RenderedCircleNode).r"
-							:fill="node.fill"
-							:stroke="node.stroke"
-							:stroke-width="node.strokeWidth"
-							:opacity="node.opacity"
-						/>
-						<text
-							:x="(node as RenderedCircleNode).cx"
-							text-anchor="middle"
-							dominant-baseline="central"
-							fill="white"
-							:font-size="node.fontSize"
-						>
-							<tspan
-								v-for="(line, li) in textLines(node.text, node.fontSize)"
-								:key="li"
-								:x="(node as RenderedCircleNode).cx"
-								:y="(node as RenderedCircleNode).cy + line.y"
-							>
-								{{ line.text }}
-							</tspan>
-						</text>
-					</template>
+					<!-- Circle nodes (cycle, radial, venn, target, gear, timeline) -->
+					<circle
+						v-if="node.kind === 'circle'"
+						:cx="(node as RenderedCircleNode).cx"
+						:cy="(node as RenderedCircleNode).cy"
+						:r="(node as RenderedCircleNode).r"
+						:fill="node.fill"
+						:stroke="node.stroke"
+						:stroke-width="node.strokeWidth"
+						:opacity="node.opacity"
+					/>
 					<!-- Polygon nodes (process, pyramid, funnel) -->
-					<template v-else-if="node.kind === 'polygon'">
-						<polygon
-							:points="(node as RenderedPolygonNode).points"
-							:fill="node.fill"
-							:stroke="node.stroke"
-							:stroke-width="node.strokeWidth"
-							:opacity="node.opacity"
-						/>
-						<text
-							:x="(node as RenderedPolygonNode).textX"
-							text-anchor="middle"
-							dominant-baseline="central"
-							fill="white"
-							:font-size="node.fontSize"
-						>
-							<tspan
-								v-for="(line, li) in textLines(node.text, node.fontSize)"
-								:key="li"
-								:x="(node as RenderedPolygonNode).textX"
-								:y="(node as RenderedPolygonNode).textY + line.y"
-							>
-								{{ line.text }}
-							</tspan>
-						</text>
-					</template>
+					<polygon
+						v-else-if="node.kind === 'polygon'"
+						:points="(node as RenderedPolygonNode).points"
+						:fill="node.fill"
+						:stroke="node.stroke"
+						:stroke-width="node.strokeWidth"
+						:opacity="node.opacity"
+					/>
 					<!-- Rect nodes (list, matrix, hierarchy) -->
-					<template v-else>
-						<rect
-							:x="(node as RenderedRectNode).x"
-							:y="(node as RenderedRectNode).y"
-							:width="(node as RenderedRectNode).width"
-							:height="(node as RenderedRectNode).height"
-							:rx="(node as RenderedRectNode).rx"
-							:fill="node.fill"
-							:stroke="node.stroke"
-							:stroke-width="node.strokeWidth"
-							:opacity="node.opacity"
-						/>
-						<text
-							:x="(node as RenderedRectNode).textX"
-							text-anchor="middle"
-							dominant-baseline="central"
-							fill="white"
-							:font-size="node.fontSize"
+					<rect
+						v-else
+						:x="(node as RenderedRectNode).x"
+						:y="(node as RenderedRectNode).y"
+						:width="(node as RenderedRectNode).width"
+						:height="(node as RenderedRectNode).height"
+						:rx="(node as RenderedRectNode).rx"
+						:fill="node.fill"
+						:stroke="node.stroke"
+						:stroke-width="node.strokeWidth"
+						:opacity="node.opacity"
+					/>
+					<!--
+						Label: placement, colour, weight and baseline all arrive decided
+						from shared, so an off-centre caption (target leader, gear legend
+						row, timeline caption above / below the axis) lands beside its
+						node rather than on top of it.
+					-->
+					<text
+						v-if="fallbackLabels[i]!.visible"
+						:x="fallbackLabels[i]!.x"
+						:text-anchor="fallbackLabels[i]!.textAnchor"
+						:dominant-baseline="fallbackLabels[i]!.dominantBaseline"
+						:fill="fallbackLabels[i]!.fill"
+						:font-size="fallbackLabels[i]!.fontSize"
+						:font-weight="fallbackLabels[i]!.fontWeight"
+						:font-style="fallbackLabels[i]!.fontStyle"
+					>
+						<tspan
+							v-for="(line, li) in fallbackLabels[i]!.lines"
+							:key="li"
+							:x="fallbackLabels[i]!.x"
+							:y="line.y"
 						>
-							<tspan
-								v-for="(line, li) in textLines(node.text, node.fontSize)"
-								:key="li"
-								:x="(node as RenderedRectNode).textX"
-								:y="(node as RenderedRectNode).textY + line.y"
-							>
-								{{ line.text }}
-							</tspan>
-						</text>
-					</template>
+							{{ line.text }}
+						</tspan>
+					</text>
 				</g>
 			</svg>
 

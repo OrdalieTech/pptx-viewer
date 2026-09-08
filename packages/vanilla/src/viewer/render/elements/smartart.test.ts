@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTranslator } from '../../i18n';
 import { createElementRendererRegistry } from '../registry';
 import type { ElementRenderContext } from '../types';
+import { applyChart3DTextStyle } from './chart-3d-text-style-registry';
 import { renderSmartArtElement } from './smartart';
 
 // Mock the lazily-imported vanilla Three.js SmartArt scene runtime so the
@@ -34,6 +35,11 @@ function makeContext(
 		mediaDataUrls: new Map<string, string>(),
 		t: createTranslator(),
 		smartArt3D,
+		surfaceChart3D: false,
+		barChart3D: false,
+		lineChart3D: false,
+		areaChart3D: false,
+		pieChart3D: false,
 		presenting: false,
 		registry,
 		renderElement: (el, z) => registry.resolve(el.type)(el, z, context),
@@ -216,6 +222,26 @@ describe('renderSmartArtElement', () => {
 		expect(node.querySelector('.pptxv-smartart-node-editor')).toBeNull();
 		node.remove();
 	});
+
+	// G8 (OpenXML parity audit, D3): a:graphicFrameLocks/@noDrilldown was
+	// parsed but never enforced - a node was still double-click editable on a
+	// locked SmartArt.
+	it('does not open the node editor on double-click when noDrilldown is set', () => {
+		const onSmartArtNodeTextChange = vi.fn();
+		const element = { ...drawingShapesElement(), locks: { noDrilldown: true } } as PptxElement;
+		const node = renderSmartArtElement(
+			element,
+			0,
+			makeContext(false, { onSmartArtNodeTextChange }),
+		) as HTMLElement;
+		document.body.appendChild(node);
+		const group = node.querySelector<SVGGElement>('[data-smartart-node-id="n1"]')!;
+
+		group.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+
+		expect(node.querySelector('.pptxv-smartart-node-editor')).toBeNull();
+		node.remove();
+	});
 });
 
 describe('renderSmartArtElement (opt-in 3D)', () => {
@@ -289,6 +315,7 @@ describe('renderSmartArtElement (opt-in 3D)', () => {
 		mountSmartArt3D.mockReturnValue({
 			resize: vi.fn(),
 			setInteractive: vi.fn(),
+			setTextStyle: vi.fn(),
 			dispose,
 		});
 		const node = renderSmartArtElement(nodesOnlyElement(), 0, makeContext(true)) as HTMLElement;
@@ -301,5 +328,134 @@ describe('renderSmartArtElement (opt-in 3D)', () => {
 		});
 
 		expect(dispose).toHaveBeenCalledOnce();
+	});
+
+	it('threads the active font-style emphasis into the mount options and keeps it live via the registry', async () => {
+		const setTextStyle = vi.fn();
+		mountSmartArt3D.mockReturnValue({
+			resize: vi.fn(),
+			setInteractive: vi.fn(),
+			setTextStyle,
+			dispose: vi.fn(),
+		});
+		const element = nodesOnlyElement();
+		const presentationStates = new Map([
+			[element.id, { visible: true, cssAnimation: undefined, textStyle: { bold: true } }],
+		]);
+		renderSmartArtElement(element, 0, makeContext(true, { presentationStates }));
+
+		await flushMount();
+
+		expect(mountSmartArt3D).toHaveBeenCalledExactlyOnceWith(
+			expect.anything(),
+			expect.objectContaining({ meshes: expect.any(Array) }),
+			400,
+			240,
+			{ textStyle: { bold: true } },
+		);
+
+		// A later animation tick reaches the SAME mounted handle via the
+		// registry (`chart-3d-text-style-registry.ts`), since a caption drawn
+		// as a canvas texture has no CSS selector the usual override can target.
+		applyChart3DTextStyle(document, element.id, { italic: true });
+		expect(setTextStyle).toHaveBeenCalledExactlyOnceWith({ italic: true });
+	});
+});
+
+// Regression: `colorsDef @meth="span"` ("Colorful Range" quick styles) was
+// parsed into `colorTransform.fillInterpolation` but never reached the layout
+// engine, so a 2-colour range alternated instead of gradienting. `smartart.ts`
+// now goes through the shared `computeSmartArtElementLayout`, which derives
+// the interpolation from `smartArtData.colorTransform` itself.
+describe('renderSmartArtElement colour interpolation (colorsDef @meth="span")', () => {
+	it('gradients a 2-colour "Colorful Range" scheme across all nodes', () => {
+		const element: PptxElement = {
+			type: 'smartArt',
+			id: 'sa-span',
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			smartArtData: {
+				nodes: [
+					{ id: 'n1', text: 'A' },
+					{ id: 'n2', text: 'B' },
+					{ id: 'n3', text: 'C' },
+					{ id: 'n4', text: 'D' },
+					{ id: 'n5', text: 'E' },
+				],
+				colorTransform: {
+					fillColors: ['#000000', '#ffffff'],
+					lineColors: [],
+					fillInterpolation: { method: 'span' },
+				},
+			},
+		};
+		const node = renderSmartArtElement(element, 0, makeContext()) as HTMLElement;
+		const svg = node.querySelector('svg.pptxv-smartart-svg');
+		const fills = [...(svg?.querySelectorAll('rect') ?? [])].map((r) => r.getAttribute('fill'));
+		expect(fills).toHaveLength(5);
+		expect(fills[0]).toBe('#000000');
+		expect(fills[4]).toBe('#ffffff');
+		expect(new Set(fills).size).toBe(5);
+	});
+});
+
+/**
+ * The shared layout descriptor's OPTIONAL paint / placement fields. This
+ * renderer used to call `appendCenteredSvgText` with a literal `'white'` fill
+ * and the node's own centre, and stroke every connector `#94a3b8` at 1.5/0.5,
+ * so a target caption sat on the bullseye and a timeline caption on its dot.
+ */
+describe('renderSmartArtElement fallback label + connector paint', () => {
+	function fallbackElement(resolvedLayoutType: 'target' | 'timeline' | 'gear'): PptxElement {
+		return {
+			type: 'smartArt',
+			id: 'sa-fb',
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			smartArtData: {
+				nodes: [
+					{ id: 'n1', text: 'One' },
+					{ id: 'n2', text: 'Two' },
+					{ id: 'n3', text: 'Three' },
+				],
+				resolvedLayoutType,
+			},
+		} as PptxElement;
+	}
+
+	function render(type: 'target' | 'timeline' | 'gear'): HTMLElement {
+		return renderSmartArtElement(fallbackElement(type), 0, makeContext()) as HTMLElement;
+	}
+
+	it('parks a target leader caption beside the ring in the node colour', () => {
+		const label = render('target').querySelector('svg text')!;
+		// Not the circle centre (cx = 160): the descriptor's textX / textAnchor.
+		expect(label.getAttribute('x')).toBe('310');
+		expect(label.getAttribute('text-anchor')).toBe('start');
+		expect(label.getAttribute('fill')).toBe('#3b82f6');
+		expect(label.querySelector('tspan')?.getAttribute('y')).toBe('13');
+	});
+
+	it('stacks timeline captions above and below the axis', () => {
+		const labels = [...render('timeline').querySelectorAll('svg text')];
+		expect(labels[0]!.getAttribute('dominant-baseline')).toBe('auto');
+		expect(labels[0]!.querySelector('tspan')?.getAttribute('y')).toBe('110');
+		expect(labels[1]!.getAttribute('dominant-baseline')).toBe('hanging');
+		expect(labels[1]!.querySelector('tspan')?.getAttribute('y')).toBe('190');
+	});
+
+	it('applies the node text style (gear hubs are bold)', () => {
+		expect(render('gear').querySelector('svg text')?.getAttribute('font-weight')).toBe('700');
+	});
+
+	it('paints timeline stems in their own node colour, not the default grey', () => {
+		const paths = [...render('timeline').querySelectorAll('svg path')];
+		expect(paths[0]!.getAttribute('stroke-width')).toBe('2');
+		expect(paths[0]!.getAttribute('opacity')).toBe('1');
+		expect(paths[1]!.getAttribute('stroke')).toBe('#3b82f6');
 	});
 });

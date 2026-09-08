@@ -1,5 +1,9 @@
+import { tableStyleAssignmentUpdate } from 'pptx-viewer-shared';
+
 import type { Translator } from '../../i18n';
 import { createEl } from '../../render';
+import type { TableStyleEditorDeps } from '../table-style-editor';
+import { createAccessibilitySection } from './accessibility-section';
 import { createActionSection } from './action-section';
 import { createAnimationPanel } from './animation-panel';
 import { createChartSection } from './chart-section';
@@ -7,11 +11,16 @@ import { createCommentsTab } from './comments-tab';
 import { createDeckPanel } from './deck-panel';
 import { createElementsTab } from './elements-tab';
 import { createFillSection } from './fill-section';
+import { createGroupInfoSection } from './group-info-section';
 import { createImageSection } from './image-section';
 import { createMediaSection } from './media-section';
+import { createOlePropertiesSection } from './ole-properties-section';
 import { createPositionSection } from './position-section';
+import { createQuickStylesGallery } from './quick-styles-gallery';
 import { createSmartArtSection } from './smartart-section';
+import { createTableDataGrid } from './table-data-grid';
 import { createTableSection } from './table-section';
+import { createText3DSection } from './text-3d-section';
 import { createTextSection } from './text-section';
 import type { Inspector, InspectorHandlers } from './types';
 
@@ -99,16 +108,59 @@ export function createInspector(
 		return wrap;
 	};
 
-	const position = createPositionSection(doc, t, section, handlers.setGeometry);
+	const position = createPositionSection(
+		doc,
+		t,
+		section,
+		handlers.setGeometry,
+		handlers.toggleElementLock,
+	);
+	const groupInfo = createGroupInfoSection(doc, t, section);
+	const oleProperties = createOlePropertiesSection(doc, t, section, handlers);
 	const fill = createFillSection(doc, t, section, handlers);
+	const quickStyles = createQuickStylesGallery(doc, t, section, handlers);
 	const text = createTextSection(doc, t, section, handlers);
+	const text3d = createText3DSection(doc, t, section, handlers);
 	const image = createImageSection(doc, t, section, handlers);
-	const table = createTableSection(doc, t, section, handlers);
+	const accessibility = createAccessibilitySection(doc, t, section, handlers);
+	// The cell-text spreadsheet sits ABOVE the table's styling section, matching
+	// React's inspector order. It builds its own <section> (rather than using the
+	// `section()` factory) because it needs an aria-labelled landmark, so it is
+	// appended to the body by hand at exactly this point.
+	const tableDataGrid = createTableDataGrid(doc, t, handlers);
+	body.appendChild(tableDataGrid.el);
+	// `handlers` already carries everything `TableStyleEditorDeps` needs
+	// (getTableStyleMap/getThemeColorMap/updateTableStyleMap/deleteTableStyle),
+	// so there is no need to thread a second deps object down from `ChromeOptions`.
+	const styleEditorDeps: TableStyleEditorDeps = {
+		getTableStyleMap: () => handlers.getTableStyleMap(),
+		getThemeColorMap: () => handlers.getThemeColorMap(),
+		onStyleMapChange: (map) => handlers.updateTableStyleMap(map),
+		onDeleteStyle: (id) => handlers.deleteTableStyle(id),
+		onAssignStyle: (styleId) => handlers.setTableOptions(tableStyleAssignmentUpdate(styleId)),
+	};
+	const table = createTableSection(doc, t, section, handlers, styleEditorDeps);
 	const smartArt = createSmartArtSection(doc, t, section, handlers);
 	const action = createActionSection(doc, t, section, handlers);
 	const chart = createChartSection(doc, t, section, handlers);
 	const media = createMediaSection(doc, t, section, handlers);
-	const sections = [position, fill, text, image, table, smartArt, action, chart, media];
+	const sections = [
+		position,
+		groupInfo,
+		oleProperties,
+		fill,
+		quickStyles,
+		text,
+		text3d,
+		image,
+		accessibility,
+		tableDataGrid,
+		table,
+		smartArt,
+		action,
+		chart,
+		media,
+	];
 
 	setActiveTab(activeTab);
 
@@ -121,6 +173,8 @@ export function createInspector(
 			}
 		},
 		updateDeck(state) {
+			action.setSlideCount(state.slideCount);
+			action.setCustomShows(state.customShows);
 			elementsTab.update(state);
 			commentsTab.update(state);
 			deckPanel.update(state);
@@ -129,10 +183,12 @@ export function createInspector(
 				selectedElementId: state.selectedElementId,
 				elements: state.elements,
 				animations: state.activeSlide?.animations ?? [],
+				animationTimelineAnchors: state.activeSlide?.animationTimelineAnchors ?? [],
 			});
 		},
 		setEditable(editable) {
 			el.hidden = !editable;
+			tableDataGrid.setEditable(editable);
 		},
 	};
 }

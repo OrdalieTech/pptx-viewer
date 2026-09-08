@@ -1,8 +1,13 @@
-import type { PptxAction, PptxSlide, PptxSlideTransition } from 'pptx-viewer-core';
-import type { PresentationPointerTool, PresentationSnapshot } from 'pptx-viewer-shared';
+import type { PptxAction, PptxElement, PptxSlide, PptxSlideTransition } from 'pptx-viewer-core';
+import type {
+	MorphTransitionPlan,
+	PresentationPointerTool,
+	PresentationSnapshot,
+} from 'pptx-viewer-shared';
 
 import type { ViewerMode, PresentationAnimationRuntime } from '../../types';
 import type { ElementAnimationState } from '../../utils/animation-timeline';
+import type { CustomShowDescriptor } from './useCustomShowRunner';
 
 /**
  * How a forward/backward slide advance was requested.
@@ -43,7 +48,22 @@ export interface PresentationTransitionOverlayState {
 export interface UsePresentationModeInput {
 	mode: ViewerMode;
 	slides: PptxSlide[];
+	/**
+	 * Master/layout shapes the presentation stage paints beneath each slide,
+	 * by slide id. Their count is the z-index the stage gives a slide's first
+	 * element, which a morph's stacking-order journeys must be written in.
+	 */
+	templateElementsBySlideId?: Record<string, PptxElement[]>;
 	visibleSlideIndexes: number[];
+	/**
+	 * The slide canvas size (px), in the same unit the elements' own
+	 * `x`/`y`/`width`/`height` are authored in. Threaded to `useAnimationPlayback`
+	 * so a `p:anim` formula that needs the animated shape's real box (e.g. Grow
+	 * And Turn's `-#ppt_w/2` fly-in) can be resolved instead of falling back.
+	 */
+	canvasSize?: { width: number; height: number };
+	/** The deck's resolved theme colour map, for a scheme-colour (`a:schemeClr`) animation stop. */
+	themeColorMap?: Readonly<Record<string, string>>;
 	activeSlideIndex: number;
 	containerRef: React.RefObject<HTMLElement | null>;
 	/** Raw PPTX bytes: forwarded to audience window for content sharing. */
@@ -56,6 +76,11 @@ export interface UsePresentationModeInput {
 	 * (used for transition sounds flagged with `soundLoop`).
 	 */
 	onPlayActionSound?: (soundPath: string, options?: { loop?: boolean }) => void;
+	/**
+	 * Stop the currently-playing action/transition sound (`p:sndAc/p:endSnd`,
+	 * PowerPoint's transition "Stop Previous Sound").
+	 */
+	onStopActionSound?: () => void;
 	/** Select a pointer tool (Ctrl+L laser, Ctrl+P pen, Ctrl+A arrow, Ctrl+E eraser). */
 	onSetPointerTool?: (tool: PresentationPointerTool | 'arrow') => void;
 	/** Erase the current slide's ink annotations (E). */
@@ -66,6 +91,8 @@ export interface UsePresentationModeInput {
 	onToggleToolbar?: () => void;
 	/** Open the All Slides navigator (Ctrl+S). */
 	onShowAllSlides?: () => void;
+	/** Show or hide live captions (PowerPoint's bare J). */
+	onToggleSubtitles?: () => void;
 	/** Called to persist rehearsal timings into slide transitions. */
 	onSaveRehearsalTimings?: (timings: Record<number, number>) => void;
 	/** Whether to loop continuously (kiosk or explicit loop setting). */
@@ -81,6 +108,12 @@ export interface UsePresentationModeInput {
 	 * advancing past the last slide exits the show directly.
 	 */
 	endWithBlackSlide?: boolean;
+	/** Custom shows defined in the presentation, for `ppaction://customshow`. */
+	customShows?: CustomShowDescriptor[];
+	/** The custom show currently driving the show order, if any. */
+	activeCustomShowId?: string | null;
+	/** Switch the active custom show (does not itself navigate). */
+	onSetActiveCustomShowId?: (id: string | null) => void;
 }
 
 export interface UsePresentationModeResult {
@@ -91,6 +124,14 @@ export interface UsePresentationModeResult {
 	transitionOverlay: PresentationTransitionOverlayState | null;
 	/** Tear down the transition overlay once its animation completes. */
 	handleTransitionOverlayComplete: () => void;
+	/**
+	 * Render plan for an active Morph transition, or `undefined` for every
+	 * other transition type. Its `incomingAnimations` are already merged into
+	 * `presentationElementStates` (and its keyframes into
+	 * `presentationKeyframesCss`); the overlay consumes `outgoingElements` to
+	 * fade out the shapes the arriving slide does not have.
+	 */
+	morphPlan: MorphTransitionPlan | undefined;
 	presentationAnimations: PresentationAnimationRuntime[];
 	presentationElementStates: Map<string, ElementAnimationState>;
 	presentationKeyframesCss: string;
@@ -104,7 +145,8 @@ export interface UsePresentationModeResult {
 	closeAllSlides: () => void;
 	movePresentationSlide: (direction: 1 | -1, trigger?: SlideAdvanceTrigger) => void;
 	navigateToSlide: (slideIndex: number) => void;
-	handlePresentationAction: (action: PptxAction) => void;
+	/** `elementId` is the clicked element, for the verbs that act on it (`playMedia`, `oleVerb`). */
+	handlePresentationAction: (action: PptxAction, elementId?: string) => void;
 	/**
 	 * Handle a shape click in presentation mode. If the shape is an interactive
 	 * trigger, play its animation sequence. Returns `true` if handled.
@@ -120,6 +162,12 @@ export interface UsePresentationModeResult {
 	handleHoverEnd: (shapeId: string) => void;
 	/** Must be called from a user-gesture handler (click) to satisfy browser fullscreen policy. */
 	enterPresentMode: () => void;
+	/**
+	 * "From Beginning" / F5: enters the show on the FIRST slide the show
+	 * order visits (`firstShowSlideIndex`), regardless of the editor's
+	 * current active slide. Also a user-gesture handler.
+	 */
+	enterPresentModeFromBeginning: () => void;
 	/** Whether presenter view (split-screen with notes) is active instead of fullscreen. */
 	presenterMode: boolean;
 	/** Enter presenter view mode (no fullscreen, shows notes panel). */

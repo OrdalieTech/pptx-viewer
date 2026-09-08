@@ -134,6 +134,20 @@ describe('writeCellTextFormatting', () => {
 		expect(rPr['@_b']).toBe('1');
 	});
 
+	it('rounds fractional point sizes to valid OOXML hundredths', () => {
+		const xmlCell: XmlObject = {
+			'a:txBody': {
+				'a:p': { 'a:r': { 'a:rPr': {}, 'a:t': 'Fractional size' } },
+			},
+		};
+
+		writeCellTextFormatting(xmlCell, { fontSize: 10.555 }, ensureArray);
+
+		const paragraph = ensureArray(xmlCell['a:txBody']?.['a:p'])[0];
+		const run = ensureArray(paragraph['a:r'])[0];
+		expect((run['a:rPr'] as XmlObject)['@_sz']).toBe('1056');
+	});
+
 	it('should create a:rPr if missing on runs', () => {
 		const xmlCell: XmlObject = {
 			'a:txBody': {
@@ -190,5 +204,80 @@ describe('writeCellFill', () => {
 		expect(tcPr['a:solidFill']).toBeUndefined();
 		expect(tcPr['a:gradFill']).toBeUndefined();
 		expect(tcPr['a:pattFill']).toBeUndefined();
+	});
+
+	it('a backgroundColorRef wins over backgroundColor/backgroundColorXml', () => {
+		const tcPr: XmlObject = {};
+		writeCellFill(tcPr, {
+			backgroundColor: '#4472C4',
+			backgroundColorXml: { 'a:srgbClr': { '@_val': '4472C4' } },
+			backgroundColorRef: { scheme: 'accent1' },
+		});
+		expect(tcPr['a:solidFill']).toStrictEqual({ 'a:schemeClr': { '@_val': 'accent1' } });
+	});
+
+	// A previously image-filled cell (`a:blipFill`) edited to a different fill
+	// mode must not leave the stray `a:blipFill` behind: two mutually exclusive
+	// fill children (e.g. `a:blipFill` + the newly-written `a:solidFill`) in the
+	// same `a:tcPr` is schema-invalid OOXML.
+	describe('a:blipFill cleanup', () => {
+		function tcPrWithBlipFill(): XmlObject {
+			return { 'a:blipFill': { 'a:blip': { '@_r:embed': 'rId3' } } };
+		}
+
+		it('removes a:blipFill when writing a solid fill', () => {
+			const tcPr = tcPrWithBlipFill();
+			writeCellFill(tcPr, { backgroundColor: '#112233' });
+			expect(tcPr['a:blipFill']).toBeUndefined();
+			expect(tcPr['a:solidFill']).toStrictEqual({ 'a:srgbClr': { '@_val': '112233' } });
+		});
+
+		it('removes a:blipFill when writing a gradient fill', () => {
+			const tcPr = tcPrWithBlipFill();
+			writeCellFill(tcPr, {
+				fillMode: 'gradient',
+				gradientFillStops: [{ color: '#FF0000', position: 0 }],
+			});
+			expect(tcPr['a:blipFill']).toBeUndefined();
+			expect(tcPr['a:gradFill']).toBeDefined();
+		});
+
+		it('removes a:blipFill when writing a pattern fill', () => {
+			const tcPr = tcPrWithBlipFill();
+			writeCellFill(tcPr, { fillMode: 'pattern', patternFillPreset: 'ltDnDiag' });
+			expect(tcPr['a:blipFill']).toBeUndefined();
+			expect(tcPr['a:pattFill']).toBeDefined();
+		});
+
+		it('removes a:blipFill when writing no-fill mode', () => {
+			const tcPr = tcPrWithBlipFill();
+			writeCellFill(tcPr, { fillMode: 'none' });
+			expect(tcPr['a:blipFill']).toBeUndefined();
+		});
+
+		it('leaves a:blipFill untouched when the style is still an unedited image fill', () => {
+			// No fill branch matches `fillMode: 'image'` (there is no authoring
+			// path for it yet), so the original blipFill must survive a save
+			// exactly as parsed.
+			const tcPr = tcPrWithBlipFill();
+			writeCellFill(tcPr, { fillMode: 'image', backgroundImageFillPath: 'ppt/media/image1.png' });
+			expect(tcPr['a:blipFill']).toStrictEqual({ 'a:blip': { '@_r:embed': 'rId3' } });
+		});
+
+		it('does not write a spurious a:solidFill for an image fill carrying a fallback backgroundColor', () => {
+			// Guards the `fillMode !== 'image'` check in the solid branch: without
+			// it, a fallback `backgroundColor` on an image-filled cell would make
+			// the solid branch fire and write `a:solidFill` alongside the
+			// still-untouched `a:blipFill`, corrupting the XML on ANY save even
+			// when the cell's fill was never edited.
+			const tcPr = tcPrWithBlipFill();
+			writeCellFill(tcPr, {
+				fillMode: 'image',
+				backgroundImageFillPath: 'ppt/media/image1.png',
+				backgroundColor: '#808080',
+			});
+			expect(tcPr['a:solidFill']).toBeUndefined();
+			expect(tcPr['a:blipFill']).toBeDefined();
+		});
 	});
 });

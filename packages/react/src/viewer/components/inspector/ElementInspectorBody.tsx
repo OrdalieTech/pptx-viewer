@@ -4,11 +4,12 @@ import type {
 	TablePptxElement,
 	ChartPptxElement,
 	MediaPptxElement,
-	PptxShapeLocks,
 	ShapeStyle,
 	TextStyle,
+	ParsedTableStyleMap,
 } from 'pptx-viewer-core';
 import { isImageLikeElement } from 'pptx-viewer-core';
+import { elementLockTogglePatch, isElementLocked } from 'pptx-viewer-shared';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { LuLock, LuLockOpen } from 'react-icons/lu';
@@ -28,6 +29,7 @@ import { CARD, HEADING, INPUT, POS_FIELDS } from './inspector-pane-constants';
 import { MediaPropertiesPanel } from './MediaPropertiesPanel';
 import { ShapeTextPanels } from './ShapeTextPanels';
 import { SmartArtPropertiesPanel } from './SmartArtPropertiesPanel';
+import { TableDataGrid } from './TableDataGrid';
 import { TablePropertiesPanel } from './TablePropertiesPanel';
 
 // ---------------------------------------------------------------------------
@@ -44,10 +46,19 @@ interface ElementInspectorBodyProps {
 	canEdit: boolean;
 	/** All slides in the presentation (used by ActionSettingsPanel for hyperlink targets). */
 	slides: PptxSlide[];
+	/** `data.customShows`, for the Action Settings `customShow` target picker. */
+	customShows: Array<{ id: string; name: string }>;
 	/** Active table cell editing state, if a table cell is being edited. */
 	tableEditorState?: TableCellEditorState | null;
 	/** Map of media relationship IDs to data URLs for media preview. */
 	mediaDataUrls?: Map<string, string>;
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, needed by "Edit style...".
+	 * See `TablePropertiesPanel`'s docblock for why this is optional.
+	 */
+	tableStyleMap?: ParsedTableStyleMap;
+	onTableStyleMapChange?: (nextMap: ParsedTableStyleMap) => void;
+	onDeleteTableStyle?: (styleId: string) => void;
 	/** Callback to apply partial updates to the selected element. */
 	onUpdateElement: (updates: Partial<PptxElement>) => void;
 	/** Callback to apply partial updates to the element's shape style. */
@@ -83,8 +94,12 @@ export function ElementInspectorBody({
 	selectedElement,
 	canEdit,
 	slides,
+	customShows,
 	tableEditorState,
 	mediaDataUrls,
+	tableStyleMap,
+	onTableStyleMapChange,
+	onDeleteTableStyle,
 	onUpdateElement,
 	onUpdateElementStyle,
 	onUpdateTextStyle,
@@ -92,18 +107,15 @@ export function ElementInspectorBody({
 }: ElementInspectorBodyProps): React.ReactElement {
 	const { t } = useTranslation();
 
-	const isLocked = Boolean(selectedElement.locks?.noMove || selectedElement.locks?.noSelect);
+	// Shared decides both what reads as "locked" and what the toggle writes, so
+	// the button's state can never drift from what the canvas enforces.
+	const isLocked = isElementLocked(selectedElement);
 
 	const handleToggleLock = () => {
 		if (!canEdit) {
 			return;
 		}
-		if (isLocked) {
-			onUpdateElement({ locks: undefined } as Partial<PptxElement>);
-		} else {
-			const locks: PptxShapeLocks = { noMove: true, noResize: true, noSelect: true };
-			onUpdateElement({ locks } as Partial<PptxElement>);
-		}
+		onUpdateElement({ locks: elementLockTogglePatch(!isLocked) } as Partial<PptxElement>);
 	};
 
 	return (
@@ -148,12 +160,22 @@ export function ElementInspectorBody({
 			</div>
 
 			{selectedElement.type === 'table' && (
-				<TablePropertiesPanel
-					tableElement={selectedElement as TablePptxElement}
-					canEdit={canEdit}
-					onUpdateElement={onUpdateElement}
-					tableEditorState={tableEditorState}
-				/>
+				<>
+					<TableDataGrid
+						tableElement={selectedElement as TablePptxElement}
+						canEdit={canEdit}
+						onUpdateElement={onUpdateElement}
+					/>
+					<TablePropertiesPanel
+						tableElement={selectedElement as TablePptxElement}
+						canEdit={canEdit}
+						onUpdateElement={onUpdateElement}
+						tableEditorState={tableEditorState}
+						tableStyleMap={tableStyleMap}
+						onTableStyleMapChange={onTableStyleMapChange}
+						onDeleteTableStyle={onDeleteTableStyle}
+					/>
+				</>
 			)}
 
 			{selectedElement.type === 'chart' && (
@@ -198,7 +220,11 @@ export function ElementInspectorBody({
 
 			<GroupInfoPanel selectedElement={selectedElement} />
 
-			<OlePropertiesPanel selectedElement={selectedElement} />
+			<OlePropertiesPanel
+				selectedElement={selectedElement}
+				canEdit={canEdit}
+				onUpdateElement={onUpdateElement}
+			/>
 
 			<ShapeTextPanels
 				selectedElement={selectedElement}
@@ -212,6 +238,7 @@ export function ElementInspectorBody({
 				selectedElement={selectedElement}
 				slides={slides}
 				canEdit={canEdit}
+				customShows={customShows}
 				onUpdateElement={onUpdateElement}
 			/>
 

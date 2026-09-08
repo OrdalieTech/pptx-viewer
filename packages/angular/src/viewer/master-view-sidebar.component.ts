@@ -1,5 +1,5 @@
 import { NgTemplateOutlet } from '@angular/common';
-import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
 import type {
 	MasterViewTab,
@@ -8,6 +8,10 @@ import type {
 	PptxSlideMaster,
 } from 'pptx-viewer-core';
 
+import { masterViewBackgroundColor } from '../internal/shared';
+import type { MasterViewCrudAction, MasterViewCrudActionId } from '../internal/shared';
+import { MasterViewCrudRowComponent } from './master-view-crud-row.component';
+
 const HANDOUT_COUNTS = [1, 2, 3, 4, 6, 9] as const;
 
 /** Framework-neutral navigation and properties rail for Angular Master View. */
@@ -15,49 +19,103 @@ const HANDOUT_COUNTS = [1, 2, 3, 4, 6, 9] as const;
 	selector: 'pptx-master-view-sidebar',
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
-	imports: [NgTemplateOutlet, TranslatePipe],
+	imports: [NgTemplateOutlet, TranslatePipe, MasterViewCrudRowComponent],
 	template: `
 		<aside class="master-sidebar" [attr.aria-label]="'pptx.view.masterViews' | translate">
 			<header>
 				<strong>{{ titleKey() | translate }}</strong>
-				<button type="button" (click)="close.emit()" [attr.aria-label]="'pptx.mode.closeMasterViewTooltip' | translate">×</button>
+				<button
+					type="button"
+					(click)="close.emit()"
+					[attr.aria-label]="'pptx.mode.closeMasterViewTooltip' | translate"
+				>
+					×
+				</button>
 			</header>
 			<div class="tabs" role="tablist" [attr.aria-label]="'pptx.mode.masterView' | translate">
 				@for (item of tabs; track item.tab) {
-					<button type="button" role="tab" [attr.aria-selected]="tab() === item.tab" (click)="tabChange.emit(item.tab)">
+					<button
+						type="button"
+						role="tab"
+						[attr.aria-selected]="tab() === item.tab"
+						(click)="tabChange.emit(item.tab)"
+					>
 						{{ item.key | translate }}
 					</button>
 				}
 			</div>
 			<div class="body" role="tabpanel">
 				@if (tab() === 'slides') {
+					@if (editable()) {
+						<!-- Format Background for the selected master or layout. -->
+						<ng-container
+							[ngTemplateOutlet]="backgroundEditor"
+							[ngTemplateOutletContext]="{ color: slidesBackground() ?? '#ffffff' }"
+						/>
+					}
+					@if (editable() && crudActions().length > 0) {
+						<pptx-master-view-crud-row [actions]="crudActions()" (pick)="crudAction.emit($event)" />
+					}
 					@for (master of slideMasters(); track master.path; let masterIndex = $index) {
-						<button type="button" class="master-item" [attr.aria-pressed]="activeMasterIndex() === masterIndex && activeLayoutIndex() === null" (click)="selectMaster.emit(masterIndex)">
+						<button
+							type="button"
+							class="master-item"
+							[attr.aria-pressed]="
+								activeMasterIndex() === masterIndex && activeLayoutIndex() === null
+							"
+							(click)="selectMaster.emit(masterIndex)"
+						>
 							{{ master.name || ('pptx.master.master' | translate) }}
 						</button>
 						@for (layout of master.layouts ?? []; track layout.path; let layoutIndex = $index) {
-							<button type="button" class="master-item layout" [attr.aria-pressed]="activeMasterIndex() === masterIndex && activeLayoutIndex() === layoutIndex" (click)="selectLayout.emit({ masterIndex, layoutIndex })">
+							<button
+								type="button"
+								class="master-item layout"
+								[attr.aria-pressed]="
+									activeMasterIndex() === masterIndex && activeLayoutIndex() === layoutIndex
+								"
+								(click)="selectLayout.emit({ masterIndex, layoutIndex })"
+							>
 								{{ layout.name || ('pptx.master.layout' | translate) }}
 							</button>
 						}
 					}
 				} @else if (tab() === 'notes') {
 					@if (notesMaster()) {
-						<ng-container [ngTemplateOutlet]="backgroundEditor" [ngTemplateOutletContext]="{ color: notesMaster()!.backgroundColor || '#ffffff' }" />
-						<p>{{ (notesMaster()!.placeholders?.length ?? 0) }} {{ 'pptx.master.notesMasterPlaceholders' | translate }}</p>
-					} @else { <p>{{ 'pptx.master.noNotesMaster' | translate }}</p> }
+						<ng-container
+							[ngTemplateOutlet]="backgroundEditor"
+							[ngTemplateOutletContext]="{ color: notesMaster()!.backgroundColor || '#ffffff' }"
+						/>
+						<p>
+							{{ notesMaster()!.placeholders?.length ?? 0 }}
+							{{ 'pptx.master.notesMasterPlaceholders' | translate }}
+						</p>
+					} @else {
+						<p>{{ 'pptx.master.noNotesMaster' | translate }}</p>
+					}
 				} @else {
 					@if (handoutMaster()) {
 						<section>
 							<strong>{{ 'pptx.master.handoutSlidesPerPage' | translate }}</strong>
 							<div class="counts">
 								@for (count of handoutCounts; track count) {
-									<button type="button" [attr.aria-pressed]="handoutSlidesPerPage() === count" (click)="slidesPerPageChange.emit(count)">{{ count }}</button>
+									<button
+										type="button"
+										[attr.aria-pressed]="handoutSlidesPerPage() === count"
+										(click)="slidesPerPageChange.emit(count)"
+									>
+										{{ count }}
+									</button>
 								}
 							</div>
 						</section>
-						<ng-container [ngTemplateOutlet]="backgroundEditor" [ngTemplateOutletContext]="{ color: handoutMaster()!.backgroundColor || '#ffffff' }" />
-					} @else { <p>{{ 'pptx.master.noHandoutMaster' | translate }}</p> }
+						<ng-container
+							[ngTemplateOutlet]="backgroundEditor"
+							[ngTemplateOutletContext]="{ color: handoutMaster()!.backgroundColor || '#ffffff' }"
+						/>
+					} @else {
+						<p>{{ 'pptx.master.noHandoutMaster' | translate }}</p>
+					}
 				}
 			</div>
 		</aside>
@@ -65,7 +123,12 @@ const HANDOUT_COUNTS = [1, 2, 3, 4, 6, 9] as const;
 		<ng-template #backgroundEditor let-color="color">
 			<label class="background-editor">
 				<span>{{ 'pptx.master.notesMasterBackground' | translate }}</span>
-				<input type="color" aria-label="Master background color" [value]="color" (input)="backgroundChange.emit($any($event.target).value)" />
+				<input
+					type="color"
+					[attr.aria-label]="'pptx.master.backgroundColorLabel' | translate"
+					[value]="color"
+					(input)="backgroundChange.emit($any($event.target).value)"
+				/>
 			</label>
 		</ng-template>
 	`,
@@ -174,6 +237,21 @@ export class MasterViewSidebarComponent {
 	readonly activeMasterIndex = input(0);
 	readonly activeLayoutIndex = input<number | null>(null);
 	readonly handoutSlidesPerPage = input(4);
+	readonly editable = input(false);
+	/** The Insert/Duplicate/Delete/Rename Layout+Master sidebar commands. */
+	readonly crudActions = input<readonly MasterViewCrudAction[]>([]);
+
+	/** Background of the master or layout the Slides tab has selected. */
+	protected readonly slidesBackground = computed(() =>
+		masterViewBackgroundColor(
+			{ slideMasters: this.slideMasters() },
+			{
+				tab: 'slides',
+				masterIndex: this.activeMasterIndex(),
+				layoutIndex: this.activeLayoutIndex(),
+			},
+		),
+	);
 
 	readonly tabChange = output<MasterViewTab>();
 	readonly selectMaster = output<number>();
@@ -181,6 +259,8 @@ export class MasterViewSidebarComponent {
 	readonly slidesPerPageChange = output<number>();
 	readonly backgroundChange = output<string>();
 	readonly close = output<void>();
+	/** A Slide Master view sidebar CRUD command was clicked. */
+	readonly crudAction = output<MasterViewCrudActionId>();
 
 	protected readonly tabs = [
 		{ tab: 'slides' as const, key: 'pptx.sections.slides' },

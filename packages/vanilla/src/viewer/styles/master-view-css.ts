@@ -18,7 +18,11 @@ export const MASTER_VIEW_CSS = `
 .pptxv-master-tab { flex: 1; padding: 6px 2px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--pptx-muted-foreground); cursor: pointer; font: inherit; font-size: 10px; }
 .pptxv-master-tab.is-active { border-bottom-color: #f59e0b; color: #f59e0b; font-weight: 600; }
 .pptxv-master-body { display: flex; flex: 1; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; padding: 6px; }
-.pptxv-master-thumb { display: flex; flex-direction: column; gap: 4px; padding: 5px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--pptx-foreground); cursor: pointer; text-align: left; }
+/* "flex: none" is load-bearing here: the rail is a column flex container, so
+   every thumb is a flex item and shrinks by default. With a dozen layouts that
+   crushed each 72px preview frame down to 8px, which went unnoticed while the
+   frames were empty. (No backticks in this file: it is one template literal.) */
+.pptxv-master-thumb { display: flex; flex: none; flex-direction: column; gap: 4px; padding: 5px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--pptx-foreground); cursor: pointer; text-align: left; }
 .pptxv-master-thumb.is-layout { margin-left: 14px; }
 .pptxv-master-thumb:hover { background: var(--pptx-accent); }
 .pptxv-master-thumb.is-active { border-color: var(--pptx-primary); background: color-mix(in srgb, var(--pptx-primary) 10%, transparent); }
@@ -27,6 +31,11 @@ export const MASTER_VIEW_CSS = `
 .pptxv-master-card { padding: 8px; border: 1px solid var(--pptx-border); border-radius: 6px; background: color-mix(in srgb, var(--pptx-muted) 55%, transparent); }
 .pptxv-master-card-label { margin-bottom: 6px; color: var(--pptx-muted-foreground); font-size: 10px; }
 .pptxv-master-background { width: 100%; height: 32px; border: 1px solid var(--pptx-border); border-radius: 4px; }
+.pptxv-master-crud { display: flex; flex-wrap: wrap; gap: 4px; }
+.pptxv-master-crud-btn { padding: 4px 7px; border: 1px solid var(--pptx-border); border-radius: 4px; background: var(--pptx-card); color: var(--pptx-foreground); cursor: pointer; font: inherit; font-size: 10px; }
+.pptxv-master-crud-btn:hover:not(:disabled) { background: var(--pptx-accent); color: var(--pptx-accent-foreground); }
+.pptxv-master-crud-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.pptxv-master-crud-btn:focus-visible { outline: 2px solid var(--pptx-ring); outline-offset: 1px; }
 .pptxv-master-placeholder { display: flex; align-items: center; gap: 7px; margin-top: 4px; padding: 5px 6px; border-radius: 4px; background: color-mix(in srgb, var(--pptx-background) 65%, transparent); font-size: 10px; }
 .pptxv-master-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: rgb(34 197 94 / 0.65); }
 .pptxv-master-dot.is-handout { background: rgb(168 85 247 / 0.65); }

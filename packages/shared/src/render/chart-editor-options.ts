@@ -11,7 +11,10 @@
  * values mirror React's local `chart-panel-constants.ts`, which keeps its own
  * copy of these tables for historical reasons but resolves to the same keys.
  */
-import type { PptxChartData, PptxChartType } from 'pptx-viewer-core';
+import type { PptxChartData, PptxChartDataLabelPosition, PptxChartType } from 'pptx-viewer-core';
+import { chartDataChangeType } from 'pptx-viewer-core';
+
+import { applyParetoConversion } from './chart-pareto';
 
 /** Display units selectable for a value axis (empty string = none). */
 export type ChartDisplayUnitsValue =
@@ -37,8 +40,13 @@ export type ChartDataLabelContentKey =
 	| 'showPercent'
 	| 'showLegendKey';
 
-/** Data-label position values (empty string = type default). */
-export type ChartDataLabelPositionValue = '' | 'ctr' | 'inEnd' | 'inBase' | 'outEnd' | 'bestFit';
+/**
+ * Data-label position values (empty string = type default). The non-empty
+ * members are exactly the nine `c:dLblPos` schema values core models as
+ * {@link PptxChartDataLabelPosition}; the select used to offer five of them,
+ * so a line/scatter chart's "Above" / "Left" labels could not be authored.
+ */
+export type ChartDataLabelPositionValue = '' | PptxChartDataLabelPosition;
 
 /** Trendline regression types (empty string = none). */
 export type ChartTrendlineValue =
@@ -88,17 +96,39 @@ export interface ChartOption<V> {
 	labelKey: string;
 }
 
-export const CHART_TYPE_OPTIONS: ReadonlyArray<ChartOption<PptxChartType>> = [
+/**
+ * The value a "Change Chart Type" select may carry. Widens {@link PptxChartType}
+ * with `'pareto'`, a `histogram`-family entry that has no `PptxChartType` of
+ * its own (see docs/guide/limitations.md's ChartEx row): selecting it converts
+ * to `chartType: 'histogram'` and appends the cumulative-percentage series
+ * `applyParetoConversion` builds, rather than being stored verbatim on
+ * `PptxChartData.chartType`.
+ */
+export type ChartTypeSelectValue = PptxChartType | 'pareto';
+
+export const CHART_TYPE_OPTIONS: ReadonlyArray<ChartOption<ChartTypeSelectValue>> = [
 	{ value: 'bar', label: 'Bar', labelKey: 'pptx.chart.typeBar' },
+	{ value: 'bar3D', label: 'Bar (3-D)', labelKey: 'pptx.chart.typeBar3D' },
 	{ value: 'line', label: 'Line', labelKey: 'pptx.chart.typeLine' },
+	{ value: 'line3D', label: 'Line (3-D)', labelKey: 'pptx.chart.typeLine3D' },
 	{ value: 'pie', label: 'Pie', labelKey: 'pptx.chart.typePie' },
+	{ value: 'pie3D', label: 'Pie (3-D)', labelKey: 'pptx.chart.typePie3D' },
 	{ value: 'doughnut', label: 'Doughnut', labelKey: 'pptx.chart.typeDoughnut' },
 	{ value: 'area', label: 'Area', labelKey: 'pptx.chart.typeArea' },
+	{ value: 'area3D', label: 'Area (3-D)', labelKey: 'pptx.chart.typeArea3D' },
+	{ value: 'surface', label: 'Surface', labelKey: 'pptx.chart.typeSurface' },
 	{ value: 'scatter', label: 'Scatter', labelKey: 'pptx.chart.typeScatter' },
 	{ value: 'bubble', label: 'Bubble', labelKey: 'pptx.chart.typeBubble' },
 	{ value: 'radar', label: 'Radar', labelKey: 'pptx.chart.typeRadar' },
 	{ value: 'stock', label: 'Stock', labelKey: 'pptx.chart.typeStock' },
 	{ value: 'waterfall', label: 'Waterfall', labelKey: 'pptx.chart.typeWaterfall' },
+	{ value: 'histogram', label: 'Histogram', labelKey: 'pptx.chart.typeHistogram' },
+	{ value: 'pareto', label: 'Pareto', labelKey: 'pptx.chart.typePareto' },
+	{ value: 'funnel', label: 'Funnel', labelKey: 'pptx.chart.typeFunnel' },
+	{ value: 'treemap', label: 'Treemap', labelKey: 'pptx.chart.typeTreemap' },
+	{ value: 'sunburst', label: 'Sunburst', labelKey: 'pptx.chart.typeSunburst' },
+	{ value: 'boxWhisker', label: 'Box and Whisker', labelKey: 'pptx.chart.typeBoxWhisker' },
+	{ value: 'regionMap', label: 'Filled Map', labelKey: 'pptx.chart.typeRegionMap' },
 	{ value: 'combo', label: 'Combo', labelKey: 'pptx.chart.typeCombo' },
 ];
 
@@ -167,6 +197,10 @@ export const DATA_LABEL_POSITION_OPTIONS: ReadonlyArray<ChartOption<ChartDataLab
 		{ value: 'inBase', label: 'Inside Base', labelKey: 'pptx.chart.labelPosInsideBase' },
 		{ value: 'outEnd', label: 'Outside End', labelKey: 'pptx.chart.labelPosOutsideEnd' },
 		{ value: 'bestFit', label: 'Best Fit', labelKey: 'pptx.chart.labelPosBestFit' },
+		{ value: 't', label: 'Above', labelKey: 'pptx.chart.labelPosAbove' },
+		{ value: 'b', label: 'Below', labelKey: 'pptx.chart.labelPosBelow' },
+		{ value: 'l', label: 'Left', labelKey: 'pptx.chart.labelPosLeft' },
+		{ value: 'r', label: 'Right', labelKey: 'pptx.chart.labelPosRight' },
 	];
 
 export const TRENDLINE_TYPE_OPTIONS: ReadonlyArray<ChartOption<ChartTrendlineValue>> = [
@@ -224,70 +258,34 @@ export const COMBO_SERIES_TYPE_OPTIONS: ReadonlyArray<ChartOption<'' | PptxChart
 	{ value: 'scatter', label: 'Scatter', labelKey: 'pptx.chart.typeScatter' },
 ];
 
-/** Axis kinds the inspector exposes, with whether they carry a numeric scale. */
-export const EDITABLE_AXIS_ROWS: ReadonlyArray<{
-	type: 'valAx' | 'dateAx' | 'catAx';
-	label: string;
-	labelKey: string;
-	hasScale: boolean;
-}> = [
-	{ type: 'valAx', label: 'Value axis', labelKey: 'pptx.chart.valueAxis', hasScale: true },
-	{ type: 'dateAx', label: 'Date axis', labelKey: 'pptx.chart.dateAxis', hasScale: true },
-	{ type: 'catAx', label: 'Category axis', labelKey: 'pptx.chart.categoryAxis', hasScale: false },
-];
+// Axis rows and supported-type Sets live in `chart-editor-support.ts`; re-exported so every
+// existing `chart-editor-options` import keeps resolving.
+export * from './chart-editor-support';
 
-/** Chart types that support clustered/stacked grouping modes. */
-export const GROUPING_SUPPORTED_TYPES: ReadonlySet<PptxChartType> = new Set<PptxChartType>([
-	'bar',
-	'line',
-	'area',
-]);
-
-/** Chart types where trendlines are meaningful. */
-export const TRENDLINE_SUPPORTED_TYPES: ReadonlySet<PptxChartType> = new Set<PptxChartType>([
-	'bar',
-	'line',
-	'area',
-	'scatter',
-	'bubble',
-]);
-
-/** Chart types where error bars are meaningful. */
-export const ERROR_BAR_SUPPORTED_TYPES: ReadonlySet<PptxChartType> = new Set<PptxChartType>([
-	'bar',
-	'line',
-	'area',
-	'scatter',
-	'bubble',
-]);
-
-/** Value types that take a numeric amount (stdErr does not). */
-export const ERROR_BAR_VALUE_TYPES: ReadonlySet<string> = new Set<string>([
-	'fixedVal',
-	'percentage',
-	'stdDev',
-]);
-
-/** Chart types where series markers are meaningful. */
-export const MARKER_SUPPORTED_TYPES: ReadonlySet<PptxChartType> = new Set<PptxChartType>([
-	'line',
-	'scatter',
-	'bubble',
-	'radar',
-]);
-
-/** Cartesian chart types where a per-series combo type makes sense. */
-export const COMBO_SUPPORTED_TYPES: ReadonlySet<PptxChartType> = new Set<PptxChartType>([
-	'bar',
-	'line',
-	'area',
-	'combo',
-]);
-
-/** Chart types where per-point slice explosion (pull-out) is meaningful. */
-export const EXPLOSION_SUPPORTED_TYPES: ReadonlySet<PptxChartType> = new Set<PptxChartType>([
-	'pie',
-	'pie3D',
-	'doughnut',
-	'ofPie',
-]);
+/**
+ * Apply an inspector patch to a chart's data, routing a `chartType` change
+ * through core's {@link chartDataChangeType} (which clears grouping the new
+ * type doesn't support and adapts the category/series shape) instead of a
+ * plain shallow merge. A `chartType` of `'pareto'` (see
+ * {@link ChartTypeSelectValue}) is routed through {@link applyParetoConversion}
+ * instead, since it has no `chartDataChangeType` target of its own. Every
+ * other field is a plain merge.
+ *
+ * Every binding's chart type/title/grouping selector needs exactly this
+ * "is this patch a type change?" branch; it was independently re-implemented
+ * in React and Vue with identical logic before being centralized here.
+ */
+export function patchChartData(
+	data: PptxChartData,
+	patch: Omit<Partial<PptxChartData>, 'chartType'> & { chartType?: ChartTypeSelectValue },
+): PptxChartData {
+	const { chartType, ...rest } = patch;
+	if (chartType === 'pareto') {
+		return { ...applyParetoConversion(data), ...rest };
+	}
+	if (chartType && chartType !== data.chartType) {
+		const adapted = chartDataChangeType(data, chartType);
+		return { ...adapted, ...rest };
+	}
+	return { ...data, ...rest, ...(chartType !== undefined ? { chartType } : {}) };
+}

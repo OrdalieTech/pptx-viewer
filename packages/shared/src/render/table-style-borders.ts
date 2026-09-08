@@ -5,9 +5,11 @@
  * (`a:tcStyle/a:tcBdr`) rendered borderless because the band-style helper
  * emitted only backgrounds/text. This module maps the parsed
  * {@link ParsedTableStyleBorders} of the applicable sections onto a cell's
- * four CSS edges, honouring table-style precedence:
+ * four CSS edges, honouring the ECMA-376 §21.1.3.14 part sequence, which is
+ * the application order from lowest precedence to highest:
  *
- *   whole-table  <  banding  <  first/last row/col
+ *   wholeTbl < band1H < band2H < band1V < band2V < lastCol < firstCol
+ *           < lastRow < seCell < swCell < firstRow < neCell < nwCell
  *
  * Per-cell explicit `a:lnX` borders are parsed elsewhere (into
  * {@link PptxTableCellStyle}) and applied on top of this lower layer, so they
@@ -164,19 +166,42 @@ function collectSections(
 		}
 	}
 
-	// First/last row: single-row region spanning all columns.
-	if (tableData.firstRowHeader && isTop) {
-		push(entry.firstRowBorders, true, true, isLeft, isRight);
-	}
-	if (tableData.lastRow && isBottom) {
-		push(entry.lastRowBorders, true, true, isLeft, isRight);
-	}
+	// From here the parts follow the ECMA-376 §21.1.3.14 CT_TableStyle
+	// sequence, which IS the application order (lowest precedence first):
+	// lastCol, firstCol, lastRow, seCell, swCell, firstRow, neCell, nwCell.
+	// Row emphasis therefore outranks column emphasis, and the corner cells
+	// straddle the two row parts.
+	const atTop = Boolean(tableData.firstRowHeader) && isTop;
+	const atBottom = Boolean(tableData.lastRow) && isBottom;
+	const atLeft = Boolean(tableData.firstCol) && isLeft;
+	const atRight = Boolean(tableData.lastCol) && isRight;
+
 	// First/last column: single-column region spanning all rows.
-	if (tableData.firstCol && isLeft) {
+	if (atRight) {
+		push(entry.lastColBorders, isTop, isBottom, true, true);
+	}
+	if (atLeft) {
 		push(entry.firstColBorders, isTop, isBottom, true, true);
 	}
-	if (tableData.lastCol && isRight) {
-		push(entry.lastColBorders, isTop, isBottom, true, true);
+	// First/last row: single-row region spanning all columns.
+	if (atBottom) {
+		push(entry.lastRowBorders, true, true, isLeft, isRight);
+	}
+	// Corner cells are single-cell regions, so every edge is a region edge.
+	if (atBottom && atRight) {
+		push(entry.seCellBorders, true, true, true, true);
+	}
+	if (atBottom && atLeft) {
+		push(entry.swCellBorders, true, true, true, true);
+	}
+	if (atTop) {
+		push(entry.firstRowBorders, true, true, isLeft, isRight);
+	}
+	if (atTop && atRight) {
+		push(entry.neCellBorders, true, true, true, true);
+	}
+	if (atTop && atLeft) {
+		push(entry.nwCellBorders, true, true, true, true);
 	}
 
 	return sections;
@@ -250,7 +275,7 @@ export function resolveCellBorderCss(
 }
 
 /**
- * Resolve the diagonal borders (`a:tl2br` / `a:bl2tr`) a cell inherits from its
+ * Resolve the diagonal borders (`a:tl2br` / `a:tr2bl`) a cell inherits from its
  * table style, honouring the same section precedence as the edge borders. The
  * per-cell explicit diagonals (parsed into the cell style) are applied on top
  * by the caller, so they still win.
@@ -273,13 +298,13 @@ export function resolveStyleDiagonalBorders(
 
 	// Last-wins across the low -> high precedence section list.
 	let tl2br: ParsedTableStyleBorder | undefined;
-	let bl2tr: ParsedTableStyleBorder | undefined;
+	let tr2bl: ParsedTableStyleBorder | undefined;
 	for (const section of sections) {
 		if (section.borders.tl2br) {
 			tl2br = section.borders.tl2br;
 		}
-		if (section.borders.bl2tr) {
-			bl2tr = section.borders.bl2tr;
+		if (section.borders.tr2bl) {
+			tr2bl = section.borders.tr2bl;
 		}
 	}
 
@@ -290,9 +315,9 @@ export function resolveStyleDiagonalBorders(
 		info.diagDownWidth = tl2br.width ?? 1;
 		applied = true;
 	}
-	if (bl2tr && !bl2tr.noFill) {
-		info.diagUpColor = bl2tr.color ?? resolve(bl2tr.fill) ?? '#000000';
-		info.diagUpWidth = bl2tr.width ?? 1;
+	if (tr2bl && !tr2bl.noFill) {
+		info.diagUpColor = tr2bl.color ?? resolve(tr2bl.fill) ?? '#000000';
+		info.diagUpWidth = tr2bl.width ?? 1;
 		applied = true;
 	}
 	return applied ? info : undefined;

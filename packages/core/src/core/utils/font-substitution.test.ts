@@ -14,6 +14,7 @@ import {
 	getSubstituteFonts,
 	hasDirectSubstitution,
 	buildFontFamilyString,
+	stripFontStyleSuffix,
 } from './font-substitution';
 
 // ---------------------------------------------------------------------------
@@ -202,6 +203,21 @@ describe('getPanoseWeight', () => {
 // ---------------------------------------------------------------------------
 
 describe('getSubstituteFontFamily', () => {
+	it('falls back through Calibri for the Aptos family', () => {
+		expect(getSubstituteFontFamily('Aptos')).toBe(
+			'"Aptos", "Calibri", "Carlito", "Liberation Sans", "Arial", sans-serif',
+		);
+		expect(getSubstituteFontFamily('Aptos Display')).toBe(
+			'"Aptos Display", "Calibri Light", "Calibri", "Carlito", "Arial", sans-serif',
+		);
+	});
+
+	it('keeps the serif and mono Aptos faces in their own genre', () => {
+		expect(getSubstituteFontFamily('Aptos Serif')).toContain('serif');
+		expect(getSubstituteFontFamily('Aptos Serif')).toContain('"Cambria"');
+		expect(getSubstituteFontFamily('Aptos Mono')).toContain('monospace');
+	});
+
 	it('returns direct substitution chain for Calibri', () => {
 		const result = getSubstituteFontFamily('Calibri');
 		expect(result).toBe('"Calibri", "Carlito", "Liberation Sans", "Arial", sans-serif');
@@ -467,5 +483,51 @@ describe('end-to-end PANOSE font substitution', () => {
 		expect(result).toContain('"MySerif"');
 		expect(result).toContain('"Times New Roman"');
 		expect(result).toContain('serif');
+	});
+});
+
+describe('stripFontStyleSuffix', () => {
+	it('strips a single trailing style token', () => {
+		expect(stripFontStyleSuffix('Bebas Neue Regular')).toBe('Bebas Neue');
+		expect(stripFontStyleSuffix('微软雅黑 Light')).toBe('微软雅黑');
+		expect(stripFontStyleSuffix('思源黑体 CN Light')).toBe('思源黑体 CN');
+	});
+
+	it('strips up to two tokens (weight + italic)', () => {
+		expect(stripFontStyleSuffix('Segoe UI Semibold Italic')).toBe('Segoe UI');
+	});
+
+	it('returns undefined when nothing was stripped', () => {
+		expect(stripFontStyleSuffix('Arial')).toBeUndefined();
+		expect(stripFontStyleSuffix('Bebas Neue')).toBeUndefined();
+	});
+
+	it('never strips a name down to nothing', () => {
+		expect(stripFontStyleSuffix('Light')).toBeUndefined();
+	});
+});
+
+describe('style-suffixed full names in the chain', () => {
+	it('adds the family base right after the full name (issue #132, "77%")', () => {
+		// "Bebas Neue Regular" is the FULL name; the OS registers "Bebas Neue".
+		// The base must join the chain along with the condensed fallbacks, or
+		// numeric labels sized for the narrow face wrap and clip.
+		const css = getSubstituteFontFamily('Bebas Neue Regular');
+		expect(css).toBe(
+			'"Bebas Neue Regular", "Bebas Neue", "Oswald", "Arial Narrow", "Impact", sans-serif',
+		);
+	});
+
+	it('routes a suffixed CJK name through the base substitution entry', () => {
+		const css = getSubstituteFontFamily('思源黑体 CN Light');
+		expect(css).toContain('"思源黑体 CN"');
+		expect(css).toContain('"Noto Sans CJK SC"');
+		expect(css).toContain('"Microsoft YaHei"');
+	});
+
+	it('keeps a genuine weight-named family first in its own chain', () => {
+		// "Arial Black" IS a family with its own map entry; the full name must
+		// stay first so the installed face keeps winning.
+		expect(getSubstituteFontFamily('Arial Black').startsWith('"Arial Black"')).toBeTruthy();
 	});
 });

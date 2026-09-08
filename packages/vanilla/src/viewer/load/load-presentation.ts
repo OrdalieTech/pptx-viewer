@@ -2,29 +2,39 @@ import type {
 	MediaPptxElement,
 	ParsedTableStyleMap,
 	PptxAppProperties,
+	PptxCommentAuthor,
+	PptxCompatibilityWarning,
 	PptxCoreProperties,
 	PptxCustomProperty,
 	PptxCustomShow,
 	PptxEmbeddedFont,
-	PptxElement,
 	PptxHandoutMaster,
 	PptxHeaderFooter,
+	PptxModernCommentAuthor,
+	PptxModifyVerifier,
 	PptxNotesMaster,
 	PptxPresentationProperties,
 	PptxSection,
 	PptxSlide,
 	PptxSlideMaster,
+	PptxTagCollection,
 	PptxThemeColorScheme,
 	PptxThemeFontScheme,
 	PptxThemeOption,
+	PptxViewProperties,
 } from 'pptx-viewer-core';
 import { PptxHandler } from 'pptx-viewer-core';
-import type { CanvasSize } from 'pptx-viewer-shared';
+import type { CanvasSize, SlideSizeEmu } from 'pptx-viewer-shared';
 import {
+	applyImagePathPatches,
+	collectAnimationSoundPaths,
 	collectImagePaths,
 	collectMediaElements,
 	DEFAULT_CANVAS_HEIGHT,
 	DEFAULT_CANVAS_WIDTH,
+	resolveMediaElementSource,
+	resolveTableCellImageUrls,
+	resolveTableStyleImageUrls,
 } from 'pptx-viewer-shared';
 
 /**
@@ -43,25 +53,48 @@ export interface LoadedPresentation {
 	/** Parsed presentation sections. */
 	sections: PptxSection[];
 	presentationProperties: PptxPresentationProperties;
+	/**
+	 * View properties (`ppt/viewProps.xml`, `p:viewPr`): grid spacing, snap /
+	 * guide toggles, last view, splitter state, etc. `gridSpacing` lives here,
+	 * NOT on `presentationProperties` -- `p:gridSpacing` is a child of
+	 * `p:viewPr`, and a real PowerPoint file never populates it under
+	 * `p:presentationPr`.
+	 */
+	viewProperties?: PptxViewProperties;
 	headerFooter: PptxHeaderFooter;
 	coreProperties?: PptxCoreProperties;
 	appProperties?: PptxAppProperties;
 	customProperties: PptxCustomProperty[];
 	customShows: PptxCustomShow[];
+	/** Office 2021 (p188) comment authors, for the `@`-mention typeahead. */
+	modernCommentAuthors: PptxModernCommentAuthor[];
+	/** Legacy `ppt/commentAuthors.xml` authors, mapped into the typeahead too. */
+	commentAuthors: PptxCommentAuthor[];
 	embeddedFonts: PptxEmbeddedFont[];
 	hasDigitalSignatures: boolean;
 	digitalSignatureCount: number;
 	isPasswordProtected: boolean;
 	/** Slide canvas size in CSS px. */
 	canvasSize: CanvasSize;
+	/**
+	 * `p:sldSz` verbatim, in EMU. Kept even when it matches no preset so a save
+	 * re-emits the authored dimensions rather than a lossy pixel round-trip.
+	 */
+	slideSize?: SlideSizeEmu;
 	/** Archive-path to displayable URL map for media + poster frames. */
 	mediaDataUrls: Map<string, string>;
 	/** Presentation theme colours used by scheme-based rendering. */
 	colorScheme?: PptxThemeColorScheme;
 	/** Presentation theme fonts used by table-style font resolution. */
 	fontScheme?: PptxThemeFontScheme;
+	/** The theme part's name, seeding the inspector's THEME EDITOR card. */
+	themeName?: string;
+	/** Tag collections from `ppt/tags/*.xml` (inspector TAGS card). */
+	tagCollections: PptxTagCollection[];
 	/** Parsed presentation table styles keyed by style id. */
 	tableStyleMap?: ParsedTableStyleMap;
+	/** `ppt/tableStyles.xml`'s `<a:tblStyleLst @def>` default style GUID. */
+	tableStylesDefaultId?: string;
 	slideMasters: PptxSlideMaster[];
 	/** Theme parts discovered in the package (inspector THEME card). */
 	themeOptions: PptxThemeOption[];
@@ -71,27 +104,60 @@ export interface LoadedPresentation {
 	notesCanvasSize?: CanvasSize;
 	/** Blob URLs created during the load; revoke them when replacing/destroying. */
 	blobUrls: string[];
+	/**
+	 * Write-protection verifier from `p:modifyVerifier` (`presentation.xml`).
+	 * Feeds `readOnlyRecommendation`: its presence means editing requires a
+	 * password this viewer never asks for.
+	 */
+	modifyVerifier?: PptxModifyVerifier;
+	/**
+	 * Deck-level compatibility warnings (`data.warnings`, distinct from each
+	 * slide's own `warnings`): unmodelled markup, lossy save fallbacks, etc.
+	 * reported by core's `PptxCompatibilityService`. Feeds
+	 * `compatibilityWarningToasts` alongside every slide's `warnings`.
+	 */
+	warnings: PptxCompatibilityWarning[];
 }
 
-export async function loadPresentation(buffer: ArrayBuffer): Promise<LoadedPresentation> {
+export interface LoadPresentationOptions {
+	/**
+	 * Trust Center > "Allow external content" (default false, matching core's
+	 * own SSRF/privacy-safe default). When false, `PptxHandler.getImageData`
+	 * silently drops `http(s)://` image references instead of fetching them.
+	 */
+	allowExternalImages?: boolean;
+}
+
+export async function loadPresentation(
+	buffer: ArrayBuffer,
+	options?: LoadPresentationOptions,
+): Promise<LoadedPresentation> {
 	const handler = new PptxHandler();
 	const blobUrls: string[] = [];
 	try {
-		const parsed = await handler.load(buffer);
+		const parsed = await handler.load(buffer, {
+			allowExternalImages: options?.allowExternalImages,
+		});
 
+		const getImageData = (path: string): Promise<string | undefined> => handler.getImageData(path);
 		const mediaDataUrls = await resolveMediaUrls(handler, parsed.slides, blobUrls);
-		const slides = await resolveImageUrls(handler, parsed.slides);
+		const imageResolvedSlides = await resolveImageUrls(handler, parsed.slides);
+		const slides = await resolveTableCellImageUrls(imageResolvedSlides, getImageData);
+		const tableStyleMap = await resolveTableStyleImageUrls(parsed.tableStyleMap, getImageData);
 
 		return {
 			handler,
 			slides,
 			sections: parsed.sections ?? [],
 			presentationProperties: parsed.presentationProperties ?? {},
+			viewProperties: parsed.viewProperties,
 			headerFooter: parsed.headerFooter ?? {},
 			coreProperties: parsed.coreProperties,
 			appProperties: parsed.appProperties,
 			customProperties: parsed.customProperties ?? [],
 			customShows: parsed.customShows ?? [],
+			modernCommentAuthors: parsed.modernCommentAuthors ?? [],
+			commentAuthors: parsed.commentAuthors ?? [],
 			embeddedFonts: parsed.embeddedFonts ?? [],
 			hasDigitalSignatures: parsed.hasDigitalSignatures ?? false,
 			digitalSignatureCount: parsed.digitalSignatureCount ?? 0,
@@ -103,12 +169,28 @@ export async function loadPresentation(buffer: ArrayBuffer): Promise<LoadedPrese
 			mediaDataUrls,
 			colorScheme: parsed.theme?.colorScheme,
 			fontScheme: parsed.theme?.fontScheme,
-			tableStyleMap: parsed.tableStyleMap,
+			themeName: parsed.theme?.name,
+			tagCollections: parsed.tags ?? [],
+			tableStyleMap,
+			tableStylesDefaultId: parsed.tableStylesDefaultId,
 			slideMasters: parsed.slideMasters ?? [],
 			themeOptions: parsed.themeOptions ?? [],
 			notesMaster: parsed.notesMaster,
 			handoutMaster: parsed.handoutMaster,
 			hasMacros: parsed.hasMacros ?? false,
+			modifyVerifier: parsed.modifyVerifier,
+			warnings: parsed.warnings ?? [],
+			slideSize:
+				typeof parsed.widthEmu === 'number' &&
+				typeof parsed.heightEmu === 'number' &&
+				parsed.widthEmu > 0 &&
+				parsed.heightEmu > 0
+					? {
+							widthEmu: parsed.widthEmu,
+							heightEmu: parsed.heightEmu,
+							type: parsed.slideSizeType ?? '',
+						}
+					: undefined,
 			notesCanvasSize:
 				typeof parsed.notesWidthEmu === 'number' &&
 				typeof parsed.notesHeightEmu === 'number' &&
@@ -137,8 +219,11 @@ export function revokeBlobUrls(urls: Iterable<string>): void {
 	}
 }
 
-/** Resolve audio/video Blob URLs + poster-frame data URLs for media elements. */
-async function resolveMediaUrls(
+/**
+ * Resolve audio/video Blob URLs + poster-frame data URLs for media elements.
+ * Exported for direct testing of the G17 linked/external media path.
+ */
+export async function resolveMediaUrls(
 	handler: PptxHandler,
 	slides: PptxSlide[],
 	blobUrls: string[],
@@ -148,36 +233,39 @@ async function resolveMediaUrls(
 		collectMediaElements(slide.elements, mediaElements);
 	}
 	const urls = new Map<string, string>();
+	// Shared with the other four bindings (G17): a LINKED media element's
+	// `mediaPath` is already the verbatim external URL by the time it reaches
+	// here; `resolveMediaElementSource` hands it straight back instead of an
+	// archive lookup that can only find embedded parts.
 	await Promise.all(
 		mediaElements.map(async (mediaElement) => {
-			const mediaPath = mediaElement.mediaPath;
-			if (!mediaPath) {
+			const resolved = await resolveMediaElementSource(mediaElement, handler);
+			if (resolved.missing || !resolved.mediaPath || !resolved.url) {
 				mediaElement.mediaMissing = true;
 				return;
 			}
+			urls.set(resolved.mediaPath, resolved.url);
+			if (resolved.isBlobUrl) {
+				blobUrls.push(resolved.url);
+			}
+		}),
+	);
+
+	// Native-animation `p:stSnd` sounds that back no visible media element
+	// (PowerPoint's animation sound library) have no entry above; resolve
+	// them into the same map so `onPlayActionSound`'s lookup finds them.
+	const soundPaths = collectAnimationSoundPaths(slides).filter((path) => !urls.has(path));
+	await Promise.all(
+		soundPaths.map(async (soundPath) => {
 			try {
-				const isAudioVideo =
-					mediaElement.mediaType === 'audio' || mediaElement.mediaType === 'video';
-				if (isAudioVideo) {
-					const arrayBuffer = await handler.getMediaArrayBuffer(mediaPath);
-					if (arrayBuffer) {
-						const mimeType = mediaElement.mediaMimeType || 'application/octet-stream';
-						const blobUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: mimeType }));
-						blobUrls.push(blobUrl);
-						urls.set(mediaPath, blobUrl);
-					} else {
-						mediaElement.mediaMissing = true;
-					}
-				} else {
-					const dataUrl = await handler.getImageData(mediaPath);
-					if (dataUrl) {
-						urls.set(mediaPath, dataUrl);
-					} else {
-						mediaElement.mediaMissing = true;
-					}
+				const arrayBuffer = await handler.getMediaArrayBuffer(soundPath);
+				if (arrayBuffer) {
+					const blobUrl = URL.createObjectURL(new Blob([arrayBuffer]));
+					blobUrls.push(blobUrl);
+					urls.set(soundPath, blobUrl);
 				}
 			} catch {
-				mediaElement.mediaMissing = true;
+				/* Non-critical: the sound simply will not play. */
 			}
 		}),
 	);
@@ -205,43 +293,8 @@ async function resolveImageUrls(handler: PptxHandler, slides: PptxSlide[]): Prom
 		}),
 	);
 
-	const elementPatches = new Map<string, Record<string, string>>();
-	for (const ref of refs) {
-		const url = resolvedMap.get(ref.path);
-		if (!url) {
-			continue;
-		}
-		const existing = elementPatches.get(ref.element.id) ?? {};
-		existing[ref.field] = url;
-		elementPatches.set(ref.element.id, existing);
-	}
-	if (elementPatches.size === 0) {
-		return slides;
-	}
-
-	const patchElements = (elements: PptxElement[]): PptxElement[] => {
-		let mutated = false;
-		const next = elements.map((el) => {
-			let updated = el;
-			const patch = elementPatches.get(el.id);
-			if (patch) {
-				updated = { ...el, ...patch } as PptxElement;
-			}
-			if (updated.type === 'group' && updated.children?.length) {
-				const newChildren = patchElements(updated.children);
-				if (newChildren !== updated.children) {
-					updated = { ...updated, children: newChildren };
-				}
-			}
-			if (updated !== el) {
-				mutated = true;
-			}
-			return updated;
-		});
-		return mutated ? next : elements;
-	};
 	return slides.map((slide) => {
-		const newElements = patchElements(slide.elements);
+		const newElements = applyImagePathPatches(slide.elements, resolvedMap, refs);
 		return newElements === slide.elements ? slide : { ...slide, elements: newElements };
 	});
 }

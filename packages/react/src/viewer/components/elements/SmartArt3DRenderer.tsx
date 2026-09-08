@@ -17,9 +17,11 @@
 
 import type { PptxElement } from 'pptx-viewer-core';
 import { updateSmartArtNodeText } from 'pptx-viewer-core';
+import type { ElementAnimationState } from 'pptx-viewer-shared';
 import {
 	buildSmartArt3DModel,
-	computeSmartArtLayout,
+	collectCoherent3DOffNodeIds,
+	computeSmartArtElementLayout,
 	shouldCommitSmartArtNodeText,
 } from 'pptx-viewer-shared';
 import React, { Suspense, useEffect, useMemo, useState } from 'react';
@@ -74,6 +76,13 @@ interface SmartArt3DRendererProps {
 	canEdit?: boolean;
 	/** Commit element updates (node text edits) through the host editor path. */
 	onUpdateElement?: (updates: Partial<PptxElement>) => void;
+	/**
+	 * Playback state for the diagram; only its `textStyle` (an active
+	 * font-style emphasis override) is consumed here, applied to every node's
+	 * caption via {@link SmartArt3DScene}'s handle. Staged-build reveal is an
+	 * SVG-only concern, handled by `SmartArtRenderer`.
+	 */
+	animationState?: ElementAnimationState;
 }
 
 export function SmartArt3DRenderer({
@@ -82,6 +91,7 @@ export function SmartArt3DRenderer({
 	interactive = false,
 	canEdit,
 	onUpdateElement,
+	animationState,
 }: SmartArt3DRendererProps): React.ReactElement {
 	const [threeAvailable, setThreeAvailable] = useState<boolean | null>(null);
 
@@ -108,24 +118,24 @@ export function SmartArt3DRenderer({
 		if (element.type !== 'smartArt' || !element.smartArtData) {
 			return null;
 		}
-		const { nodes, resolvedLayoutType, layout, chrome } = element.smartArtData;
+		const { nodes, chrome } = element.smartArtData;
 		if (nodes.length === 0) {
 			return null;
 		}
 		const palette = resolvePalette(element);
 		const style = resolveStyle(element);
-		const layoutResult = computeSmartArtLayout(
+		const layoutResult = computeSmartArtElementLayout(
+			element.smartArtData,
 			nodes,
 			{ width: element.width, height: element.height },
 			palette,
 			style,
 			element.id,
-			resolvedLayoutType,
-			layout,
 		);
 		return buildSmartArt3DModel(layoutResult, {
 			background: chrome?.backgroundColor,
 			spatial: true,
+			coherent3DOffNodeIds: collectCoherent3DOffNodeIds(nodes),
 		});
 	}, [element]);
 
@@ -148,6 +158,7 @@ export function SmartArt3DRenderer({
 					width={element.width}
 					height={element.height}
 					interactive={interactive}
+					textStyle={animationState?.textStyle}
 				/>
 			</Suspense>
 		</SceneErrorBoundary>

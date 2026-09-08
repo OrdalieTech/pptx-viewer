@@ -75,6 +75,30 @@ function tableEl(): PptxElement {
 	} as PptxElement;
 }
 
+function chartEl(): PptxElement {
+	return { type: 'chart', id: 'cht1', x: 0, y: 0, width: 200, height: 100 } as PptxElement;
+}
+
+function smartArtEl(): PptxElement {
+	return {
+		type: 'smartArt',
+		id: 'sa1',
+		x: 0,
+		y: 0,
+		width: 200,
+		height: 100,
+		smartArtData: { layout: 'orgChart', nodes: [{ id: 'n1', text: 'Root' }] },
+	} as PptxElement;
+}
+
+function mediaEl(): PptxElement {
+	return { type: 'media', id: 'med1', x: 0, y: 0, width: 200, height: 100 } as PptxElement;
+}
+
+function oleEl(): PptxElement {
+	return { type: 'ole', id: 'ole1', x: 0, y: 0, width: 200, height: 100 } as PptxElement;
+}
+
 function makeEditor(elements: PptxElement[]): EditorState {
 	const editor = new EditorState({ getCurrent: () => 0, getHandler: () => null });
 	editor.editable = true;
@@ -127,7 +151,13 @@ describe('inspectorPanel', () => {
 		const { target } = mountInspector(editor);
 
 		expect(target.querySelector('.pptx-svelte-inspector-grid')).toBeTruthy();
-		expect(sectionTitles(target)).toStrictEqual(['Fill & Stroke', 'Text']);
+		expect(sectionTitles(target)).toStrictEqual([
+			'Fill & Stroke',
+			'Effects',
+			'Text',
+			'Accessibility',
+			'Action',
+		]);
 		expect(target.querySelector('.pptx-svelte-inspector-empty')).toBeNull();
 	});
 
@@ -137,7 +167,13 @@ describe('inspectorPanel', () => {
 		editor.select(el.id);
 		const { target } = mountInspector(editor);
 
-		expect(sectionTitles(target)).toStrictEqual(['Fill & Stroke', 'Text']);
+		expect(sectionTitles(target)).toStrictEqual([
+			'Fill & Stroke',
+			'Effects',
+			'Text',
+			'Accessibility',
+			'Action',
+		]);
 	});
 
 	it('shows Position + Fill & Stroke + Image for an image element (no Text section)', () => {
@@ -146,17 +182,71 @@ describe('inspectorPanel', () => {
 		editor.select(el.id);
 		const { target } = mountInspector(editor);
 
-		expect(sectionTitles(target)).toStrictEqual(['Fill & Stroke', 'Image']);
+		expect(sectionTitles(target)).toStrictEqual(['Fill & Stroke', 'Effects', 'Image', 'Action']);
 	});
 
-	it('shows only Position + Table for a table element (no Fill & Stroke or Text)', () => {
+	it('shows Position + Accessibility + Table for a table element (no Fill & Stroke or Text)', () => {
 		const el = tableEl();
 		const editor = makeEditor([el]);
 		editor.select(el.id);
 		const { target } = mountInspector(editor);
 
-		expect(sectionTitles(target)).toStrictEqual(['Table']);
+		expect(sectionTitles(target)).toStrictEqual(['Accessibility', 'Table', 'Action']);
 	});
+
+	it('offers Quick Styles for a shape but not for an image (React FillStrokeProperties gating)', () => {
+		const shape = shapeEl();
+		const shapeEditor = makeEditor([shape]);
+		shapeEditor.select(shape.id);
+		const { target } = mountInspector(shapeEditor);
+		expect(target.querySelector('.pptx-svelte-quick-styles')).not.toBeNull();
+		cleanup?.();
+
+		const image = imageEl();
+		const imageEditor = makeEditor([image]);
+		imageEditor.select(image.id);
+		const { target: imageTarget } = mountInspector(imageEditor);
+		expect(imageTarget.querySelector('.pptx-svelte-quick-styles')).toBeNull();
+	});
+
+	it('offers the alt-text field for an image, and alt-text + title for a shape', () => {
+		const image = imageEl();
+		const imageEditor = makeEditor([image]);
+		imageEditor.select(image.id);
+		const { target } = mountInspector(imageEditor);
+		expect(target.querySelector('.pptx-svelte-alt-text')).not.toBeNull();
+		// A picture has no title field: only the alt-text textarea, no title input.
+		expect(target.querySelector('.pptx-svelte-alt-text input[type="text"]')).toBeNull();
+		cleanup?.();
+
+		// A plain shape now models both altText and title (PptxNonVisualDescription),
+		// so its own Accessibility section renders both fields.
+		const shape = shapeEl();
+		const shapeEditor = makeEditor([shape]);
+		shapeEditor.select(shape.id);
+		const { target: shapeTarget } = mountInspector(shapeEditor);
+		expect(shapeTarget.querySelector('.pptx-svelte-alt-text textarea')).not.toBeNull();
+		expect(shapeTarget.querySelector('.pptx-svelte-alt-text input[type="text"]')).not.toBeNull();
+	});
+
+	it.each([
+		['chart', chartEl],
+		['smartArt', smartArtEl],
+		['media', mediaEl],
+		['ole', oleEl],
+	] as const)(
+		'shows the Accessibility section (alt text + title) for a %s element',
+		(_type, factory) => {
+			const el = factory();
+			const editor = makeEditor([el]);
+			editor.select(el.id);
+			const { target } = mountInspector(editor);
+
+			expect(sectionTitles(target)).toContain('Accessibility');
+			expect(target.querySelector('.pptx-svelte-alt-text textarea')).not.toBeNull();
+			expect(target.querySelector('.pptx-svelte-alt-text input[type="text"]')).not.toBeNull();
+		},
+	);
 
 	it('has no header close button on the tab row (React InspectorPane parity)', () => {
 		const el = shapeEl();
@@ -241,6 +331,7 @@ describe('inspectorPanel deck properties (no selection)', () => {
 			'Theme',
 			'Theme Override',
 			'Slide Size',
+			'Slide transition',
 			'Notes & Handout',
 			'Document',
 			'Slide',
@@ -255,6 +346,7 @@ describe('inspectorPanel deck properties (no selection)', () => {
 			'Presentation',
 			'Theme',
 			'Slide Size',
+			'Slide transition',
 			'Notes & Handout',
 			'Document',
 			'Slide',

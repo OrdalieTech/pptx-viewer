@@ -4,11 +4,15 @@
  * Re-imported as class-property function references so Angular template
  * type-checking continues to work without changes to the template.
  */
+import { smartArtConnectorPaint, smartArtNodeLabel } from '../internal/shared';
 import type {
 	RenderedCircleNode,
 	RenderedNode,
 	RenderedPolygonNode,
 	RenderedRectNode,
+	SmartArtConnectorPaint,
+	SmartArtLayoutResult,
+	SmartArtNodeLabel,
 } from '../internal/shared';
 
 /** Narrow a RenderedNode to a circle, or undefined. */
@@ -27,23 +31,23 @@ export function narrowToRect(node: RenderedNode): RenderedRectNode | undefined {
 }
 
 /**
- * Split node text on newlines and compute per-line y offsets (in SVG px)
- * that centre the block around the node centre y (offset 0). Single-line
- * text produces one entry with offsetY=0, preserving the existing
- * dominant-baseline="central" behaviour exactly.
+ * Resolved label descriptors for a layout, index-aligned with `layout.nodes`.
+ *
+ * The template used to hardcode `fill="white"` and anchor circle labels on
+ * `cx`/`cy`, ignoring the descriptor's optional `fontColor` / `fontWeight` /
+ * `fontStyle` / `textX` / `textY` / `textAnchor` / `textBaseline`. The shared
+ * `smartArtNodeLabel` decides all of it; this only maps the array so the
+ * component can expose it as a single `computed()`.
  */
-export function computeTextLines(
-	text: string,
-	fontSize: number,
-): Array<{ text: string; offsetY: number }> {
-	const raw = (text ?? '').split('\n').filter((l) => l.length > 0);
-	if (raw.length === 0) {
-		return [{ text: '', offsetY: 0 }];
-	}
-	const lh = fontSize * 1.2;
-	const totalH = raw.length * lh;
-	return raw.map((line, i) => ({
-		text: line,
-		offsetY: -totalH / 2 + lh / 2 + i * lh,
-	}));
+export function layoutNodeLabels(layout: SmartArtLayoutResult): SmartArtNodeLabel[] {
+	return layout.nodes.map((node) => smartArtNodeLabel(node));
+}
+
+/**
+ * Resolved connector paint for a layout, index-aligned with
+ * `layout.connectors`. The template used to hardcode the grey default, which
+ * flattened the per-node colours target leaders and timeline stems carry.
+ */
+export function layoutConnectorPaints(layout: SmartArtLayoutResult): SmartArtConnectorPaint[] {
+	return layout.connectors.map((connector) => smartArtConnectorPaint(connector));
 }

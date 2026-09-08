@@ -23,9 +23,22 @@
  * Selector: `pptx-chart-renderer`
  * Input:    `element` - required `PptxElement` narrowed to `type === 'chart'`
  */
-import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
+import {
+	ChangeDetectionStrategy,
+	Component,
+	computed,
+	DestroyRef,
+	inject,
+	input,
+	signal,
+} from '@angular/core';
 import type { PptxElement } from 'pptx-viewer-core';
 
+import {
+	computeChartLegendLayout,
+	getBarFacePicturePixelSampleVersion,
+	subscribeBarFacePicturePixelSamples,
+} from '../internal/shared';
 import { ChartPrimitivesComponent } from './chart-primitives.component';
 import { buildChartViewModel } from './chart-renderer-helpers';
 import type { ChartViewModel } from './chart-renderer-helpers';
@@ -33,7 +46,6 @@ import type { ChartViewModel } from './chart-renderer-helpers';
 export type { ChartViewModel };
 
 const LEGEND_SWATCH_SIZE = 10;
-const LEGEND_ITEM_WIDTH = 80;
 
 @Component({
 	selector: 'pptx-chart-renderer',
@@ -48,14 +60,43 @@ const LEGEND_ITEM_WIDTH = 80;
 			class="pptx-ng-chart-svg"
 			style="overflow: visible; display: block; pointer-events: none;"
 		>
-			<!-- Background tint -->
-			<rect
-				x="0"
-				y="0"
-				[attr.width]="vm().svgWidth"
-				[attr.height]="vm().svgHeight"
-				fill="#0f172a0d"
-			/>
+			<!-- c:dPt/c:pictureOptions picture-fill patterns, rendered before anything
+				references them via fill="url(#...)" -->
+			@if ((vm().defs ?? []).length > 0) {
+				<defs>
+					@for (def of vm().defs ?? []; track def.id) {
+						<pattern
+							[attr.id]="def.id"
+							[attr.patternUnits]="def.patternUnits"
+							[attr.x]="def.x"
+							[attr.y]="def.y"
+							[attr.width]="def.width"
+							[attr.height]="def.height"
+						>
+							<image
+								[attr.href]="def.href"
+								x="0"
+								y="0"
+								[attr.width]="def.width"
+								[attr.height]="def.height"
+								[attr.preserveAspectRatio]="def.preserveAspectRatio"
+							/>
+						</pattern>
+					}
+				</defs>
+			}
+
+			<!-- Chart-area fill; absent when the deck declares c:chartSpace/a:noFill -->
+			@if (vm().areaFill) {
+				<rect
+					x="0"
+					y="0"
+					[attr.width]="vm().svgWidth"
+					[attr.height]="vm().svgHeight"
+					[attr.rx]="vm().areaRadius"
+					[attr.fill]="vm().areaFill"
+				/>
+			}
 
 			<!-- Chart title (data-chart-part enables in-place editing in edit mode) -->
 			@if (vm().title) {
@@ -63,12 +104,27 @@ const LEGEND_ITEM_WIDTH = 80;
 					[attr.x]="vm().titleX"
 					[attr.y]="vm().titleY"
 					text-anchor="middle"
-					font-size="12"
-					font-weight="600"
-					fill="#1e293b"
+					[attr.font-size]="vm().titleStyle?.fontSize ?? 12"
+					[attr.font-weight]="vm().titleStyle?.fontWeight ?? 600"
+					[attr.font-family]="vm().titleStyle?.fontFamily"
+					[attr.fill]="vm().titleStyle?.fill ?? '#1e293b'"
 					data-chart-part="title"
 				>
-					{{ vm().title }}
+					@if (vm().titleRunSpans; as titleRunSpans) {
+						@for (run of titleRunSpans; track $index) {
+							<tspan
+								[attr.font-size]="run.fontSize"
+								[attr.font-weight]="run.fontWeight"
+								[attr.font-style]="run.fontStyle"
+								[attr.font-family]="run.fontFamily"
+								[attr.fill]="run.fill"
+							>
+								{{ run.text }}
+							</tspan>
+						}
+					} @else {
+						{{ vm().title }}
+					}
 				</text>
 			}
 
@@ -174,19 +230,27 @@ const LEGEND_ITEM_WIDTH = 80;
 			}
 
 			<!-- Legend -->
-			@if (vm().legend.length > 0) {
-				@for (entry of vm().legend; track $index) {
-					<g [attr.transform]="legendTransform($index)">
+			@if (legendItems().length > 0) {
+				@for (item of legendItems(); track $index) {
+					<g [attr.transform]="legendTransform(item)">
 						<rect
 							x="0"
 							y="-7"
 							[attr.width]="swatchSize"
 							[attr.height]="swatchSize"
 							rx="2"
-							[attr.fill]="entry.color"
+							[attr.fill]="item.color"
 						/>
-						<text [attr.x]="swatchSize + 3" y="3" font-size="9" fill="#475569">
-							{{ entry.label }}
+						<text
+							[attr.x]="swatchSize + 3"
+							y="3"
+							[attr.font-size]="item.fontSize"
+							[attr.fill]="item.fill"
+							[attr.font-weight]="item.fontWeight"
+							[attr.font-style]="item.fontStyle"
+							[attr.font-family]="item.fontFamily ?? null"
+						>
+							{{ item.label }}
 						</text>
 					</g>
 				}
@@ -196,17 +260,33 @@ const LEGEND_ITEM_WIDTH = 80;
 })
 export class ChartRendererComponent {
 	readonly element = input.required<PptxElement>();
-	readonly vm = computed<ChartViewModel>(() => buildChartViewModel(this.element()));
+
+	/**
+	 * An untargeted bar3D extrusion face whose fill is picture-only samples a
+	 * colour from the picture ASYNCHRONOUSLY (see `chart-bar3d-face-picture-
+	 * sample.ts`'s module doc for the COM-verified ground truth this
+	 * reproduces); `buildChartViewModel` only ever sees whatever is already
+	 * cached. This signal is bumped by the shared (non-Angular) sample cache
+	 * whenever one resolves, and `vm` below reads it purely to establish a
+	 * signal dependency, forcing `computed` to rebuild once a sample lands.
+	 */
+	private readonly sampleVersion = signal(getBarFacePicturePixelSampleVersion());
+	constructor() {
+		const unsubscribe = subscribeBarFacePicturePixelSamples(() => {
+			this.sampleVersion.set(getBarFacePicturePixelSampleVersion());
+		});
+		inject(DestroyRef).onDestroy(unsubscribe);
+	}
+
+	readonly vm = computed<ChartViewModel>(() => {
+		this.sampleVersion();
+		return buildChartViewModel(this.element());
+	});
 	readonly viewBox = computed(() => `0 0 ${this.vm().svgWidth} ${this.vm().svgHeight}`);
 	readonly swatchSize = LEGEND_SWATCH_SIZE;
+	readonly legendItems = computed(() => computeChartLegendLayout(this.vm()));
 
-	legendTransform(index: number): string {
-		const v = this.vm();
-		const isVertical = v.legendAnchor === 'start';
-		const x = isVertical
-			? v.legendX
-			: v.legendX - (v.legend.length * LEGEND_ITEM_WIDTH) / 2 + index * LEGEND_ITEM_WIDTH;
-		const y = isVertical ? v.legendY + index * 14 : v.legendY;
-		return `translate(${x.toFixed(1)},${y.toFixed(1)})`;
+	legendTransform(item: { x: number; y: number }): string {
+		return `translate(${item.x.toFixed(1)},${item.y.toFixed(1)})`;
 	}
 }

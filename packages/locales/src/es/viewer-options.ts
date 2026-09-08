@@ -25,6 +25,18 @@ export const translations = {
 	'pptx.options.general.userName': 'Nombre de usuario',
 	'pptx.options.general.userInitials': 'Iniciales',
 	'pptx.options.general.appearance': 'Tema del visor',
+	'pptx.options.general.fonts': 'Fuentes',
+	'pptx.options.general.fontsDescription':
+		'Las presentaciones a veces usan fuentes que no están instaladas en su dispositivo, y el visor las sustituye por la más parecida disponible. Añadir el archivo de fuente hace que la presentación se muestre con la fuente con la que se creó.',
+	'pptx.options.general.enableCustomFonts': 'Permitirme añadir archivos de fuente a esta sesión',
+	'pptx.options.general.enableCustomFontsInfo':
+		'Las fuentes añadidas se usan para la representación y aparecen en la lista de fuentes de la pestaña Inicio. Solo se mantienen en memoria, nunca se cargan ni se guardan en la presentación, y se descartan al recargar la página.',
+	'pptx.options.general.addFontFile': 'Añadir archivo de fuente',
+	'pptx.options.general.customFontsAdded': 'Fuentes añadidas en esta sesión',
+	'pptx.options.general.customFontsEmpty': 'Aún no se han añadido fuentes.',
+	'pptx.options.general.customFontsDisabled':
+		'Active la opción anterior para añadir un archivo de fuente.',
+	'pptx.options.general.customFontError': 'No se pudo leer ese archivo como una fuente.',
 	'pptx.options.general.startup': 'Opciones de inicio',
 	'pptx.options.general.showStartScreen':
 		'Mostrar la pantalla Inicio cuando se inicie esta aplicación',
@@ -64,12 +76,6 @@ export const translations = {
 	'pptx.options.save.minutes': 'minutos',
 	'pptx.options.save.keepLastAutoRecovered':
 		'Conservar la última versión autorrecuperada cuando cierro sin guardar',
-	'pptx.options.save.fidelity': 'Mantener la fidelidad al compartir esta presentación',
-	'pptx.options.save.embedFonts': 'Incrustar fuentes en el archivo',
-	'pptx.options.save.embedFontsInfo':
-		'Incrustar fuentes aumenta el tamaño del archivo, pero mantiene el texto idéntico en otros dispositivos.',
-	'pptx.options.save.embedAllCharacters':
-		'Incrustar todos los caracteres (adecuado para que lo modifiquen otras personas)',
 	'pptx.options.save.cache': 'Configuración de la caché',
 	'pptx.options.save.cacheRetentionDays':
 		'Días para mantener los archivos en la caché de documentos local',
@@ -122,6 +128,10 @@ export const translations = {
 	'pptx.options.advanced.recentCount': 'Mostrar este número de presentaciones recientes',
 	'pptx.options.advanced.disableHardwareAcceleration':
 		'Deshabilitar la aceleración gráfica de hardware',
+	'pptx.options.advanced.disable3DRendering':
+		'Deshabilitar el renderizado 3D (para el rendimiento)',
+	'pptx.options.advanced.disable3DRenderingInfo':
+		'Obliga a cada gráfico 3D y escena de SmartArt a usar el renderizado 2D plano, incluso en una presentación que habilita 3D. Actívelo si las escenas 3D van lentas en este dispositivo.',
 	'pptx.options.advanced.openDocumentsView': 'Abrir todos los documentos con esta vista',
 	'pptx.options.openView.savedView': 'La vista guardada en el archivo',
 	'pptx.options.openView.normal': 'Normal',

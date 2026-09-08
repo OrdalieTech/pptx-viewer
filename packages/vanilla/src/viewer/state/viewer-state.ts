@@ -2,6 +2,7 @@ import type {
 	MasterViewTab,
 	ParsedTableStyleMap,
 	PptxAppProperties,
+	PptxCommentAuthor,
 	PptxCoreProperties,
 	PptxCustomProperty,
 	PptxCustomShow,
@@ -9,28 +10,41 @@ import type {
 	PptxElement,
 	PptxHandoutMaster,
 	PptxHeaderFooter,
+	PptxModernCommentAuthor,
+	PptxModifyVerifier,
 	PptxNotesMaster,
 	PptxPresentationProperties,
 	PptxSection,
 	PptxSlideMaster,
 	PptxSlide,
+	PptxTagCollection,
 	PptxThemeColorScheme,
 	PptxThemeFontScheme,
 	PptxThemeOption,
+	PptxViewProperties,
 } from 'pptx-viewer-core';
 import type {
 	CanvasSize,
+	CompatibilityWarningToast,
 	ElementClipboardPayload,
 	InlineTextSelection,
 	Guide,
+	ModifyPasswordCheckResult,
+	ReadOnlyRecommendation,
 	RemoteCursor,
 	SanitizedPresence,
+	SlideSizeEmu,
 } from 'pptx-viewer-shared';
 import {
 	DEFAULT_CANVAS_HEIGHT,
 	DEFAULT_CANVAS_WIDTH,
 	DEFAULT_STROKE_COLOR,
 } from 'pptx-viewer-shared';
+
+import type { ChartPartSelection } from '../render';
+
+/** Why the last password attempt failed; see `checkModifyPassword` (`pptx-viewer-shared`). */
+export type ModifyPasswordErrorReason = Extract<ModifyPasswordCheckResult, { ok: false }>['reason'];
 
 /** `zoom` is either an explicit scale factor (1 = 100%) or fit-to-viewport. */
 export type ZoomLevel = number | 'fit';
@@ -41,7 +55,7 @@ export type ZoomLevel = number | 'fit';
  * routes stage pointer events to the ink-drawing gesture controller instead
  * (see `editor-draw-gestures.ts`).
  */
-export type DrawTool = 'select' | 'pen' | 'highlighter' | 'eraser';
+export type DrawTool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'freeform';
 
 /**
  * The vanilla viewer's reactive view state. Kept intentionally flat and small;
@@ -53,15 +67,56 @@ export interface ViewerState {
 	/** Presentation sections used to group slides in the thumbnail rail. */
 	sections: PptxSection[];
 	presentationProperties: PptxPresentationProperties;
+	/**
+	 * View properties (`ppt/viewProps.xml`, `p:viewPr`): grid spacing, snap /
+	 * guide toggles, last view, splitter state, etc. `gridSpacing` lives here,
+	 * NOT on `presentationProperties` -- `p:gridSpacing` is a child of
+	 * `p:viewPr`, and a real PowerPoint file never populates it under
+	 * `p:presentationPr`.
+	 */
+	viewProperties: PptxViewProperties | undefined;
 	headerFooter: PptxHeaderFooter;
 	coreProperties?: PptxCoreProperties;
 	appProperties?: PptxAppProperties;
 	customProperties: PptxCustomProperty[];
 	customShows: PptxCustomShow[];
+	/** Office 2021 (p188) comment authors, for the `@`-mention typeahead. */
+	modernCommentAuthors: PptxModernCommentAuthor[];
+	/** Legacy `ppt/commentAuthors.xml` authors, mapped into the typeahead too. */
+	commentAuthors: PptxCommentAuthor[];
+	/**
+	 * The custom show a started slide show is restricted to, or null for the
+	 * whole deck. Custom shows were definable here but nothing could select one,
+	 * so picking a show had no effect on what actually presented; this is the
+	 * state the show-order rule needs to honour membership (React, Vue and
+	 * Angular each hold the same id).
+	 */
+	activeCustomShowId: string | null;
 	embeddedFonts: PptxEmbeddedFont[];
+	/**
+	 * File > Fonts > "Embed fonts in the file". Read by the save path, which
+	 * hands it to the shared `embeddedFontSaveOptions`: off passes
+	 * `embeddedFontList: null` and strips `p:embeddedFontLst`, the `/font`
+	 * relationships and the `.fntdata` parts, while on leaves core's lossless
+	 * re-embed alone. Seeded per load from {@link embeddedFonts} (see
+	 * `describeFontEmbedding`), because a deck that arrived with embedded fonts
+	 * keeps them on save and the switch has to say so. It used to be a private
+	 * field on `PptxViewer` that nothing downstream read, so moving it produced a
+	 * byte-identical file.
+	 */
+	embedFonts: boolean;
 	hasDigitalSignatures: boolean;
 	digitalSignatureCount: number;
 	isPasswordProtected: boolean;
+	/**
+	 * The File > Info > Protect Presentation secret, or null when the deck saves
+	 * in the clear. Read by the save path and handed to the shared
+	 * `planDeckSave`, which routes a protected save through `saveEncrypted` so
+	 * the produced file is an encrypted OLE2 container, not a plain ZIP.
+	 * Deliberately separate from {@link isPasswordProtected}, which the LOAD
+	 * pipeline also sets for a deck that merely arrived protected.
+	 */
+	presentationPassword: string | null;
 	/** Inherited layout/master elements, separated so interaction can be gated. */
 	templateElementsBySlideId: Record<string, PptxElement[]>;
 	/** Parsed slide masters and layouts used by the dedicated master canvas. */
@@ -83,14 +138,45 @@ export interface ViewerState {
 	masterViewTarget: { masterIndex: number; layoutIndex: number | null } | null;
 	/** Slide canvas size in CSS pixels. */
 	canvasSize: CanvasSize;
+	/**
+	 * The deck's `p:sldSz` in EMU, seeded from the parse and re-written by the
+	 * inspector's Slide Size preset / orientation controls.
+	 *
+	 * Held alongside {@link canvasSize} rather than derived from it because the
+	 * pixel size is lossy: Ledger is 12179300 EMU (1278.5px), so a round-trip
+	 * through an integer pixel would move it 6350 EMU and cost the deck its
+	 * `ppSlideSizeLedgerPaper` identity. `resolveSlideSizeSelection` decides
+	 * which of the two wins at save time.
+	 */
+	slideSize?: SlideSizeEmu;
 	/** Archive-path to displayable URL map for media + poster frames. */
 	mediaDataUrls: Map<string, string>;
 	/** Presentation theme colours used by scheme-based rendering. */
 	colorScheme?: PptxThemeColorScheme;
 	/** Presentation theme fonts used by table-style font resolution. */
 	fontScheme?: PptxThemeFontScheme;
+	/** The loaded theme's name (inspector THEME EDITOR card). */
+	themeName?: string;
+	/**
+	 * Families the user registered from a local font file this session
+	 * (File > Options > Fonts, off by default).
+	 *
+	 * Session state, never persisted and never written into the deck: the font
+	 * binary is the user's, not ours to store.
+	 */
+	customFontFamilies: string[];
+	/** Tag collections parsed from `ppt/tags/*.xml` (inspector TAGS card). */
+	tagCollections: PptxTagCollection[];
 	/** Parsed presentation table styles keyed by style id. */
 	tableStyleMap?: ParsedTableStyleMap;
+	/** `ppt/tableStyles.xml`'s `<a:tblStyleLst @def>` default style GUID. */
+	tableStylesDefaultId?: string;
+	/**
+	 * Style GUIDs deleted from `tableStyleMap` via the table style editor,
+	 * pending removal from `ppt/tableStyles.xml` on the next save. See
+	 * `tableStyleSaveOptions` / `applyTableStyleDelete` in `pptx-viewer-shared`.
+	 */
+	tableStylesToDelete: string[];
 	/** Zero-based index of the visible slide. */
 	currentSlide: number;
 	/** Requested zoom (explicit factor or fit-to-viewport). */
@@ -108,8 +194,20 @@ export interface ViewerState {
 	 * kept painting its last slide looked stuck and swallowed every advance.
 	 */
 	endOfShow: boolean;
+	/**
+	 * True for a single render pass when the show stepped BACKWARD onto the
+	 * current slide, so its builds are seeded already-complete (PowerPoint).
+	 */
+	enteringBackward?: boolean;
 	/** True when editing interactions (select/move/resize/...) are enabled. */
 	editable: boolean;
+	/**
+	 * True while a freshly-opened deck is held read-only by Trust Center >
+	 * "Open documents in Protected View" (see `shouldOpenInProtectedView`).
+	 * While set, `editable` is forced off regardless of the host's own
+	 * `editable` option; the "Enable Editing" banner clears it for the session.
+	 */
+	protectedView: boolean;
 	/** Id of the selected element on the current slide, or null. */
 	selectedElementId: string | null;
 	/** All selected top-level element ids; the primary selection is listed last. */
@@ -120,6 +218,12 @@ export interface ViewerState {
 	selectedTableCells: Array<{ row: number; column: number }>;
 	/** Active rich-text range captured from the inline editor. */
 	selectedTextRange: InlineTextSelection | null;
+	/**
+	 * On-canvas chart part selection (a clicked bar/dot/slice/series line),
+	 * surfaced to the chart inspector's data grid + point-index picker. Cleared
+	 * whenever the general element selection changes (see `selectionState`).
+	 */
+	chartPartSelection: ChartPartSelection | null;
 	/** Source element id while the one-shot Format Painter is armed. */
 	formatPainterSourceId: string | null;
 	/** When true, selection and element mutations target inherited template elements. */
@@ -156,9 +260,56 @@ export interface ViewerState {
 	showRulers: boolean;
 	snapToGrid: boolean;
 	snapToShape: boolean;
+	/**
+	 * Whether the drawing guides are painted on the stage (View > Guides).
+	 *
+	 * Visibility only: `guides` keeps the full list either way, so hiding them
+	 * neither drops a guide from the saved deck nor stops a drag snapping to
+	 * one. Guide visibility and shape snapping are separate settings and each
+	 * has its own View-tab control.
+	 */
+	showGuides: boolean;
 	guides: Guide[];
 	eyedropperActive: boolean;
 	spellCheckEnabled: boolean;
+	/**
+	 * Whether the loaded deck recommends opening read-only (`p:modifyVerifier`
+	 * or `docProps/custom.xml`'s "Mark as Final"), and why; null when it does
+	 * not. See `readOnlyRecommendation` in `pptx-viewer-shared`. Reset on every
+	 * load.
+	 */
+	readOnlyRecommendation: ReadOnlyRecommendation | null;
+	/**
+	 * Whether the read-only recommendation banner has been closed for this
+	 * load, by either "Edit anyway" or the plain dismiss button. Independent
+	 * from whether editing is actually locked: "Dismiss" hides the banner but
+	 * keeps the lock, only "Edit anyway" lifts it too.
+	 */
+	readOnlyBannerDismissed: boolean;
+	/**
+	 * The loaded deck's raw `p:modifyVerifier`, kept alongside
+	 * {@link readOnlyRecommendation} so `submitReadOnlyPassword` can check a
+	 * candidate password against it (`checkModifyPassword`, `pptx-viewer-shared`).
+	 */
+	modifyVerifier?: PptxModifyVerifier;
+	/**
+	 * Whether the read-only recommendation banner's inline password prompt is
+	 * open (replaces "Edit anyway"/"Dismiss" while true). Only reachable when
+	 * `readOnlyRecommendation.requiresPassword` is set.
+	 */
+	readOnlyPasswordPromptOpen: boolean;
+	/** Reason the last password attempt failed, or null before any attempt / after success. */
+	readOnlyPasswordError: ModifyPasswordErrorReason | null;
+	/** True while a submitted password is being checked; disables the form. */
+	readOnlyCheckingPassword: boolean;
+	/**
+	 * Compatibility-warning toasts for the current load (deck-level
+	 * `data.warnings` concatenated with every slide's own `warnings`, deduped
+	 * by code through the shared `compatibilityWarningToasts`). Load
+	 * diagnostics, not auto-hiding; cleared on the next load. Dismissing a
+	 * toast (or all of them) removes it from this list.
+	 */
+	compatToasts: CompatibilityWarningToast[];
 }
 
 export function createInitialViewerState(): ViewerState {
@@ -166,15 +317,22 @@ export function createInitialViewerState(): ViewerState {
 		slides: [],
 		sections: [],
 		presentationProperties: {},
+		viewProperties: undefined,
 		headerFooter: {},
 		coreProperties: undefined,
 		appProperties: undefined,
 		customProperties: [],
 		customShows: [],
+		modernCommentAuthors: [],
+		commentAuthors: [],
+		activeCustomShowId: null,
 		embeddedFonts: [],
+		embedFonts: true,
+		customFontFamilies: [],
 		hasDigitalSignatures: false,
 		digitalSignatureCount: 0,
 		isPasswordProtected: false,
+		presentationPassword: null,
 		templateElementsBySlideId: {},
 		slideMasters: [],
 		themeOptions: [],
@@ -186,22 +344,30 @@ export function createInitialViewerState(): ViewerState {
 		handoutSlidesPerPage: 4,
 		masterViewTarget: null,
 		canvasSize: { width: DEFAULT_CANVAS_WIDTH, height: DEFAULT_CANVAS_HEIGHT },
+		slideSize: undefined,
 		mediaDataUrls: new Map(),
 		colorScheme: undefined,
 		fontScheme: undefined,
+		themeName: undefined,
+		tagCollections: [],
 		tableStyleMap: undefined,
+		tableStylesDefaultId: undefined,
+		tableStylesToDelete: [],
 		currentSlide: 0,
 		zoom: 'fit',
 		loading: false,
 		error: null,
 		presenting: false,
 		endOfShow: false,
+		enteringBackward: false,
 		editable: false,
+		protectedView: false,
 		selectedElementId: null,
 		selectedElementIds: [],
 		selectedTableCell: null,
 		selectedTableCells: [],
 		selectedTextRange: null,
+		chartPartSelection: null,
 		formatPainterSourceId: null,
 		editTemplateMode: false,
 		dirty: false,
@@ -219,9 +385,17 @@ export function createInitialViewerState(): ViewerState {
 		showRulers: false,
 		snapToGrid: false,
 		snapToShape: true,
+		showGuides: true,
 		guides: [],
 		eyedropperActive: false,
 		spellCheckEnabled: false,
+		readOnlyRecommendation: null,
+		readOnlyBannerDismissed: false,
+		modifyVerifier: undefined,
+		readOnlyPasswordPromptOpen: false,
+		readOnlyPasswordError: null,
+		readOnlyCheckingPassword: false,
+		compatToasts: [],
 	};
 }
 

@@ -7,10 +7,12 @@ import {
 	alignElements,
 	bringForward,
 	bringToFront,
+	canInteractWithElement,
 	distributeElements,
 	groupElements,
 	sendBackward,
 	sendToBack,
+	ungroupElements,
 } from 'pptx-viewer-shared';
 import type { AlignEdge, DistributeAxis } from 'pptx-viewer-shared';
 
@@ -62,6 +64,13 @@ export function useGroupAlignLayerHandlers(input: GroupAlignLayerInput): GroupAl
 		if (ids.length < 2 || !activeSlide) {
 			return;
 		}
+		// G10: `a:spLocks/@noGrouping` "SHALL be rejected" for the whole grouping
+		// attempt when it involves a locked shape, not just that one shape - so
+		// this rejects the command outright rather than silently grouping the
+		// rest, mirroring PowerPoint's own refusal.
+		if (!selectedElements.every((el) => canInteractWithElement(el, 'group'))) {
+			return;
+		}
 		// Group within whichever store is being edited (template store while
 		// edit-template mode is on, otherwise slide.elements).
 		const { elements, groupId } = groupElements(ops.activeElements, ids, generateElementId());
@@ -77,18 +86,31 @@ export function useGroupAlignLayerHandlers(input: GroupAlignLayerInput): GroupAl
 		if (!selectedElement || selectedElement.type !== 'group' || !activeSlide) {
 			return;
 		}
+		// G10: `a:grpSpLocks/@noGrouping` forbids ungrouping this specific group.
+		if (!canInteractWithElement(selectedElement, 'group')) {
+			return;
+		}
 		const group = selectedElement as GroupPptxElement;
 		const intoTemplate = isTemplateElementId(group.id);
-		const ungrouped: PptxElement[] = group.children.map((child) => ({
-			...structuredClone(child),
-			// Keep child ids in the same store as the group so later edits route
-			// correctly: template groups yield template-prefixed child ids.
-			id: intoTemplate ? makeCloneId(true, child.id || group.id) : child.id || generateElementId(),
-			x: child.x + group.x,
-			y: child.y + group.y,
-		}));
-		ops.updateActiveElements((els) => [...els.filter((el) => el.id !== group.id), ...ungrouped]);
-		setSelectedElementIds(ungrouped.map((el) => el.id));
+		// Keep child ids in the same store as the group so later edits route
+		// correctly: template groups yield template-prefixed child ids. The
+		// shared op does the same for a promoted NESTED group's descendants, and
+		// splices the children in where the group stood instead of appending
+		// them (which reordered the slide's paint order behind the user's back).
+		const childIds = group.children.map((child) =>
+			intoTemplate ? makeCloneId(true, child.id || group.id) : child.id || generateElementId(),
+		);
+		const { elements, childIds: usedIds } = ungroupElements(
+			ops.activeElements,
+			group.id,
+			childIds,
+			{ intoTemplate },
+		);
+		if (usedIds.length === 0) {
+			return;
+		}
+		ops.updateActiveElements(() => elements);
+		setSelectedElementIds(usedIds);
 		history.markDirty();
 	};
 
@@ -147,6 +169,12 @@ export function useGroupAlignLayerHandlers(input: GroupAlignLayerInput): GroupAl
 
 	const canDistribute = selectedElements.length >= 3;
 
+	// G10: drives the ribbon's Group button disabled state, mirroring the same
+	// `a:spLocks/@noGrp` guard `handleGroupElements` enforces on the command
+	// itself, so a locked selection reads as disabled instead of a click that
+	// silently does nothing.
+	const selectionGroupable = selectedElements.every((el) => canInteractWithElement(el, 'group'));
+
 	const handleMoveLayer = (direction: string) => {
 		if (!selectedElement || !activeSlide) {
 			return;
@@ -190,6 +218,7 @@ export function useGroupAlignLayerHandlers(input: GroupAlignLayerInput): GroupAl
 		handleAlignElements,
 		handleDistributeElements,
 		canDistribute,
+		selectionGroupable,
 		handleMoveLayer,
 		handleMoveLayerToEdge,
 		handleMergeShapes,

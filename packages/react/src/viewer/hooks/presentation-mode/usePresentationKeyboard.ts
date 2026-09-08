@@ -1,8 +1,16 @@
 import type { PresentationPointerTool } from 'pptx-viewer-shared';
-import { createPresentationKeyBuffer, mapPresentationKey } from 'pptx-viewer-shared';
+import {
+	createPresentationKeyBuffer,
+	firstShowSlideIndex,
+	lastShowSlideIndex,
+	createWheelStepBuffer,
+	mapPresentationKey,
+	mapPresentationWheel,
+} from 'pptx-viewer-shared';
 import { useEffect, useRef } from 'react';
 
 import type { ViewerMode } from '../../types';
+import { acceptsPresentationInput } from './audience-content-store';
 
 // ---------------------------------------------------------------------------
 // Sub-hook interface
@@ -13,8 +21,15 @@ export interface UsePresentationKeyboardInput {
 	movePresentationSlide: (direction: 1 | -1) => void;
 	/** Jump to a 0-based slide index (Home / End / typed slide number). */
 	navigateToSlide: (index: number) => void;
-	/** Total slide count, so End can resolve the last slide. */
+	/** Total slide count, bounding the typed "slide number + Enter" jump. */
 	slideCount: number;
+	/**
+	 * Deck indexes the show visits, in show order (hidden slides removed).
+	 * Home / End land on the show's first / last slide, so a deck whose first
+	 * or last slide is hidden does not open one on a key PowerPoint treats as
+	 * "go to the start / end of the show".
+	 */
+	showSlideIndexes: number[];
 	onSetMode: (mode: ViewerMode) => void;
 	/** Select a pointer tool (Ctrl+L / Ctrl+P / Ctrl+A / Ctrl+E). */
 	onSetPointerTool?: (tool: PresentationPointerTool | 'arrow') => void;
@@ -26,6 +41,8 @@ export interface UsePresentationKeyboardInput {
 	onToggleToolbar?: () => void;
 	/** Open the All Slides navigator (Ctrl+S). */
 	onShowAllSlides?: () => void;
+	/** Show or hide live captions (J). */
+	onToggleSubtitles?: () => void;
 	onToggleBlackScreen?: () => void;
 	onToggleWhiteScreen?: () => void;
 	rehearsing: boolean;
@@ -45,17 +62,21 @@ export interface UsePresentationKeyboardInput {
  * resolves the same chords; this hook only performs the resulting actions.
  */
 export function usePresentationKeyboard(input: UsePresentationKeyboardInput): void {
+	// Partial wheel charge, so one trackpad flick is one slide step.
+	const wheelBufferRef = useRef(createWheelStepBuffer());
 	const {
 		mode,
 		movePresentationSlide,
 		navigateToSlide,
 		slideCount,
+		showSlideIndexes,
 		onSetMode,
 		onSetPointerTool,
 		onEraseAnnotations,
 		onToggleInkMarkup,
 		onToggleToolbar,
 		onShowAllSlides,
+		onToggleSubtitles,
 		onToggleBlackScreen,
 		onToggleWhiteScreen,
 		rehearsing,
@@ -68,7 +89,10 @@ export function usePresentationKeyboard(input: UsePresentationKeyboardInput): vo
 	const keyBufferRef = useRef(createPresentationKeyBuffer());
 
 	useEffect(() => {
-		if (mode !== 'present') {
+		// An audience display mirrors the presenter's screen. If its own keyboard
+		// navigated, a stray key moved it off the presenter's slide and the next
+		// snapshot yanked it back, which reads as the display refusing to advance.
+		if (mode !== 'present' || !acceptsPresentationInput()) {
 			keyBufferRef.current = createPresentationKeyBuffer();
 			return;
 		}
@@ -95,14 +119,20 @@ export function usePresentationKeyboard(input: UsePresentationKeyboardInput): vo
 				case 'previous':
 					movePresentationSlide(-1);
 					return;
-				case 'first':
-					navigateToSlide(0);
+				case 'first': {
+					const first = firstShowSlideIndex(showSlideIndexes);
+					navigateToSlide(first ?? 0);
 					return;
-				case 'last':
-					navigateToSlide(Math.max(0, slideCount - 1));
+				}
+				case 'last': {
+					const last = lastShowSlideIndex(showSlideIndexes);
+					navigateToSlide(last ?? Math.max(0, slideCount - 1));
 					return;
+				}
 				case 'goto': {
-					// Typed numbers are 1-based; ignore anything past the deck.
+					// Typed numbers are 1-based and bounded by the DECK, not the show:
+					// PowerPoint reaches a hidden slide this way on purpose, which is
+					// how a presenter pulls up a backup slide mid-show.
 					const index = mapped.slideNumber - 1;
 					if (index >= 0 && index < slideCount) {
 						navigateToSlide(index);
@@ -124,6 +154,9 @@ export function usePresentationKeyboard(input: UsePresentationKeyboardInput): vo
 				case 'showAllSlides':
 					onShowAllSlides?.();
 					return;
+				case 'toggleSubtitles':
+					onToggleSubtitles?.();
+					return;
 				case 'toggleBlackScreen':
 					onToggleBlackScreen?.();
 					return;
@@ -137,21 +170,41 @@ export function usePresentationKeyboard(input: UsePresentationKeyboardInput): vo
 			}
 		};
 
+		// PowerPoint navigates a running show on the wheel: down advances, up goes
+		// back. The step buffer keeps one trackpad flick to one slide.
+		const handleWheel = (event: WheelEvent): void => {
+			if (mode !== 'present' || !acceptsPresentationInput()) {
+				return;
+			}
+			const mapped = mapPresentationWheel(event, wheelBufferRef.current);
+			if (mapped.intent === 'next-slide') {
+				event.preventDefault();
+				movePresentationSlide(1);
+			} else if (mapped.intent === 'previous-slide') {
+				event.preventDefault();
+				movePresentationSlide(-1);
+			}
+		};
+
 		window.addEventListener('keydown', handleKeyDown);
+		window.addEventListener('wheel', handleWheel, { passive: false });
 		return () => {
 			window.removeEventListener('keydown', handleKeyDown);
+			window.removeEventListener('wheel', handleWheel);
 		};
 	}, [
 		mode,
 		movePresentationSlide,
 		navigateToSlide,
 		slideCount,
+		showSlideIndexes,
 		onSetMode,
 		onSetPointerTool,
 		onEraseAnnotations,
 		onToggleInkMarkup,
 		onToggleToolbar,
 		onShowAllSlides,
+		onToggleSubtitles,
 		onToggleBlackScreen,
 		onToggleWhiteScreen,
 		rehearsing,

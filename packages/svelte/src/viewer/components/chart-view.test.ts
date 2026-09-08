@@ -105,8 +105,10 @@ describe('chartView', () => {
 		expect(texts).toContain('Q3');
 		// Value-axis tick labels (0..max) are present.
 		expect(texts).toContain('0');
-		// Gridlines: 6 ticks for the value axis.
-		expect(svg.querySelectorAll('line').length).toBeGreaterThanOrEqual(6);
+		// Gridlines: one per major unit of the automatic scale, which rounds the
+		// bounds out to round numbers rather than dividing the span into a fixed
+		// count (see `chart-axis-nice.ts` in `pptx-viewer-shared`).
+		expect(svg.querySelectorAll('line').length).toBeGreaterThanOrEqual(4);
 		// Legend: one group per series with a swatch and the series name.
 		const legendItems = svg.querySelectorAll('g.pptx-svelte-chart-legend-item');
 		expect(legendItems).toHaveLength(2);
@@ -138,7 +140,9 @@ describe('chartView', () => {
 	it('renders a labelled placeholder for charts without data', () => {
 		const target = mountEl(buildChartElement(undefined));
 		expect(target.querySelector('svg')).toBeNull();
-		expect(target.textContent).toContain('Chart: bar');
+		// The chart kind is spelled through `pptx.chart.type*`, not printed as the
+		// raw OOXML token: a placeholder reading "Chart: bar" was untranslatable.
+		expect(target.textContent).toContain('Chart: Bar');
 	});
 
 	it('colours untagged series from an explicit parsed palette', () => {
@@ -152,5 +156,28 @@ describe('chartView', () => {
 
 	it('falls back to the style-id palette when no palette is parsed', () => {
 		expect(resolveChartPalette(barChartData()).length).toBeGreaterThan(0);
+	});
+
+	/**
+	 * A choropleth patch carries no label of its own, so the shared descriptor's
+	 * per-region `title` is BOTH its hover tooltip and its accessible name.
+	 * Svelte projected every other field of the path primitive and dropped that
+	 * one, so a region map announced nothing at all.
+	 */
+	it('projects each region path title as an SVG <title> child', () => {
+		const svg = renderChartSvg({
+			chartType: 'regionMap',
+			title: 'Revenue by country',
+			categories: ['France', 'Germany', 'Spain'],
+			series: [{ name: 'Revenue', values: [12, 34, 21] }],
+			style: { hasTitle: true },
+		});
+
+		const titles = [...svg.querySelectorAll('path > title')].map((node) => node.textContent ?? '');
+		expect(titles.length).toBeGreaterThan(1);
+		// The matched regions name themselves AND report their value.
+		expect(titles.some((text) => text.startsWith('France:'))).toBeTruthy();
+		// An unmatched region still names itself, without a value.
+		expect(titles.some((text) => !text.includes(':'))).toBeTruthy();
 	});
 });

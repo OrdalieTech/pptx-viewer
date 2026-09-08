@@ -15,9 +15,16 @@
  */
 
 import { inject, Injectable, signal } from '@angular/core';
-import type { InkPptxElement, PptxSlide, PptxTableData, TextStyle } from 'pptx-viewer-core';
+import type {
+	InkPptxElement,
+	PptxElement,
+	PptxSlide,
+	PptxTableData,
+	TextStyle,
+} from 'pptx-viewer-core';
+import { hasTextProperties } from 'pptx-viewer-core';
 
-import { publishLiveInlineText } from '../internal/shared';
+import { buildInlineTextCommitPatch, publishLiveInlineText } from '../internal/shared';
 import { CollaborationService } from './collaboration.service';
 import { EditorStateService } from './editor-state.service';
 import { textStylePatch } from './inspector-helpers';
@@ -25,12 +32,15 @@ import { setCellText } from './table-data-helpers';
 import type { TableCellCommit } from './table-renderer.component';
 import { ViewerDialogsService } from './viewer-dialogs.service';
 import { ViewerFormatPainterService } from './viewer-format-painter.service';
+import { ViewerOptionsService } from './viewer-options.service';
 
 /** Live host accessors the canvas-editing controller needs. */
 interface CanvasEditingHost {
 	readonly canEdit: () => boolean;
 	readonly activeSlide: () => PptxSlide | undefined;
 	readonly activeSlideIndex: () => number;
+	/** Inherited template (master/layout) elements for the active slide, when editTemplateMode is on. */
+	readonly activeTemplateElements: () => readonly PptxElement[];
 }
 
 @Injectable()
@@ -39,6 +49,8 @@ export class ViewerCanvasEditingService {
 	private readonly dialogs = inject(ViewerDialogsService);
 	private readonly formatPainter = inject(ViewerFormatPainterService);
 	private readonly collab = inject(CollaborationService);
+	/** Options > Proofing > AutoCorrect, applied to committed inline-edit text. */
+	private readonly viewerOpts = inject(ViewerOptionsService, { optional: true });
 
 	/** Id of the element being inline text-edited, or null. */
 	readonly editingId = signal<string | null>(null);
@@ -60,12 +72,24 @@ export class ViewerCanvasEditingService {
 	}
 
 	/**
+	 * Find an element by id on the active slide or, when editTemplateMode has
+	 * it inline-editable, in the separate inherited-template layer (layout-
+	 * / master- prefixed ids never appear in `activeSlide().elements`).
+	 */
+	private findElement(host: CanvasEditingHost, id: string): PptxElement | undefined {
+		return (
+			host.activeSlide()?.elements.find((el) => el.id === id) ??
+			host.activeTemplateElements().find((el) => el.id === id)
+		);
+	}
+
+	/**
 	 * Double-click text edit entry: equations open the equation editor instead
 	 * of the inline text editor (mirrors React's dbl-click-to-edit-equation).
 	 */
 	onTextEditStart(id: string): void {
 		const host = this.requireHost();
-		const element = host.activeSlide()?.elements.find((el) => el.id === id);
+		const element = this.findElement(host, id);
 		const segments = element && 'textSegments' in element ? element.textSegments : undefined;
 		const equation = segments?.find((segment) => segment.equationXml);
 		if (host.canEdit() && equation?.equationXml) {
@@ -81,7 +105,7 @@ export class ViewerCanvasEditingService {
 		if (!host.canEdit()) {
 			return;
 		}
-		const element = host.activeSlide()?.elements.find((el) => el.id === event.id);
+		const element = this.findElement(host, event.id);
 		if (!element) {
 			return;
 		}
@@ -107,15 +131,47 @@ export class ViewerCanvasEditingService {
 		);
 	}
 
-	/** Commit an inline text edit: replace the element's text (one history entry). */
-	onTextCommit(event: { id: string; text: string }): void {
+	/** Commit an inline text edit without flattening its rich-text runs. */
+	onTextCommit(event: {
+		id: string;
+		text: string;
+		height?: number;
+		autoFitFontScale?: number;
+		autoFitLineSpacingReduction?: number;
+	}): void {
 		const host = this.requireHost();
 		// Push any queued interim frame out first so it cannot land after the
 		// committed text and revert it.
 		this.collab.livePatcher.flush();
+		const element = this.findElement(host, event.id);
+		const textPatch = buildInlineTextCommitPatch(element, event.text);
+		const hasShrink = event.autoFitFontScale !== undefined;
+		if (!textPatch && event.height === undefined && !hasShrink) {
+			this.editingId.set(null);
+			return;
+		}
+		// Built by hand rather than through `textStylePatch` (which only accepts
+		// the ribbon/inspector's `TextStyleChanges`, not the autofit-only fields
+		// this editor-commit path writes).
+		const shrinkPatch: Partial<PptxElement> =
+			hasShrink && element && hasTextProperties(element)
+				? ({
+						textStyle: {
+							...element.textStyle,
+							autoFitFontScale: event.autoFitFontScale,
+							autoFitLineSpacingReduction: event.autoFitLineSpacingReduction,
+						},
+					} as Partial<PptxElement>)
+				: {};
 		this.editor.updateElement(host.activeSlideIndex(), event.id, {
-			text: event.text,
-			textSegments: [],
+			...textPatch,
+			// `a:spAutoFit`: the shape's new height, already decided by
+			// `slide-canvas.component.ts`'s `commitText` (it holds the live
+			// editor DOM node this needs to measure).
+			...(event.height !== undefined ? { height: event.height } : {}),
+			// `a:normAutofit`: the recomputed font scale/line-spacing reduction,
+			// same source.
+			...shrinkPatch,
 		});
 		this.editingId.set(null);
 	}
@@ -216,6 +272,24 @@ export class ViewerCanvasEditingService {
 	}
 
 	/**
+	 * Commit a selection-pane inline rename through the history-integrated
+	 * update path.
+	 *
+	 * The name is never `undefined`. The save writer reads `undefined` as "the
+	 * model has no opinion" and skips `cNvPr/@name` entirely, which is what
+	 * stops a plain round-trip from wiping the names of chart / SmartArt /
+	 * graphic frames that parse without one - and which also meant a cleared
+	 * box did nothing at all. `@name` is required on
+	 * `CT_NonVisualDrawingProps`, so it is never dropped; a clear arrives here
+	 * as `''` and is written as `name=""`.
+	 */
+	onSelectionPaneRename(event: { id: string; name: string }): void {
+		this.editor.updateElement(this.requireHost().activeSlideIndex(), event.id, {
+			name: event.name,
+		});
+	}
+
+	/**
 	 * Commit a table cell's inline text edit. Finds the table element on the
 	 * active slide, rebuilds its `tableData` with the new cell text, and patches
 	 * it through the editor (which records undo history).
@@ -229,12 +303,10 @@ export class ViewerCanvasEditingService {
 		if (!el || el.type !== 'table') {
 			return;
 		}
-		const updated = setCellText(
-			el,
-			event.commit.rowIndex,
-			event.commit.colIndex,
-			event.commit.text,
-		);
+		const text = this.viewerOpts
+			? this.viewerOpts.autoCorrect(event.commit.text)
+			: event.commit.text;
+		const updated = setCellText(el, event.commit.rowIndex, event.commit.colIndex, text);
 		this.editor.updateElement(host.activeSlideIndex(), event.id, {
 			tableData: updated.tableData,
 		});

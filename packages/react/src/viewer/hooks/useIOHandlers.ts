@@ -14,6 +14,7 @@ import { usePrintHandlers } from './usePrintHandlers';
 import type { PrintHandlersResult } from './usePrintHandlers';
 import { usePropertyHandlers } from './usePropertyHandlers';
 import type { PropertyHandlersResult } from './usePropertyHandlers';
+import type { SerializeSlides } from './useSerialize';
 import { useThemeHandlers } from './useThemeHandlers';
 import type { ThemeHandlersResult } from './useThemeHandlers';
 import type { ViewerState } from './useViewerState';
@@ -34,10 +35,21 @@ export interface UseIOHandlersInput {
 		canvasStageRef: React.RefObject<HTMLDivElement | null>;
 	};
 	handlerRef: React.RefObject<PptxHandler | null>;
-	serializeSlides: () => Promise<Uint8Array | null>;
+	/**
+	 * The one user-facing serialiser (`useSerialize`). Save As passes it the
+	 * output format, so the downloaded file carries every save option Save does.
+	 */
+	serializeSlides: SerializeSlides;
+	/**
+	 * Plaintext serialisation for bytes the viewer feeds straight back into its
+	 * own loader. "Apply theme" does exactly that, and the loader has no password
+	 * to offer, so it must never receive an encrypted package.
+	 */
+	serializeForRecovery: () => Promise<Uint8Array | null>;
 	setContent: React.Dispatch<React.SetStateAction<ArrayBuffer | Uint8Array | null>>;
 	onContentChange: ((content: Uint8Array) => void) | undefined;
-	password?: string;
+	/** File > Options > Advanced > "Image Size and Quality" raster-scale multiplier. */
+	imageExportScale?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,9 +79,10 @@ export function useIOHandlers(input: UseIOHandlersInput): IOHandlersResult {
 		zoom,
 		handlerRef,
 		serializeSlides,
+		serializeForRecovery,
 		setContent,
 		onContentChange,
-		password,
+		imageExportScale,
 	} = input;
 
 	const exportHandlers = useExportHandlers({
@@ -80,21 +93,21 @@ export function useIOHandlers(input: UseIOHandlersInput): IOHandlersResult {
 		filePath,
 		canvasStageRef: zoom.canvasStageRef,
 		setActiveSlideIndex: state.setActiveSlideIndex,
-		handlerRef,
 		serializeSlides,
-		headerFooter: state.headerFooter as unknown as Record<string, unknown>,
-		presentationProperties: state.presentationProperties as unknown as Record<string, unknown>,
+		headerFooter: state.headerFooter,
+		presentationProperties: state.presentationProperties,
 		customShows: state.customShows,
 		sections: state.sections,
-		coreProperties: (state.coreProperties ?? null) as Record<string, unknown> | null,
-		appProperties: (state.appProperties ?? null) as Record<string, unknown> | null,
-		customProperties: state.customProperties as unknown as Array<Record<string, unknown>>,
-		tagCollections: state.tagCollections as unknown as Array<Record<string, unknown>>,
-		notesMaster: state.notesMaster as unknown as Record<string, unknown> | undefined,
-		handoutMaster: state.handoutMaster as unknown as Record<string, unknown> | undefined,
-		guides: state.guides,
-		activeSlideIndexForGuides: state.activeSlideIndex,
-		password,
+		coreProperties: state.coreProperties,
+		appProperties: state.appProperties,
+		customProperties: state.customProperties,
+		tagCollections: state.tagCollections,
+		notesMaster: state.notesMaster,
+		handoutMaster: state.handoutMaster,
+		theme: state.theme,
+		canvasSize,
+		slideSizeEmu: state.slideSizeEmu,
+		imageExportScale,
 	});
 
 	const printHandlers = usePrintHandlers({
@@ -106,7 +119,9 @@ export function useIOHandlers(input: UseIOHandlersInput): IOHandlersResult {
 
 	const themeHandlers = useThemeHandlers({
 		handlerRef,
-		serializeSlides,
+		// Theme apply re-serialises and re-parses through `setContent`, so these
+		// bytes go back into our own loader: plaintext, never the protected save.
+		serializeSlides: serializeForRecovery,
 		setContent,
 		onContentChange,
 		setTheme: state.setTheme as unknown as React.Dispatch<
@@ -118,6 +133,8 @@ export function useIOHandlers(input: UseIOHandlersInput): IOHandlersResult {
 		slideMasters: state.slideMasters as unknown as Array<Record<string, unknown>>,
 		history,
 		setSlides: state.setSlides,
+		templateElementsBySlideId: state.templateElementsBySlideId,
+		setTemplateElementsBySlideId: state.setTemplateElementsBySlideId,
 		theme: state.theme,
 		bumpHistory: () => state.setPointerCommitNonce((n) => n + 1),
 	});

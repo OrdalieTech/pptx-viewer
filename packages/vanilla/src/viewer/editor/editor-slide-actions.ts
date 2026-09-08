@@ -1,6 +1,17 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per action, each computed from the
+   previous statement's result); merging them isn't a style choice here. */
 import { cloneElement, cloneSlide } from 'pptx-viewer-core';
 import type { PptxHandler, PptxSlide } from 'pptx-viewer-core';
-import { createBlankSlide, makeSlideId } from 'pptx-viewer-shared';
+import {
+	buildSlideTemplateSlide,
+	createBlankSlide,
+	makeSlideId,
+	partitionTemplateElements,
+	resetSlideLayoutPath,
+	templateSchemeFromTheme,
+} from 'pptx-viewer-shared';
+import type { SlideTemplateId } from 'pptx-viewer-shared';
 
 import type { Store, ViewerState } from '../state';
 import type { EditorOps } from './editor-operations';
@@ -24,6 +35,10 @@ export interface SlideActions {
 	deleteSlide(): void;
 	/** Insert a new slide below the current one, keyed to the given layout. */
 	insertSlideFromLayout(layoutPath: string, layoutName?: string): void;
+	/** Insert a pre-designed starter slide from the shared template catalog. */
+	insertSlideFromTemplate(templateId: SlideTemplateId): void;
+	/** Resolved deck theme scheme map for template builds and gallery previews. */
+	getTemplateScheme(): Record<string, string>;
 	/** Re-key the current slide onto another layout (React's Layout button). */
 	applyLayout(layoutPath: string): void;
 	/** Reset the current slide to its own layout's defaults (React's Reset). */
@@ -60,9 +75,20 @@ export function createSlideActions(deps: SlideActionsDeps): SlideActions {
 				const current = store.get();
 				if (current.slides[index]?.id === expectedId) {
 					ops.pushHistory();
+					// Core returns the slide with the TARGET layout's inherited artwork
+					// merged in, which this viewer holds in its own store; partitioning
+					// the result again swaps that artwork over instead of leaving the
+					// previous layout's decoration on screen.
+					const partition = partitionTemplateElements([updated]);
 					const slides = [...current.slides];
-					slides[index] = updated;
-					store.set({ slides });
+					slides[index] = partition.slides[0]!;
+					store.set({
+						slides,
+						templateElementsBySlideId: {
+							...current.templateElementsBySlideId,
+							[updated.id]: partition.templateElementsBySlideId[updated.id] ?? [],
+						},
+					});
 					ops.commitChange();
 				}
 				return undefined;
@@ -173,6 +199,36 @@ export function createSlideActions(deps: SlideActionsDeps): SlideActions {
 			resolveLayout(insertAt, layoutPath, draft.id);
 		},
 
+		insertSlideFromTemplate(templateId) {
+			const state = store.get();
+			if (!state.editable) {
+				return;
+			}
+			ops.pushHistory();
+			const insertAt = state.currentSlide + 1;
+			const slide = buildSlideTemplateSlide(templateId, makeSlideId(), insertAt + 1, {
+				slideWidth: state.canvasSize.width,
+				slideHeight: state.canvasSize.height,
+				scheme: templateSchemeFromTheme(state.colorScheme),
+			});
+			const slides = renumber([
+				...state.slides.slice(0, insertAt),
+				slide,
+				...state.slides.slice(insertAt),
+			]);
+			store.set({
+				slides,
+				currentSlide: insertAt,
+				selectedElementId: null,
+				selectedElementIds: [],
+			});
+			ops.commitChange();
+		},
+
+		getTemplateScheme() {
+			return templateSchemeFromTheme(store.get().colorScheme);
+		},
+
 		applyLayout(layoutPath) {
 			const state = store.get();
 			const target = state.slides[state.currentSlide];
@@ -185,10 +241,15 @@ export function createSlideActions(deps: SlideActionsDeps): SlideActions {
 		resetSlide() {
 			const state = store.get();
 			const target = state.slides[state.currentSlide];
-			if (!state.editable || !target?.layoutPath) {
+			// The layout-path decision itself comes from the shared
+			// `resetSlideLayoutPath` function (React/Vue/Angular parity); this
+			// keeps the extra `editable` gate the ribbon button's own disabled
+			// state already relies on.
+			const path = resetSlideLayoutPath(target);
+			if (!state.editable || !target || !path) {
 				return;
 			}
-			resolveLayout(state.currentSlide, target.layoutPath, target.id);
+			resolveLayout(state.currentSlide, path, target.id);
 		},
 	};
 }

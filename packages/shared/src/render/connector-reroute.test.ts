@@ -7,6 +7,7 @@ import {
 	computeConnectorGeometry,
 	applyReroutedConnectors,
 	getShapeConnectionSites,
+	getUnrotatedShapeConnectionSites,
 } from './connector-reroute';
 
 // ---------------------------------------------------------------------------
@@ -69,14 +70,14 @@ describe('rerouteConnectorsForMovedElements', () => {
 			makeShape('s2', 200, 0, 100, 100),
 			makeConnector('c1', 50, 0, 150, 50, 's1', 0, 's2', 0),
 		];
-		// Move s3 which doesn't exist — no connectors reference it
+		// Move s3 which doesn't exist: no connectors reference it
 		const result = rerouteConnectorsForMovedElements(elements, new Set(['s3']));
 		expect(result).toStrictEqual([]);
 	});
 
 	it('reroutes connector when start shape is moved', () => {
-		// Shape s1 at (100, 100), 200x100 — site 0 (top center) = (200, 100)
-		// Shape s2 at (400, 300), 200x100 — site 2 (bottom center) = (500, 400)
+		// Shape s1 at (100, 100), 200x100: site 0 (top center) = (200, 100)
+		// Shape s2 at (400, 300), 200x100: site 2 (bottom center) = (500, 400)
 		const elements = [
 			makeShape('s1', 100, 100, 200, 100),
 			makeShape('s2', 400, 300, 200, 100),
@@ -96,12 +97,12 @@ describe('rerouteConnectorsForMovedElements', () => {
 	});
 
 	it('reroutes connector when end shape is moved', () => {
-		// s1 at (0,0), 100x100, site 1 (right center) = (100, 50)
-		// s2 moved to (300, 200), 100x100, site 3 (left center) = (300, 250)
+		// s1 at (0,0), 100x100, site 3 (right center) = (100, 50)
+		// s2 moved to (300, 200), 100x100, site 1 (left center) = (300, 250)
 		const elements = [
 			makeShape('s1', 0, 0, 100, 100),
 			makeShape('s2', 300, 200, 100, 100),
-			makeConnector('c1', 100, 50, 200, 200, 's1', 1, 's2', 3),
+			makeConnector('c1', 100, 50, 200, 200, 's1', 3, 's2', 1),
 		];
 
 		const result = rerouteConnectorsForMovedElements(elements, new Set(['s2']));
@@ -153,7 +154,7 @@ describe('rerouteConnectorsForMovedElements', () => {
 		const result = rerouteConnectorsForMovedElements(elements, new Set(['s1']));
 		expect(result).toHaveLength(1);
 		// s1 site 0 (top center) = (0+100, 0+0) = (100, 0)
-		// No end connection — use existing: (100+200, 0+200) = (300, 200)
+		// No end connection: use existing: (100+200, 0+200) = (300, 200)
 		expect(result[0].x).toBe(100);
 		expect(result[0].y).toBe(0);
 		expect(result[0].width).toBe(200);
@@ -169,7 +170,7 @@ describe('rerouteConnectorsForMovedElements', () => {
 
 		const result = rerouteConnectorsForMovedElements(elements, new Set(['s2']));
 		expect(result).toHaveLength(1);
-		// No start connection — use existing: (50, 50)
+		// No start connection: use existing: (50, 50)
 		// s2 site 2 (bottom center) = (300+100, 300+100) = (400, 400)
 		expect(result[0].x).toBe(50);
 		expect(result[0].y).toBe(50);
@@ -243,7 +244,7 @@ describe('rerouteConnectorsForMovedElements', () => {
 			makeConnector('c_bc', 0, 0, 10, 10, 'b', 1, 'c', 3),
 		];
 
-		// Move shape b — both connectors reference it
+		// Move shape b: both connectors reference it
 		const result = rerouteConnectorsForMovedElements(elements, new Set(['b']));
 		expect(result).toHaveLength(2);
 		expect(result.map((r) => r.id).sort()).toStrictEqual(['c_ab', 'c_bc']);
@@ -262,7 +263,7 @@ describe('rerouteConnectorsForMovedElements', () => {
 			elements.push(makeConnector(`c${i}`, 0, 0, 10, 10, `s${i}`, 1, `s${i + 1}`, 3));
 		}
 
-		// Move shape s0 — should affect only c0
+		// Move shape s0: should affect only c0
 		const result = rerouteConnectorsForMovedElements(elements, new Set(['s0']));
 		expect(result).toHaveLength(1);
 		expect(result[0].id).toBe('c0');
@@ -312,8 +313,8 @@ describe('computeConnectorGeometry', () => {
 
 		const result = computeConnectorGeometry(
 			connector,
-			{ shapeId: 's1', connectionSiteIndex: 1 }, // right center = (100, 50)
-			{ shapeId: 's2', connectionSiteIndex: 3 }, // left center = (200, 250)
+			{ shapeId: 's1', connectionSiteIndex: 3 }, // right center = (100, 50)
+			{ shapeId: 's2', connectionSiteIndex: 1 }, // left center = (200, 250)
 			elementMap,
 		);
 		expect(result).not.toBeNull();
@@ -556,7 +557,7 @@ describe('computeConnectorGeometry', () => {
 
 		const result = computeConnectorGeometry(
 			connector,
-			{ shapeId: 's1', connectionSiteIndex: 1 }, // right center = (100, 50)
+			{ shapeId: 's1', connectionSiteIndex: 3 }, // right center = (100, 50)
 			{ connectionSiteIndex: 0 }, // no shapeId
 			elementMap,
 		);
@@ -590,7 +591,7 @@ describe('computeConnectorGeometry', () => {
 		expect(r0!.width).toBe(250);
 		expect(r0!.height).toBe(200);
 
-		// Site 1: right center = (100+300, 200+200) = (400, 400)
+		// Site 1: left center = (100+0, 200+200) = (100, 400)
 		const r1 = computeConnectorGeometry(
 			connector,
 			{ shapeId: 's', connectionSiteIndex: 1 },
@@ -600,7 +601,7 @@ describe('computeConnectorGeometry', () => {
 		expect(r1).not.toBeNull();
 		expect(r1!.x).toBe(0);
 		expect(r1!.y).toBe(0);
-		expect(r1!.width).toBe(400);
+		expect(r1!.width).toBe(100);
 		expect(r1!.height).toBe(400);
 
 		// Site 2: bottom center = (100+150, 200+400) = (250, 600)
@@ -616,7 +617,7 @@ describe('computeConnectorGeometry', () => {
 		expect(r2!.width).toBe(250);
 		expect(r2!.height).toBe(600);
 
-		// Site 3: left center = (100+0, 200+200) = (100, 400)
+		// Site 3: right center = (100+300, 200+200) = (400, 400)
 		const r3 = computeConnectorGeometry(
 			connector,
 			{ shapeId: 's', connectionSiteIndex: 3 },
@@ -626,7 +627,7 @@ describe('computeConnectorGeometry', () => {
 		expect(r3).not.toBeNull();
 		expect(r3!.x).toBe(0);
 		expect(r3!.y).toBe(0);
-		expect(r3!.width).toBe(100);
+		expect(r3!.width).toBe(400);
 		expect(r3!.height).toBe(400);
 	});
 
@@ -663,8 +664,8 @@ describe('computeConnectorGeometry', () => {
 
 		const result = computeConnectorGeometry(
 			connector,
-			{ shapeId: 's1', connectionSiteIndex: 1 }, // right center: (150000, 215000)
-			{ shapeId: 's2', connectionSiteIndex: 3 }, // left center: (300000, 415000)
+			{ shapeId: 's1', connectionSiteIndex: 3 }, // right center: (150000, 215000)
+			{ shapeId: 's2', connectionSiteIndex: 1 }, // left center: (300000, 415000)
 			elementMap,
 		);
 		expect(result).not.toBeNull();
@@ -786,9 +787,9 @@ describe('integration: reroute and apply', () => {
 			500,
 			300,
 			'a',
-			1, // right center
+			3, // right center
 			'b',
-			3, // left center
+			1, // left center
 		);
 
 		const elements = [shapeA, shapeB, connector];
@@ -821,9 +822,9 @@ describe('integration: reroute and apply', () => {
 			10,
 			10,
 			'a',
-			1, // right center: (300, 200)
+			3, // right center: (300, 200)
 			'b',
-			1, // right center: (300, 200) — same
+			3, // right center: (300, 200): same
 		);
 
 		const elements = [shapeA, shapeB, connector];
@@ -867,12 +868,12 @@ describe('integration: reroute and apply', () => {
 		const b = makeShape('b', 200, 0, 100, 100);
 		const c = makeShape('c', 400, 0, 100, 100);
 
-		const cAB = makeConnector('c_ab', 0, 0, 10, 10, 'a', 1, 'b', 3);
-		const cBC = makeConnector('c_bc', 0, 0, 10, 10, 'b', 1, 'c', 3);
+		const cAB = makeConnector('c_ab', 0, 0, 10, 10, 'a', 3, 'b', 1);
+		const cBC = makeConnector('c_bc', 0, 0, 10, 10, 'b', 3, 'c', 1);
 
 		const elements = [a, b, c, cAB, cBC];
 
-		// Move shape b — both connectors should reroute
+		// Move shape b: both connectors should reroute
 		const rerouted = rerouteConnectorsForMovedElements(elements, new Set(['b']));
 		expect(rerouted).toHaveLength(2);
 
@@ -900,7 +901,7 @@ describe('integration: reroute and apply', () => {
 // Issue #93: flip-flag recompute after endpoint reversal
 // ---------------------------------------------------------------------------
 
-describe('computeConnectorGeometry — flip recompute (issue #93)', () => {
+describe('computeConnectorGeometry: flip recompute (issue #93)', () => {
 	it('leaves flip flags false when the start is above-left of the end', () => {
 		const s1 = makeShape('s1', 0, 0, 100, 100);
 		const s2 = makeShape('s2', 400, 400, 100, 100);
@@ -977,7 +978,7 @@ describe('getShapeConnectionSites (issue #93)', () => {
 	it('falls back to four edge midpoints for shapes without custom sites', () => {
 		const sites = getShapeConnectionSites(makeShape('s', 0, 0, 200, 100));
 		expect(sites).toHaveLength(4);
-		expect(sites[1]).toStrictEqual({ x: 200, y: 50, index: 1 });
+		expect(sites[1]).toStrictEqual({ x: 0, y: 50, index: 1 });
 	});
 
 	it('derives scaled sites from the shape custom-geometry a:cxnLst', () => {
@@ -1036,5 +1037,155 @@ describe('getShapeConnectionSites (issue #93)', () => {
 		expect(r.y).toBe(400);
 		expect(r.width).toBe(400); // |700-300|
 		expect(r.height).toBe(300); // |700-400|
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Rotated / flipped targets: a site lives on the shape as DRAWN, not on its
+// upright box. The reroute (and the site overlay) added the unrotated local
+// offset to the frame origin, so on a rotated shape the connector ended in
+// mid-air where the edge would have been had the shape been upright.
+// ---------------------------------------------------------------------------
+
+describe('connection sites on rotated and flipped shapes', () => {
+	function expectSite(site: { x: number; y: number }, x: number, y: number): void {
+		expect(site.x).toBeCloseTo(x, 6);
+		expect(site.y).toBeCloseTo(y, 6);
+	}
+
+	it('rotates the fallback edge midpoints about the frame centre', () => {
+		// 200x100 box rotated 90 degrees clockwise: the "top" midpoint (100, 0)
+		// swings to the right of the centre (100, 50), i.e. (150, 50).
+		const shape = { ...makeShape('s', 0, 0, 200, 100), rotation: 90 };
+		const sites = getShapeConnectionSites(shape);
+		expectSite(sites[0], 150, 50); // top -> right of centre
+		expectSite(sites[1], 100, -50); // left -> above centre
+		expectSite(sites[2], 50, 50); // bottom -> left of centre
+		expectSite(sites[3], 100, 150); // right -> below centre
+		expect(sites.map((site) => site.index)).toStrictEqual([0, 1, 2, 3]);
+	});
+
+	it('mirrors a site across the centre for flipH / flipV before rotating', () => {
+		const flipped = { ...makeShape('s', 0, 0, 200, 100), flipHorizontal: true };
+		expectSite(getShapeConnectionSites(flipped)[3], 0, 50); // right site now on the left
+
+		const both = {
+			...makeShape('s', 0, 0, 200, 100),
+			flipHorizontal: true,
+			flipVertical: true,
+			rotation: 180,
+		};
+		// A double flip is a 180-degree turn, which the rotation undoes again.
+		expectSite(getShapeConnectionSites(both)[0], 100, 0);
+	});
+
+	it('leaves an upright, unflipped shape untouched', () => {
+		expect(getShapeConnectionSites(makeShape('s', 0, 0, 200, 100))).toStrictEqual(
+			getUnrotatedShapeConnectionSites(makeShape('s', 0, 0, 200, 100)),
+		);
+	});
+
+	it('exposes the untransformed a:cxnLst sites separately', () => {
+		const shape = { ...makeShape('s', 0, 0, 200, 100), rotation: 90 };
+		expect(getUnrotatedShapeConnectionSites(shape)[0]).toStrictEqual({ x: 100, y: 0, index: 0 });
+	});
+
+	it('reroutes a connector to the rotated site, not the upright one', () => {
+		// Target at (300, 400), 200x100, rotated 90 degrees. Its site 0 ("top")
+		// is at frame-local (150, 50), so on the slide at (450, 450); the upright
+		// reading would have put it at (400, 400).
+		const target = { ...makeShape('t', 300, 400, 200, 100), rotation: 90 };
+		const map = new Map<string, PptxElement>([['t', target]]);
+		const r = computeConnectorGeometry(
+			makeConnector('c', 100, 100, 0, 0),
+			undefined, // start = connector position (100, 100)
+			{ shapeId: 't', connectionSiteIndex: 0 },
+			map,
+		)!;
+		expect(r.x).toBe(100);
+		expect(r.y).toBe(100);
+		expect(r.width).toBeCloseTo(350, 6); // 450 - 100
+		expect(r.height).toBeCloseTo(350, 6); // 450 - 100
+	});
+
+	it('follows the rotated site through rerouteConnectorsForMovedElements', () => {
+		const start = makeShape('a', 0, 0, 100, 100);
+		const end = { ...makeShape('b', 500, 0, 100, 100), rotation: 180 };
+		const connector = makeConnector('c', 0, 0, 1, 1, 'a', 3, 'b', 1);
+		const [r] = rerouteConnectorsForMovedElements([start, end, connector], new Set(['b']));
+		// a: right site (100, 50). b rotated 180: its "left" site (0, 50) becomes
+		// (100, 50) in the frame, i.e. slide (600, 50), the far side of the box.
+		expect(r.x).toBe(100);
+		expect(r.width).toBeCloseTo(500, 6);
+		expect(r.flipHorizontal).toBeFalsy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Id spelling: `a:stCxn/@id` is the OOXML cNvPr id, not the model element id
+// ---------------------------------------------------------------------------
+
+describe('connector endpoints referenced by their OOXML id', () => {
+	/**
+	 * A connector parsed from a real `.pptx` stores `a:stCxn/@id` verbatim (the
+	 * target shape's `p:cNvPr/@id`, e.g. "2"), while the element it points at
+	 * carries a synthetic part-scoped `id` and keeps the raw id on `shapeId`.
+	 * A lookup keyed only on the model id therefore matched nothing, so a
+	 * connector authored in PowerPoint never followed its shape in any binding,
+	 * including the one that called this function.
+	 */
+	function parsedShape(
+		id: string,
+		shapeId: string,
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+	): PptxElement {
+		return { id, shapeId, type: 'shape', x, y, width, height } as PptxElement;
+	}
+
+	it('reroutes a connector whose stCxn/@id is the raw cNvPr id', () => {
+		const elements = [
+			parsedShape('ppt/slides/slide1.xml-shape-0', '2', 200, 0, 100, 100),
+			parsedShape('ppt/slides/slide1.xml-shape-1', '3', 0, 300, 100, 100),
+			// Endpoints spelled the OOXML way, as the parser produces them.
+			makeConnector('ppt/slides/slide1.xml-conn-0', 0, 0, 10, 10, '2', 2, '3', 0),
+		];
+
+		const rerouted = rerouteConnectorsForMovedElements(
+			elements,
+			new Set(['ppt/slides/slide1.xml-shape-0']),
+		);
+
+		expect(rerouted).toHaveLength(1);
+		// start = shape "2" bottom-center (250, 100); end = shape "3" top-center (50, 300).
+		expect(rerouted[0]).toMatchObject({
+			id: 'ppt/slides/slide1.xml-conn-0',
+			x: 50,
+			y: 100,
+			width: 200,
+			height: 200,
+		});
+	});
+
+	it('still reroutes when the moved id set itself uses the raw id', () => {
+		const elements = [
+			parsedShape('ppt/slides/slide1.xml-shape-0', '2', 200, 0, 100, 100),
+			makeConnector('ppt/slides/slide1.xml-conn-0', 0, 0, 10, 10, '2', 2),
+		];
+		expect(rerouteConnectorsForMovedElements(elements, new Set(['2']))).toHaveLength(1);
+	});
+
+	it('keeps preferring the model id when a raw id collides with one', () => {
+		// A deck whose shape "A" happens to carry the raw id of shape "B".
+		const collide = parsedShape('A', 'B', 0, 0, 100, 100);
+		const real = parsedShape('B', '9', 500, 500, 100, 100);
+		const elements = [collide, real, makeConnector('c', 0, 0, 10, 10, 'B', 0)];
+		const rerouted = rerouteConnectorsForMovedElements(elements, new Set(['B']));
+		// The connector's free end stays at (10, 10), so the box height reports
+		// which shape the start resolved to: 490 for "B" at y=500, 10 for "A" at
+		// y=0. The model id must win.
+		expect(rerouted[0].height).toBe(490);
 	});
 });

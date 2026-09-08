@@ -1,11 +1,20 @@
 import type {
+	ParsedTableStyleMap,
 	PptxAppProperties,
 	PptxCoreProperties,
 	PptxCustomProperty,
 	PptxPresentationProperties,
 	PptxThemeOption,
 } from 'pptx-viewer-core';
-import type { CanvasSize } from 'pptx-viewer-shared';
+import type { CanvasSize, SlideSizeEmu, SlideSizeRescaleMode } from 'pptx-viewer-shared';
+import {
+	applyTableStyleDelete,
+	applyTableStyleMapChange,
+	resolveSlideSizeSelection,
+	scaleSlidesForSizeChange,
+	slideSizeToCanvasPx,
+	tableStyleSaveOptions,
+} from 'pptx-viewer-shared';
 import { getContext, setContext } from 'svelte';
 
 import { createEditorSnapshot, saveEditorDocument } from '../editor/editor-document-state';
@@ -30,10 +39,25 @@ export interface InspectorDeckActions {
 	readonly canvasSize: CanvasSize;
 	/** Notes page size in px, when the package declares one. */
 	readonly notesCanvasSize: CanvasSize | undefined;
+	/** The deck's `p:sldSz` in EMU, which is what a save persists. */
+	readonly slideSize: SlideSizeEmu | undefined;
+	/** Whether any slide has at least one element; gates the Maximize/Ensure Fit rescale prompt. */
+	readonly hasContent: boolean;
 	/** Apply a packaged theme part by archive path (React's `handleApplyTheme`). */
 	applyThemeByPath(themePath: string, applyToAllMasters: boolean): void;
-	/** Resize the slide canvas (inspector SLIDE SIZE card). */
+	/** Resize the slide canvas (inspector SLIDE SIZE card's raw W/H inputs). */
 	updateCanvasSize(size: CanvasSize): void;
+	/**
+	 * Adopt an EMU slide size (a preset pick or an orientation flip). Writes the
+	 * EMU state AND the pixel canvas, so the stage resizes and the save keeps the
+	 * exact authored dimensions.
+	 *
+	 * `rescaleMode` is set only when the user confirmed the Maximize/Ensure Fit
+	 * prompt for a size change that affects existing content: the shared
+	 * `scaleSlidesForSizeChange` transform is applied to every slide as ONE
+	 * undo step together with the size change (`commitSlides`).
+	 */
+	updateSlideSize(size: SlideSizeEmu, rescaleMode?: SlideSizeRescaleMode): void;
 	/** Patch deck-wide slide-show / print settings (PRESENTATION card). */
 	updatePresentationProperties(patch: Partial<PptxPresentationProperties>): void;
 	/** Patch document core properties (Title / Author / ...). */
@@ -42,6 +66,25 @@ export interface InspectorDeckActions {
 	updateAppProperties(patch: Partial<PptxAppProperties>): void;
 	/** Replace the custom document-property list. */
 	updateCustomProperties(next: PptxCustomProperty[]): void;
+	/**
+	 * Set a layout/master's background colour (SLIDE BACKGROUND card's
+	 * template rows, shown while `editTemplateMode` is on). Master Views
+	 * covers the same ground but requires leaving the slide.
+	 */
+	setTemplateBackground(path: string, backgroundColor: string): void;
+	/** Read a layout/master's current background colour. */
+	getTemplateBackgroundColor(path: string): string | undefined;
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, for the table properties
+	 * panel's "Edit style...". Reached via `useInspectorDeck()` context rather
+	 * than prop-drilled, so `TableSection`/`TableStyleEditor` need no chain of
+	 * intermediate props through `InspectorPanel`'s ancestors.
+	 */
+	readonly tableStyleMap: ParsedTableStyleMap | undefined;
+	/** Commit a full replacement style map (section edit, create, or delete already applied). */
+	updateTableStyleMap(nextMap: ParsedTableStyleMap): void;
+	/** Record a styleId for save-time removal from `ppt/tableStyles.xml`. */
+	deleteTableStyle(styleId: string): void;
 }
 
 export interface InspectorDeckDeps {
@@ -65,10 +108,25 @@ export function createInspectorDeckActions(deps: InspectorDeckDeps): InspectorDe
 		if (!handler) {
 			return;
 		}
-		const bytes = await saveEditorDocument(handler, {
-			...createEditorSnapshot(editor),
-			slides: editor.renderedSlides,
-		});
+		const bytes = await saveEditorDocument(
+			handler,
+			{ ...createEditorSnapshot(editor), slides: editor.renderedSlides },
+			'pptx',
+			undefined,
+			editor.embedFonts,
+			// Without this the theme round-trip would reload the deck at its
+			// load-time `p:sldSz` and silently undo a slide-size pick.
+			resolveSlideSizeSelection({ current: loader.slideSize, canvas: loader.canvasSize }).size,
+			undefined,
+			// Without this the theme round-trip would reload the deck at its
+			// load-time `ppt/tableStyles.xml` and silently undo a pending
+			// table-style edit/delete.
+			tableStyleSaveOptions({
+				tableStyleMap: loader.tableStyleMap,
+				tableStylesDefaultId: loader.tableStylesDefaultId,
+				tableStylesToDelete: loader.tableStylesToDelete,
+			}),
+		);
 		await loader.load(bytes);
 	}
 
@@ -81,6 +139,12 @@ export function createInspectorDeckActions(deps: InspectorDeckDeps): InspectorDe
 		},
 		get notesCanvasSize(): CanvasSize | undefined {
 			return loader.notesCanvasSize;
+		},
+		get slideSize(): SlideSizeEmu | undefined {
+			return loader.slideSize;
+		},
+		get hasContent(): boolean {
+			return editor.slides.some((slide) => slide.elements.length > 0);
 		},
 		applyThemeByPath(themePath: string, applyToAllMasters: boolean): void {
 			const handler = loader.handler;
@@ -103,6 +167,26 @@ export function createInspectorDeckActions(deps: InspectorDeckDeps): InspectorDe
 				return;
 			}
 			loader.canvasSize = { width: Math.max(1, width), height: Math.max(1, height) };
+			editor.commitChange();
+		},
+		updateSlideSize(size: SlideSizeEmu, rescaleMode?: SlideSizeRescaleMode): void {
+			if (!Number.isFinite(size.widthEmu) || !Number.isFinite(size.heightEmu)) {
+				return;
+			}
+			if (size.widthEmu <= 0 || size.heightEmu <= 0) {
+				return;
+			}
+			if (rescaleMode) {
+				// Maximize/Ensure Fit: rescale every slide's content through the
+				// normal undoable path (one history entry), THEN apply the new size.
+				const oldSize = resolveSlideSizeSelection({
+					current: loader.slideSize,
+					canvas: loader.canvasSize,
+				}).size;
+				editor.commitSlides(scaleSlidesForSizeChange(editor.slides, oldSize, size, rescaleMode));
+			}
+			loader.slideSize = { ...size };
+			loader.canvasSize = slideSizeToCanvasPx(size);
 			editor.commitChange();
 		},
 		updatePresentationProperties(patch: Partial<PptxPresentationProperties>): void {
@@ -131,6 +215,41 @@ export function createInspectorDeckActions(deps: InspectorDeckDeps): InspectorDe
 				{ ...(editor.appProperties ?? {}) },
 				next,
 			);
+		},
+		setTemplateBackground(path: string, backgroundColor: string): void {
+			const handler = loader.handler;
+			if (!handler) {
+				return;
+			}
+			handler.setTemplateBackground(path, backgroundColor);
+			editor.slideMasters = editor.slideMasters.map((master) =>
+				master.path === path ? { ...master, backgroundColor } : master,
+			);
+			editor.commitChange();
+		},
+		getTemplateBackgroundColor(path: string): string | undefined {
+			return loader.handler?.getTemplateBackgroundColor(path);
+		},
+		get tableStyleMap(): ParsedTableStyleMap | undefined {
+			return loader.tableStyleMap;
+		},
+		updateTableStyleMap(nextMap: ParsedTableStyleMap): void {
+			const result = applyTableStyleMapChange(
+				{ tableStyleMap: loader.tableStyleMap, tableStylesToDelete: loader.tableStylesToDelete },
+				nextMap,
+			);
+			loader.tableStyleMap = result.tableStyleMap;
+			loader.tableStylesToDelete = result.tableStylesToDelete;
+			editor.commitChange();
+		},
+		deleteTableStyle(styleId: string): void {
+			const result = applyTableStyleDelete(
+				{ tableStyleMap: loader.tableStyleMap, tableStylesToDelete: loader.tableStylesToDelete },
+				styleId,
+			);
+			loader.tableStyleMap = result.tableStyleMap;
+			loader.tableStylesToDelete = result.tableStylesToDelete;
+			editor.commitChange();
 		},
 	};
 }

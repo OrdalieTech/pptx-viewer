@@ -1,4 +1,7 @@
-﻿/**
+﻿/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per test, several separated by
+   comments or guard clauses); merging them isn't a style choice here. */
+/**
  * Tests for table-renderer pure helpers.
  *
  * All assertions target functions exported from `table-renderer-helpers.ts`
@@ -6,7 +9,12 @@
  * compiler, which is not available in the plain vitest environment
  * (component/TestBed tests are a follow-up with @analogjs/vite-plugin-angular).
  */
-import type { PptxElement, PptxTableCell, PptxTableCellStyle } from 'pptx-viewer-core';
+import type {
+	PptxElement,
+	PptxTableCell,
+	PptxTableCellStyle,
+	TablePptxElement,
+} from 'pptx-viewer-core';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -51,16 +59,14 @@ function tableElement(
 		tableData: {
 			rows: rows.map((r) => ({
 				height: r.height,
-				cells: r.cells.map(
-					(c): PptxTableCell => ({
-						text: c.text ?? '',
-						style: c.style,
-						gridSpan: c.gridSpan,
-						rowSpan: c.rowSpan,
-						hMerge: c.hMerge,
-						vMerge: c.vMerge,
-					}),
-				),
+				cells: r.cells.map((c): PptxTableCell => ({
+					text: c.text ?? '',
+					style: c.style,
+					gridSpan: c.gridSpan,
+					rowSpan: c.rowSpan,
+					hMerge: c.hMerge,
+					vMerge: c.vMerge,
+				})),
 			})),
 			columnWidths: columnWidths ?? [],
 		},
@@ -118,7 +124,37 @@ describe('cellStyleToStyleMap', () => {
 		const map = cellStyleToStyleMap({ bold: true, italic: true, underline: true });
 		expect(map['font-weight']).toBe('bold');
 		expect(map['font-style']).toBe('italic');
-		expect(map['text-decoration']).toBe('underline');
+		// Shared emits the longhand `text-decoration-line` (which is what the
+		// other four bindings apply); the hand-ported copy this now delegates to
+		// emitted the shorthand.
+		expect(map['text-decoration-line']).toBe('underline');
+	});
+
+	// The four features the hand-ported copy had silently dropped. Each renders
+	// in the other four bindings via shared `cellStyleToCss`.
+	it('renders a preset pattern fill as a real tile, not a flat colour', () => {
+		const map = cellStyleToStyleMap({
+			fillMode: 'pattern',
+			patternFillPreset: 'ltHorz',
+			patternFillForeground: '#FF0000',
+			patternFillBackground: '#FFFFFF',
+		});
+		expect(map['background-image']).toContain('data:image/svg+xml');
+	});
+
+	it('centres the text block for anchorCtr', () => {
+		expect(cellStyleToStyleMap({ anchorCtr: true })['text-align']).toBe('center');
+		// An explicit paragraph alignment still wins.
+		expect(cellStyleToStyleMap({ anchorCtr: true, align: 'right' })['text-align']).toBe('right');
+	});
+
+	it('clips horizontal overflow', () => {
+		expect(cellStyleToStyleMap({ horzOverflow: 'clip' })['overflow-x']).toBe('hidden');
+	});
+
+	it('applies the a:cell3D bevel', () => {
+		const map = cellStyleToStyleMap({ cell3D: { bevelWidth: 6, bevelHeight: 6 } });
+		expect(map['box-shadow']).toContain('inset');
 	});
 
 	it('maps per-edge borders', () => {
@@ -395,6 +431,61 @@ describe('buildTableViewModel - cell fill color', () => {
 		expect(rows[0].cells[0].tdStyle['background']).toBe(gradient);
 		expect(rows[0].cells[0].tdStyle['background-color']).toBeUndefined();
 	});
+
+	it('renders a resolved cell image fill as a cover background', () => {
+		const el = tableElement([
+			{
+				cells: [
+					{
+						text: 'Photo',
+						style: {
+							fillMode: 'image',
+							backgroundImageFillData: 'data:image/png;base64,AAAA',
+						},
+					},
+				],
+			},
+		]);
+		const rows = buildTableViewModel(el);
+		expect(rows[0].cells[0].tdStyle['background-image']).toBe('url("data:image/png;base64,AAAA")');
+		expect(rows[0].cells[0].tdStyle['background-size']).toBe('cover');
+	});
+
+	it('renders no background-image for an unresolved raw archive path', () => {
+		const el = tableElement([
+			{
+				cells: [
+					{
+						text: 'Photo',
+						style: { fillMode: 'image', backgroundImageFillPath: 'ppt/media/image1.png' },
+					},
+				],
+			},
+		]);
+		const rows = buildTableViewModel(el);
+		expect(rows[0].cells[0].tdStyle['background-image']).toBeUndefined();
+	});
+});
+
+// ==========================================================================
+// buildTableViewModel: explicit zero cell margin (issue: table-cell fidelity)
+// ==========================================================================
+
+describe('buildTableViewModel - explicit zero cell margin', () => {
+	it('renders 0px padding for an explicit zero margin rather than the base default', () => {
+		// Angular's base padding (padding-left: '4px' etc., set before the
+		// computed cell CSS spreads over it) is exactly the kind of value a
+		// zero margin must be able to override; asserting the literal '0px'
+		// (not merely "not 4px") catches a binding clobbering it back.
+		const el = tableElement([
+			{
+				cells: [{ text: 'Dense', style: { marginLeft: 0, marginTop: 0 } }],
+			},
+		]);
+		const rows = buildTableViewModel(el);
+		expect(rows[0].cells[0].tdStyle['padding-left']).toBe('0px');
+		expect(rows[0].cells[0].tdStyle['padding-top']).toBe('0px');
+	});
 });
 
 // ==========================================================================
@@ -456,9 +547,9 @@ describe('buildTableViewModel - empty cell display text', () => {
 	it('uses non-breaking space for empty text to preserve row height', () => {
 		const el = tableElement([{ cells: [{ text: '' }] }]);
 		const rows = buildTableViewModel(el);
-		// ' ' (U+00A0) keeps the cell from collapsing; mirrors React's
-		// `cell.text || ' '` in table-render-data.tsx.
-		expect(rows[0].cells[0].displayText).toBe(' ');
+		// '\u00a0' (U+00A0) keeps the cell from collapsing; mirrors React's
+		// `cell.text || '\u00a0'` in table-render-data.tsx.
+		expect(rows[0].cells[0].displayText).toBe('\u00a0');
 	});
 });
 
@@ -487,9 +578,8 @@ describe('cellRunStyle', () => {
 		expect(cellRunStyle({ color: '#FF0000' })['color']).toBe('#FF0000');
 	});
 
-	it('maps fontSize to font-size in px', () => {
-		// PptxTableCellStyle.fontSize is already in px (converted from EMU by the parser).
-		expect(cellRunStyle({ fontSize: 14 })['font-size']).toBe('14px');
+	it('maps fractional cell font sizes to CSS points', () => {
+		expect(cellRunStyle({ fontSize: 14.5 })['font-size']).toBe('14.5pt');
 	});
 
 	it('does not include layout properties like background-color', () => {
@@ -556,6 +646,46 @@ describe('buildCellParagraphs', () => {
 		expect(paras[0][0].style['color']).toBe('#0000FF');
 	});
 
+	it('renders each parsed run as its own styled run', () => {
+		// Angular had the CellTextRun type and the per-run template branch, but
+		// its builder split `cell.text` and stamped ONE cell-level style over the
+		// whole cell, so a mixed-format cell came out uniform in the demo while
+		// the other four bindings painted it correctly.
+		const cell: PptxTableCell = {
+			text: 'Revenue grew 42%',
+			textRuns: [
+				{ text: 'Revenue ', fontSize: 12, fontFamily: 'Arial' },
+				{ text: 'grew 42%', bold: true, fontSize: 24, color: '#C00000', fontFamily: 'Georgia' },
+			],
+		};
+		const paras = buildCellParagraphs(cell);
+		expect(paras).toHaveLength(1);
+		expect(paras[0]).toHaveLength(2);
+		expect(paras[0][0].text).toBe('Revenue ');
+		expect(paras[0][0].style['font-weight']).toBeUndefined();
+		expect(paras[0][0].style['font-family']).toBe('Arial');
+		expect(paras[0][1].style['font-weight']).toBe('bold');
+		expect(paras[0][1].style['color']).toBe('#C00000');
+		expect(paras[0][1].style['font-family']).toBe('Georgia');
+		expect(paras[0][1].style['font-size']).toBe('24pt');
+	});
+
+	it('splits runs into paragraphs and keeps soft line breaks', () => {
+		const cell: PptxTableCell = {
+			text: 'a\nb',
+			textRuns: [
+				{ text: 'a' },
+				{ text: '', isLineBreak: true },
+				{ text: '', isParagraphBreak: true },
+				{ text: 'b' },
+			],
+		};
+		const paras = buildCellParagraphs(cell);
+		expect(paras).toHaveLength(2);
+		expect(paras[0][1].isLineBreak).toBeTruthy();
+		expect(paras[1][0].text).toBe('b');
+	});
+
 	it('cell with paragraph break (newline in text) produces two paragraphs', () => {
 		// The core parser joins paragraphs with \n in extractTableCellText.
 		const cell: PptxTableCell = { text: 'Line 1\nLine 2' };
@@ -609,7 +739,7 @@ describe('buildTableViewModel -- paragraphs field', () => {
 		const rows = buildTableViewModel(el);
 		expect(rows[0].cells[0].paragraphs).toHaveLength(0);
 		// displayText is the non-breaking-space fallback.
-		expect(rows[0].cells[0].displayText).toBe(' ');
+		expect(rows[0].cells[0].displayText).toBe('\u00a0');
 	});
 
 	it('styled cell preserves style on each paragraph run', () => {
@@ -671,5 +801,67 @@ describe('buildTableViewModel - diagonal borders', () => {
 			fontScheme: { majorFont: { latin: 'Calibri Light' }, minorFont: { latin: 'Calibri' } },
 		});
 		expect(rows[0].cells[0].diagonal?.diagDownColor).toBe('#0000FF');
+	});
+});
+
+// ==========================================================================
+// buildTableViewModel: the default cell text colour
+// ==========================================================================
+
+/** Turn on a `tableData` banding flag and hand the element straight back. */
+function withTableFlag(el: PptxElement, flag: 'firstRowHeader' | 'bandedRows'): PptxElement {
+	const tableData = (el as TablePptxElement).tableData;
+	if (tableData) {
+		tableData[flag] = true;
+	}
+	return el;
+}
+
+describe('buildTableViewModel - default cell text colour', () => {
+	/**
+	 * Angular was the only binding that set no `color` on a cell nothing had
+	 * given one. The `<td>` then inherited the viewer CHROME's `foreground`
+	 * (`#f0efec` on the dark theme preset, i.e. `rgb(240, 239, 236)`), so a
+	 * table on a light fill rendered near-white text on a near-white cell while
+	 * React, Vue, Svelte and Vanilla all floored it at the dark slide-text
+	 * colour. That value is the host UI's own token and has nothing to do with
+	 * the deck: PowerPoint resolves an uncoloured cell through the table style's
+	 * `a:tcTxStyle` and ultimately `tx1`, which is dark.
+	 */
+	it('floors an unstyled cell at the dark slide-text colour', () => {
+		const rows = buildTableViewModel(tableElement([{ cells: [{ text: 'A' }] }], [1]));
+		expect(rows[0].cells[0].tdStyle['color']).toBe('#111827');
+	});
+
+	it('lets the header band set the colour instead of the floor', () => {
+		const rows = buildTableViewModel(
+			withTableFlag(
+				tableElement([{ cells: [{ text: 'H' }] }, { cells: [{ text: 'A' }] }], [1]),
+				'firstRowHeader',
+			),
+		);
+		expect(rows[0].cells[0].tdStyle['color']).toBe('#ffffff');
+	});
+
+	it('lets an explicit cell colour beat the floor', () => {
+		const rows = buildTableViewModel(
+			tableElement([{ cells: [{ text: 'A', style: { color: '#ff0000' } }] }], [1]),
+		);
+		expect(rows[0].cells[0].tdStyle['color']).toBe('#ff0000');
+	});
+
+	it('bands alternate body rows of a programmatic table', () => {
+		const rows = buildTableViewModel(
+			withTableFlag(
+				tableElement(
+					[{ cells: [{ text: 'A' }] }, { cells: [{ text: 'B' }] }, { cells: [{ text: 'C' }] }],
+					[1],
+				),
+				'bandedRows',
+			),
+		);
+		expect(rows[0].cells[0].tdStyle['background-color']).not.toBe(
+			rows[1].cells[0].tdStyle['background-color'],
+		);
 	});
 });

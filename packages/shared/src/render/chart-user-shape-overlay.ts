@@ -8,17 +8,64 @@
  * `absSizeAnchor` extents are EMU converted to pixels. Rendered last so the
  * overlay sits above the data marks.
  *
+ * A `grpSp` entry (grouped annotation shapes with their own nested
+ * transform) is expanded into positioned leaves via core's
+ * `flattenChartUserShapes` before projecting, so this module never has to
+ * know about groups itself.
+ *
  * @module chart-user-shape-overlay
  */
 
 import type { PptxChartData } from 'pptx-viewer-core';
+import { flattenChartUserShapes } from 'pptx-viewer-core';
 
+import { DEFAULT_CHART_TEXT_PX, chartFontPx } from './chart-font';
 import type { SvgLine, SvgPolygon, SvgPrimitive, SvgText } from './chart-view-model';
 
-type UserShape = NonNullable<PptxChartData['userShapes']>[number];
+/** The raw, un-flattened overlay model as parsed/edited (may contain `grpSp` entries). */
+type RawUserShape = NonNullable<PptxChartData['userShapes']>[number];
+
+/** A leaf overlay shape (never `grpSp`), after `flattenChartUserShapes` applies any group transform. */
+type UserShape = ReturnType<typeof flattenChartUserShapes>[number];
 
 /** EMU per CSS pixel at 96 DPI, mirroring core's `EMU_PER_PIXEL`. */
 const EMU_PER_PIXEL = 9525;
+
+/**
+ * Build an SVG `transform` for a leaf's own composed rotation/flip (already
+ * resolved by core's `flattenChartUserShapes`: a group's rotation composed
+ * onto each contained leaf, added; flip, XORed), about the leaf's OWN box
+ * centre. Mirrors {@link https://ecma-international.org/ ECMA-376}'s "flip,
+ * then rotate, both about own centre" order (see
+ * `element-style-transform.ts`'s `getElementTransform` doc for the same
+ * convention applied as CSS elsewhere in this codebase): the flip
+ * (`translate` + `scale` + `translate` back) is placed AFTER `rotate` in the
+ * string so it applies FIRST (SVG, like CSS, applies a transform list
+ * right-to-left to a point). `undefined` when neither rotation nor flip is
+ * set, so an ordinary unrotated shape's markup is unchanged.
+ */
+function overlayTransform(
+	rotation: number | undefined,
+	flipH: boolean | undefined,
+	flipV: boolean | undefined,
+	box: { x: number; y: number; w: number; h: number },
+): string | undefined {
+	if (!rotation && !flipH && !flipV) {
+		return undefined;
+	}
+	const cx = box.x + box.w / 2;
+	const cy = box.y + box.h / 2;
+	const parts: string[] = [];
+	if (rotation) {
+		parts.push(`rotate(${rotation} ${cx} ${cy})`);
+	}
+	if (flipH || flipV) {
+		const sx = flipH ? -1 : 1;
+		const sy = flipV ? -1 : 1;
+		parts.push(`translate(${cx} ${cy}) scale(${sx} ${sy}) translate(${-cx} ${-cy})`);
+	}
+	return parts.join(' ');
+}
 
 /** Resolve the pixel bounding box of an anchored overlay shape. */
 function shapeBox(
@@ -37,20 +84,48 @@ function shapeBox(
 		};
 	}
 	const ext = shape.ext ?? { cx: 0, cy: 0 };
-	return { x, y, w: ext.cx / EMU_PER_PIXEL, h: ext.cy / EMU_PER_PIXEL };
+	// `buildChartUserShapeOverlay` always passes a `chartBox` to
+	// `flattenChartUserShapes`, so a group-nested leaf's offset is already
+	// folded into `from` and this is normally undefined; it is only set as a
+	// fallback for some other, chartBox-less caller of `flattenChartUserShapes`
+	// (see `absGroupOffsetEmu`'s doc), in which case it is an extra EMU
+	// position delta applied here in the same absolute-EMU-to-pixel unit
+	// `ext` already uses, not as a further fraction of `from`.
+	const offset = shape.absGroupOffsetEmu;
+	return {
+		x: x + (offset ? offset.x / EMU_PER_PIXEL : 0),
+		y: y + (offset ? offset.y / EMU_PER_PIXEL : 0),
+		w: ext.cx / EMU_PER_PIXEL,
+		h: ext.cy / EMU_PER_PIXEL,
+	};
 }
 
-/** Build the text primitives for a shape's paragraphs, stacked vertically. */
+/**
+ * Build the text primitives for a shape's paragraphs, stacked vertically.
+ * `rotation` (the shape's own composed spin, degrees) is applied to each
+ * line about the SHAPE's own box centre so the text rotates as one rigid
+ * unit with its box; flip is deliberately NOT applied to text (mirroring it
+ * would render backwards), matching how an ordinary rotated/flipped slide
+ * shape keeps its text upright via `element-style-transform.ts`'s
+ * `getTextCompensationTransform`.
+ */
 function textPrimitives(
 	shape: UserShape,
 	box: { x: number; y: number; w: number; h: number },
+	rotation: number | undefined,
 ): SvgText[] {
 	if (!shape.paragraphs || shape.paragraphs.length === 0) {
 		return [];
 	}
-	const lineH = 12;
+	// para.fontSize is parsed in POINTS (core's chart-user-shapes-parser); it
+	// crosses the pt -> px boundary here (see chart-font.ts).
+	const fontPxOf = (para: NonNullable<UserShape['paragraphs']>[number]): number =>
+		para.fontSize !== undefined ? chartFontPx(para.fontSize) : DEFAULT_CHART_TEXT_PX;
+	const lineH = Math.max(12, ...shape.paragraphs.map((para) => fontPxOf(para) * 1.2));
 	const totalH = shape.paragraphs.length * lineH;
 	let cursorY = box.y + Math.max((box.h - totalH) / 2, 0) + lineH * 0.75;
+	const cx = box.x + box.w / 2;
+	const cy = box.y + box.h / 2;
 	const out: SvgText[] = [];
 	for (const para of shape.paragraphs) {
 		if (para.text.length === 0) {
@@ -66,10 +141,11 @@ function textPrimitives(
 			x: tx,
 			y: cursorY,
 			text: para.text,
-			fontSize: para.fontSize ?? 9,
+			fontSize: fontPxOf(para),
 			fill: para.color ?? '#1e293b',
 			textAnchor: anchor,
 			fontWeight: para.bold ? 'bold' : 'normal',
+			...(rotation ? { transform: `rotate(${rotation} ${cx} ${cy})` } : {}),
 		});
 		cursorY += lineH;
 	}
@@ -79,6 +155,7 @@ function textPrimitives(
 /** Project a single overlay shape into its SVG primitives. */
 function projectShape(shape: UserShape, svgWidth: number, svgHeight: number): SvgPrimitive[] {
 	const box = shapeBox(shape, svgWidth, svgHeight);
+	const transform = overlayTransform(shape.rotation, shape.flipH, shape.flipV, box);
 	const primitives: SvgPrimitive[] = [];
 
 	if (shape.kind === 'cxnSp') {
@@ -91,6 +168,7 @@ function projectShape(shape: UserShape, svgWidth: number, svgHeight: number): Sv
 			y2: box.y + box.h,
 			stroke: shape.stroke ?? '#000000',
 			strokeWidth: shape.strokeWidth ?? 1,
+			...(transform ? { transform } : {}),
 		} satisfies SvgLine);
 		return primitives;
 	}
@@ -105,10 +183,11 @@ function projectShape(shape: UserShape, svgWidth: number, svgHeight: number): Sv
 			fill: shape.fill ?? 'none',
 			stroke: shape.stroke ?? 'none',
 			strokeWidth: shape.strokeWidth ?? (shape.stroke ? 1 : 0),
+			...(transform ? { transform } : {}),
 		} satisfies SvgPolygon);
 	}
 
-	primitives.push(...textPrimitives(shape, box));
+	primitives.push(...textPrimitives(shape, box, shape.rotation));
 	return primitives;
 }
 
@@ -121,12 +200,21 @@ function projectShape(shape: UserShape, svgWidth: number, svgHeight: number): Sv
  * @returns Overlay primitives, or an empty array when there are none.
  */
 export function buildChartUserShapeOverlay(
-	userShapes: ReadonlyArray<UserShape> | undefined,
+	userShapes: ReadonlyArray<RawUserShape> | undefined,
 	svgWidth: number,
 	svgHeight: number,
 ): SvgPrimitive[] {
 	if (!userShapes || userShapes.length === 0) {
 		return [];
 	}
-	return userShapes.flatMap((shape) => projectShape(shape, svgWidth, svgHeight));
+	// The chart's own rendered box, in EMU (matching the unit `ext` already
+	// uses): lets core resolve a top-level `relSizeAnchor` group's real
+	// (possibly non-square) rotation aspect and fold a grouped `absSizeAnchor`
+	// leaf's offset straight into `from`, instead of approximating both (see
+	// `ChartUserShapesChartBox`'s doc in `chart-user-shapes-parser.ts`).
+	const leaves = flattenChartUserShapes(userShapes, {
+		width: svgWidth * EMU_PER_PIXEL,
+		height: svgHeight * EMU_PER_PIXEL,
+	});
+	return leaves.flatMap((shape) => projectShape(shape, svgWidth, svgHeight));
 }

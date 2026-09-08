@@ -81,9 +81,14 @@ describe('slideInspector', () => {
 		expect(wrapper.text()).not.toContain('Tags');
 	});
 
-	it('no longer renders a Slide Transition section on the default tab', () => {
+	// This assertion used to be its own inverse: it pinned the SLIDE TRANSITION
+	// section as deliberately ABSENT, which is how a built-but-unmounted section
+	// survived long enough for Vue to end up with no transition-authoring path at
+	// all (the ribbon tab was inert at the same time). React, Angular, Svelte and
+	// Vanilla all render this card in their deck-properties pane.
+	it('renders the Slide Transition section on the default tab', () => {
 		const wrapper = mount(SlideInspector, { props: baseProps });
-		expect(wrapper.text()).not.toContain('Slide transition');
+		expect(wrapper.text()).toContain('Slide transition');
 	});
 
 	it('relays background edits as slide-update patches', async () => {
@@ -136,7 +141,7 @@ describe('slideInspector', () => {
 		await commentsTab!.trigger('click');
 		await wrapper.get('textarea').setValue('First!');
 		await wrapper.get('form').trigger('submit.prevent');
-		expect(wrapper.emitted('comment-add')?.[0]).toStrictEqual(['First!']);
+		expect(wrapper.emitted('comment-add')?.[0]).toStrictEqual([{ text: 'First!', mentions: [] }]);
 	});
 
 	it('emits close from the tab strip close button', async () => {

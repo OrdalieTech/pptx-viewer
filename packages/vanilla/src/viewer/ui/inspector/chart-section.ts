@@ -1,25 +1,38 @@
-import type { PptxChartData, PptxChartType } from 'pptx-viewer-core';
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (an imperative DOM-builder with many independent `const`s), not one
+   statement */
+import type { PptxChartData } from 'pptx-viewer-core';
+import type { ChartTypeSelectValue } from 'pptx-viewer-shared';
+import {
+	CHART_GROUPING_LABEL_KEYS,
+	CHART_TYPE_LABEL_KEYS,
+	CHART_TYPE_OPTIONS,
+	collapseChartTitleRunsForEdit,
+	patchChartData as sharedPatchChartData,
+	resolveDisplayedChartType,
+} from 'pptx-viewer-shared';
 
 import type { Translator } from '../../i18n';
 import { createChartAdvancedSection } from './chart-advanced-section';
+import { createChartDataGrid } from './chart-data-grid';
+import { tokenSelect } from './chart-exhaustive-controls';
 import { createChartExhaustiveSection } from './chart-exhaustive-section';
+import { createChartPointIndexField } from './chart-point-index';
+import { createChartSubtypeSection } from './chart-subtype-section';
+import { createChartUserShapeSection } from './chart-user-shape-section';
 import type { InspectorHandlers, InspectorState } from './types';
 
-const CHART_TYPES: readonly PptxChartType[] = [
-	'bar',
-	'line',
-	'pie',
-	'doughnut',
-	'area',
-	'scatter',
-	'bubble',
-	'radar',
-	'waterfall',
-	'funnel',
-	'treemap',
-	'sunburst',
-	'combo',
-];
+/**
+ * Derived from the same `CHART_TYPE_OPTIONS` catalogue Vue and Angular's
+ * chart-type selects consume (React re-exports it too), rather than a
+ * hand-spelled copy: this list used to omit histogram, boxWhisker and
+ * regionMap, and separately drifted ahead of the other three bindings by
+ * hand-adding funnel/treemap/sunburst.
+ */
+const CHART_TYPES: readonly ChartTypeSelectValue[] = CHART_TYPE_OPTIONS.map((opt) => opt.value);
+
+/** `c:grouping` modes offered alongside the type, exactly as React offers them. */
+const GROUPINGS: readonly string[] = ['clustered', 'stacked', 'percentStacked'];
 
 export function createChartSection(
 	doc: Document,
@@ -29,30 +42,76 @@ export function createChartSection(
 ) {
 	const el = section(t('pptx.chart.data'));
 	const title = input(doc, 'text', t('pptx.chart.title'));
-	const chartType = doc.createElement('select');
-	for (const value of CHART_TYPES) {
-		addOption(doc, chartType, value);
-	}
-	const grouping = doc.createElement('select');
-	for (const value of ['clustered', 'stacked', 'percentStacked']) {
-		addOption(doc, grouping, value);
-	}
-	const categories = textarea(doc, t('pptx.chart.categories'));
-	const series = textarea(doc, t('pptx.chart.series'));
-	const legend = checkbox(doc, t('pptx.chart.legend'));
+	// Both selects used to be bare, unlabelled `<select>`s whose options were the
+	// raw schema tokens (`percentStacked`, `doughnut`). React labels the same two
+	// with `pptx.chart.type` / `pptx.chart.grouping` and spells the options from
+	// the shared catalogues, so the value lists stay put and only the wording and
+	// the accessible name change.
+	const chartType = tokenSelect(doc, t('pptx.chart.type'), CHART_TYPES, CHART_TYPE_LABEL_KEYS, t);
+	const grouping = tokenSelect(
+		doc,
+		t('pptx.chart.grouping'),
+		GROUPINGS,
+		CHART_GROUPING_LABEL_KEYS,
+		t,
+	);
+	// The data grid replaces the old free-text categories/series textareas: the
+	// textarea round-trip rebuilt every series from parsed text, silently
+	// dropping per-series colour/marker/trendline fields the advanced controls
+	// below had just set. The grid edits through core's `chartData*` helpers,
+	// which preserve them.
+	const grid = createChartDataGrid(
+		doc,
+		t,
+		(data) => handlers.setChartData(data),
+		() => handlers.getChartFollowDataPoint(),
+	);
+	const legend = checkbox(doc, t('pptx.chart.showLegend'));
 	const labels = checkbox(doc, t('pptx.chart.dataLabels'));
-	const advanced = createChartAdvancedSection(doc, t, (data) => handlers.setChartData(data));
-	const exhaustive = createChartExhaustiveSection(doc, t, (data) => handlers.setChartData(data));
+	// One point picker drives every `c:dPt` control in the panel: the advanced
+	// block renders it and edits the point fill/explosion, the exhaustive block
+	// reuses the same selection for the point marker and invert-if-negative.
+	// It is also driven FROM the canvas: a clicked mark's point index lands here
+	// via `state.chartHighlightCell` below, so it always targets the point the
+	// user just pressed rather than whatever was last typed.
+	const pointIndex = createChartPointIndexField(doc, t);
+	const advanced = createChartAdvancedSection(
+		doc,
+		t,
+		(data) => handlers.setChartData(data),
+		pointIndex,
+		handlers.pushRecentColor,
+	);
+	const exhaustive = createChartExhaustiveSection(
+		doc,
+		t,
+		(data) => handlers.setChartData(data),
+		pointIndex,
+		handlers.pushRecentColor,
+	);
+	// Family-specific subtype pickers (bar3D shape, radar style, surface
+	// wireframe): shown beside the advanced section's gridlines toggle and the
+	// exhaustive section's secondary-axis control, same wave.
+	const subtype = createChartSubtypeSection(doc, t, (data) => handlers.setChartData(data));
+	// Overlay-shape edits (`c:userShapes`) only ever touch `userShapes`, so a
+	// shallow patch merged onto `current` is enough; unlike the sections above
+	// it never needs a full replacement chart-data object.
+	const userShapes = createChartUserShapeSection(doc, t, (patch) => {
+		if (current) {
+			handlers.setChartData({ ...current, ...patch });
+		}
+	});
 	el.append(
 		title.label,
-		chartType,
-		grouping,
-		categories.label,
-		series.label,
+		chartType.label,
+		grouping.label,
+		grid.el,
 		legend.label,
 		labels.label,
 		advanced.el,
+		subtype.el,
 		exhaustive.el,
+		userShapes.el,
 	);
 
 	let current: PptxChartData | undefined;
@@ -60,15 +119,27 @@ export function createChartSection(
 		if (!current) {
 			return;
 		}
+		// Route an actual type change through the shared `patchChartData`, not a
+		// bare field assignment: that is what clears grouping the new type
+		// doesn't support, adapts the category/series shape, and (for `'pareto'`,
+		// which has no `PptxChartType` of its own; see docs/guide/limitations.md's
+		// ChartEx row) converts to `chartType: 'histogram'` plus a
+		// cumulative-percent series, matching React/Vue/Angular's chart-type
+		// selectors.
+		const selectedType = chartType.control.value as ChartTypeSelectValue;
+		const base: PptxChartData =
+			selectedType === current.chartType
+				? current
+				: sharedPatchChartData(current, { chartType: selectedType });
+		// A multi-run title collapses to one run in its dominant style so an
+		// edit does not leave another, now-stale run's text trailing the new
+		// title; see `collapseChartTitleRunsForEdit`'s doc.
 		handlers.setChartData({
-			...current,
-			title: title.control.value,
-			chartType: chartType.value as PptxChartType,
-			grouping: grouping.value as PptxChartData['grouping'],
-			categories: lines(categories.control.value),
-			series: lines(series.control.value).map(parseSeries),
+			...base,
+			...collapseChartTitleRunsForEdit(base, title.control.value),
+			grouping: grouping.control.value as PptxChartData['grouping'],
 			style: {
-				...current.style,
+				...base.style,
 				hasTitle: title.control.value.trim().length > 0,
 				hasLegend: legend.control.checked,
 				hasDataLabels: labels.control.checked,
@@ -77,10 +148,8 @@ export function createChartSection(
 	};
 	for (const control of [
 		title.control,
-		chartType,
-		grouping,
-		categories.control,
-		series.control,
+		chartType.control,
+		grouping.control,
 		legend.control,
 		labels.control,
 	]) {
@@ -96,16 +165,25 @@ export function createChartSection(
 				return;
 			}
 			title.control.value = current.title ?? '';
-			chartType.value = current.chartType;
-			grouping.value = current.grouping ?? 'clustered';
-			categories.control.value = current.categories.join('\n');
-			series.control.value = current.series
-				.map(({ name, values }) => `${name}: ${values.join(', ')}`)
-				.join('\n');
+			// "Pareto" has no `PptxChartType` of its own (docs/guide/limitations.md's
+			// ChartEx row): it is `chartType: 'histogram'` plus a `paretoLine`-layout
+			// series, so reading `current.chartType` raw would show "Histogram" for
+			// a chart the user picked "Pareto" for.
+			chartType.control.value = resolveDisplayedChartType(current);
+			grouping.control.value = current.grouping ?? 'clustered';
+			// Point the shared index picker at the canvas-clicked point BEFORE the
+			// advanced/exhaustive sections read it below, so their per-point fields
+			// (fill, marker, invert-if-negative, ...) reflect the pressed mark.
+			if (state.chartHighlightCell?.pointIndex !== undefined) {
+				pointIndex.setSelected(state.chartHighlightCell.pointIndex);
+			}
+			grid.update(current, state.chartHighlightCell ?? null);
 			legend.control.checked = current.style?.hasLegend ?? false;
 			labels.control.checked = current.style?.hasDataLabels ?? false;
 			advanced.update(current);
+			subtype.update(current);
 			exhaustive.update(current);
+			userShapes.update(current);
 		},
 	};
 }
@@ -119,38 +197,7 @@ function input(doc: Document, type: string, text: string) {
 	return { label, control };
 }
 
-function textarea(doc: Document, text: string) {
-	const label = doc.createElement('label');
-	label.textContent = text;
-	const control = doc.createElement('textarea');
-	control.rows = 4;
-	label.appendChild(control);
-	return { label, control };
-}
-
 function checkbox(doc: Document, text: string) {
 	const field = input(doc, 'checkbox', text);
 	return field;
-}
-
-function lines(value: string): string[] {
-	return value
-		.split(/\r?\n/)
-		.map((item) => item.trim())
-		.filter(Boolean);
-}
-
-function parseSeries(value: string) {
-	const [name, raw = ''] = value.split(':', 2);
-	return {
-		name: name.trim(),
-		values: raw.split(',').map(Number).filter(Number.isFinite),
-	};
-}
-
-function addOption(doc: Document, select: HTMLSelectElement, value: string): void {
-	const option = doc.createElement('option');
-	option.value = value;
-	option.textContent = value;
-	select.appendChild(option);
 }

@@ -1,10 +1,16 @@
 import type { TextSegment } from 'pptx-viewer-core';
-import type { AccountAuthConfig, ToolbarActionId } from 'pptx-viewer-shared';
+import type {
+	AccountAuthConfig,
+	CompatibilityWarningToast,
+	ReadOnlyRecommendation,
+	ToolbarActionId,
+} from 'pptx-viewer-shared';
 
 import type { Translator } from '../i18n';
 import { createEl } from '../render';
 import type { AccessibilityPanel } from './accessibility-panel';
 import { createAccessibilityPanel } from './accessibility-panel';
+import { createCompatToastStack } from './compat-toasts';
 import type { Inspector, InspectorHandlers } from './inspector';
 import { createInspector } from './inspector';
 import type { MasterViewSidebar } from './master-view-sidebar';
@@ -15,11 +21,19 @@ import type { MobileToolbar } from './mobile-toolbar';
 import { createMobileToolbar } from './mobile-toolbar';
 import type { NotesPanel } from './notes-panel';
 import { createNotesPanel } from './notes-panel';
+import type { PresentationToolbar, PresentationToolbarHandlers } from './presentation-toolbar';
+import { createPresentationToolbar } from './presentation-toolbar';
 import type { PresentationTouchControls } from './presentation-touch-controls';
 import { createPresentationTouchControls } from './presentation-touch-controls';
+import type { ProtectedViewBanner } from './protected-view-banner';
+import { createProtectedViewBanner } from './protected-view-banner';
+import type { ModifyPasswordErrorReason, ReadOnlyBanner } from './read-only-banner';
+import { createReadOnlyBanner } from './read-only-banner';
 import type { Ribbon } from './ribbon/ribbon';
 import { createRibbon } from './ribbon/ribbon';
 import type { RibbonHandlers } from './ribbon/ribbon-types';
+import type { ShortcutPanel } from './shortcut-panel';
+import { createShortcutPanel } from './shortcut-panel';
 import type { StatusBar } from './status-bar';
 import { createStatusBar } from './status-bar';
 import type { ThumbnailRail } from './thumbnails';
@@ -46,6 +60,15 @@ export interface ChromeOptions {
 	ribbonHandlers: RibbonHandlers;
 	/** Inspector actions (geometry + shape fill/stroke). */
 	inspectorHandlers: InspectorHandlers;
+	/**
+	 * Slide-show toolbar actions (annotation tools, presenter view, end show).
+	 * Navigation and exit reuse `ribbonHandlers.nav`; only the annotation and
+	 * presenter-console actions have no ribbon equivalent, so they arrive here.
+	 */
+	presentationToolbarHandlers: Pick<
+		PresentationToolbarHandlers,
+		'setTool' | 'setColor' | 'toggleBlackboard' | 'clearAnnotations' | 'togglePresenterView'
+	>;
 	/** PowerPoint-style top chrome, built when the toolbar is visible. */
 	titleBar: TitleBarDeps;
 	/** Optional File > Account sign-in hook point; disabled/absent by default. */
@@ -55,6 +78,20 @@ export interface ChromeOptions {
 	onToggleNotes(): void;
 	/** Fired when the notes textarea commits (change/blur) in editable mode. */
 	onCommitNotes(notes: string, notesSegments?: TextSegment[]): void;
+	/** "Enable Editing" click on the Protected View banner. */
+	onEnableEditing(): void;
+	/** "Edit anyway" click on the read-only recommendation banner. */
+	onEditAnywayFromReadOnly(): void;
+	/** Close click on the read-only recommendation banner. */
+	onDismissReadOnlyBanner(): void;
+	/** The read-only recommendation banner's password form submit. */
+	onSubmitReadOnlyPassword(password: string): void;
+	/** The read-only recommendation banner's password form "Cancel". */
+	onCancelReadOnlyPasswordPrompt(): void;
+	/** One compatibility toast's own dismiss button. */
+	onDismissCompatToast(id: string): void;
+	/** The compatibility toast stack's "Dismiss all" button. */
+	onDismissAllCompatToasts(): void;
 }
 
 /** The viewer's static DOM skeleton plus the mutable overlay controls. */
@@ -69,6 +106,8 @@ export interface ViewerChrome {
 	inspector: Inspector | null;
 	/** Cross-slide accessibility checker results, opened from the View ribbon. */
 	accessibility: AccessibilityPanel;
+	/** Keyboard-shortcut cheat sheet, toggled by "?". */
+	shortcuts: ShortcutPanel;
 	/** Dedicated Slide/Notes/Handout master workspace navigation. */
 	masterSidebar: MasterViewSidebar;
 	thumbnails: ThumbnailRail | null;
@@ -85,10 +124,33 @@ export interface ViewerChrome {
 	mobileActionSheets: MobileActionSheets | null;
 	/** Persistent exit and navigation affordances for touch slide shows. */
 	presentationTouchControls: PresentationTouchControls;
+	/** Auto-hiding floating show toolbar (desktop slide-show chrome). */
+	presentationToolbar: PresentationToolbar;
 	setLoading(loading: boolean): void;
 	setError(message: string | null): void;
 	setEmpty(empty: boolean): void;
 	setPresenting(presenting: boolean): void;
+	/**
+	 * Move the Quick Access strip between the title bar (above the Ribbon,
+	 * PowerPoint's default) and a dedicated row directly under the Ribbon
+	 * (Options > Quick Access Toolbar > position). A no-op when the toolbar is
+	 * hidden, since neither the title bar nor the strip exist.
+	 */
+	setQuickAccessPosition(position: 'above' | 'below'): void;
+	/** Show/hide the Protected View "Enable Editing" banner. */
+	setProtectedView(active: boolean): void;
+	/** Show/hide + populate the read-only recommendation banner. */
+	setReadOnlyRecommendation(
+		recommendation: ReadOnlyRecommendation | null,
+		dismissed: boolean,
+		passwordState: {
+			promptOpen: boolean;
+			error: ModifyPasswordErrorReason | null;
+			checking: boolean;
+		},
+	): void;
+	/** Replace the compatibility-warning toast stack. */
+	setCompatToasts(toasts: readonly CompatibilityWarningToast[]): void;
 }
 
 /**
@@ -114,8 +176,21 @@ export function buildViewerChrome(
 
 	let titleBar: TitleBar | null = null;
 	let ribbon: Ribbon | null = null;
+	let quickAccessRow: HTMLElement | null = null;
+	let quickAccessDetached = false;
 	if (options.showToolbar) {
-		titleBar = createTitleBar(doc, t, options.titleBar);
+		titleBar = createTitleBar(doc, t, {
+			...options.titleBar,
+			// Mirror the strip's own visibility onto the below-the-ribbon dock so
+			// a read-only view or "Show Quick Access Toolbar" off does not leave
+			// an empty bordered row when the strip lives there.
+			onQuickAccessVisibilityChange: (hidden) => {
+				if (quickAccessDetached && quickAccessRow) {
+					quickAccessRow.hidden = hidden;
+				}
+				options.titleBar.onQuickAccessVisibilityChange?.(hidden);
+			},
+		});
 		root.appendChild(titleBar.el);
 		ribbon = createRibbon(
 			doc,
@@ -128,6 +203,31 @@ export function buildViewerChrome(
 			ribbon.setEditable(false);
 		}
 		root.appendChild(ribbon.el);
+		// Below-the-Ribbon Quick Access dock (Options > Quick Access Toolbar).
+		// Hidden until `setQuickAccessPosition('below')` moves the live strip
+		// element in; otherwise it stays docked inside the title bar.
+		quickAccessRow = createEl(doc, 'div', 'pptxv-qat-row');
+		quickAccessRow.hidden = true;
+		root.appendChild(quickAccessRow);
+	}
+	const protectedViewBanner: ProtectedViewBanner | null = options.showToolbar
+		? createProtectedViewBanner(doc, t, () => options.onEnableEditing())
+		: null;
+	if (protectedViewBanner) {
+		root.appendChild(protectedViewBanner.el);
+	}
+	const readOnlyBanner: ReadOnlyBanner | null = options.showToolbar
+		? createReadOnlyBanner(
+				doc,
+				t,
+				() => options.onEditAnywayFromReadOnly(),
+				() => options.onDismissReadOnlyBanner(),
+				(password) => options.onSubmitReadOnlyPassword(password),
+				() => options.onCancelReadOnlyPasswordPrompt(),
+			)
+		: null;
+	if (readOnlyBanner) {
+		root.appendChild(readOnlyBanner.el);
 	}
 	let mobileActionSheets: MobileActionSheets | null = null;
 	const mobileToolbar = options.showToolbar
@@ -153,6 +253,8 @@ export function buildViewerChrome(
 	root.appendChild(body);
 	const accessibility = createAccessibilityPanel(doc, t, options.onSelectSlide);
 	root.appendChild(accessibility.el);
+	const shortcuts = createShortcutPanel(doc, t);
+	root.appendChild(shortcuts.el);
 	const masterSidebar = createMasterViewSidebar(doc, t);
 	body.appendChild(masterSidebar.el);
 
@@ -235,8 +337,30 @@ export function buildViewerChrome(
 	presentationTouchControls.update(0, 0);
 	root.appendChild(presentationTouchControls.el);
 
+	// The desktop bar measures its bottom trigger zone against `root`, which is
+	// also the element the Fullscreen API promotes, so the zone stays correct in
+	// and out of fullscreen without re-reading the viewport.
+	const presentationToolbar = createPresentationToolbar(doc, t, root, {
+		previous: options.ribbonHandlers.nav.prev,
+		next: options.ribbonHandlers.nav.next,
+		end: options.ribbonHandlers.nav.togglePresentation,
+		...options.presentationToolbarHandlers,
+	});
+	root.appendChild(presentationToolbar.el);
+
+	// Load-diagnostics toast stack, bottom-right of the chrome; not part of the
+	// slide-show surface, so it mounts on `root` alongside the touch/desktop
+	// show controls rather than inside `body`.
+	const compatToasts = createCompatToastStack(
+		doc,
+		t,
+		(id) => options.onDismissCompatToast(id),
+		() => options.onDismissAllCompatToasts(),
+	);
+	root.appendChild(compatToasts.el);
+
 	const loadingOverlay = createEl(doc, 'div', 'pptxv-overlay pptxv-loading');
-	loadingOverlay.textContent = t('common.loading');
+	loadingOverlay.textContent = t('pptx.common.loading');
 	loadingOverlay.setAttribute('role', 'status');
 	loadingOverlay.setAttribute('aria-live', 'polite');
 	loadingOverlay.hidden = true;
@@ -255,6 +379,7 @@ export function buildViewerChrome(
 		titleBar,
 		inspector,
 		accessibility,
+		shortcuts,
 		masterSidebar,
 		thumbnails,
 		viewport,
@@ -264,6 +389,7 @@ export function buildViewerChrome(
 		mobileToolbar,
 		mobileActionSheets,
 		presentationTouchControls,
+		presentationToolbar,
 		setLoading(loading) {
 			loadingOverlay.hidden = !loading;
 			root.setAttribute('aria-busy', String(loading));
@@ -278,6 +404,38 @@ export function buildViewerChrome(
 		},
 		setPresenting(presenting) {
 			root.classList.toggle('pptxv-presenting', presenting);
+			// The bar owns a 1s timer and two document listeners; both are armed
+			// only for the duration of the show.
+			presentationToolbar.setPresenting(presenting);
+		},
+		setQuickAccessPosition(position) {
+			if (!titleBar || !quickAccessRow) {
+				return;
+			}
+			if (position === 'below') {
+				const strip = titleBar.getQuickAccessElement();
+				quickAccessRow.appendChild(strip);
+				quickAccessDetached = true;
+				// Follow the strip's own visibility (Options > "Show Quick Access
+				// Toolbar" off, or the chrome currently read-only): an empty docked
+				// row would otherwise still draw its border/padding.
+				quickAccessRow.hidden = strip.hidden;
+				titleBar.setQuickAccessDetached(true);
+			} else {
+				quickAccessDetached = false;
+				titleBar.dockQuickAccessElement();
+				quickAccessRow.hidden = true;
+				titleBar.setQuickAccessDetached(false);
+			}
+		},
+		setProtectedView(active) {
+			protectedViewBanner?.setActive(active);
+		},
+		setReadOnlyRecommendation(recommendation, dismissed, passwordState) {
+			readOnlyBanner?.update(recommendation, dismissed, passwordState);
+		},
+		setCompatToasts(toasts) {
+			compatToasts.update(toasts);
 		},
 	};
 }

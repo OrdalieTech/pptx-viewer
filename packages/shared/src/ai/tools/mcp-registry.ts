@@ -102,6 +102,13 @@ export const MCP_TOOL_ENTRIES: Record<string, McpToolEntry> = {
 		'read',
 		'Convert to markdown',
 	),
+	export_to_json: entry(
+		'Export the presentation to the portable pptx-viewer-json document format.',
+		mcpSchemas.ExportToJsonSchema,
+		mcp.exportToJson,
+		'read',
+		'Export to JSON',
+	),
 
 	// ── slide structure ────────────────────────────────────────────────────────
 	add_slide: entry(
@@ -162,6 +169,13 @@ export const MCP_TOOL_ENTRIES: Record<string, McpToolEntry> = {
 		mcp.updateElement,
 		'slides',
 		'Update element',
+	),
+	rename_element: entry(
+		'Rename an element (the name shown in the selection pane).',
+		mcpSchemas.RenameElementSchema,
+		mcp.renameElement,
+		'slides',
+		'Rename element',
 	),
 	delete_elements: entry(
 		'Delete one or more elements by id.',
@@ -305,6 +319,34 @@ export const MCP_TOOL_ENTRIES: Record<string, McpToolEntry> = {
 		'slides',
 		'Update chart data',
 	),
+	chart_user_shape_list: entry(
+		"List a chart's drawing-overlay shapes (c:userShapes).",
+		mcpSchemas.ListChartUserShapesSchema,
+		mcp.listChartUserShapesT,
+		'read',
+		'List chart overlay shapes',
+	),
+	chart_user_shape_add: entry(
+		"Add a drawing-overlay shape (text box or connector) to a chart's c:userShapes.",
+		mcpSchemas.AddChartUserShapeSchema,
+		mcp.addChartUserShapeT,
+		'slides',
+		'Add chart overlay shape',
+	),
+	chart_user_shape_update: entry(
+		"Move, resize, or restyle one of a chart's drawing-overlay shapes by index.",
+		mcpSchemas.UpdateChartUserShapeSchema,
+		mcp.updateChartUserShapeT,
+		'slides',
+		'Update chart overlay shape',
+	),
+	chart_user_shape_remove: entry(
+		"Remove one of a chart's drawing-overlay shapes by index.",
+		mcpSchemas.RemoveChartUserShapeSchema,
+		mcp.removeChartUserShapeT,
+		'slides',
+		'Remove chart overlay shape',
+	),
 	manage_smart_art: entry(
 		'Manage SmartArt: get, add, remove, reorder, promote/demote nodes, or decompose to shapes.',
 		mcpSchemas.ManageSmartArtSchema,
@@ -378,6 +420,14 @@ export const MCP_TOOL_ENTRIES: Record<string, McpToolEntry> = {
 		mcp.updatePresentationProperties,
 		'deck',
 		'Update presentation properties',
+	),
+	import_from_json: entry(
+		'Replace the whole presentation with a deck imported from a pptx-viewer-json document.',
+		mcpSchemas.ImportFromJsonSchema,
+		mcp.importFromJson,
+		'deck',
+		'Import from JSON',
+		true,
 	),
 };
 

@@ -6,9 +6,9 @@ import { describe, expect, it } from 'vitest';
 import { FieldContextKey } from '../composables/field-context';
 import ElementRenderer from './ElementRenderer.vue';
 
-function mountEl(element: PptxElement) {
+function mountEl(element: PptxElement, interactive = false) {
 	return mount(ElementRenderer, {
-		props: { element, mediaDataUrls: new Map<string, string>(), zIndex: 1 },
+		props: { element, mediaDataUrls: new Map<string, string>(), zIndex: 1, interactive },
 	});
 }
 
@@ -144,6 +144,51 @@ describe('elementRenderer', () => {
 		} as PptxElement);
 		expect(wrapper.find('[data-element-id="c1"]').exists()).toBeTruthy();
 		expect(wrapper.text()).toContain('child');
+	});
+
+	it('mirrors a group-level a:reflection (p:grpSpPr/a:effectLst) across its children', () => {
+		// `p:grpSpPr/a:effectLst/a:reflection` lands on `groupFill` (the same
+		// extractor a regular shape's `spPr` uses); a group has no `shapeStyle`
+		// of its own, so `ElementRenderer` must mount `ShapeEffectOverlay` on the
+		// group branch too, not only on the text/shape branch.
+		const wrapper = mountEl({
+			type: 'group',
+			id: 'g-refl',
+			x: 0,
+			y: 0,
+			width: 200,
+			height: 200,
+			groupEffectStyle: { reflectionStartOpacity: 0.5, reflectionDistance: 4 },
+			children: [{ type: 'text', id: 'c1', x: 0, y: 0, width: 50, height: 20, text: 'child' }],
+		} as unknown as PptxElement);
+		const reflection = wrapper.get('.pptx-vue-reflection');
+		expect(reflection.text()).toContain('child');
+	});
+
+	it('paints a group-level shadow / glow as a filter on the group composite', () => {
+		// `p:grpSpPr/a:effectLst` shadow / glow is computed into the group's
+		// `filter` by `getShapeFillStrokeStyle`; the group branch must bind that
+		// style (it bound only the container transform once, so the filter never
+		// reached the DOM while the other four bindings painted it).
+		const wrapper = mountEl({
+			type: 'group',
+			id: 'g-fx',
+			x: 0,
+			y: 0,
+			width: 200,
+			height: 200,
+			groupEffectStyle: {
+				shadowColor: '#000000',
+				shadowBlur: 4,
+				shadowOffsetX: 3,
+				shadowOffsetY: 3,
+				glowColor: '#FFC000',
+				glowRadius: 8,
+			},
+			children: [{ type: 'text', id: 'c1', x: 0, y: 0, width: 50, height: 20, text: 'child' }],
+		} as unknown as PptxElement);
+		const group = wrapper.get('.pptx-vue-group');
+		expect(group.attributes('style')).toContain('drop-shadow');
 	});
 
 	it('renders a defensive placeholder for unknown element types', () => {
@@ -297,7 +342,85 @@ describe('elementRenderer per-run text effects', () => {
 		} as unknown as PptxElement);
 		const block = wrapper.find('.pptx-vue-text');
 		const style = block.attributes('style') ?? '';
-		expect(style).toContain('perspective');
-		expect(style).toContain('rotateX');
+		// `perspectiveAbove` is unified onto the shape-level COM-measured
+		// homography (see `text-effects-3d`'s module doc comment): a
+		// `matrix3d(...)` + `transform-origin: 0 0`, not the old hand-tuned
+		// `perspective` + `rotateX` approximation.
+		expect(style).toContain('matrix3d');
+		expect(style).toContain('transform-origin: 0 0');
+	});
+});
+
+/**
+ * The neutral element contract: on the interactive canvas EVERY rendered
+ * element carries `data-pptx-element="true"`, whichever renderer drew it.
+ *
+ * Regression guard. Charts (and every other delegated renderer) painted
+ * perfectly while carrying no marker at all, because the dispatcher only set it
+ * on the branches whose box it renders itself. That made those types invisible
+ * to everything that enumerates or hit-tests slide elements by the marker
+ * (including every e2e selector built on it), with nothing failing.
+ */
+describe('elementRenderer neutral element marker', () => {
+	const marked = (element: PptxElement, interactive: boolean): string | undefined =>
+		mountEl(element, interactive).get('[data-element-id="e1"]').attributes('data-pptx-element');
+
+	const base = { id: 'e1', x: 5, y: 6, width: 120, height: 40 };
+
+	/** Minimal per-type payloads so each renderer takes its real branch. */
+	const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+		['text', { type: 'text', text: 'Hello' }],
+		['shape', { type: 'shape', shapeType: 'rect' }],
+		['image', { type: 'image', imageData: 'data:image/png;base64,QUJD' }],
+		['picture', { type: 'picture', imageData: 'data:image/png;base64,QUJD' }],
+		['connector', { type: 'connector', shapeType: 'straightConnector1' }],
+		[
+			'table',
+			{ type: 'table', tableData: { columnWidths: [1], rows: [{ cells: [{ text: 'x' }] }] } },
+		],
+		[
+			'chart',
+			{
+				type: 'chart',
+				chartData: {
+					chartType: 'bar',
+					categories: ['A'],
+					series: [{ name: 'S', values: [1] }],
+					style: {},
+				},
+			},
+		],
+		['smartArt', { type: 'smartArt' }],
+		['media', { type: 'media' }],
+		['ink', { type: 'ink', inkPaths: ['M 0 0 L 5 5'] }],
+		['ole', { type: 'ole' }],
+		['zoom', { type: 'zoom', zoomType: 'slide', targetSlideIndex: 0 }],
+		['model3d', { type: 'model3d' }],
+		['equation', { type: 'shape', textSegments: [{ text: '', equationXml: { 'm:oMath': {} } }] }],
+		[
+			'group',
+			{
+				type: 'group',
+				children: [{ id: 'c1', type: 'text', x: 0, y: 0, width: 50, height: 20, text: 'kid' }],
+			},
+		],
+		// `contentPart` used to land here as "unsupported", which is what this
+		// case asserted. Vue now has a real ContentPartRenderer, so it is an
+		// ordinary rendered element like the rest.
+		[
+			'contentPart',
+			{
+				type: 'contentPart',
+				inkStrokes: [{ path: 'M 0 0 L 5 5', color: '#000', width: 1, opacity: 1 }],
+			},
+		],
+	];
+
+	it.each(cases)('marks a %s element on the interactive canvas', (_type, payload) => {
+		expect(marked({ ...base, ...payload } as PptxElement, true)).toBe('true');
+	});
+
+	it.each(cases)('leaves a %s element unmarked on a static surface', (_type, payload) => {
+		expect(marked({ ...base, ...payload } as PptxElement, false)).toBeUndefined();
 	});
 });

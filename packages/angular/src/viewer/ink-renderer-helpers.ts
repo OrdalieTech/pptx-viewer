@@ -1,6 +1,15 @@
-import type { InkPptxElement, PptxElement } from 'pptx-viewer-core';
+import type { PptxElement } from 'pptx-viewer-core';
 import { isInkElement } from 'pptx-viewer-core';
 
+import {
+	buildInkGroupStrokes,
+	extractPathPoints,
+	generatePressureCircles,
+	hasPressureVariation,
+	interpolateWidth,
+	pressuresToWidths,
+} from '../internal/shared';
+import type { InkGroupStrokeView, PathPoint, PressureCircle } from '../internal/shared';
 import { DEFAULT_STROKE_COLOR } from './constants';
 import type { StyleMap } from './element-style';
 import { getContainerStyle } from './element-style';
@@ -12,153 +21,25 @@ import { getContainerStyle } from './element-style';
  * unit-tested without TestBed, following the same pattern as
  * `connector-path.ts`.
  *
- * Pressure-sensitive strokes are approximated the same way React's
- * `ink-rendering.ts` does it: the path is sampled into points and each point is
- * drawn as a filled circle whose radius follows the per-point pressure/width,
- * producing a variable-width look. Strokes without pressure variation fall back
- * to a single constant-width `<path>`.
+ * The pressure/tilt-stroke maths itself lives in `pptx-viewer-shared`
+ * (`render/ink-group-strokes`, the same decision function
+ * `ContentPartRendererComponent` uses for a loaded `p:contentPart`), so every
+ * binding samples a path and sizes its circles/nib marks the same way; what
+ * remains here is the Angular view-model: the container style.
  */
 
-/** A 2D point extracted from an SVG path string. */
-export interface PathPoint {
-	x: number;
-	y: number;
-}
+// Re-exported for the existing Angular import sites (and its tests).
+export type { PathPoint, PressureCircle };
+export {
+	extractPathPoints,
+	generatePressureCircles,
+	hasPressureVariation,
+	interpolateWidth,
+	pressuresToWidths,
+};
 
-/** A circle representing a single pressure point on an ink stroke. */
-export interface PressureCircle {
-	cx: number;
-	cy: number;
-	r: number;
-}
-
-/** Resolved per-stroke data used to render a single `<path>` (or circle set). */
-export interface InkStroke {
-	d: string;
-	color: string;
-	width: number;
-	opacity: number;
-	/**
-	 * When present, render as pressure-sensitive circles instead of a plain
-	 * constant-width `<path>`. Empty/absent means a constant-width stroke.
-	 */
-	circles?: PressureCircle[];
-}
-
-/**
- * Parse an SVG path `d` string and extract coordinate points.
- *
- * Curves are sampled at their control points and endpoints (not interpolated),
- * which is sufficient for pressure-width rendering where each extracted point
- * gets a circle overlay.
- */
-export function extractPathPoints(d: string): PathPoint[] {
-	const points: PathPoint[] = [];
-	const numberRegex = /-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/giu;
-	const numbers: number[] = [];
-	let match: RegExpExecArray | null;
-	while ((match = numberRegex.exec(d)) !== null) {
-		numbers.push(Number.parseFloat(match[0]));
-	}
-	for (let i = 0; i < numbers.length - 1; i += 2) {
-		points.push({ x: numbers[i], y: numbers[i + 1] });
-	}
-	return points;
-}
-
-/**
- * Linearly interpolate a width value at normalised position `t` (0..1) along a
- * stroke, given a list of width samples.
- */
-export function interpolateWidth(widths: number[], t: number): number {
-	if (widths.length === 0) {
-		return 1;
-	}
-	if (widths.length === 1) {
-		return widths[0];
-	}
-	const clampedT = Math.max(0, Math.min(1, t));
-	const index = clampedT * (widths.length - 1);
-	const lower = Math.floor(index);
-	const upper = Math.min(lower + 1, widths.length - 1);
-	const frac = index - lower;
-	return widths[lower] * (1 - frac) + widths[upper] * frac;
-}
-
-/**
- * Whether a width/pressure array has meaningful variation (i.e. is not uniform).
- */
-export function hasPressureVariation(values: number[]): boolean {
-	if (values.length <= 1) {
-		return false;
-	}
-	const first = values[0];
-	return values.some((v) => Math.abs(v - first) > 0.01);
-}
-
-/**
- * Convert per-point pressure values (0-1, e.g. `PointerEvent.pressure`) to
- * per-point width values. Zero pressure maps to `baseWidth * minScale`, full
- * pressure to `baseWidth * maxScale`.
- */
-export function pressuresToWidths(
-	pressures: number[],
-	baseWidth: number,
-	minScale = 0.3,
-	maxScale = 1.8,
-): number[] {
-	return pressures.map((p) => {
-		const clamped = Math.max(0, Math.min(1, p));
-		return baseWidth * (minScale + clamped * (maxScale - minScale));
-	});
-}
-
-/**
- * Generate pressure circles for a stroke's path points using per-point width
- * data. Widths shorter than the point list are interpolated linearly.
- */
-export function generatePressureCircles(
-	points: PathPoint[],
-	widths: number[],
-	baseWidth: number,
-	minRadius = 0.5,
-	maxRadius = baseWidth * 1.5,
-): PressureCircle[] {
-	if (points.length === 0) {
-		return [];
-	}
-	return points.map((pt, i) => {
-		const t = points.length === 1 ? 0.5 : i / (points.length - 1);
-		const w = interpolateWidth(widths, t);
-		const ratio = baseWidth > 0 ? w / baseWidth : 1;
-		const r = Math.max(minRadius, Math.min(maxRadius, (baseWidth / 2) * ratio));
-		return { cx: pt.x, cy: pt.y, r };
-	});
-}
-
-/**
- * Compute pressure circles for stroke `i`, or `undefined` when the stroke has
- * no usable pressure variation and should render as a plain constant-width path.
- *
- * Mirrors React's `renderInk`: prefer per-point `inkPointPressures`, then fall
- * back to a varying `inkWidths` array treated as per-point widths.
- */
-function pressureCirclesForStroke(
-	el: InkPptxElement,
-	index: number,
-	d: string,
-	baseWidth: number,
-): PressureCircle[] | undefined {
-	const pointPressures = el.inkPointPressures?.[index];
-	if (pointPressures && pointPressures.length > 1 && hasPressureVariation(pointPressures)) {
-		const widths = pressuresToWidths(pointPressures, baseWidth);
-		return generatePressureCircles(extractPathPoints(d), widths, baseWidth);
-	}
-	if (el.inkWidths && el.inkWidths.length > 1 && hasPressureVariation(el.inkWidths)) {
-		return generatePressureCircles(extractPathPoints(d), el.inkWidths, baseWidth);
-	}
-	return undefined;
-}
+/** Resolved per-stroke data used to render a single `<path>`, circle set, or nib-mark set. */
+export type InkStroke = InkGroupStrokeView;
 
 /**
  * Narrow `element` to `InkPptxElement` and return the resolved per-stroke
@@ -168,17 +49,7 @@ export function buildInkStrokes(element: PptxElement): InkStroke[] {
 	if (!isInkElement(element)) {
 		return [];
 	}
-	const el: InkPptxElement = element;
-	return (el.inkPaths ?? []).map((d, i) => {
-		const width = el.inkWidths?.[i] ?? 1;
-		return {
-			d,
-			color: el.inkColors?.[i] ?? DEFAULT_STROKE_COLOR,
-			width,
-			opacity: el.inkOpacities?.[i] ?? 1,
-			circles: pressureCirclesForStroke(el, i, d, width),
-		};
-	});
+	return buildInkGroupStrokes(element, { color: DEFAULT_STROKE_COLOR, width: 1 });
 }
 
 /** Minimum SVG viewport dimension (clamp to ≥ 1 to avoid degenerate viewBox). */

@@ -2,7 +2,6 @@ import type { PptxElement, ShapeStyle } from 'pptx-viewer-core';
 import { describe, expect, it } from 'vitest';
 
 import {
-	buildReflectionCssValue,
 	colorWithOpacity,
 	getBoxShadowCss,
 	getComputedEffectStyle,
@@ -15,7 +14,6 @@ import {
 	getInnerShadowCss,
 	getMultiLayerShadowCss,
 	getOuterShadowCss,
-	getReflectionCss,
 	normalizeHexColor,
 } from '../internal/shared';
 
@@ -87,6 +85,36 @@ describe('getOuterShadowCss', () => {
 		const css = getOuterShadowCss({ shadowColor: '#112233' });
 		// default offsets 4,4 / blur 6 / opacity 0.35
 		expect(css).toBe('4px 4px 6px rgba(17, 34, 51, 0.35)');
+	});
+
+	it('counter-rotates the shadow angle when shadowRotateWithShape is false', () => {
+		// angle 0, element rotated 90deg -> effective angle -90deg -> offsetX 0, offsetY -10
+		const css = getOuterShadowCss(
+			{
+				shadowColor: '#000000',
+				shadowAngle: 0,
+				shadowDistance: 10,
+				shadowBlur: 0,
+				shadowOpacity: 1,
+				shadowRotateWithShape: false,
+			},
+			{ rotation: 90 },
+		);
+		expect(css).toBe('0px -10px 0px rgba(0, 0, 0, 1)');
+	});
+
+	it('ignores rotation when shadowRotateWithShape is unset/true', () => {
+		const css = getOuterShadowCss(
+			{
+				shadowColor: '#000000',
+				shadowAngle: 0,
+				shadowDistance: 10,
+				shadowBlur: 0,
+				shadowOpacity: 1,
+			},
+			{ rotation: 90 },
+		);
+		expect(css).toBe('10px 0px 0px rgba(0, 0, 0, 1)');
 	});
 });
 
@@ -208,7 +236,7 @@ describe('getEffectFilterCss', () => {
 	it('glow produces a drop-shadow filter', () => {
 		const css = getEffectFilterCss({ glowColor: '#ffff00', glowRadius: 12, glowOpacity: 0.75 });
 		expect(css).toBeDefined();
-		expect(css).toContain('drop-shadow(0 0 12px rgba(255, 255, 0, 0.75))');
+		expect(css).toContain('drop-shadow(0 0 6px rgba(255, 255, 0, 0.75))');
 	});
 
 	it('soft edge without an element id falls back to a capped blur filter', () => {
@@ -275,41 +303,10 @@ describe('dag opacity and blend mode', () => {
 	});
 });
 
-// ── reflection ──────────────────────────────────────────────────────────────
-
-describe('getReflectionCss', () => {
-	it('returns undefined when no reflection is set', () => {
-		expect(getReflectionCss({}, 200)).toBeUndefined();
-	});
-
-	it('builds a -webkit-box-reflect value (no blur)', () => {
-		const r = getReflectionCss({ reflectionStartOpacity: 0.5, reflectionDistance: 4 }, 200);
-		expect(r).toBeDefined();
-		expect(r?.webkitBoxReflect).toContain('below 4px linear-gradient(to bottom,');
-		expect(r?.webkitBoxReflect).toContain('rgba(255,255,255,0.5)');
-	});
-
-	it('derives fade length from reflectionEndPosition × height', () => {
-		const r = getReflectionCss({ reflectionStartOpacity: 1, reflectionEndPosition: 0.5 }, 200);
-		// 0.5 * 200 = 100px fade length
-		expect(r?.fadeLength).toBe(100);
-		expect(r?.webkitBoxReflect).toContain('100px)');
-	});
-
-	it('uses a three-stop gradient when blurred', () => {
-		const r = getReflectionCss(
-			{ reflectionStartOpacity: 1, reflectionBlurRadius: 4, reflectionEndPosition: 0.5 },
-			200,
-		);
-		expect(r?.webkitBoxReflect.match(/rgba\(255,255,255,/gu)?.length).toBe(3);
-	});
-
-	it('buildReflectionCssValue matches the no-blur format', () => {
-		expect(buildReflectionCssValue(4, 0.5, 0, 100)).toBe(
-			'below 4px linear-gradient(to bottom, rgba(255,255,255,0.5), rgba(255,255,255,0) 100px)',
-		);
-	});
-});
+// Reflection coverage lives in `reflection.test.ts` now: the `-webkit-box-reflect`
+// builder (`getReflectionCss`/`buildReflectionCssValue`) was replaced by
+// `getReflectionWrapperStyle`, a cross-browser mirrored-sibling wrapper style
+// (Firefox never supported `-webkit-box-reflect` at all).
 
 // ── duotone svg filter ──────────────────────────────────────────────────────
 
@@ -358,8 +355,25 @@ describe('getComputedEffectStyle', () => {
 		// Soft edge now emits an SVG alpha-feather filter reference when an
 		// element id is present, instead of a whole-element blur().
 		expect(result.filter).toContain('url(#soft-edge-');
-		expect(result.webkitBoxReflect).toContain('below 4px');
+		expect(result.reflection?.top).toBe('calc(100% + 4px)');
 		expect(result.opacity).toBe(0.8);
 		expect(result.mixBlendMode).toBe('multiply');
+	});
+
+	it('counter-rotates the outer shadow by the element rotation when rotWithShape is false', () => {
+		const result = getComputedEffectStyle(
+			shape(
+				{
+					shadowColor: '#000000',
+					shadowAngle: 0,
+					shadowDistance: 10,
+					shadowBlur: 0,
+					shadowOpacity: 1,
+					shadowRotateWithShape: false,
+				},
+				{ rotation: 90 },
+			),
+		);
+		expect(result.boxShadow).toBe('0px -10px 0px rgba(0, 0, 0, 1)');
 	});
 });

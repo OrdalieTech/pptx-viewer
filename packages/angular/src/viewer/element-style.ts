@@ -4,24 +4,23 @@ import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
 import {
 	DEFAULT_STROKE_COLOR,
 	DEFAULT_TEXT_COLOR,
+	buildTextBlockStyle,
+	getComputed3dStyle,
 	getComputedEffectStyle,
 	getComputedFillStyle,
+	getComputedStrokeStyle,
+	getCssBorderDashStyle,
+	resolveShapeGeometry,
 	getContainerStyle as sharedGetContainerStyle,
 	getImageSrc as sharedGetImageSrc,
-	isVerticalTextDirection,
 	px,
-	resolveCssTextAlign,
-	resolveLineHeight,
-	toCssTextOrientation,
-	toCssVerticalDirection,
-	toCssWritingMode,
 } from '../internal/shared';
-import { buildCssGradientFromShapeStyle } from './color-gradient';
-import { buildPatternFillCss } from './color-patterns';
 import { buildDuotoneFilter } from './duotone-filter';
 import type { DuotoneFilterDef } from './duotone-filter';
 import { getSoftEdgeFilterDef, resolveShapeFilterCss } from './element-effect-defs';
-import { getResolvedShapeClipPath } from './shape-geometry';
+import { merge3dStyleMap } from './merge-3d';
+import { isHollowShapeElement } from './shape-geometry';
+import { cssObjectToStyleMap } from './table-renderer-helpers';
 
 /**
  * Basic, framework-agnostic style computation for slide elements, returning
@@ -78,6 +77,24 @@ export function getShapeFillStrokeStyle(
 	animatesFill?: boolean,
 	animatesStroke?: boolean,
 ): StyleMap {
+	if (el.type === 'group') {
+		// A group has no fill/stroke/geometry of its own (the branches below all
+		// read `el.shapeStyle`, which a group never has), but PowerPoint still
+		// lets `p:grpSpPr/a:effectLst` carry a shadow/glow/soft-edge for the
+		// group's own COMPOSITE raster (see shared `getComputedEffectStyle`).
+		// Reflection rides a separate mirrored sibling node
+		// (`ReflectionMirrorContentComponent`), same as a shape, so only the
+		// container-level `filter` / `overflow` belong here.
+		const fx = getComputedEffectStyle(el);
+		const groupStyle: StyleMap = {};
+		if (fx.filter) {
+			groupStyle['filter'] = fx.filter;
+		}
+		if (fx.overflowVisible) {
+			groupStyle['overflow'] = 'visible';
+		}
+		return groupStyle;
+	}
 	if (!hasShapeProperties(el)) {
 		return {};
 	}
@@ -85,71 +102,69 @@ export function getShapeFillStrokeStyle(
 	const style: StyleMap = {};
 
 	if (ss) {
-		// `a:grpFill` child (fillMode 'group'): inherit the enclosing group's
-		// resolved fill (threaded down by the group render branch). The shared
-		// resolver paints the parent group's fill in this child's own box.
-		const inheritedGroupFill =
-			ss.fillMode === 'group' && parentGroupFill
-				? getComputedFillStyle(el, parentGroupFill)
-				: undefined;
-		// Fill resolution order mirrors the React `getShapeVisualStyle`:
-		// image → pattern (SVG preset) → gradient (structured builder, with the
-		// parser's prebuilt CSS string as fallback) → solid colour. Skipped
-		// entirely while a `p:animClr` fill animation owns the colour.
-		const imageFillUrl = ss.fillMode === 'image' && ss.fillImageUrl ? ss.fillImageUrl : undefined;
-		const patternCss = ss.fillMode === 'pattern' ? buildPatternFillCss(ss) : undefined;
-		const gradient =
-			ss.fillMode === 'gradient'
-				? (buildCssGradientFromShapeStyle(ss) ?? ss.fillGradient)
-				: ss.fillGradient;
-
-		if (animatesFill) {
-			// Leave `background-color` / `background-image` to the animated keyframes.
-		} else if (inheritedGroupFill) {
-			if (inheritedGroupFill.backgroundColor !== undefined) {
-				style['background-color'] = inheritedGroupFill.backgroundColor;
+		// Fill: resolved entirely by the shared builder, in React's order
+		//   image → structured gradient (falling back to the parser's prebuilt
+		//   `fillGradient` string) → preset pattern → solid colour WITH
+		//   `fillOpacity` applied. A `a:grpFill` child (fillMode 'group') inherits
+		//   `parentGroupFill`, painted in this child's own box.
+		//
+		// This deliberately delegates instead of re-deriving the cascade locally:
+		// the local copy dropped `ss.fillOpacity`, so a shape authored
+		// `<a:solidFill><a:schemeClr …><a:alpha val="0"/></a:schemeClr></a:solidFill>`
+		// (a fully TRANSPARENT overlay, common over a full-bleed background video)
+		// painted as an opaque block of colour and hid everything beneath it.
+		// Skipped entirely while a `p:animClr` fill animation owns the colour.
+		const fill = animatesFill ? undefined : getComputedFillStyle(el, parentGroupFill);
+		if (fill) {
+			if (fill.backgroundColor !== undefined) {
+				style['background-color'] = fill.backgroundColor;
 			}
-			if (inheritedGroupFill.backgroundImage !== undefined) {
-				style['background-image'] = inheritedGroupFill.backgroundImage;
+			if (fill.backgroundImage !== undefined) {
+				style['background-image'] = fill.backgroundImage;
 			}
-			if (inheritedGroupFill.backgroundRepeat !== undefined) {
-				style['background-repeat'] = inheritedGroupFill.backgroundRepeat;
+			if (fill.backgroundRepeat !== undefined) {
+				style['background-repeat'] = fill.backgroundRepeat;
 			}
-			if (inheritedGroupFill.backgroundSize !== undefined) {
-				style['background-size'] = inheritedGroupFill.backgroundSize;
+			if (fill.backgroundSize !== undefined) {
+				style['background-size'] = fill.backgroundSize;
 			}
-		} else if (imageFillUrl) {
-			style['background-color'] = 'transparent';
-			style['background-image'] = `url(${imageFillUrl})`;
-			style['background-repeat'] = ss.fillImageMode === 'tile' ? 'repeat' : 'no-repeat';
-			style['background-size'] = ss.fillImageMode === 'tile' ? 'auto' : '100% 100%';
-		} else if (patternCss) {
-			style['background-image'] = patternCss.backgroundImage;
-			style['background-color'] = patternCss.backgroundColor;
-			style['background-repeat'] = 'repeat';
-			style['background-size'] = 'auto';
-		} else if (gradient) {
-			style['background-image'] = gradient;
-		} else if (ss.fillColor && ss.fillColor !== 'transparent' && ss.fillMode !== 'none') {
-			style['background-color'] = ss.fillColor;
+			if (fill.backgroundPosition !== undefined) {
+				style['background-position'] = fill.backgroundPosition;
+			}
 		}
 
-		// Stroke.
-		const strokeWidth = Math.max(0, ss.strokeWidth ?? 0);
-		if (strokeWidth > 0) {
-			const dash =
-				ss.strokeDash && ss.strokeDash !== 'solid'
-					? ss.strokeDash === 'dot' || ss.strokeDash === 'sysDot'
-						? 'dotted'
-						: 'dashed'
-					: 'solid';
+		// Stroke: the WHOLE outline decision (`a:ln`) is shared's, so this binding
+		// only maps the descriptor onto its style map.
+		//
+		// The local two-liner this replaces resolved the dash with its own
+		// `dot|sysDot ? 'dotted' : 'dashed'` ternary, which ignored `a:ln/@cmpd`
+		// (`grep compoundLine packages/angular/src` returned nothing), and it read
+		// `strokeColor` raw, so `strokeOpacity` and `a:miter/@lim` never reached
+		// the DOM either. `getComputedStrokeStyle` also owns the two suppression
+		// rules that used to be spelled out here: a width-only fill-less `<a:ln>`
+		// paints no outline, and a gradient / pattern line (or an open preset) is
+		// painted by the stroke overlay instead of a CSS border.
+		const stroke = getComputedStrokeStyle(el);
+		if (stroke.borderWidth > 0) {
 			if (animatesStroke) {
-				// Keep the width / dash; leave the colour to the animated keyframes.
-				style['border-width'] = px(strokeWidth);
-				style['border-style'] = dash;
-			} else {
-				style['border'] = `${px(strokeWidth)} ${dash} ${ss.strokeColor ?? DEFAULT_STROKE_COLOR}`;
+				// Keep the width / style; leave the colour to the animated keyframes.
+				style['border-width'] = px(stroke.borderWidth);
+				style['border-style'] = stroke.borderStyle ?? 'solid';
+			} else if (stroke.border) {
+				style['border'] = stroke.border;
 			}
+		}
+		// Inherited SVG presentation properties: writing them on the shape
+		// container is what makes the freeform `<path>` and the stroke overlay
+		// honour them without either restating it (mirrors React).
+		if (stroke.strokeLinejoin) {
+			style['stroke-linejoin'] = stroke.strokeLinejoin;
+		}
+		if (stroke.strokeLinecap) {
+			style['stroke-linecap'] = stroke.strokeLinecap;
+		}
+		if (stroke.strokeMiterlimit !== undefined) {
+			style['stroke-miterlimit'] = stroke.strokeMiterlimit;
 		}
 	}
 
@@ -171,9 +186,10 @@ export function getShapeFillStrokeStyle(
 	if (filterCss) {
 		style['filter'] = filterCss;
 	}
-	if (fx.webkitBoxReflect) {
-		style['-webkit-box-reflect'] = fx.webkitBoxReflect;
-	}
+	// Reflection is no longer a single CSS property (`-webkit-box-reflect`
+	// never worked in Firefox): the renderer renders a mirrored sibling node
+	// instead, using shared's `getReflectionWrapperStyle` directly (see
+	// `element-effect-defs.ts`'s `getReflectionOverlay`).
 	if (fx.mixBlendMode) {
 		style['mix-blend-mode'] = fx.mixBlendMode;
 	}
@@ -186,125 +202,91 @@ export function getShapeFillStrokeStyle(
 		style['opacity'] = elementOpacity * fx.opacity;
 	}
 
-	// Geometry. ellipse / roundRect get cheap `border-radius` approximations;
-	// every other preset geometry falls back to an SVG `clip-path` derived from
-	// the core geometry engine (mirrors the Vue port's cascade). Plain
-	// rectangles resolve to `undefined` and stay unclipped.
-	const shapeType = 'shapeType' in el ? el.shapeType : undefined;
-	if (shapeType === 'ellipse' || shapeType === 'circle') {
-		style['border-radius'] = '50%';
-		return style;
-	}
-	if (shapeType === 'roundRect') {
-		style['border-radius'] = px(Math.min(el.width, el.height) * 0.1);
-		return style;
+	// Shape 3D (`a:spPr/a:scene3d` camera + `a:spPr/a:sp3d` extrusion / bevel /
+	// material), applied before the geometry cascade so every early return below
+	// carries it. `merge3dStyleMap` comma-joins the extrusion / bevel shadows
+	// onto the effect `box-shadow` set above instead of clobbering it, and
+	// APPENDS the 3D transform (the element's rotation / flip transform comes
+	// from `getContainerStyle` and is composed by the renderer, which must not
+	// let this one overwrite it).
+	merge3dStyleMap(style, getComputed3dStyle(el));
+
+	// An unfilled, textless shape is a FRAME: PowerPoint hit-tests it on its
+	// outline only, so its interior must not swallow clicks meant for what it is
+	// drawn over. ShapeEffectOverlay paints a transparent pointer-events:stroke
+	// band that opts the outline back in.
+	if (isHollowShapeElement(el)) {
+		style['pointer-events'] = 'none';
 	}
 
-	const clipPath = getResolvedShapeClipPath(el);
-	if (clipPath) {
-		style['clip-path'] = clipPath;
+	// Geometry: the branch ORDER and every threshold live in shared
+	// `resolveShapeGeometry`, so this binding only maps the decision onto its
+	// kebab-case style map. Angular's own copy of the cascade had drifted four
+	// ways: it compared `shapeType` raw so `oval` and any capitalised spelling
+	// missed the ellipse branch, it had no connector or cylinder branch at all,
+	// and it rounded `roundRect` by a hardcoded 10% of the short side instead of
+	// the authored `a:avLst/adj` (the spec default alone is ~16.7%).
+	const geometry = resolveShapeGeometry(el);
+	switch (geometry.kind) {
+		case 'bare':
+			style['background-color'] = 'transparent';
+			style['border'] = 'none';
+			return style;
+		case 'strokeOnly':
+			// An open preset has no region to fill and no box to outline: the
+			// renderer strokes the evaluated geometry from `buildStrokeOutline`.
+			// The clip in particular encloses zero area for an open path and would
+			// clip that overlay away entirely.
+			style['background-color'] = 'transparent';
+			delete style['background-image'];
+			style['border'] = 'none';
+			return style;
+		case 'borderRadius':
+			style['border-radius'] = geometry.radius;
+			return style;
+		case 'clipPath':
+			style['clip-path'] = geometry.clipPath;
+			return style;
+		case 'lineEdge':
+			style['background-color'] = 'transparent';
+			style['border'] = 'none';
+			// A `line` preset draws one edge, so the compound type decides its
+			// style here too (`border-style: double` paints the parallel strands).
+			style['border-top'] = `${px(geometry.strokeWidth)} ${getCssBorderDashStyle(
+				el.shapeStyle?.strokeDash,
+				el.shapeStyle?.compoundLine,
+			)} ${el.shapeStyle?.strokeColor ?? DEFAULT_STROKE_COLOR}`;
+			return style;
+		default:
+			return style;
 	}
-
-	return style;
 }
 
 /**
- * Text block style for elements that carry text. Mirrors the essentials of the
- * React `getTextStyleForElement`.
+ * Text block style for elements that carry text.
+ *
+ * A thin adapter over the shared {@link buildTextBlockStyle}, which React
+ * renders from too. This used to be a hand-ported copy of React's builder, and
+ * the copy had silently lost `a:normAutofit` (a shrink-to-fit title painted 43%
+ * too large), `a:bodyPr/@wrap="none"` (a no-wrap line wrapped to three), the
+ * default font declaration, the italic padding nudge and the body
+ * margin/indent pair.
+ *
+ * The shared record is camelCase; `[ngStyle]` maps elsewhere in this binding
+ * are kebab-case, so it is converted rather than mixing both conventions in one
+ * merged map (`warpedTextStyle` merges this with the 3D scene style).
  */
 export function getTextBlockStyle(el: PptxElement): StyleMap {
 	if (!hasTextProperties(el)) {
 		return {};
 	}
-	const ts = el.textStyle;
-	const style: StyleMap = {
-		display: 'flex',
-		'flex-direction': 'column',
-		width: '100%',
-		height: '100%',
-		overflow: 'visible',
-		'white-space': 'pre-wrap',
-		'word-break': 'break-word',
-	};
-	if (!ts) {
-		style['color'] = DEFAULT_TEXT_COLOR;
-		return style;
-	}
-
-	style['color'] = ts.color ?? DEFAULT_TEXT_COLOR;
-	if (ts.fontFamily) {
-		style['font-family'] = ts.fontFamily;
-	}
-	if (typeof ts.fontSize === 'number') {
-		// The parsed model stores font size as a px value; render it as px (matches
-		// React/Vue). Emitting `pt` inflated every glyph by 96/72 (≈1.33×), which
-		// overflowed text boxes and broke visual parity (e2e: text-rendering.spec).
-		style['font-size'] = `${ts.fontSize}px`;
-	}
-	// Line spacing: an exact-pt spacing wins (`Xpt`); else the proportional
-	// multiplier, defaulting to 1.25 (1.35 with italics). Without this Angular
-	// relied on the browser's font-dependent `normal` (~1.2-1.5), loosening
-	// multi-line text out of its box vs React/Vue. Shared with both bindings.
-	style['line-height'] = resolveLineHeight(ts, Boolean(ts.italic));
-	if (ts.bold) {
-		style['font-weight'] = 'bold';
-	}
-	if (ts.italic) {
-		style['font-style'] = 'italic';
-	}
-
-	const decorations: string[] = [];
-	if (ts.underline) {
-		decorations.push('underline');
-	}
-	if (ts.strikethrough) {
-		decorations.push('line-through');
-	}
-	if (decorations.length > 0) {
-		style['text-decoration'] = decorations.join(' ');
-	}
-
-	// Alignment: the special OOXML values justLow / dist / thaiDist all map to
-	// CSS `justify`, and an unset alignment defaults to `right` for RTL text.
-	// Mirrors React's `getTextStyleForElement` align branch + `resolveCssTextAlign`.
-	const isRtl = ts.rtl === true;
-	style['text-align'] = resolveCssTextAlign(ts.align, isRtl) ?? 'left';
-
-	// Vertical text direction: writing-mode / text-orientation / direction.
-	// Mirrors React's `getTextStyleForElement` vertical-text branch. Only the
-	// `wordArtVertRtl` mode forces `direction: rtl`; otherwise paragraph-level
-	// RTL drives the direction.
-	if (isVerticalTextDirection(ts.textDirection)) {
-		const writingMode = toCssWritingMode(ts.textDirection);
-		const textOrientation = toCssTextOrientation(ts.textDirection);
-		const verticalDirection = toCssVerticalDirection(ts.textDirection);
-		if (writingMode) {
-			style['writing-mode'] = writingMode;
-		}
-		if (textOrientation) {
-			style['text-orientation'] = textOrientation;
-		}
-		if (verticalDirection) {
-			style['direction'] = verticalDirection;
-		} else if (isRtl) {
-			style['direction'] = 'rtl';
-		}
-	} else if (isRtl) {
-		style['direction'] = 'rtl';
-	}
-
-	switch (ts.vAlign) {
-		case 'middle':
-			style['justify-content'] = 'center';
-			break;
-		case 'bottom':
-			style['justify-content'] = 'flex-end';
-			break;
-		default:
-			style['justify-content'] = 'flex-start';
-	}
-
-	return style;
+	return cssObjectToStyleMap(
+		buildTextBlockStyle(el, {
+			fallbackColor: DEFAULT_TEXT_COLOR,
+			bodyLayout: true,
+			pxLengths: true,
+		}),
+	);
 }
 
 /** Resolve a displayable image source for picture/image/media poster frames. */

@@ -1,10 +1,14 @@
+/* oxlint-disable eslint/one-var -- each `it` block below declares its own
+   independent fixture locals; merging unrelated declarations across these
+   test cases would hurt readability, not help it. */
 import type { PptxElement, PptxElementAnimation } from 'pptx-viewer-core';
+import { reorderAnimationTo } from 'pptx-viewer-shared';
+import { translationsEn } from 'pptx-viewer-shared/i18n';
 import { describe, expect, it } from 'vitest';
 
 import {
 	animationTypeLabel,
 	buildTimelineBarData,
-	reorderAnimationsByIndex,
 	sortAnimations,
 	timelineLabel,
 } from './animation-panel-helpers';
@@ -66,15 +70,31 @@ describe('timelineLabel', () => {
 });
 
 describe('animationTypeLabel', () => {
-	it('prefers entrance, then emphasis, then exit, then custom', () => {
-		expect(animationTypeLabel(anim({ elementId: 'a', entrance: 'fadeIn' }))).toBe('fadeIn');
-		expect(animationTypeLabel(anim({ elementId: 'a', emphasis: 'pulse' }))).toBe('pulse');
-		expect(animationTypeLabel(anim({ elementId: 'a', exit: 'fadeOut' }))).toBe('fadeOut');
-		expect(animationTypeLabel(anim({ elementId: 'a' }))).toBe('custom');
+	/** The dictionary lookup a host performs, so the tooltip's real text is asserted. */
+	const t = (key: string): string => translationsEn[key] ?? key;
+
+	it('names the effect rather than printing its wire token', () => {
+		expect(animationTypeLabel(anim({ elementId: 'a', entrance: 'fadeIn' }), t)).toBe('Fade In');
+		expect(animationTypeLabel(anim({ elementId: 'a', emphasis: 'pulse' }), t)).toBe('Pulse');
+		expect(animationTypeLabel(anim({ elementId: 'a', exit: 'fadeOut' }), t)).toBe('Fade Out');
+	});
+
+	it('prefers entrance, then emphasis, then exit, then the generic word', () => {
+		expect(
+			animationTypeLabel(anim({ elementId: 'a', entrance: 'fadeIn', exit: 'fadeOut' }), t),
+		).toBe('Fade In');
+		expect(animationTypeLabel(anim({ elementId: 'a' }), t)).toBe('Animation');
 	});
 });
 
-describe('reorderAnimationsByIndex', () => {
+/**
+ * The panel's drag-reorder wiring (`AnimationTimelineList.svelte`) calls the
+ * shared `reorderAnimationTo` directly; this is the binding-level regression
+ * test that the wiring's row-index call shape still moves the right entry
+ * (full behavioural coverage lives in `pptx-viewer-shared`'s
+ * `animation-authoring.test.ts`).
+ */
+describe('reorderAnimationTo (index-keyed, as called from AnimationTimelineList)', () => {
 	const three = [
 		anim({ elementId: 'a', order: 0 }),
 		anim({ elementId: 'b', order: 1 }),
@@ -82,13 +102,13 @@ describe('reorderAnimationsByIndex', () => {
 	];
 
 	it('moves an entry and re-normalises order fields', () => {
-		const next = reorderAnimationsByIndex(three, 0, 2);
+		const next = reorderAnimationTo(three, 0, 2);
 		expect(next.map((a) => a.elementId)).toStrictEqual(['b', 'c', 'a']);
 		expect(next.map((a) => a.order)).toStrictEqual([0, 1, 2]);
 	});
 
 	it('returns a copy when the source index is out of range', () => {
-		const next = reorderAnimationsByIndex(three, 5, 0);
+		const next = reorderAnimationTo(three, 5, 0);
 		expect(next.map((a) => a.elementId)).toStrictEqual(['a', 'b', 'c']);
 	});
 });

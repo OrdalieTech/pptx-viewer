@@ -2,6 +2,7 @@ import type {
 	PptxAnimationPreset,
 	PptxAnimationRepeatMode,
 	PptxAnimationSequence,
+	PptxAnimationTimelineAnchor,
 	PptxAnimationTimingCurve,
 	PptxAnimationTrigger,
 	PptxElement,
@@ -9,16 +10,20 @@ import type {
 } from 'pptx-viewer-core';
 import type { AnimationGroup } from 'pptx-viewer-shared';
 import {
+	buildAnimationTimelineRows,
 	DIRECTIONAL_PRESETS,
 	EMPHASIS_PRESET_VALUES,
 	ENTRANCE_PRESET_VALUES,
 	EXIT_PRESET_VALUES,
+	getEffectSoundState,
 	SEQUENCE_VALUES,
 	TRIGGER_VALUES,
 } from 'pptx-viewer-shared';
 
+import { playAnimationPreview } from '../../animation';
 import type { Translator } from '../../i18n';
 import { createEl } from '../../render';
+import { createAfterAnimationRow } from './after-animation-row';
 import {
 	animField,
 	animNumber,
@@ -29,10 +34,12 @@ import {
 } from './animation-panel-fields';
 import {
 	elementDisplayLabel,
-	playAnimationPreview,
+	renderNativeOrderRow,
 	renderOrderRow,
 	renderTimelineBar,
 } from './animation-panel-parts';
+import { createEffectSoundRow } from './effect-sound-row';
+import { createMotionPathRow } from './motion-path-row';
 import type { InspectorHandlers } from './types';
 
 /** Docked panel state, derived from the deck-level inspector state. */
@@ -41,6 +48,8 @@ export interface AnimationPanelState {
 	selectedElementId: string | undefined;
 	elements: readonly PptxElement[];
 	animations: readonly PptxElementAnimation[];
+	/** Read-only anchors for the deck's own effect groups; see {@link PptxAnimationTimelineAnchor}. */
+	animationTimelineAnchors?: readonly PptxAnimationTimelineAnchor[];
 }
 
 export interface AnimationPanel {
@@ -50,7 +59,12 @@ export interface AnimationPanel {
 
 type PanelHandlers = Pick<
 	InspectorHandlers,
-	'setAnimationEffect' | 'setAnimationTiming' | 'reorderAnimation'
+	| 'setAnimationEffect'
+	| 'applyMotionPath'
+	| 'setAnimationTiming'
+	| 'setAnimationSound'
+	| 'reorderAnimation'
+	| 'pushRecentColor'
 >;
 
 /**
@@ -113,6 +127,10 @@ export function createAnimationPanel(
 	const emphasis = presetSelect('emphasis', 'pptx.animation.emphasis', EMPHASIS_PRESET_VALUES);
 	const exit = presetSelect('exit', 'pptx.animation.exit', EXIT_PRESET_VALUES);
 
+	// Motion path: geometry, not a preset, so it gets its own row.
+	const motionPath = createMotionPathRow(doc, t, (presetId) => handlers.applyMotionPath(presetId));
+	el.appendChild(motionPath.el);
+
 	// -- Effect options + timing (visible only with an active animation) ------
 	const options = createEl(doc, 'div', 'pptxv-anim-options');
 	el.appendChild(options);
@@ -141,6 +159,23 @@ export function createAnimationPanel(
 		(value) => commit({ sequence: value as PptxAnimationSequence }),
 		options,
 	);
+
+	const effectSoundRow = createEffectSoundRow(doc, t, (pick) => {
+		if (current.selectedElementId) {
+			handlers.setAnimationSound(current.selectedElementId, pick);
+		}
+	});
+	options.appendChild(effectSoundRow.el);
+	const afterAnimationRow = createAfterAnimationRow(
+		doc,
+		t,
+		(action) => commit({ afterAnimation: action }),
+		(color) => {
+			commit({ afterAnimationColor: color });
+			handlers.pushRecentColor(color);
+		},
+	);
+	options.appendChild(afterAnimationRow.el);
 
 	const timingTitle = createEl(doc, 'span', 'pptxv-inspector-section-title');
 	timingTitle.textContent = t('pptx.animation.timing');
@@ -217,10 +252,15 @@ export function createAnimationPanel(
 				return;
 			}
 			const animation = selectedAnimation();
-			const hasEffect = Boolean(animation?.entrance || animation?.emphasis || animation?.exit);
+			// A motion path is an effect in its own right: it must keep the timing
+			// controls and the Preview button reachable even with no preset set.
+			const hasEffect = Boolean(
+				animation?.entrance || animation?.emphasis || animation?.exit || animation?.motionPath,
+			);
 			entrance.value = animation?.entrance ?? 'none';
 			emphasis.value = animation?.emphasis ?? 'none';
 			exit.value = animation?.exit ?? 'none';
+			motionPath.update({ motionPath: animation?.motionPath, editable: state.editable });
 			previewBtn.hidden = !hasEffect;
 			options.hidden = !hasEffect;
 			const directional =
@@ -232,6 +272,15 @@ export function createAnimationPanel(
 				btn.disabled = !state.editable;
 			}
 			sequence.value = animation?.sequence ?? 'asOne';
+			effectSoundRow.update({
+				...getEffectSoundState(state.animations, state.selectedElementId ?? ''),
+				editable: state.editable,
+			});
+			afterAnimationRow.update({
+				action: animation?.afterAnimation ?? 'none',
+				color: animation?.afterAnimationColor,
+				editable: state.editable,
+			});
 			trigger.value = animation?.trigger ?? 'onClick';
 			triggerShapeWrap.hidden = trigger.value !== 'onShapeClick';
 			triggerShape.replaceChildren(
@@ -268,22 +317,34 @@ export function createAnimationPanel(
 			duration.disabled = delay.disabled = repeatCount.disabled = !state.editable;
 
 			const ordered = [...state.animations].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-			timeline.hidden = ordered.length === 0;
-			renderTimelineBar(doc, bar, ordered, state.elements, state.selectedElementId);
+			// Merges the editor's own animations with the deck's read-only native
+			// anchors into one full-sequence timeline.
+			const rows = buildAnimationTimelineRows(ordered, state.animationTimelineAnchors ?? []);
+			const animationByElementId = new Map(ordered.map((entry) => [entry.elementId, entry]));
+			timeline.hidden = rows.length === 0;
+			renderTimelineBar(doc, t, bar, ordered, state.elements, state.selectedElementId);
 			list.replaceChildren(
-				...ordered.map((entry, index) =>
-					renderOrderRow(
-						doc,
-						t,
-						entry,
-						index,
-						ordered.length,
-						state.elements,
-						state.selectedElementId,
-						state.editable,
-						handlers.reorderAnimation,
-					),
-				),
+				...rows.flatMap((row, index) => {
+					if (row.kind === 'native') {
+						return [renderNativeOrderRow(doc, t, row.targetIds, index, state.elements)];
+					}
+					const entry = animationByElementId.get(row.elementId);
+					return entry
+						? [
+								renderOrderRow(
+									doc,
+									t,
+									entry,
+									index,
+									rows.length,
+									state.elements,
+									state.selectedElementId,
+									state.editable,
+									handlers.reorderAnimation,
+								),
+							]
+						: [];
+				}),
 			);
 		},
 	};

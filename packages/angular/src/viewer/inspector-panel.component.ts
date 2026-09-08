@@ -21,19 +21,32 @@ import { TranslatePipe } from '@ngx-translate/core';
 import type {
 	ChartPptxElement,
 	MediaPptxElement,
+	ParsedTableStyleMap,
+	PptxAnimationTimelineAnchor,
 	PptxElement,
 	PptxElementAnimation,
-	PptxShapeLocks,
 	PptxSmartArtData,
+	PptxThemeColorRef,
 	SmartArtPptxElement,
 	TablePptxElement,
 } from 'pptx-viewer-core';
 import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
 
-import { rebuildDrawingShapesIfCleared, resolvePalette } from '../internal/shared';
+import type { ThemeColorPickerCommit } from '../internal/shared';
+import {
+	applyTableStyleDelete,
+	applyTableStyleMapChange,
+	elementLockTogglePatch,
+	isElementLocked,
+	rebuildDrawingShapesIfCleared,
+	resolvePalette,
+	textFontSizePtToPx,
+} from '../internal/shared';
+import { AccessibilityTextPanelComponent } from './accessibility-text-panel.component';
 import { ActionSettingsPanelComponent } from './action-settings-panel.component';
 import { AnimationAuthorPanelComponent } from './animation-author-panel.component';
 import { ChartDataEditorComponent } from './chart-data-editor.component';
+import { ChartTypeSelectorComponent } from './chart-type-selector.component';
 import { EditorStateService } from './editor-state.service';
 import { EffectsPanelComponent } from './effects-panel.component';
 import { ElementFlipControlsComponent } from './element-flip-controls.component';
@@ -49,30 +62,42 @@ import {
 	shapeStylePatch,
 	strokeColorOf,
 	textColorOf,
+	textFontSizePatch,
 	textStylePatch,
 } from './inspector-helpers';
 import { IsMobileService } from './is-mobile';
+import { LineFormatPanelComponent } from './line-format-panel.component';
+import { LoadContentService } from './load-content.service';
 import { MediaPropertiesPanelComponent } from './media-properties-panel.component';
+import { PatternFillPanelComponent } from './pattern-fill-panel.component';
+import { RecentColorsRowComponent } from './recent-colors-row.component';
+import { RecentColorsService } from './recent-colors.service';
 import { ShapeAuthoringPanelComponent } from './shape-authoring-panel.component';
 import { SmartArtPropertiesComponent } from './smart-art-properties.component';
 import { TableCellFormattingComponent } from './table-cell-formatting.component';
 import { TableDataEditorComponent } from './table-data-editor.component';
 import { TablePropertiesComponent } from './table-properties.component';
+import { Text3DPanelComponent } from './text-3d-panel.component';
 import { TextAdvancedPanelComponent } from './text-advanced-panel.component';
 import { TextWarpGalleryComponent } from './text-warp-gallery.component';
+import { ThemeColorSwatchGridComponent } from './theme-color-swatch-grid.component';
 
 @Component({
 	selector: 'pptx-inspector-panel',
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
 	imports: [
+		AccessibilityTextPanelComponent,
 		GradientPickerComponent,
 		EffectsPanelComponent,
+		LineFormatPanelComponent,
+		PatternFillPanelComponent,
 		TextAdvancedPanelComponent,
 		TableDataEditorComponent,
 		TablePropertiesComponent,
 		TableCellFormattingComponent,
 		ChartDataEditorComponent,
+		ChartTypeSelectorComponent,
 		SmartArtPropertiesComponent,
 		AnimationAuthorPanelComponent,
 		ActionSettingsPanelComponent,
@@ -81,7 +106,10 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 		ElementMiscPropertiesComponent,
 		ElementFlipControlsComponent,
 		ShapeAuthoringPanelComponent,
+		Text3DPanelComponent,
 		TextWarpGalleryComponent,
+		RecentColorsRowComponent,
+		ThemeColorSwatchGridComponent,
 		TranslatePipe,
 		LucideArrowUp,
 		LucideArrowDown,
@@ -214,12 +242,42 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 								(change)="onStrokeColorChange($event)"
 							/>
 						</div>
+						<div class="pptx-ng-inspector__row" [attr.data-el-key]="key">
+							<span class="pptx-ng-inspector__label">{{ 'pptx.inspector.fill' | translate }}</span>
+							<pptx-theme-color-swatch-grid
+								[selectedRef]="fillColorRef()"
+								[selectedHex]="liveFillColor()"
+								(pick)="onFillThemeColor($event)"
+							/>
+							<pptx-recent-colors-row
+								[colors]="recentColors.recent()"
+								(pick)="onFillColorPick($event)"
+							/>
+						</div>
+						<div class="pptx-ng-inspector__row" [attr.data-el-key]="key">
+							<span class="pptx-ng-inspector__label">{{
+								'pptx.inspector.stroke' | translate
+							}}</span>
+							<pptx-theme-color-swatch-grid
+								[selectedRef]="strokeColorRef()"
+								[selectedHex]="liveStrokeColor()"
+								(pick)="onStrokeThemeColor($event)"
+							/>
+							<pptx-recent-colors-row
+								[colors]="recentColors.recent()"
+								(pick)="onStrokeColorPick($event)"
+							/>
+						</div>
 					}
 				</section>
 			}
 
 			<pptx-shape-authoring-panel [element]="el()" (patch)="onPatch($event)" />
-			<pptx-element-misc-properties [element]="el()" (patch)="onPatch($event)" />
+			<pptx-element-misc-properties
+				[element]="el()"
+				[canEdit]="canEdit()"
+				(patch)="onPatch($event)"
+			/>
 
 			<!-- ── Text style (text-bearing elements only) ─────────────────────── -->
 			@if (hasText()) {
@@ -245,12 +303,22 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 								id="insp-font-size"
 								class="pptx-ng-inspector__input pptx-ng-inspector__input--number"
 								type="number"
-								inputmode="numeric"
+								inputmode="decimal"
 								min="1"
+								step="any"
 								[value]="seed().fontSize"
 								(change)="onFontSizeChange($event)"
 							/>
 						</div>
+						<pptx-theme-color-swatch-grid
+							[selectedRef]="textColorRef()"
+							[selectedHex]="liveTextColor()"
+							(pick)="onTextThemeColor($event)"
+						/>
+						<pptx-recent-colors-row
+							[colors]="recentColors.recent()"
+							(pick)="onTextColorPick($event)"
+						/>
 					}
 
 					<div class="pptx-ng-inspector__row pptx-ng-inspector__row--toggles">
@@ -305,6 +373,15 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 						{{ 'pptx.inspector.media' | translate }}
 					</summary>
 					<pptx-media-properties-panel [element]="media" (patch)="onPatch($event)" />
+				</details>
+			}
+
+			@if (accessibilityTextEl(); as a11yEl) {
+				<details class="pptx-ng-inspector__details" open>
+					<summary class="pptx-ng-inspector__summary">
+						{{ 'pptx.accessibility.heading' | translate }}
+					</summary>
+					<pptx-accessibility-text-panel [element]="a11yEl" (patch)="onPatch($event)" />
 				</details>
 			}
 
@@ -381,6 +458,22 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 					</summary>
 					<pptx-effects-panel [element]="el()" (patch)="onPatch($event)" />
 				</details>
+
+				<!-- ── Advanced: line format (dash / compound / join / cap) ────── -->
+				<details class="pptx-ng-inspector__details">
+					<summary class="pptx-ng-inspector__summary">
+						{{ 'pptx.inspector.line' | translate }}
+					</summary>
+					<pptx-line-format-panel [element]="el()" (patch)="onPatch($event)" />
+				</details>
+
+				<!-- ── Advanced: pattern fill (preset + fg/bg) ─────────────────── -->
+				<details class="pptx-ng-inspector__details">
+					<summary class="pptx-ng-inspector__summary">
+						{{ 'pptx.table.fillPattern' | translate }}
+					</summary>
+					<pptx-pattern-fill-panel [element]="el()" (patch)="onPatch($event)" />
+				</details>
 			}
 
 			<!-- ── Advanced: text (spacing / alignment / direction) ───────────── -->
@@ -391,11 +484,20 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 					</summary>
 					<pptx-text-advanced-panel [element]="el()" (patch)="onPatch($event)" />
 				</details>
+
+				<!-- ── Advanced: 3D text (extrusion / bevels / material) ────────── -->
+				<details class="pptx-ng-inspector__details">
+					<summary class="pptx-ng-inspector__summary">
+						{{ 'pptx.text3d.title' | translate }}
+					</summary>
+					<pptx-text-3d-panel [element]="el()" (patch)="onPatch($event)" />
+				</details>
 			}
 
 			<!-- ── Table data editor ──────────────────────────────────────────── -->
 			@if (tableEl(); as t) {
-				<details class="pptx-ng-inspector__details">
+				<!-- Open by default, as the other four bindings show these two sections. -->
+				<details class="pptx-ng-inspector__details" open>
 					<summary class="pptx-ng-inspector__summary">
 						{{ 'pptx.inspector.tableData' | translate }}
 					</summary>
@@ -403,11 +505,17 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 				</details>
 
 				<!-- ── Table style (structure, presets, widths, heights) ─────────── -->
-				<details class="pptx-ng-inspector__details">
+				<details class="pptx-ng-inspector__details" open>
 					<summary class="pptx-ng-inspector__summary">
 						{{ 'pptx.inspector.tableStyle' | translate }}
 					</summary>
-					<pptx-table-properties [element]="t" (elementChange)="onElementReplace($event)" />
+					<pptx-table-properties
+						[element]="t"
+						[tableStyleMap]="loader?.tableStyleMap()"
+						(elementChange)="onElementReplace($event)"
+						(tableStyleMapChange)="onTableStyleMapChange($event)"
+						(deleteTableStyle)="onDeleteTableStyle($event)"
+					/>
 				</details>
 
 				<!-- ── Selected cell formatting ─────────────────────────────────── -->
@@ -419,9 +527,23 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 				</details>
 			}
 
+			<!-- ── Chart type / title / grouping ────────────────────────────── -->
+			@if (chartEl(); as c) {
+				<details class="pptx-ng-inspector__details" open>
+					<summary class="pptx-ng-inspector__summary">
+						{{ 'pptx.chart.heading' | translate }}
+					</summary>
+					<pptx-chart-type-selector
+						[element]="c"
+						[canEdit]="canEdit()"
+						(elementChange)="onElementReplace($event)"
+					/>
+				</details>
+			}
+
 			<!-- ── Chart data editor ──────────────────────────────────────────── -->
 			@if (chartEl(); as c) {
-				<details class="pptx-ng-inspector__details">
+				<details class="pptx-ng-inspector__details" open>
 					<summary class="pptx-ng-inspector__summary">
 						{{ 'pptx.inspector.chartData' | translate }}
 					</summary>
@@ -449,6 +571,7 @@ import { TextWarpGalleryComponent } from './text-warp-gallery.component';
 					[slideIndex]="slideIndex()"
 					[animations]="slideAnimations()"
 					[slideElements]="slideElements()"
+					[animationTimelineAnchors]="slideAnimationTimelineAnchors()"
 					[canEdit]="canEdit()"
 					(animationsChange)="onAnimationsChange($event)"
 				/>
@@ -741,8 +864,18 @@ export class InspectorPanelComponent {
 
 	protected readonly editor = inject(EditorStateService);
 
+	/**
+	 * Optional: absent in a standalone-thumbnail/export render context.
+	 * Feeds the table properties panel's "Edit style..." (`tableStyleMap`),
+	 * see {@link onTableStyleMapChange} / {@link onDeleteTableStyle}.
+	 */
+	protected readonly loader = inject(LoadContentService, { optional: true });
+
 	/** Reactive viewport / pointer flags (drives the bottom-sheet layout). */
 	protected readonly mobile = inject(IsMobileService);
+
+	/** "Recent colours" row backing the fill/stroke/text colour pickers below. */
+	protected readonly recentColors = inject(RecentColorsService);
 
 	/**
 	 * Root class list: gains the `is-mobile` modifier under the mobile
@@ -787,16 +920,43 @@ export class InspectorPanelComponent {
 		};
 	});
 
-	/** Whether the element has lock flags preventing move/select. */
-	protected readonly isLocked = computed(
-		() => Boolean(this.el().locks?.noMove) || Boolean(this.el().locks?.noSelect),
-	);
+	/**
+	 * Whether the element carries a lock that stops a canvas gesture, resolved by
+	 * the SHARED predicate so all five bindings agree on what "locked" means
+	 * (previously a hand-rolled `noMove || noSelect` that omitted `noResize`, so a
+	 * resize-locked shape showed as unlocked while the canvas refused the drag).
+	 */
+	protected readonly isLocked = computed(() => isElementLocked(this.el()));
 
 	/** Whether the element supports shape-style (fill/stroke) editing. */
 	protected readonly hasShape = computed(() => hasShapeProperties(this.el()));
 
+	/**
+	 * LIVE (not `seed()`-frozen) fill/stroke colour + ref, read fresh from the
+	 * element on every change so the theme-swatch grid's highlight tracks the
+	 * current colour right after a pick, unlike the caret-preserving `seed()`
+	 * fields the native `<input type="color">`s bind to.
+	 */
+	protected readonly liveFillColor = computed(() => fillColorOf(this.el()));
+	protected readonly liveStrokeColor = computed(() => strokeColorOf(this.el()));
+	protected readonly fillColorRef = computed<PptxThemeColorRef | undefined>(() => {
+		const cur = this.el();
+		return hasShapeProperties(cur) ? cur.shapeStyle?.fillColorRef : undefined;
+	});
+	protected readonly strokeColorRef = computed<PptxThemeColorRef | undefined>(() => {
+		const cur = this.el();
+		return hasShapeProperties(cur) ? cur.shapeStyle?.strokeColorRef : undefined;
+	});
+
 	/** Whether the element supports text-style editing. */
 	protected readonly hasText = computed(() => hasTextProperties(this.el()));
+
+	/** LIVE text colour + ref (see {@link liveFillColor}'s doc for why not `seed()`). */
+	protected readonly liveTextColor = computed(() => textColorOf(this.el()));
+	protected readonly textColorRef = computed<PptxThemeColorRef | undefined>(() => {
+		const cur = this.el();
+		return hasTextProperties(cur) ? cur.textStyle?.colorRef : undefined;
+	});
 
 	// -- Computed display values (toggles only: buttons, no caret risk) -------
 
@@ -814,6 +974,16 @@ export class InspectorPanelComponent {
 	);
 	protected readonly imageEl = computed(() =>
 		ImagePropertiesPanelComponent.supports(this.el()) ? this.el() : undefined,
+	);
+	/**
+	 * The selected element, or `undefined`, gating
+	 * `AccessibilityTextPanelComponent` (alt text / title) via shared's
+	 * `shouldShowAccessibilitySection`: true for a plain shape, text box,
+	 * connector, and every graphic-frame kind (table/chart/smartArt/media/ole).
+	 * A picture's own alt text lives in `imageEl` above instead.
+	 */
+	protected readonly accessibilityTextEl = computed(() =>
+		AccessibilityTextPanelComponent.supports(this.el()) ? this.el() : undefined,
 	);
 	protected readonly mediaEl = computed(() =>
 		this.el().type === 'media' ? (this.el() as MediaPptxElement) : undefined,
@@ -854,14 +1024,9 @@ export class InspectorPanelComponent {
 		} as Partial<PptxElement>);
 	}
 
-	/** Toggle element lock (noMove + noResize + noSelect). */
+	/** Toggle element lock. Shared owns which flags that writes. */
 	protected onLockToggle(): void {
-		if (this.isLocked()) {
-			this.onPatch({ locks: undefined } as Partial<PptxElement>);
-		} else {
-			const locks: PptxShapeLocks = { noMove: true, noResize: true, noSelect: true };
-			this.onPatch({ locks } as Partial<PptxElement>);
-		}
+		this.onPatch({ locks: elementLockTogglePatch(!this.isLocked()) } as Partial<PptxElement>);
 	}
 
 	/** Commit a partial-element patch from an advanced sub-panel as one history entry. */
@@ -874,10 +1039,56 @@ export class InspectorPanelComponent {
 		this.editor.updateElement(this.slideIndex(), updated.id, updated as Partial<PptxElement>);
 	}
 
+	/**
+	 * Table style DEFINITION edits ("Edit style...") are a whole-map
+	 * replacement or a delete, never a per-element patch, so they bypass
+	 * {@link onElementReplace} entirely and write straight to the loader's
+	 * `tableStyleMap`/`tableStylesToDelete` signals. `applyTableStyleMapChange`/
+	 * `applyTableStyleDelete` (shared) keep `tableStylesToDelete` in sync, the
+	 * accumulator {@link LoadContentService.saveSlides} forwards via
+	 * `tableStyleSaveOptions`.
+	 */
+	protected onTableStyleMapChange(nextMap: ParsedTableStyleMap): void {
+		if (!this.loader) {
+			return;
+		}
+		const result = applyTableStyleMapChange(
+			{
+				tableStyleMap: this.loader.tableStyleMap(),
+				tableStylesToDelete: this.loader.tableStylesToDelete(),
+			},
+			nextMap,
+		);
+		this.loader.tableStyleMap.set(result.tableStyleMap);
+		this.loader.tableStylesToDelete.set(result.tableStylesToDelete);
+		this.editor.dirty.set(true);
+	}
+
+	/** Record a styleId for save-time removal from `ppt/tableStyles.xml`. */
+	protected onDeleteTableStyle(styleId: string): void {
+		if (!this.loader) {
+			return;
+		}
+		const result = applyTableStyleDelete(
+			{
+				tableStyleMap: this.loader.tableStyleMap(),
+				tableStylesToDelete: this.loader.tableStylesToDelete(),
+			},
+			styleId,
+		);
+		this.loader.tableStyleMap.set(result.tableStyleMap);
+		this.loader.tableStylesToDelete.set(result.tableStylesToDelete);
+		this.editor.dirty.set(true);
+	}
+
 	/** The active slide's element-animation list (animations live on the slide). */
 	protected readonly slideAnimations = computed<readonly PptxElementAnimation[]>(
 		() => this.editor.slides()[this.slideIndex()]?.animations ?? [],
 	);
+	/** Read-only anchors for the active slide's deck-native effect groups. */
+	protected readonly slideAnimationTimelineAnchors = computed<
+		readonly PptxAnimationTimelineAnchor[]
+	>(() => this.editor.slides()[this.slideIndex()]?.animationTimelineAnchors ?? []);
 	protected readonly slideElements = computed<readonly PptxElement[]>(
 		() => this.editor.slides()[this.slideIndex()]?.elements ?? [],
 	);
@@ -941,12 +1152,27 @@ export class InspectorPanelComponent {
 		if (!color) {
 			return;
 		}
+		this.commitFillColor(color);
+	}
+
+	/** Recent-colours row pick: commits through the same path as the native picker, clearing any stored ref. */
+	protected onFillColorPick(color: string): void {
+		this.commitFillColor(color, undefined);
+	}
+
+	/** Theme-swatch pick: commits BOTH the resolved hex and the ref, so the fill follows a later theme change. */
+	protected onFillThemeColor(commit: ThemeColorPickerCommit): void {
+		this.commitFillColor(commit.hex, commit.ref);
+	}
+
+	private commitFillColor(color: string, ref?: PptxThemeColorRef): void {
 		const cur = this.el();
 		this.editor.updateElement(
 			this.slideIndex(),
 			cur.id,
-			shapeStylePatch(cur, { fillColor: color }),
+			shapeStylePatch(cur, { fillColor: color, fillColorRef: ref }),
 		);
+		this.recentColors.push(color);
 	}
 
 	protected onStrokeColorChange(event: Event): void {
@@ -954,12 +1180,27 @@ export class InspectorPanelComponent {
 		if (!color) {
 			return;
 		}
+		this.commitStrokeColor(color);
+	}
+
+	/** Recent-colours row pick: commits through the same path as the native picker, clearing any stored ref. */
+	protected onStrokeColorPick(color: string): void {
+		this.commitStrokeColor(color, undefined);
+	}
+
+	/** Theme-swatch pick: commits BOTH the resolved hex and the ref, so the stroke follows a later theme change. */
+	protected onStrokeThemeColor(commit: ThemeColorPickerCommit): void {
+		this.commitStrokeColor(commit.hex, commit.ref);
+	}
+
+	private commitStrokeColor(color: string, ref?: PptxThemeColorRef): void {
 		const cur = this.el();
 		this.editor.updateElement(
 			this.slideIndex(),
 			cur.id,
-			shapeStylePatch(cur, { strokeColor: color }),
+			shapeStylePatch(cur, { strokeColor: color, strokeColorRef: ref }),
 		);
+		this.recentColors.push(color);
 	}
 
 	// ── Text style ───────────────────────────────────────────────────────────
@@ -969,8 +1210,27 @@ export class InspectorPanelComponent {
 		if (!color) {
 			return;
 		}
+		this.commitTextColor(color);
+	}
+
+	/** Recent-colours row pick: commits through the same path as the native picker, clearing any stored ref. */
+	protected onTextColorPick(color: string): void {
+		this.commitTextColor(color, undefined);
+	}
+
+	/** Theme-swatch pick: commits BOTH the resolved hex and the ref, so the text colour follows a later theme change. */
+	protected onTextThemeColor(commit: ThemeColorPickerCommit): void {
+		this.commitTextColor(commit.hex, commit.ref);
+	}
+
+	private commitTextColor(color: string, ref?: PptxThemeColorRef): void {
 		const cur = this.el();
-		this.editor.updateElement(this.slideIndex(), cur.id, textStylePatch(cur, { color }));
+		this.editor.updateElement(
+			this.slideIndex(),
+			cur.id,
+			textStylePatch(cur, { color, colorRef: ref }),
+		);
+		this.recentColors.push(color);
 	}
 
 	protected onFontSizeChange(event: Event): void {
@@ -979,7 +1239,11 @@ export class InspectorPanelComponent {
 			return;
 		}
 		const cur = this.el();
-		this.editor.updateElement(this.slideIndex(), cur.id, textStylePatch(cur, { fontSize: val }));
+		this.editor.updateElement(
+			this.slideIndex(),
+			cur.id,
+			textFontSizePatch(cur, textFontSizePtToPx(val)),
+		);
 	}
 
 	protected onBoldToggle(): void {

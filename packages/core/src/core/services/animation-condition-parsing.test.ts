@@ -73,6 +73,14 @@ describe('parseCondition', () => {
 		expect(result.event).toBe('onStopAudio');
 	});
 
+	it('parses onDblClick event', () => {
+		const result = parseCondition({
+			'@_evt': 'onDblClick',
+			'@_delay': '0',
+		});
+		expect(result.event).toBe('onDblClick');
+	});
+
 	it('ignores invalid event values', () => {
 		const result = parseCondition({
 			'@_evt': 'invalidEvent',
@@ -140,6 +148,26 @@ describe('parseCondition', () => {
 		expect(result.targetTimeNodeId).toBeUndefined();
 		expect(result.targetShapeId).toBeUndefined();
 		expect(result.targetSlide).toBeUndefined();
+	});
+
+	it('parses onStopAudio with a p:tgtEl/p:spTgt dependency (no @tn)', () => {
+		// ECMA-376 CT_TLTimeCondition (S19.5.31): `p:cond` names its dependency by
+		// EITHER `@_tn` OR a `p:tgtEl` choice-child, never both. A media shape's
+		// own Play behaviour is 1:1 with its shape id, so PowerPoint (or another
+		// authoring tool) may name an `onStopAudio` dependency this way instead
+		// of by time-node id; `animation-advanced-triggers`/
+		// `animation-media-end-gating` in `pptx-viewer-shared` consume
+		// `targetShapeId` for this form.
+		const result = parseCondition({
+			'@_evt': 'onStopAudio',
+			'@_delay': '0',
+			'p:tgtEl': {
+				'p:spTgt': { '@_spid': 'audio-shape-1' },
+			},
+		});
+		expect(result.event).toBe('onStopAudio');
+		expect(result.targetShapeId).toBe('audio-shape-1');
+		expect(result.targetTimeNodeId).toBeUndefined();
 	});
 
 	it('parses condition with all fields', () => {

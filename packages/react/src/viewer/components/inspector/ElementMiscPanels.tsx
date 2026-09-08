@@ -1,9 +1,11 @@
 import type { PptxElement, ShapeStyle, OlePptxElement, GroupPptxElement } from 'pptx-viewer-core';
 import { getOleObjectTypeLabel } from 'pptx-viewer-core';
+import { buildOleObjectNamePatch, canInteractWithElement } from 'pptx-viewer-shared';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '../../utils';
+import { ConnectorArrowsSection } from './ConnectorArrowsSection';
 import { CARD, HEADING, INPUT, BTN } from './inspector-pane-constants';
 
 // ---------------------------------------------------------------------------
@@ -21,38 +23,24 @@ export function ConnectorPanel({
 	canEdit,
 	onUpdateElementStyle,
 }: ConnectorPanelProps): React.ReactElement | null {
-	const { t } = useTranslation();
 	if (selectedElement.type !== 'connector') {
 		return null;
 	}
+	// Delegates to ConnectorArrowsSection so the card offers the arrow SIZE
+	// (width + length) alongside the head style. OOXML carries `w`/`len` on
+	// `a:headEnd` / `a:tailEnd`, and the previous inline dropdown pair could
+	// only ever write the head type, leaving the two size attributes editable
+	// nowhere in React.
+	// G9: `arrowheadsChangeable` (`a:cxnSpLocks/@noChangeArrowheads`) already
+	// existed on `element-locks.ts` but nothing consulted it here.
 	return (
 		<div className={CARD}>
 			<div className={HEADING}>Connector</div>
-			<div className='grid grid-cols-2 gap-1.5 text-[11px]'>
-				{(
-					[
-						['Start', 'connectorStartArrow'],
-						['End', 'connectorEndArrow'],
-					] as const
-				).map(([label, key]) => (
-					<label key={key} className='flex flex-col gap-1'>
-						<span className='text-muted-foreground'>{label} Arrow</span>
-						<select
-							disabled={!canEdit}
-							className={cn(INPUT, 'w-full')}
-							value={selectedElement.shapeStyle?.[key] ?? 'none'}
-							onChange={(e) => onUpdateElementStyle({ [key]: e.target.value })}
-						>
-							<option value='none'>{t('pptx.arrowhead.none')}</option>
-							<option value='triangle'>{t('pptx.arrowhead.triangle')}</option>
-							<option value='arrow'>{t('pptx.arrowhead.arrow')}</option>
-							<option value='stealth'>{t('pptx.arrowhead.stealth')}</option>
-							<option value='diamond'>{t('pptx.arrowhead.diamond')}</option>
-							<option value='oval'>{t('pptx.arrowhead.oval')}</option>
-						</select>
-					</label>
-				))}
-			</div>
+			<ConnectorArrowsSection
+				selectedShapeStyle={selectedElement.shapeStyle}
+				canEdit={canEdit && canInteractWithElement(selectedElement, 'changeArrowheads')}
+				onUpdateShapeStyle={onUpdateElementStyle}
+			/>
 		</div>
 	);
 }
@@ -68,15 +56,18 @@ interface GroupInfoPanelProps {
 export function GroupInfoPanel({
 	selectedElement,
 }: GroupInfoPanelProps): React.ReactElement | null {
+	const { t } = useTranslation();
 	if (selectedElement.type !== 'group') {
 		return null;
 	}
 	const group = selectedElement as GroupPptxElement;
 	return (
 		<div className={CARD}>
-			<div className={HEADING}>Group</div>
+			<div className={HEADING}>{t('pptx.elementType.group')}</div>
 			<div className='text-[11px] text-muted-foreground'>
-				{Array.isArray(group.children) ? `${group.children.length} children` : 'Grouped element'}
+				{Array.isArray(group.children)
+					? t('pptx.group.childCount', { count: group.children.length })
+					: t('pptx.group.groupedElement')}
 			</div>
 		</div>
 	);
@@ -88,10 +79,22 @@ export function GroupInfoPanel({
 
 interface OlePropertiesPanelProps {
 	selectedElement: PptxElement;
+	canEdit: boolean;
+	onUpdateElement: (updates: Partial<PptxElement>) => void;
 }
 
+/**
+ * A browser cannot run the native application that owns an embedded OLE
+ * object, so the object itself stays read-only. Its Object Name IS editable,
+ * though: `p:oleObj/@name` (ECMA-376 SS13.3.4) already parses, saves, and
+ * syncs via collaboration (`collaboration-sync.ts`), and shared's
+ * `getOleDisplayName` / `getOleAriaLabel` already read it, so this text field
+ * was the only piece missing to make it a real, round-tripping edit.
+ */
 export function OlePropertiesPanel({
 	selectedElement,
+	canEdit,
+	onUpdateElement,
 }: OlePropertiesPanelProps): React.ReactElement | null {
 	const { t } = useTranslation();
 	if (selectedElement.type !== 'ole') {
@@ -102,6 +105,19 @@ export function OlePropertiesPanel({
 		<div className={CARD}>
 			<div className={HEADING}>{t('pptx.ole.title')}</div>
 			<div className='space-y-1.5 text-[11px]'>
+				<label className='flex flex-col gap-1'>
+					<span className='text-muted-foreground'>{t('pptx.ole.objectName')}</span>
+					<input
+						type='text'
+						disabled={!canEdit}
+						className={INPUT}
+						value={ole.oleName ?? ''}
+						placeholder={t('pptx.ole.objectNamePlaceholder')}
+						onChange={(e) =>
+							onUpdateElement(buildOleObjectNamePatch(e.target.value) as Partial<PptxElement>)
+						}
+					/>
+				</label>
 				<div className='flex items-center justify-between gap-2'>
 					<span className='text-muted-foreground'>{t('pptx.ole.type')}</span>
 					<span className='text-foreground truncate'>

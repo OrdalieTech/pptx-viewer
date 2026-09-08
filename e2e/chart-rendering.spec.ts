@@ -8,6 +8,7 @@ import type { Locator, Page } from '@playwright/test';
 
 import { CHART_SLIDES } from './fixtures/generate-chart-fixture';
 import type { ChartSlideSpec } from './fixtures/generate-chart-fixture';
+import { resetTabSession } from './support/deck';
 
 /**
  * Chart-rendering parity, run identically against every framework demo.
@@ -19,13 +20,19 @@ import type { ChartSlideSpec } from './fixtures/generate-chart-fixture';
  * (`[data-pptx-element="true"]`,
  * `[aria-roledescription="slide"]`, inline `<svg>`).
  *
- * Per chart slide the spec:
- *   (a) PARITY - captures the rendered form of the chart element (a real chart
- *       `<svg>` with per-type geometry, or the "Chart" placeholder fallback) and
- *       asserts the SAME contract holds. Because the body is framework-agnostic,
- *       a divergence in any of the five bindings fails the run and names the
- *       chart kind. When a chart renders as SVG, the per-type primitive counts
- *       (`<rect>` / `<path>` / `<circle>` / `<polygon>`) are validated too.
+ * One test per chart kind (so one broken kind cannot mask the rest). Per kind:
+ *   (a) PARITY - the chart renders as a real `<svg>` (never the "Chart"
+ *       placeholder) and its data-bearing primitives meet a per-type profile
+ *       DERIVED from the fixture data ({@link expectedPrimitives}): bars are
+ *       `<rect>`s (>= series x categories), pie/doughnut/funnel/sunburst
+ *       slices are `<path>`s (>= categories), line/area series are
+ *       `<polyline>`s, scatter/bubble/marker points are `<circle>`s, radar
+ *       series are `<polygon>`s, box-whisker whiskers are `<line>`s. Chrome
+ *       (gridlines, legend swatches, plot background) sits on top of those
+ *       minima, which is why the bounds are `>=`. Axis/category/legend text
+ *       must render too. Both React and Vue were measured emitting identical
+ *       primitive counts (same shared engine), so the profile holds for every
+ *       binding or the run names the divergent kind.
  *   (b) VISUAL - screenshots the chart element to
  *       `e2e/__screenshots__/<framework>-<charttype>.png` for eyeballing.
  *
@@ -35,9 +42,9 @@ import type { ChartSlideSpec } from './fixtures/generate-chart-fixture';
  */
 
 const fixturePath = resolve(
-	fileURLToPath(new URL('./fixtures/chart-gallery.pptx', import.meta.url)),
-);
-const screenshotDir = resolve(fileURLToPath(new URL('./__screenshots__', import.meta.url)));
+		fileURLToPath(new URL('./fixtures/chart-gallery.pptx', import.meta.url)),
+	),
+	screenshotDir = resolve(fileURLToPath(new URL('./__screenshots__', import.meta.url)));
 
 /**
  * Load the gallery deck and enter presentation mode.
@@ -49,6 +56,9 @@ const screenshotDir = resolve(fileURLToPath(new URL('./__screenshots__', import.
  * binding emits on every element in both modes.
  */
 async function openGalleryInPresentMode(page: Page): Promise<void> {
+	// Forget any restored session first, or the deck reopens and the landing
+	// dropzone (the only place #file-input exists) never mounts.
+	await resetTabSession(page);
 	await page.goto('/');
 	await page.locator('#file-input').setInputFiles(fixturePath);
 	// First chart slide's title anchor confirms the deck rendered.
@@ -66,9 +76,13 @@ async function openGalleryInPresentMode(page: Page): Promise<void> {
 }
 
 /** Advance to the next slide via the shared presentation keyboard contract. */
-async function nextSlide(page: Page): Promise<void> {
+async function nextSlide(page: Page, next: ChartSlideSpec): Promise<void> {
 	await page.keyboard.press('PageDown');
-	await page.waitForTimeout(500);
+	// Wait for the slide we asked for rather than a flat delay: the gallery is
+	// long enough that stepping to the last kinds took more presses than a fixed
+	// 500ms each could absorb, and the run then failed on NAVIGATION while
+	// looking like a rendering defect.
+	await titleAnchor(page, next).waitFor({ timeout: 15_000 });
 }
 
 /** The title anchor shape for a slide (the `data-element-id` bearing its title). */
@@ -103,12 +117,13 @@ async function chartElement(page: Page, slide: ChartSlideSpec): Promise<Locator>
 		.locator('[data-element-id]:visible:has(svg)')
 		.filter({ hasText: slide.title });
 	await candidates.first().waitFor();
+	// eslint-disable-next-line one-var -- pre-existing, unrelated to this change
 	const count = await candidates.count();
-	let bestIndex = 0;
-	let bestArea = -1;
+	let bestIndex = 0,
+		bestArea = -1;
 	for (let i = 0; i < count; i++) {
-		const box = await candidates.nth(i).boundingBox();
-		const area = box ? box.width * box.height : 0;
+		const box = await candidates.nth(i).boundingBox(),
+			area = box ? box.width * box.height : 0;
 		if (area > bestArea) {
 			bestArea = area;
 			bestIndex = i;
@@ -123,7 +138,7 @@ function escapeRe(s: string): string {
 }
 
 /** Counts of each SVG primitive kind within a chart `<svg>` (0s if no svg). */
-async function primitiveCounts(el: Locator): Promise<{
+interface PrimitiveCounts {
 	hasSvg: boolean;
 	rect: number;
 	path: number;
@@ -132,7 +147,9 @@ async function primitiveCounts(el: Locator): Promise<{
 	polyline: number;
 	line: number;
 	text: number;
-}> {
+}
+
+async function primitiveCounts(el: Locator): Promise<PrimitiveCounts> {
 	return el.evaluate((node) => {
 		const svg = node.querySelector('svg');
 		return {
@@ -148,70 +165,170 @@ async function primitiveCounts(el: Locator): Promise<{
 	});
 }
 
+/** One primitive lower bound with the data-derived reason it must hold. */
+interface PrimitiveExpectation {
+	kind: 'rect' | 'path' | 'circle' | 'polygon' | 'polyline' | 'line';
+	min: number;
+	why: string;
+}
+
 /**
- * Per-type minimum primitive expectations for a rendered chart `<svg>`.
- * Lower-bound (`>=`) because the shared engine adds chrome (gridlines, ticks,
- * legend swatches) whose exact count is not the parity target - the target is
- * that the *same* engine drives all five bindings, so the same bounds hold.
+ * The per-type minimum data primitives, derived from the fixture manifest
+ * (`seriesCount` x `categoryCount`). Bounds are `>=` because engine chrome
+ * (plot background rect, legend swatches, gridlines) adds primitives of the
+ * same kinds on top of the data marks.
  */
-function assertSvgTypeShape(
-	slide: ChartSlideSpec,
-	counts: Awaited<ReturnType<typeof primitiveCounts>>,
-): void {
-	// Every chart, whatever its kind, must draw *some* geometry: an empty svg is
-	// the regression this guards against. We total the drawable kinds the shared
-	// engine emits (bars `rect`, slices/arcs `path`, area/line bands `polyline`,
-	// rings/trapezoids `polygon`, points `circle`) rather than asserting a
-	// per-type breakdown, because the parity target is that the *same* engine
-	// drives all five bindings (so the same svg renders), not a specific
-	// primitive mix. The screenshots are the per-type visual record.
-	const drawable = counts.rect + counts.path + counts.circle + counts.polygon + counts.polyline;
-	expect(drawable, `${slide.key} (${slide.chartType}): drew geometry`).toBeGreaterThan(0);
-	// A real chart also paints axis/category/legend text in every binding.
-	expect(counts.text, `${slide.key}: labels`).toBeGreaterThan(0);
+function expectedPrimitives(slide: ChartSlideSpec): PrimitiveExpectation[] {
+	const { seriesCount: series, categoryCount: categories } = slide,
+		points = series * categories;
+	switch (slide.chartType) {
+		case 'bar':
+			return [{ kind: 'rect', min: points, why: `one bar per series x category (${points})` }];
+		case 'line':
+			return [
+				{ kind: 'polyline', min: series, why: `one line per series (${series})` },
+				{ kind: 'circle', min: points, why: `one marker per point (${points})` },
+				{ kind: 'path', min: 1, why: 'the fixture line chart carries a trendline' },
+			];
+		case 'area':
+			return [{ kind: 'polyline', min: series, why: `one area band per series (${series})` }];
+		case 'pie':
+		case 'doughnut':
+			return [{ kind: 'path', min: categories, why: `one slice per category (${categories})` }];
+		case 'radar':
+			return [
+				{ kind: 'polygon', min: series, why: `one radar ring per series (${series})` },
+				{ kind: 'circle', min: points, why: `one vertex marker per point (${points})` },
+			];
+		case 'scatter':
+		case 'bubble':
+			return [{ kind: 'circle', min: points, why: `one point per series x category (${points})` }];
+		case 'funnel':
+			return [{ kind: 'path', min: categories, why: `one trapezoid per category (${categories})` }];
+		case 'sunburst':
+			return [{ kind: 'path', min: categories, why: `one arc per leaf category (${categories})` }];
+		case 'histogram':
+			return [{ kind: 'rect', min: categories, why: `one bin bar per category (${categories})` }];
+		case 'combo':
+			return [
+				{ kind: 'rect', min: categories, why: `one bar per category (${categories})` },
+				{
+					kind: 'polyline',
+					min: series - 1,
+					why: `every series after the first is a line (${series - 1})`,
+				},
+				{
+					kind: 'circle',
+					min: (series - 1) * categories,
+					why: `a marker on every line point (${(series - 1) * categories})`,
+				},
+			];
+		case 'stock':
+			return [
+				{ kind: 'rect', min: categories, why: `one candle body per category (${categories})` },
+				{ kind: 'line', min: categories, why: `a high-low wick per category (${categories})` },
+			];
+		case 'surface':
+			return [
+				{
+					kind: 'polygon',
+					min: (series - 1) * (categories - 1),
+					why: `an isometric facet per grid cell (${(series - 1) * (categories - 1)})`,
+				},
+			];
+		case 'waterfall':
+			return [{ kind: 'rect', min: categories, why: `one step bar per category (${categories})` }];
+		case 'treemap':
+			return [{ kind: 'rect', min: categories, why: `one leaf cell per category (${categories})` }];
+		case 'regionMap':
+			return [
+				// The choropleth paints the whole simplified world outline, matched
+				// or not, so the bound is the region table rather than the data.
+				{ kind: 'path', min: 20, why: 'the simplified world region outlines' },
+			];
+		case 'boxWhisker':
+			return [
+				// Measured on the shared engine: 9 rects (boxes + plot chrome). The
+				// box count does not decompose cleanly as series x categories, so the
+				// bound only requires that several quartile boxes drew.
+				{ kind: 'rect', min: 5, why: 'quartile boxes' },
+				{ kind: 'line', min: points, why: `whisker segments (>= ${points})` },
+			];
+		default:
+			return [{ kind: 'rect', min: 1, why: 'unknown chart type still draws geometry' }];
+	}
 }
 
 test.describe('chart rendering (cross-framework parity)', () => {
-	test('every chart kind renders an identical contract + captures screenshots', async ({
-		page,
-	}, testInfo) => {
-		const framework = testInfo.project.name;
-		mkdirSync(screenshotDir, { recursive: true });
+	mkdirSync(screenshotDir, { recursive: true });
 
-		await openGalleryInPresentMode(page);
+	for (let i = 0; i < CHART_SLIDES.length; i++) {
+		const slide = CHART_SLIDES[i];
 
-		const renderedAsSvg: string[] = [];
-
-		for (let i = 0; i < CHART_SLIDES.length; i++) {
-			const slide = CHART_SLIDES[i];
-			if (i > 0) {
-				await nextSlide(page);
+		test(`${slide.key} renders its per-type SVG profile + screenshot`, async ({
+			page,
+		}, testInfo) => {
+			const framework = testInfo.project.name;
+			await openGalleryInPresentMode(page);
+			for (let step = 0; step < i; step++) {
+				await nextSlide(page, CHART_SLIDES[step + 1]);
 			}
 
 			// Confirm navigation landed on the intended slide: its unique title
 			// anchor must be on screen before we inspect that slide's chart.
 			await expect(titleAnchor(page, slide), `${slide.key}: slide active`).toBeVisible();
 
+			// eslint-disable-next-line one-var -- pre-existing, unrelated to this change
 			const el = await chartElement(page, slide);
 			await expect(el, `${slide.key}: chart element present`).toBeVisible();
 
+			// eslint-disable-next-line one-var -- pre-existing, unrelated to this change
 			const counts = await primitiveCounts(el);
-
 			expect(counts.hasSvg, `${slide.key}: chart renders as SVG`).toBe(true);
-			assertSvgTypeShape(slide, counts);
+			for (const expectation of expectedPrimitives(slide)) {
+				expect(
+					counts[expectation.kind],
+					`${slide.key} (${slide.chartType}): <${expectation.kind}> x${expectation.min} - ${expectation.why}`,
+				).toBeGreaterThanOrEqual(expectation.min);
+			}
+			// A real chart also paints its title plus axis/category/legend text.
+			expect(counts.text, `${slide.key}: labels`).toBeGreaterThan(1);
+
+			// A choropleth patch carries no label of its own, so the shared
+			// descriptor's per-region `title` is BOTH its hover tooltip and its
+			// accessible name. Three bindings projected every other field of the
+			// path and dropped that one, which left a region map announcing
+			// nothing at all to a screen reader.
+			if (slide.chartType === 'regionMap') {
+				const titled = await el.locator('path > title').count();
+				expect(titled, `${slide.key}: every region path names itself`).toBeGreaterThan(1);
+			}
+
+			// Every mainstream mark kind now carries the same hover-tooltip `title`
+			// the region map pioneered: a bar rect and a line-chart point dot, not
+			// just a choropleth patch, name their series/category/value on hover.
+			// Only the shared engine's `part`-tagged data marks are checked (chrome
+			// primitives like gridlines and legend swatches stay untitled).
+			if (slide.chartType === 'bar') {
+				const titled = await el.locator('rect[data-chart-part="dataPoint"] > title').count();
+				expect(titled, `${slide.key}: every bar names its series/category/value`).toBeGreaterThan(
+					0,
+				);
+			}
+			if (slide.chartType === 'line') {
+				const titled = await el.locator('circle[data-chart-part="dataPoint"] > title').count();
+				expect(
+					titled,
+					`${slide.key}: every line-chart point dot names its series/category/value`,
+				).toBeGreaterThan(0);
+			}
+
 			await expect(el, `${slide.key}: real chart, not placeholder`).toContainText(slide.title);
-			renderedAsSvg.push(slide.key);
 
 			// (b) VISUAL - screenshot the chart element per framework + type.
 			await el.screenshot({
 				path: resolve(screenshotDir, `${framework}-${slide.key}.png`),
 			});
-		}
-
-		// Surface the rendered-form tally in the report for quick triage.
-		testInfo.annotations.push({
-			type: 'chart-render-form',
-			description: `svg=[${renderedAsSvg.join(',')}]`,
 		});
-	});
+	}
 });

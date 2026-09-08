@@ -19,6 +19,7 @@
 // Shape styling (fill, stroke, effects, connectors)
 // ==========================================================================
 
+import type { PptxThemeColorRef } from './color-ref';
 import type {
 	ConnectorArrowType,
 	ConnectorConnectionPoint,
@@ -83,10 +84,31 @@ export interface ShapeStyle {
 	 * back to canonical `<a:srgbClr>`.
 	 */
 	fillColorXml?: XmlObject;
+	/**
+	 * Typed theme colour reference for the fill, set when {@link fillColorXml}
+	 * is a plain `a:schemeClr` (see `themeColorRefFromColorChoice`). When
+	 * present it WINS on save: the writer emits `<a:schemeClr>` from this ref
+	 * instead of the resolved {@link fillColor}, so the fill keeps following
+	 * the theme palette after a later theme change. `undefined` means the fill
+	 * is a plain hex (or a colour kind a ref cannot express).
+	 */
+	fillColorRef?: PptxThemeColorRef;
 	fillGradient?: string;
 	/** Original `gradFill` XML retained for unknown-child and extension round-tripping. */
 	fillGradientXml?: XmlObject;
 	fillMode?: 'solid' | 'gradient' | 'pattern' | 'none' | 'image' | 'theme' | 'group';
+	/**
+	 * `<p:sp useBgFill="1">`: the shape paints with the SLIDE BACKGROUND's fill
+	 * rather than its own or its theme style's.
+	 *
+	 * PowerPoint's designer emits full-bleed rectangles this way, and they also
+	 * carry an `a:fillRef` pointing at `accent1`. Ignoring the attribute painted
+	 * those panels in the accent colour, so a black-and-white title slide came out
+	 * black-and-blue. The load pipeline copies the resolved slide background onto
+	 * the fill fields; the flag stays for round-trip and for renderers that want
+	 * to re-resolve against a changed background.
+	 */
+	useBackgroundFill?: boolean;
 	fillPatternPreset?: string;
 	fillPatternBackgroundColor?: string;
 	/** Original `pattFill` XML retained for unknown-child round-tripping. */
@@ -105,6 +127,12 @@ export interface ShapeStyle {
 		opacity?: number;
 		/** Raw XML colour node preserved for round-trip (e.g. a:schemeClr with transforms). */
 		originalColorXml?: XmlObject;
+		/**
+		 * Typed theme colour reference for this stop, set when
+		 * {@link originalColorXml} is a plain `a:schemeClr`. Wins on save, same
+		 * as {@link ShapeStyle.fillColorRef}.
+		 */
+		colorRef?: PptxThemeColorRef;
 	}>;
 	fillGradientAngle?: number;
 	fillGradientType?: 'linear' | 'radial';
@@ -139,6 +167,12 @@ export interface ShapeStyle {
 	 */
 	strokeColorXml?: XmlObject;
 	/**
+	 * Typed theme colour reference for the outline, mirroring
+	 * {@link fillColorRef}: set when {@link strokeColorXml} is a plain
+	 * `a:schemeClr`, and wins on save.
+	 */
+	strokeColorRef?: PptxThemeColorRef;
+	/**
 	 * Kind of fill painted on the outline (`a:ln` child). Distinguishes a solid
 	 * outline from a gradient/pattern/none outline so save can emit the correct
 	 * single line fill instead of collapsing every outline to `a:solidFill`
@@ -152,6 +186,27 @@ export interface ShapeStyle {
 	/** Raw `a:ln/a:pattFill` XML preserved for round-trip when the outline is
 	 *  pattern-filled. Re-emitted verbatim as the line's single fill on save. */
 	strokePatternXml?: XmlObject;
+	/**
+	 * Structured stops of a gradient outline (`a:ln/a:gradFill/a:gsLst`), in the
+	 * same shape as {@link fillGradientStops}.
+	 *
+	 * The raw XML above round-trips a gradient outline on save, but a renderer
+	 * cannot paint from it: it needs resolved colours and positions. Without
+	 * these, every binding fell back to {@link strokeColor} - a single averaged
+	 * colour - so a two-tone outline painted flat and a fade-to-transparent
+	 * outline painted fully opaque.
+	 */
+	strokeGradientStops?: ShapeStyle['fillGradientStops'];
+	/** Gradient outline angle in OOXML degrees (`a:lin/@ang`), 0 = left to right. */
+	strokeGradientAngle?: number;
+	/** Gradient outline kind: `linear` (`a:lin`) or `radial` (`a:path`). */
+	strokeGradientType?: ShapeStyle['fillGradientType'];
+	/** Path-gradient shape for a radial outline (`a:path/@path`). */
+	strokeGradientPathType?: ShapeStyle['fillGradientPathType'];
+	/** Preset name of a pattern outline (`a:ln/a:pattFill/@prst`). */
+	strokePatternPreset?: string;
+	/** Background colour of a pattern outline (`a:ln/a:pattFill/a:bgClr`). */
+	strokePatternBackgroundColor?: string;
 	strokeWidth?: number;
 	strokeOpacity?: number;
 	strokeDash?: StrokeDashType;
@@ -351,6 +406,28 @@ export interface ShapeStyle {
 	/** Fill overlay tint opacity (0-1), from the overlay fill colour's alpha. */
 	dagFillOverlayOpacity?: number;
 
+	// ── Direct effectLst fillOverlay (CT_EffectList §20.1.8.24) ───────────
+	// `a:fillOverlay` is a legal direct sibling of the other effectLst
+	// primitives (blur/glow/shadow/etc.), distinct from the effectDag form
+	// above (different XML location, so kept in separate fields to avoid
+	// the two colliding when both happen to be present).
+
+	/** Fill overlay blend mode from a direct `a:effectLst/a:fillOverlay/@blend`. */
+	shapeFillOverlayBlend?: 'over' | 'mult' | 'screen' | 'darken' | 'lighten';
+	/**
+	 * Fill overlay tint colour (hex `#RRGGBB`) from a direct
+	 * `a:effectLst/a:fillOverlay`'s `a:solidFill`/`a:gradFill`.
+	 */
+	shapeFillOverlayColor?: string;
+	/** Fill overlay tint opacity (0-1), from the overlay fill colour's alpha. */
+	shapeFillOverlayOpacity?: number;
+	/** Original source `a:fillOverlay` node, preserved for lossless surgical updates. */
+	fillOverlayXml?: XmlObject;
+	/** Resolved source fill-overlay colour used to detect colour edits. */
+	shapeFillOverlayOriginalColor?: string;
+	/** Source fill-overlay opacity used to detect alpha edits. */
+	shapeFillOverlayOriginalOpacity?: number;
+
 	// ── Style references (CT_ShapeStyle §20.1.2.2.36) ─────────────────────
 	// These mirror the `<p:style>` element on a shape. They preserve the
 	// theme matrix indices so PowerPoint's Recolor / Reset / Quick Style
@@ -373,4 +450,30 @@ export interface ShapeStyle {
 	fontRefIdx?: string;
 	/** Raw XML colour child of `<a:fontRef>`. */
 	fontRefColorXml?: XmlObject;
+
+	/**
+	 * The fill `<a:fillRef>` resolved to, recorded ONLY when the shape's own
+	 * `spPr` authored no fill at all, so the reference is what paints it.
+	 *
+	 * Its absence therefore means "the fill is the shape's own", and its
+	 * presence plus an unchanged flat fill means "still purely inherited": see
+	 * `authored-shape-style.ts`, the shape-scope twin of `TextStyle`'s
+	 * `inheritedRunStyle`.
+	 */
+	inheritedFillStyle?: ShapeStyle;
+	/**
+	 * The outline `<a:lnRef>` resolved to, recorded before `spPr/a:ln` was
+	 * layered on top. A property that still equals this baseline was never
+	 * authored on the shape and must not be written back as if it were.
+	 */
+	inheritedLineStyle?: ShapeStyle;
+	/**
+	 * The shadow/glow/reflection/soft-edge/3D properties `<a:effectRef>`
+	 * resolved from the theme's `effectStyleLst`, recorded ONLY for the
+	 * properties the shape had not already authored itself. A shape whose
+	 * effects still match this baseline was never given its own effects and
+	 * must not have them written back as a literal `spPr/a:effectLst`; see
+	 * `authored-shape-style.ts`'s `effectIsPurelyStyleMatrix`.
+	 */
+	inheritedEffectStyle?: ShapeStyle;
 }

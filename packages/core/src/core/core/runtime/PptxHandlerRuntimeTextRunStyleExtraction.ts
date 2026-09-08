@@ -1,7 +1,21 @@
+import { themeColorRefFromColorChoice } from '../../color/theme-color-ref';
 import { TextStyle, XmlObject } from '../../types';
 import { extractColorChoiceXml } from '../../utils/color-xml-preservation';
 import { xmlAttr, xmlChild } from '../../utils/xml-access';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeTextRunEffects';
+
+/**
+ * The `EG_FillProperties` members `CT_TextCharacterProperties` may carry, minus
+ * `a:noFill`. Any one of them is a run declaring a fill of its OWN, which
+ * overrides an inherited `<a:noFill/>` from a lower style layer.
+ */
+const TEXT_FILL_ELEMENTS = [
+	'a:solidFill',
+	'a:gradFill',
+	'a:pattFill',
+	'a:blipFill',
+	'a:grpFill',
+] as const;
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	protected extractTextRunStyle(
@@ -20,11 +34,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			style.fontSize = points * (96 / 72);
 		}
 
-		if (runProperties['@_b'] !== undefined) {
-			style.bold = runProperties['@_b'] === '1';
+		// `@b` / `@i` are `xsd:boolean`, so "1", "0", "true" and "false" are all
+		// legal (the parser runs with `parseAttributeValue: false`, so the value
+		// is the raw string). A literal `=== '1'` test read the spec-legal
+		// `b="true"` written by several non-Microsoft producers as an EXPLICIT
+		// false, which then also beat the inherited bold. Every other boolean in
+		// this file already goes through the tolerant helper.
+		const bold = this.parseOptionalBooleanAttr(runProperties['@_b']);
+		if (bold !== undefined) {
+			style.bold = bold;
 		}
-		if (runProperties['@_i'] !== undefined) {
-			style.italic = runProperties['@_i'] === '1';
+		const italic = this.parseOptionalBooleanAttr(runProperties['@_i']);
+		if (italic !== undefined) {
+			style.italic = italic;
 		}
 		if (runProperties['@_u'] !== undefined) {
 			const underlineToken = String(runProperties['@_u'] || '')
@@ -129,9 +151,22 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				}
 			}
 		}
-		// No fill on text run (a:rPr > a:noFill) — hollow/outline-only text
+		// No fill on text run (a:rPr > a:noFill): hollow / outline-only text.
+		//
+		// This flag has to be able to say `false` as well as `true`. Run styles are
+		// assembled as `{...mergedDefaultRunStyle, ...extractTextRunStyle(rPr)}`,
+		// where the lower layers are themselves `extractTextRunStyle` of the
+		// `a:lstStyle` levels, the layout / master `a:defRPr` and `a:endParaRPr`.
+		// Only ever setting it `true` meant a run that OVERRODE an inherited
+		// `<a:noFill/>` with a fill of its own left the slot untouched, so the
+		// inherited `true` survived the spread: the run rendered hollow
+		// (`hollowTextFillStyle` in shared) and the writer re-emitted `<a:noFill/>`
+		// over its real fill, losing the colour permanently on the first save.
+		// Recording the override explicitly is what lets the spread clear it.
 		if (runProperties['a:noFill'] !== undefined) {
 			style.textFillNone = true;
+		} else if (TEXT_FILL_ELEMENTS.some((name) => runProperties[name] !== undefined)) {
+			style.textFillNone = false;
 		}
 		// Superscript / subscript baseline shift (percentage)
 		if (runProperties['@_baseline'] !== undefined) {
@@ -181,7 +216,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			style.textFillPatternForeground = textFillVariants.textFillPatternForeground;
 			style.textFillPatternBackground = textFillVariants.textFillPatternBackground;
 		}
-		const runRtl = this.parseOptionalBooleanAttr(runProperties['@_rtl']);
+		// Run-level right-to-left. On CT_TextCharacterProperties `rtl` is a child
+		// ELEMENT of type CT_Boolean (`<a:rtl val="1"/>`) whose `@val` defaults
+		// to true when omitted; the ATTRIBUTE spelling belongs to
+		// CT_TextParagraphProperties. Reading only `@_rtl` here meant an
+		// authored `<a:rtl/>` never loaded at all. The attribute is still read
+		// as a fallback for SDK-built content that put it there.
+		const rtlElement = runProperties['a:rtl'];
+		const runRtl =
+			rtlElement !== undefined
+				? (this.parseOptionalBooleanAttr(xmlAttr(xmlChild(runProperties, 'a:rtl'), 'val')) ?? true)
+				: this.parseOptionalBooleanAttr(runProperties['@_rtl']);
 		if (runRtl !== undefined) {
 			style.rtl = runRtl;
 		}
@@ -192,7 +237,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const latinTypefaceToken = xmlAttr(latin, 'typeface');
 		const eaTypefaceToken = xmlAttr(eastAsian, 'typeface');
 		const csTypefaceToken = xmlAttr(complexScript, 'typeface');
-		const chosenTypeface = latinTypefaceToken || eaTypefaceToken || csTypefaceToken;
+		// The run's primary CSS family is its Latin face. East Asian and complex
+		// script faces are preserved below and applied only to matching glyphs.
+		const chosenTypeface = latinTypefaceToken;
 		const resolvedTypeface = this.resolveThemeTypeface(chosenTypeface);
 		if (resolvedTypeface) {
 			style.fontFamily = resolvedTypeface;
@@ -213,7 +260,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		// Store per-script font families for Unicode font fallback. Only set when
-		// the source actually authored an `a:ea` / `a:cs` typeface — otherwise the
+		// the source actually authored an `a:ea` / `a:cs` typeface; otherwise the
 		// writer must not synthesize one (see #84).
 		const eaTypeface = this.resolveThemeTypeface(eaTypefaceToken);
 		if (eaTypeface) {
@@ -230,6 +277,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const colorXml = extractColorChoiceXml(solidFill);
 			if (colorXml) {
 				style.colorXml = colorXml;
+			}
+			const colorRef = themeColorRefFromColorChoice(solidFill);
+			if (colorRef) {
+				style.colorRef = colorRef;
 			}
 		}
 
@@ -318,7 +369,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			this.applyTextRunEffects(style, runEffectList);
 		}
 
-		// Text run effect graph (a:effectDag on a:rPr) — ECMA-376
+		// Text run effect graph (a:effectDag on a:rPr): ECMA-376
 		// §21.1.2.3.6 allows `effectDag` as an alternative to `effectLst`.
 		this.applyTextRunEffectDag(style, runProperties);
 

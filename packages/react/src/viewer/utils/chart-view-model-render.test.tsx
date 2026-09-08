@@ -1,4 +1,6 @@
+import type { PptxChartData, PptxElement } from 'pptx-viewer-core';
 import type { ChartViewModel, SvgLine, SvgPrimitive, SvgRect, SvgText } from 'pptx-viewer-shared';
+import { buildChartViewModel } from 'pptx-viewer-shared';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, it, expect } from 'vitest';
 
@@ -166,5 +168,145 @@ describe('renderChartViewModel: overlays and data table (via primitives)', () =>
 		const vm = baseViewModel({ primitives: overlays, overlays });
 		const html = renderToStaticMarkup(renderChartViewModel('c1', vm));
 		expect(html).toContain('fill-opacity="0.3"');
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// End-to-end regression: c:dTable data table + c:legendEntry deletion.
+//
+// Unlike the projector tests above (which feed hand-built ChartViewModel
+// fixtures), these run a real chart element through the shared
+// `buildChartViewModel` first, so they prove the whole shared pipeline (core
+// parse -> chart-view-model -> chart-data-table-render / chart-legend-entries)
+// reaches React's actual rendered SVG markup, not just that the projector can
+// render an arbitrary primitive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function chartElement(chartData: PptxChartData): PptxElement {
+	return {
+		id: 'el-chart',
+		type: 'chart',
+		x: 0,
+		y: 0,
+		width: 400,
+		height: 300,
+		chartData,
+	} as PptxElement;
+}
+
+describe('renderChartViewModel: c:dTable data table (real chart pipeline)', () => {
+	it('renders the data table grid below the plot, including the series key text', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			categories: ['Q1', 'Q2'],
+			series: [{ name: 'Revenue', values: [100, 150] }],
+			dataTable: { showKeys: true, showOutline: true },
+		});
+		const vm = buildChartViewModel(element);
+		const html = renderToStaticMarkup(renderChartViewModel('c1', vm));
+		expect(html).toContain('>Revenue</text>');
+		expect(html).toContain('>Q1</text>');
+	});
+
+	it('renders nothing extra when the chart has no c:dTable', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			categories: ['Q1'],
+			series: [{ name: 'Revenue', values: [100] }],
+		});
+		const vm = buildChartViewModel(element);
+		expect(vm.dataTable).toBeUndefined();
+	});
+});
+
+describe('renderChartViewModel: c:legendEntry deletion (real chart pipeline)', () => {
+	it('omits a deleted series from the rendered legend', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			categories: ['Q1'],
+			series: [
+				{ name: 'Revenue', values: [100] },
+				{ name: 'Cost', values: [80] },
+			],
+			style: {
+				hasLegend: true,
+				legendPosition: 'b',
+				legendEntries: [{ index: 1, deleted: true }],
+			},
+		});
+		const vm = buildChartViewModel(element);
+		const html = renderToStaticMarkup(renderChartViewModel('c1', vm));
+		expect(html).toContain('>Revenue</text>');
+		expect(html).not.toContain('>Cost</text>');
+	});
+});
+
+// C2-G9 (render half): a data point's c:dPt/c:pictureOptions picture fill
+// reaches the SVG as a <pattern>/<image> def and a fill="url(#...)" bar rect.
+describe('renderChartViewModel: c:dPt/c:pictureOptions picture fill (real chart pipeline)', () => {
+	it('renders a <pattern>/<image> def and points the bar fill at it', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			categories: ['Q1', 'Q2'],
+			series: [
+				{
+					name: 'Revenue',
+					values: [100, 150],
+					dataPoints: [
+						{
+							idx: 0,
+							picture: { imageUrl: 'data:image/png;base64,AAA', pictureFormat: 'stretch' },
+						},
+					],
+				},
+			],
+		});
+		const vm = buildChartViewModel(element);
+		expect(vm.defs).toHaveLength(1);
+		const html = renderToStaticMarkup(renderChartViewModel('c1', vm));
+		expect(html).toContain('<pattern');
+		expect(html).toContain('<image');
+		expect(html).toContain(`fill="url(#${vm.defs?.[0].id})"`);
+	});
+});
+
+// W4-D: a chart title with typed rich-text runs (`titleRuns`) draws one
+// <tspan> per run instead of collapsing to a single flat text node.
+describe('renderChartViewModel: chart title rich text (titleRunSpans)', () => {
+	it('renders one <tspan> per titleRunSpans entry with its own style', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			title: 'Sales Q1',
+			categories: ['Q1'],
+			series: [{ name: 'Revenue', values: [10] }],
+			style: { hasTitle: true },
+			titleRuns: [
+				{ text: 'Sales ', bold: true },
+				{ text: 'Q1', italic: true, color: '#FF0000' },
+			],
+		});
+		const vm = buildChartViewModel(element);
+		expect(vm.titleRunSpans).toHaveLength(2);
+		const html = renderToStaticMarkup(renderChartViewModel('c1', vm));
+		expect(html).toContain('<tspan');
+		expect(html.match(/<tspan/gu) ?? []).toHaveLength(2);
+		expect(html).toContain('>Sales </tspan>');
+		expect(html).toContain('>Q1</tspan>');
+		expect(html).toContain('font-style="italic"');
+	});
+
+	it('falls back to a flat text node when the title has no typed runs', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			title: 'Sales',
+			categories: ['Q1'],
+			series: [{ name: 'Revenue', values: [10] }],
+			style: { hasTitle: true },
+		});
+		const vm = buildChartViewModel(element);
+		expect(vm.titleRunSpans).toBeUndefined();
+		const html = renderToStaticMarkup(renderChartViewModel('c1', vm));
+		expect(html).not.toContain('<tspan');
+		expect(html).toContain('>Sales</text>');
 	});
 });

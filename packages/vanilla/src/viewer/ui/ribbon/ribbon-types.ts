@@ -1,5 +1,11 @@
-import type { PptxElementAnimation } from 'pptx-viewer-core';
-import type { ViewerTheme } from 'pptx-viewer-shared';
+import type {
+	PptxAnimationTimelineAnchor,
+	PptxElementAnimation,
+	PptxLayoutPreview,
+	PptxPresentationProperties,
+	PptxSlideTransition,
+} from 'pptx-viewer-core';
+import type { RibbonTransitionDraft, ViewerTheme } from 'pptx-viewer-shared';
 
 import type { EditActions } from '../../editor/editor-edit-ops';
 import type { FindReplaceActions } from '../../editor/editor-find-replace-actions';
@@ -37,13 +43,25 @@ export interface RibbonNavHandlers {
 	openCompare(): void;
 	openSelectionPane(): void;
 	openSlideSorter(): void;
+	/** Open PowerPoint's Reading View (windowed deck, not the slide show). */
+	openReadingView(): void;
+	/** Open PowerPoint's Outline view (the deck as editable indented text). */
+	openOutlineView(): void;
 	openComments(): void;
 	openHyperlink(): void;
 	toggleTemplateEditing?(): void;
 	toggleMasterView?(): void;
 	/** Show/hide the right-hand property inspector (React's panel toggle). */
 	toggleInspector?(): void;
-	toggleViewOption(option: 'showGrid' | 'showRulers' | 'snapToGrid' | 'snapToShape'): void;
+	/**
+	 * Drop the current selection. Design > Slide Size needs it: the slide-size
+	 * fields live on the inspector's DECK panel, which only renders when nothing
+	 * is selected.
+	 */
+	clearSelection?(): void;
+	toggleViewOption(
+		option: 'showGrid' | 'showRulers' | 'showGuides' | 'snapToGrid' | 'snapToShape',
+	): void;
 	addGuide(axis: 'h' | 'v'): void;
 	activateEyedropper(): void;
 	toggleSpellCheck(): void;
@@ -68,15 +86,20 @@ export interface RibbonFileHandlers {
 	openDigitalSignatures(): void;
 	openPasswordProtection(): void;
 	openVersionHistory(): void;
+	/**
+	 * File > Options > Advanced > "Quickly access this number of Recent
+	 * Documents" (0-50), read fresh whenever the Recent list loads.
+	 */
+	getRecentPresentationsCount(): number;
 	save(): void;
 	saveAsPpsx(): void;
 	saveAsPptm(): void;
-	packageForSharing(): void;
 	exportPng(): void;
 	copySlideAsImage(): void;
 	exportPdf(): void;
 	exportGif(): void;
 	exportVideo(): void;
+	exportJson(): void;
 	print(): void;
 }
 
@@ -87,10 +110,53 @@ export interface RibbonSlideShowHandlers {
 	openPresenterView(): void;
 	openBroadcast(): void;
 	openSetUp(): void;
+	/**
+	 * PowerPoint's Hide Slide: toggle the ACTIVE slide's `hidden` flag, which
+	 * makes the show skip it while it stays in the deck, the thumbnail rail and
+	 * the sorter.
+	 */
+	toggleHideSlide(): void;
 	startRehearsal(): void;
 	openCustomShows(): void;
 	toggleSubtitles(): void;
 	openSubtitleSettings(): void;
+	/**
+	 * The deck's show settings, for the Options cluster's checkbox state (shared
+	 * `readSlideShowOption` turns them into ticks).
+	 */
+	showOptions(): PptxPresentationProperties;
+	/**
+	 * Commit an Options-cluster change onto the deck's show settings. Routes to
+	 * the same history-integrated `updatePresentationProperties` path the Set Up
+	 * Show dialog uses, so unticking Use Timings really does stop the show
+	 * auto-advancing.
+	 */
+	updateShowOptions(patch: Partial<PptxPresentationProperties>): void;
+}
+
+/**
+ * Transitions tab handlers, expressed in the shared `ribbon-transitions`
+ * vocabulary: what the controls should show for the active slide, and what a
+ * change to any of them commits.
+ *
+ * The read is deliberately NOT an `EditActions` method: the ribbon is built
+ * before the editor controller exists (see `createLazyActions`), and the tab
+ * reads its initial state while it is being constructed. Reading the store
+ * directly is the only thing available that early.
+ */
+export interface RibbonTransitionHandlers {
+	/** The draft the tab's controls should show for the ACTIVE slide. */
+	readDraft(): RibbonTransitionDraft;
+	/** Commit the tab's whole draft, onto the active slide or every slide. */
+	applyDraft(draft: RibbonTransitionDraft, applyToAll: boolean): void;
+	/** The ACTIVE slide's raw transition, for fields the draft does not carry (the Sound picker). */
+	readTransition(): PptxSlideTransition | undefined;
+	/**
+	 * Merge a raw partial change onto the active slide's transition. Used by
+	 * the Sound picker: a freshly-picked file's `soundData` has no equivalent
+	 * in {@link RibbonTransitionDraft}.
+	 */
+	applyChange(changes: Partial<PptxSlideTransition>): void;
 }
 
 /**
@@ -124,6 +190,8 @@ export interface RibbonDrawState {
 	tool: DrawTool;
 	color: string;
 	width: number;
+	/** B6: the deck's `p:clrMru`, most-recent-first. */
+	recentColors?: readonly string[];
 }
 
 /** Insert tab handler: build + insert an element of the given kind/shape preset. */
@@ -150,6 +218,8 @@ export interface RibbonHandlers {
 	findReplace: FindReplaceActions;
 	/** Design tab's viewer-chrome theme swap (Format Background routes through `edit`). */
 	design: RibbonDesignHandlers;
+	/** Transitions tab's draft read/commit pair. */
+	transitions: RibbonTransitionHandlers;
 	/** Draw tab's tool/colour/width switches (the stroke commit itself routes through `edit`). */
 	draw: RibbonDrawHandlers;
 }
@@ -181,9 +251,27 @@ export interface RibbonSelectionState {
 	hasClipboard: boolean;
 	slideCount: number;
 	selectedCount?: number;
+	/** Whether every selected element allows `a:spLocks/@noGrp` grouping. */
+	selectionGroupable?: boolean;
 	formatPainterActive?: boolean;
 	selectedElementId?: string;
 	animations?: readonly PptxElementAnimation[];
+	/** Read-only anchors for the active slide's deck-native effect groups. */
+	animationTimelineAnchors?: readonly PptxAnimationTimelineAnchor[];
 	/** Available slide layouts for the Slides group's New Slide / Layout menus. */
 	layouts?: readonly LayoutOption[];
+	/** Artwork for the layout gallery thumbnails, keyed by layout path. */
+	layoutPreviews?: ReadonlyMap<string, PptxLayoutPreview>;
+	/** `layoutPath` of the active slide, marking the current gallery tile. */
+	currentLayoutPath?: string;
+	/** Theme major/minor latin faces, leading the font dropdown. */
+	themeFonts?: { heading?: string; body?: string };
+	/** Families the deck embeds, offered as their own dropdown group. */
+	embeddedFontFamilies?: readonly string[];
+	/** Families registered this session via File > Options > Fonts. */
+	customFontFamilies?: readonly string[];
+	/** B6: the deck's `p:clrMru`, most-recent-first; feeds every swatch picker's row. */
+	recentColors?: readonly string[];
+	/** The deck's resolved theme colour map, feeding the font-colour "Theme Colors" grid. */
+	themeColorMap?: Record<string, string>;
 }

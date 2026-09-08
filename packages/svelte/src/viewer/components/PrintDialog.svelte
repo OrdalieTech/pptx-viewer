@@ -9,15 +9,24 @@
 		current,
 		onclose,
 		onprint,
+		defaultSettings,
 	}: {
 		slideCount: number;
 		current: number;
 		onclose: () => void;
 		onprint: (options: PrintOptions) => void;
+		/**
+		 * File > Options > Advanced > Print seed (`viewerOptions.printDefaults`).
+		 * `undefined` (Options > "Use the most recently used print settings")
+		 * leaves `printWhat`/`colorMode`/`frameSlides` at their hardcoded defaults.
+		 */
+		defaultSettings?: PrintOptions;
 	} = $props();
 	const t = useTranslator();
 	// eslint-disable-next-line prefer-const
-	let printWhat = $state<'slides' | 'handouts' | 'notes' | 'outline'>('slides');
+	let printWhat = $state<'slides' | 'handouts' | 'notes' | 'outline'>(
+		defaultSettings?.printWhat ?? 'slides',
+	);
 	// eslint-disable-next-line prefer-const
 	let slideRange = $state<'all' | 'current' | 'custom'>('all');
 	// eslint-disable-next-line prefer-const
@@ -25,9 +34,11 @@
 	// eslint-disable-next-line prefer-const
 	let orientation = $state<'portrait' | 'landscape'>('landscape');
 	// eslint-disable-next-line prefer-const
-	let colorMode = $state<'color' | 'grayscale' | 'blackAndWhite'>('color');
+	let colorMode = $state<'color' | 'grayscale' | 'blackAndWhite'>(
+		defaultSettings?.colorMode ?? 'color',
+	);
 	// eslint-disable-next-line prefer-const
-	let frameSlides = $state(false);
+	let frameSlides = $state(defaultSettings?.frameSlides ?? false);
 	// eslint-disable-next-line prefer-const
 	let customRangeFrom = $state(1);
 	let customRangeTo = $state(1);
@@ -46,6 +57,9 @@
 			frameSlides,
 			customRangeFrom: slideRange === 'current' ? current + 1 : customRangeFrom,
 			customRangeTo: slideRange === 'current' ? current + 1 : customRangeTo,
+			// Options > Advanced > "Print scale to fit"; no dialog control of its
+			// own (PowerPoint keeps this an Options default, not a per-job choice).
+			scaleToFit: defaultSettings?.scaleToFit ?? true,
 		});
 		onclose();
 	}
@@ -56,15 +70,15 @@
 	<section role="dialog" tabindex="-1" aria-modal="true" aria-label={t('pptx.print.title')}>
 		<header><h2><Printer size={16} aria-hidden="true" /> {t('pptx.print.title')}</h2><button aria-label={t('pptx.common.close')} onclick={onclose}><X size={16} aria-hidden="true" /></button></header>
 		<div class="body">
-			<label>{t('pptx.print.printWhat')}<select bind:value={printWhat}><option value="slides">{t('pptx.print.fullPageSlides')}</option><option value="handouts">{t('pptx.print.handouts')}</option><option value="notes">{t('pptx.print.notesPages')}</option><option value="outline">{t('pptx.print.outline')}</option></select></label>
-			{#if printWhat === 'handouts'}<label>{t('pptx.print.slidesPerPage')}<select bind:value={slidesPerPage}>{#each [1, 2, 3, 4, 6, 9] as value}<option value={value}>{value}</option>{/each}</select></label>{/if}
-			<label>{t('pptx.print.range')}<select bind:value={slideRange}><option value="all">{t('pptx.print.allSlides')}</option><option value="current">{t('pptx.print.currentSlide')}</option><option value="custom">{t('pptx.print.customRange')}</option></select></label>
+			<label>{t('pptx.print.printWhat')}<select aria-label={t('pptx.print.printWhat')} bind:value={printWhat}><option value="slides">{t('pptx.print.fullPageSlides')}</option><option value="handouts">{t('pptx.print.handouts')}</option><option value="notes">{t('pptx.print.notesPages')}</option><option value="outline">{t('pptx.print.outline')}</option></select></label>
+			{#if printWhat === 'handouts'}<label>{t('pptx.print.slidesPerPage')}<select aria-label={t('pptx.print.slidesPerPage')} bind:value={slidesPerPage}>{#each [1, 2, 3, 4, 6, 9] as value}<option value={value}>{value}</option>{/each}</select></label>{/if}
+			<label>{t('pptx.print.range')}<select aria-label={t('pptx.print.range')} bind:value={slideRange}><option value="all">{t('pptx.print.allSlides')}</option><option value="current">{t('pptx.print.currentSlide')}</option><option value="custom">{t('pptx.print.customRange')}</option></select></label>
 			{#if slideRange === 'custom'}<div class="range"><input type="number" min="1" max={slideCount} bind:value={customRangeFrom} /><span>{t('pptx.slideShow.to')}</span><input type="number" min="1" max={slideCount} bind:value={customRangeTo} /></div>{/if}
-			<label>{t('pptx.print.orientation')}<select bind:value={orientation}><option value="landscape">{t('pptx.print.landscape')}</option><option value="portrait">{t('pptx.print.portrait')}</option></select></label>
-			<label>{t('pptx.print.colorMode')}<select bind:value={colorMode}><option value="color">{t('pptx.print.color')}</option><option value="grayscale">{t('pptx.print.grayscale')}</option><option value="blackAndWhite">{t('pptx.print.pureBlackWhite')}</option></select></label>
+			<label>{t('pptx.print.orientation')}<select aria-label={t('pptx.print.orientation')} bind:value={orientation}><option value="landscape">{t('pptx.print.landscape')}</option><option value="portrait">{t('pptx.print.portrait')}</option></select></label>
+			<label>{t('pptx.print.colorMode')}<select aria-label={t('pptx.print.colorMode')} bind:value={colorMode}><option value="color">{t('pptx.print.color')}</option><option value="grayscale">{t('pptx.print.grayscale')}</option><option value="blackAndWhite">{t('pptx.print.pureBlackWhite')}</option></select></label>
 			<label class="check"><input type="checkbox" bind:checked={frameSlides} />{t('pptx.print.frameSlides')}</label>
 		</div>
-		<footer><button onclick={onclose}>{t('common.cancel')}</button><button class="primary" onclick={print}><Printer size={14} aria-hidden="true" /> {t('pptx.print.printButton')}</button></footer>
+		<footer><button onclick={onclose}>{t('pptx.common.cancel')}</button><button class="primary" onclick={print}><Printer size={14} aria-hidden="true" /> {t('pptx.print.printButton')}</button></footer>
 	</section>
 </div>
 

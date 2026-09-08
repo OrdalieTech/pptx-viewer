@@ -12,6 +12,7 @@
  * (via `remapTextToSegments`) so per-run styling is preserved.
  */
 import type { PptxElement, TextStyle } from 'pptx-viewer-core';
+import { placeCaretAtEnd } from 'pptx-viewer-shared';
 import type { CSSProperties } from 'vue';
 import { computed, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -66,7 +67,13 @@ const editorStyle = computed<CSSProperties>(() => {
 		padding: '2px 4px',
 		margin: 0,
 		outline: '2px solid var(--pptx-vue-selection-color, #3b82f6)',
-		background: 'rgba(255, 255, 255, 0.92)',
+		// Transparent: the element's own shape fill (still rendered underneath by
+		// `ElementRenderer`, which only suppresses its TEXT while this element is
+		// being edited) shows through, matching React and the element's actual
+		// authored appearance. A near-opaque white used to sit here as a stand-in
+		// backdrop; with the static text no longer duplicated underneath (issue
+		// #182), it only mismatched non-white fills.
+		background: 'transparent',
 		color: typeof style.color === 'string' ? (style.color as string) : '#111827',
 		fontFamily: typeof style.fontFamily === 'string' ? (style.fontFamily as string) : 'inherit',
 		fontSize: fontSize ?? 'inherit',
@@ -87,13 +94,8 @@ onMounted(() => {
 	}
 	node.innerText = seedText();
 	node.focus();
-	// Place the caret at the end of the seeded text.
-	const range = document.createRange();
-	range.selectNodeContents(node);
-	range.collapse(false);
-	const selection = window.getSelection();
-	selection?.removeAllRanges();
-	selection?.addRange(range);
+	// Place the caret at the end of the seeded text (shared contract helper).
+	placeCaretAtEnd(node);
 });
 
 function onInput(): void {

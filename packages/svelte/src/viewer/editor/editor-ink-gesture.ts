@@ -1,4 +1,5 @@
 import type { InkPoint } from 'pptx-viewer-shared';
+import { pointFromPointerEvent } from 'pptx-viewer-shared';
 
 import type { InkDrawTool } from './editor-ink-controller.svelte';
 
@@ -39,13 +40,20 @@ export function createInkGestureController(deps: InkGestureDeps): InkGestureCont
 	let points: InkPoint[] = [];
 	let activePointerId: number | null = null;
 
+	/**
+	 * Map a pointer event to a stage-local point, carrying its pressure and
+	 * tilt reading along (via the shared `pointFromPointerEvent`) so a
+	 * completed stroke can author variable-width `inkPointPressures` and
+	 * `inkPointTiltX`/`inkPointTiltY` channels, matching React.
+	 */
 	function toPoint(event: PointerEvent): InkPoint {
 		const origin = deps.getStageOrigin();
 		const scale = deps.getScale() || 1;
-		return {
-			x: (event.clientX - origin.left) / scale,
-			y: (event.clientY - origin.top) / scale,
-		};
+		return pointFromPointerEvent(
+			(event.clientX - origin.left) / scale,
+			(event.clientY - origin.top) / scale,
+			event,
+		);
 	}
 
 	function onPointerMove(event: PointerEvent): void {

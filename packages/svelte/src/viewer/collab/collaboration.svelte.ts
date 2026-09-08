@@ -9,6 +9,7 @@
 import type { PptxSlide } from 'pptx-viewer-core';
 import type {
 	CollaborationConfig,
+	CollabLoadOrigin,
 	CollaborationLivePatcher,
 	ConnectionStatus,
 	RemoteCursor,
@@ -59,7 +60,7 @@ export class CollaborationController {
 	#ydoc: YDocLike | null = null;
 	#factories: YjsFactories | null = null;
 	#provider: CollabProviderHandle | null = null;
-	#config: CollaborationConfig | null = null;
+	#config: CollaborationConfig | null = $state(null);
 	#lastStarted: CollaborationConfig | null = null;
 	#startedByEffect = false;
 
@@ -72,6 +73,7 @@ export class CollaborationController {
 	readonly #writeBack = createWriteBackScheduler({
 		getYDoc: () => this.#ydoc,
 		getSourceBytes: () => this.#deps.getSourceBytes?.() ?? null,
+		getSaveOptions: () => this.#deps.getSaveOptions?.(),
 	});
 	readonly #presence: CollaborationPresence;
 
@@ -118,6 +120,15 @@ export class CollaborationController {
 	get followedClientId(): number | null {
 		return this.#presence.followedClientId;
 	}
+	/** The config the active session was started with (null when stopped); the
+	 * Share dialog's active view reads the local user's name/colour from this. */
+	get activeCollaboration(): CollaborationConfig | null {
+		return this.#config;
+	}
+	/** Total connected participants (self + remote peers), reactive. */
+	get connectedCount(): number {
+		return this.remotePresences.length + (this.#active ? 1 : 0);
+	}
 
 	/** Publish a cursor move (slide-space px); no-op when no session is active. */
 	setCursor(x: number, y: number, activeSlideIndex?: number): void {
@@ -143,9 +154,9 @@ export class CollaborationController {
 	 * publish effect can flush the freshly loaded slides into the doc, so a
 	 * late joiner's bootstrap deck never clobbers the room's synced content.
 	 */
-	adoptDocAfterLoad(): void {
+	adoptDocAfterLoad(origin: CollabLoadOrigin = 'user'): void {
 		if (this.#active && this.#ydoc) {
-			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps());
+			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps(), origin);
 		}
 	}
 
@@ -287,6 +298,7 @@ export class CollaborationController {
 		this.#provider = null;
 		this.#ydoc = null;
 		this.#factories = null;
+		this.#config = null;
 		this.livePatcher.configure(null, null);
 		this.#applyingRemote = false;
 		this.#lastSynced = '';

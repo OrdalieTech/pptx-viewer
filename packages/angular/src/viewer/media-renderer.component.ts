@@ -12,7 +12,15 @@ import {
 import { TranslateService } from '@ngx-translate/core';
 import type { PptxElement, PptxMediaType } from 'pptx-viewer-core';
 
-import { startMediaAutoplay } from '../internal/shared';
+import {
+	applyMediaPlaybackAttributes,
+	mediaFallbackIcon,
+	mediaFallbackLabelKey,
+	mediaTransportVisible,
+	scheduleMediaTrimAndFade,
+	startMediaAutoplay,
+} from '../internal/shared';
+import type { MediaFallbackVisual, MediaSurface } from '../internal/shared';
 import { getClrChangeParams } from './color-changed-image-helpers';
 import type { ClrChangeParams } from './color-changed-image-helpers';
 import { ColorChangedImageComponent } from './color-changed-image.component';
@@ -21,6 +29,9 @@ import type { StyleMap } from './element-style';
 import {
 	asMediaElement,
 	buildTrimFragment,
+	mediaFallbackFor,
+	mediaSurfaceFor,
+	registerCrossSlideAudio,
 	resolveCaptionTracks,
 	resolveMediaSrc,
 } from './media-renderer-helpers';
@@ -40,8 +51,21 @@ import type { ResolvedCaptionTrack } from './media-renderer-helpers';
  *
  * On the interactive (edit) canvas native controls are suppressed and pointer
  * events are disabled so a click selects / moves the element rather than
- * scrubbing playback; preview / presentation canvases play normally. This
- * mirrors Vue's `interactive`-gated controls.
+ * scrubbing playback.
+ *
+ * They are suppressed during a SHOW too, which the `interactive` gate alone got
+ * backwards: a running show is non-interactive, so it turned the transport ON,
+ * and a full-bleed background video then painted Chrome's own black scrubber
+ * across the bottom of the slide, over the presentation toolbar. PowerPoint
+ * shows no transport during a show either; React gates on the same condition
+ * (`controls={!isPresentationMode}`).
+ *
+ * The same `interactive` gate turned it on for every STILL of a slide as well
+ * (the presenter console's current-slide pane and next-slide preview, the
+ * thumbnail rail), so the console painted a scrubber over a slide the speaker
+ * cannot play. {@link showControls} routes the decision through the shared
+ * `mediaTransportVisible`, which owns the show/still rules for all five
+ * bindings and leaves the authoring canvas to each of them.
  */
 @Component({
 	selector: 'pptx-media-renderer',
@@ -52,8 +76,9 @@ import type { ResolvedCaptionTrack } from './media-renderer-helpers';
 		<div
 			class="pptx-ng-element pptx-ng-media"
 			[ngStyle]="containerStyle()"
-			[attr.data-element-id]="element().id"
-			[attr.data-pptx-element]="interactive() ? 'true' : null"
+			[style.pointer-events]="rootPointerEvents()"
+			[attr.data-element-id]="elementIdAttr()"
+			[attr.data-pptx-element]="interactive() || marked() ? 'true' : null"
 		>
 			@if (mediaSrc(); as src) {
 				@if (mediaKind() === 'audio') {
@@ -62,7 +87,7 @@ import type { ResolvedCaptionTrack } from './media-renderer-helpers';
 						class="pptx-ng-media-el pptx-ng-media-audio"
 						[class.pptx-ng-media-inert]="interactive()"
 						[src]="src + trimFragment()"
-						[controls]="!interactive()"
+						[controls]="showControls()"
 						[loop]="loop()"
 						preload="metadata"
 					></audio>
@@ -73,7 +98,7 @@ import type { ResolvedCaptionTrack } from './media-renderer-helpers';
 						[class.pptx-ng-media-inert]="interactive()"
 						[src]="src + trimFragment()"
 						[poster]="poster() ?? null"
-						[controls]="!interactive()"
+						[controls]="showControls()"
 						[loop]="loop()"
 						preload="metadata"
 						playsInline
@@ -89,19 +114,54 @@ import type { ResolvedCaptionTrack } from './media-renderer-helpers';
 						}
 					</video>
 				}
-			} @else if (poster(); as posterSrc) {
+			} @else if (fallback().poster && poster(); as posterSrc) {
 				@if (clrChangeParams(); as cc) {
 					<pptx-color-changed-image
 						[src]="posterSrc"
 						[clrChange]="cc"
 						alt=""
-						imgClass="pptx-ng-img"
+						[imgClass]="fallback().dimPoster ? 'pptx-ng-img pptx-ng-media-dim' : 'pptx-ng-img'"
 					/>
 				} @else {
-					<img [src]="posterSrc" alt="" class="pptx-ng-img" />
+					<img
+						[src]="posterSrc"
+						alt=""
+						class="pptx-ng-img"
+						[class.pptx-ng-media-dim]="fallback().dimPoster"
+					/>
 				}
-			} @else {
-				<div class="pptx-ng-placeholder">{{ placeholderLabel() }}</div>
+				<!-- Authoring-canvas chrome only; data-pptx-media-chrome is the neutral
+				     marker e2e/media-transition-chrome.spec.ts asserts the absence of. -->
+				@if (fallback().badge !== 'none') {
+					<div
+						[attr.data-pptx-media-chrome]="fallback().badge"
+						class="pptx-ng-media-badge"
+						[class.pptx-ng-media-badge-missing]="fallback().badge === 'missing'"
+					>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+							@for (d of fallbackIcon(); track d) {
+								<path [attr.d]="d" />
+							}
+						</svg>
+						@if (fallback().badge === 'missing') {
+							<span>{{ fallbackLabel() }}</span>
+						}
+					</div>
+				}
+			} @else if (fallback().placeholder !== 'none') {
+				<div
+					class="pptx-ng-placeholder pptx-ng-media-placeholder"
+					[attr.data-pptx-media-chrome]="fallback().placeholder"
+				>
+					@if (fallbackIcon().length > 0) {
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+							@for (d of fallbackIcon(); track d) {
+								<path [attr.d]="d" />
+							}
+						</svg>
+					}
+					<span>{{ fallbackLabel() }}</span>
+				</div>
 			}
 		</div>
 	`,
@@ -129,6 +189,43 @@ import type { ResolvedCaptionTrack } from './media-renderer-helpers';
 				object-fit: contain;
 				display: block;
 			}
+			/* A poster standing in for media the package could not resolve. */
+			.pptx-ng-media-dim {
+				opacity: 0.5;
+			}
+			.pptx-ng-media-badge {
+				position: absolute;
+				inset: 0;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 4px;
+				font-size: 10px;
+				color: rgba(255, 255, 255, 0.8);
+				filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+				pointer-events: none;
+			}
+			.pptx-ng-media-badge svg {
+				width: 48px;
+				height: 48px;
+			}
+			.pptx-ng-media-badge-missing {
+				color: rgba(255, 255, 255, 0.6);
+			}
+			.pptx-ng-media-badge-missing svg {
+				width: 32px;
+				height: 32px;
+			}
+			.pptx-ng-media-placeholder {
+				flex-direction: column;
+				gap: 4px;
+				font-size: 10px;
+			}
+			.pptx-ng-media-placeholder svg {
+				width: 32px;
+				height: 32px;
+			}
 		`,
 	],
 })
@@ -138,6 +235,29 @@ export class MediaRendererComponent {
 	readonly mediaDataUrls = input<Map<string, string>>(new Map());
 	readonly zIndex = input<number>(0);
 	readonly interactive = input<boolean>(true);
+	/** Keep the data-pptx-element marker on interaction-locked template elements. */
+	readonly marked = input<boolean>(false);
+	/**
+	 * When true (default), the rendered node carries `data-element-id`. The
+	 * miniature surfaces that paint every slide at once turn it off so one
+	 * element id resolves to exactly one node in the document; see
+	 * `ElementRendererComponent.exposeElementId`.
+	 */
+	readonly exposeElementId = input<boolean>(true);
+
+	/** `data-element-id` for this element, or null on a miniature surface. */
+	readonly elementIdAttr = computed<string | null>(() =>
+		this.exposeElementId() ? this.element().id : null,
+	);
+
+	/**
+	 * `pointer-events: none` while not interactive, mirroring React's
+	 * `pointer-events-none` class. {@link marked} keeps the element findable via
+	 * `data-pptx-element` even while locked (e.g. a template/master video with
+	 * `editTemplateMode` off); this is what actually stops it from being clicked
+	 * or dragged.
+	 */
+	readonly rootPointerEvents = computed<'none' | null>(() => (this.interactive() ? null : 'none'));
 	/**
 	 * True only on the live presentation stage. When set, the media element
 	 * starts playing on its own once mounted (as PowerPoint does when a slide
@@ -157,21 +277,95 @@ export class MediaRendererComponent {
 		// Presentation autoplay: once the media node is in the DOM and this is the
 		// live stage, start playback; pause again if it leaves present mode. Reads
 		// mediaSrc so a source swap re-evaluates. The shared helper owns the
-		// `.play()` + blocked-autoplay handling so all three bindings match.
-		effect(() => {
+		// `.play()` + blocked-autoplay handling so all five bindings match.
+		//
+		// The deck's authored playback settings are applied on the same pass.
+		// `volume` and `playbackRate` are IDL properties with no attribute form,
+		// so the template cannot bind them the way it binds `loop`, and until this
+		// they were simply dropped: `solution-explorer.pptx` slide 2 declares
+		// `vol="0"` and Angular played it at full volume.
+		effect((onCleanup) => {
 			const el = this.mediaElRef()?.nativeElement;
 			const presenting = this.presenting();
 			this.mediaSrc();
 			if (!el) {
 				return;
 			}
+			const media = asMediaElement(this.element());
+			if (media) {
+				applyMediaPlaybackAttributes(el, media);
+			}
 			if (presenting) {
-				startMediaAutoplay(el, { trimStartMs: asMediaElement(this.element())?.trimStartMs });
+				// "Play across slides" audio: a hidden document-level element (the
+				// shared persistent-audio manager) carries the sound so it survives
+				// this slide's unmount when the show advances. The slide-local copy
+				// must then stay silent, or the track doubles while its slide is up.
+				if (media && registerCrossSlideAudio(media, this.mediaSrc())) {
+					el.muted = true;
+					if (!el.paused) {
+						el.pause();
+					}
+					return;
+				}
+				startMediaAutoplay(el, { trimStartMs: media?.trimStartMs });
+				// G20: trim-end stop + fade in/out, shared with the other four
+				// bindings so a trimmed/faded clip behaves identically everywhere
+				// (this used to be React-only logic).
+				if (media) {
+					onCleanup(scheduleMediaTrimAndFade(el, media));
+				}
 			} else if (!el.paused) {
 				el.pause();
 			}
 		});
 	}
+
+	/**
+	 * Whether to paint the browser's native transport.
+	 *
+	 * `canvasTransport: false` is this binding's own long-standing answer for its
+	 * authoring canvas: a click there selects or moves the picture, so a scrubber
+	 * would only steal the gesture (the element also carries `pptx-ng-media-inert`
+	 * for the same reason). React paints one on its canvas; that difference is
+	 * deliberate and is the only thing the shared rule leaves to the binding.
+	 */
+	readonly showControls = computed<boolean>(() =>
+		mediaTransportVisible({ ...this.surface(), canvasTransport: false }),
+	);
+
+	/**
+	 * Which surface this renderer is painting on: the live show stage, a STILL of
+	 * a slide (the transition overlay, the presenter console's panes, the
+	 * thumbnail rail), or the authoring canvas.
+	 */
+	readonly surface = computed<MediaSurface>(() =>
+		mediaSurfaceFor(this.interactive(), this.presenting()),
+	);
+
+	/**
+	 * What to paint when no `<video>`/`<audio>` can be mounted.
+	 *
+	 * A still of a slide - the slide-transition overlay, the presenter console's
+	 * panes, the thumbnail rail - gets the poster frame and nothing else: the
+	 * play badge and the typed placeholder box are authoring chrome, and issue
+	 * #147 is exactly that chrome riding along inside a morph. Shared, so the
+	 * five bindings cannot drift on it.
+	 */
+	readonly fallback = computed<MediaFallbackVisual>(() =>
+		mediaFallbackFor(this.element(), Boolean(this.poster()), this.surface()),
+	);
+
+	/** The shared icon paths and resolved label for whatever the fallback is. */
+	readonly fallbackIcon = computed<readonly string[]>(() =>
+		mediaFallbackIcon(this.fallback(), this.mediaKind()),
+	);
+
+	private readonly translate = inject(TranslateService);
+
+	readonly fallbackLabel = computed<string>(() => {
+		const key = mediaFallbackLabelKey(this.fallback(), this.mediaKind());
+		return key === undefined ? '' : (this.translate.instant(key) as string);
+	});
 
 	readonly containerStyle = computed<StyleMap>(() =>
 		getContainerStyle(this.element(), this.zIndex()),

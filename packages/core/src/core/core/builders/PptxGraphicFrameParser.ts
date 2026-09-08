@@ -9,6 +9,15 @@ import type {
 	XmlObject,
 } from '../../types';
 import { detectOleObjectType, inferOleExtensionFromTarget } from '../../utils/ole-utils';
+import { resolveP14MediaForGraphicFrame } from '../runtime/media-p14-extension-resolve';
+import { parseShapeLocksFromNode, SHAPE_LOCK_CONTAINERS } from '../runtime/shape-lock-containers';
+import type { GraphicFramePlaceholder } from './graphic-frame-placeholder';
+import {
+	hasUsableTransform,
+	readGraphicFramePlaceholder,
+	readInheritedTransform,
+} from './graphic-frame-placeholder';
+import { parseOleUpdateAutomatic } from './ole-update-automatic';
 
 /**
  * Recognised `a:graphicData/a:extLst/a:ext` URIs that map to first-class
@@ -26,6 +35,35 @@ function ensureArrayLike<T>(value: T | T[] | undefined): T[] {
 		return [];
 	}
 	return Array.isArray(value) ? value : [value];
+}
+
+function readPositiveInteger(value: unknown): number {
+	const parsed = Number.parseInt(String(value ?? ''), 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/**
+ * A table's true size is its grid: the sum of `a:tblGrid` column widths and
+ * `a:tr` row heights. Some producers (e.g. Google Slides / Slidesgo exports)
+ * leave the graphic frame's `p:xfrm/a:ext` stale after the grid is resized,
+ * which otherwise clips or shrinks the rendered table to the wrong extent.
+ */
+function getTableGridExtent(
+	graphicData: XmlObject | undefined,
+): { widthEmu: number; heightEmu: number } | undefined {
+	const table = graphicData?.['a:tbl'] as XmlObject | undefined;
+	if (!table) {
+		return undefined;
+	}
+	const grid = table['a:tblGrid'] as XmlObject | undefined;
+	const widthEmu = ensureArrayLike(
+		grid?.['a:gridCol'] as XmlObject | XmlObject[] | undefined,
+	).reduce((sum, column) => sum + readPositiveInteger(column?.['@_w']), 0);
+	const heightEmu = ensureArrayLike(table['a:tr'] as XmlObject | XmlObject[] | undefined).reduce(
+		(sum, row) => sum + readPositiveInteger(row?.['@_h']),
+		0,
+	);
+	return widthEmu > 0 && heightEmu > 0 ? { widthEmu, heightEmu } : undefined;
 }
 
 /**
@@ -181,6 +219,42 @@ function findAinkInkPayload(graphicData: XmlObject | undefined): XmlObject | und
  * `<a:graphicData>`. A handful of producers may also put it inside an
  * `mc:Choice` instead of `mc:Fallback`, so both are checked.
  */
+/**
+ * Detect a ChartEx payload by LOCAL NAME, independent of the namespace prefix.
+ *
+ * PowerPoint binds each chartex part to its own prefix, so the payload element
+ * is `<cx:chart>` in a single-chart deck but `<cx1:chart>`, `<cx2:chart>` and
+ * so on once there are several. Matching the raw key `cx:chart` therefore sees
+ * only the first spelling. Splitting on the prefix separator and comparing the
+ * local name matches every one of them, and every `mc:Choice`/`mc:Fallback`
+ * branch spelling too.
+ */
+function hasChartExPayload(graphicData: XmlObject | undefined): boolean {
+	if (!graphicData) {
+		return false;
+	}
+	for (const key of Object.keys(graphicData)) {
+		const separator = key.indexOf(':');
+		if (separator <= 0) {
+			continue;
+		}
+		const prefix = key.slice(0, separator);
+		const localName = key.slice(separator + 1);
+		if (localName === 'chart' && /^cx\d*$/.test(prefix)) {
+			return true;
+		}
+	}
+	const altContent = graphicData['mc:AlternateContent'] as XmlObject | undefined;
+	if (!altContent) {
+		return false;
+	}
+	const branches = [
+		...ensureArrayLike(altContent['mc:Choice'] as XmlObject | XmlObject[] | undefined),
+		...ensureArrayLike(altContent['mc:Fallback'] as XmlObject | XmlObject[] | undefined),
+	];
+	return branches.some((branch) => hasChartExPayload(branch));
+}
+
 function findOleObjPayload(graphicData: XmlObject | undefined): XmlObject | undefined {
 	if (!graphicData) {
 		return undefined;
@@ -206,6 +280,30 @@ function findOleObjPayload(graphicData: XmlObject | undefined): XmlObject | unde
 		}
 	}
 	return undefined;
+}
+
+/**
+ * Parse `p:link/@followColorScheme` (`ST_OleObjectFollowColorScheme`,
+ * ECMA-376 §19.3.1.28) into its typed enum. Only present on the `p:link`
+ * child (linked OLE objects); an embedded object's `p:embed` has no such
+ * attribute. Returns `undefined` for a missing/unrecognised value.
+ */
+function parseOleFollowColorScheme(
+	linkNode: XmlObject | undefined,
+): OlePptxElement['oleFollowColorScheme'] {
+	const raw = String(linkNode?.['@_followColorScheme'] || '')
+		.trim()
+		.toLowerCase();
+	switch (raw) {
+		case 'none':
+			return 'none';
+		case 'full':
+			return 'full';
+		case 'textandbackground':
+			return 'textAndBackground';
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -295,7 +393,7 @@ export interface PptxGraphicFrameParserContext {
 		flipHorizontal?: boolean;
 		flipVertical?: boolean;
 	};
-	parseTableData: (graphicData: XmlObject) => PptxTableData | undefined;
+	parseTableData: (graphicData: XmlObject, slidePath?: string) => PptxTableData | undefined;
 	parseMediaData: (graphicData: XmlObject, slidePath: string) => Partial<MediaPptxElement>;
 	parseElementActions: (
 		cNvPr: XmlObject | undefined,
@@ -310,6 +408,16 @@ export interface PptxGraphicFrameParserContext {
 		slidePath: string,
 		elementId: string,
 	) => void;
+	/**
+	 * Resolve the layout/master node a placeholder frame inherits from, so a
+	 * frame whose own `p:xfrm` has no usable offset/extent can take the
+	 * inherited transform. Optional: without it the frame keeps its own
+	 * (possibly zero) transform.
+	 */
+	findPlaceholderNode?: (
+		slidePath: string,
+		placeholder: GraphicFramePlaceholder,
+	) => XmlObject | undefined;
 }
 
 export interface IPptxGraphicFrameParser {
@@ -326,7 +434,15 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 
 	public parseGraphicFrame(frame: XmlObject, id: string, slidePath?: string): PptxElement | null {
 		try {
-			const transform = frame['p:xfrm'] as XmlObject | undefined;
+			const placeholder = readGraphicFramePlaceholder(frame);
+			const ownTransform = frame['p:xfrm'] as XmlObject | undefined;
+			// A placeholder frame without a usable transform of its own inherits
+			// the layout/master placeholder's, the same way a `p:sp` does.
+			const inheritedTransform =
+				placeholder && slidePath && !hasUsableTransform(ownTransform)
+					? readInheritedTransform(this.context.findPlaceholderNode?.(slidePath, placeholder))
+					: undefined;
+			const transform = inheritedTransform ?? ownTransform;
 			const offset = ((transform?.['a:off'] as XmlObject | undefined) || {}) as XmlObject;
 			const extent = ((transform?.['a:ext'] as XmlObject | undefined) || {}) as XmlObject;
 
@@ -340,13 +456,49 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 				this.context.inspectGraphicFrameCompatibility(type, slidePath, id);
 			}
 
+			// `p:nvGraphicFramePr/p:cNvPr`: the same non-visual-properties
+			// container a `p:sp` carries. Reading `@name`/`@id` here is what
+			// makes a table/chart/SmartArt/OLE/media rename or native-id lookup
+			// round-trip: the generic element writer (`applyNameToCnvPr`,
+			// `applyShapeIdToCnvPr`) already writes both back for every
+			// `p:nvGraphicFramePr`-shaped element, but nothing read them on
+			// parse, so a renamed frame reverted to its original name (and
+			// `element.shapeId` was always undefined) after a save/reload.
+			const cNvPr = (frame['p:nvGraphicFramePr'] as XmlObject | undefined)?.['p:cNvPr'] as
+				| XmlObject
+				| undefined;
+			const frameName = cNvPr?.['@_name'] !== undefined ? String(cNvPr['@_name']) : undefined;
+			const frameShapeId = cNvPr?.['@_id'] !== undefined ? String(cNvPr['@_id']) : undefined;
+			// `p:nvGraphicFramePr/p:cNvPr/@descr` / `@title`: the same alt-text
+			// attributes a picture's `p:cNvPr` carries (see
+			// `PptxHandlerRuntimePictureParsing.ts`'s `altTextRaw`), but nothing
+			// read them for a table/chart/SmartArt/OLE/media graphic frame, so
+			// accessibility text authored on those element types was silently
+			// dropped on load. Attached below only to the element types that
+			// declare the fields (table, chart, smartArt, ole, media).
+			const frameAltText = String(cNvPr?.['@_descr'] || '').trim() || undefined;
+			const frameTitle = String(cNvPr?.['@_title'] || '').trim() || undefined;
+
 			const baseElement = {
 				id,
 				type,
+				...(frameName !== undefined ? { name: frameName } : {}),
+				...(frameShapeId !== undefined ? { shapeId: frameShapeId } : {}),
 				x: Math.round(parseInt(String(offset['@_x'] || '0'), 10) / this.context.emuPerPx),
 				y: Math.round(parseInt(String(offset['@_y'] || '0'), 10) / this.context.emuPerPx),
 				width: Math.round(parseInt(String(extent['@_cx'] || '0'), 10) / this.context.emuPerPx),
 				height: Math.round(parseInt(String(extent['@_cy'] || '0'), 10) / this.context.emuPerPx),
+				// Exact EMU alongside the rounded pixel value; see
+				// `xfrm-emu-resolution.ts`. A table's `width`/`height` above may be
+				// overridden further down from its `a:tblGrid` (some producers leave
+				// the frame's own `a:xfrm/a:ext` stale relative to the grid) -- in
+				// that case these values legitimately fail `resolveXfrmEmu`'s
+				// equality check on save and the writer re-quantizes from the
+				// grid-corrected pixel value instead of re-emitting the stale EMU.
+				xEmu: parseInt(String(offset['@_x'] || '0'), 10),
+				yEmu: parseInt(String(offset['@_y'] || '0'), 10),
+				widthEmu: parseInt(String(extent['@_cx'] || '0'), 10),
+				heightEmu: parseInt(String(extent['@_cy'] || '0'), 10),
 				rotation: transform?.['@_rot']
 					? parseInt(String(transform['@_rot']), 10) / 60000
 					: undefined,
@@ -358,7 +510,21 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 					: undefined,
 				flipHorizontal,
 				flipVertical,
+				// `p:nvGraphicFramePr/p:nvPr/p:ph`: a table/chart/SmartArt/OLE/media
+				// frame filling a layout placeholder. Surfaced on the same fields a
+				// `p:sp` placeholder uses so consumers need not re-walk `rawXml`.
+				...(placeholder?.type !== undefined ? { placeholderType: placeholder.type } : {}),
+				...(placeholder?.sz !== undefined ? { placeholderSz: placeholder.sz } : {}),
+				...(placeholder?.orient !== undefined ? { placeholderOrient: placeholder.orient } : {}),
 				rawXml: frame,
+				// `a:graphicFrameLocks` is the lock element for every family that
+				// round-trips as a graphic frame (table, chart, SmartArt, OLE
+				// object, graphic-frame media, loaded ink). Reading it is what
+				// makes the writer safe: `serializeShapeLocks` rebuilds the node
+				// from `element.locks` and treats an absent bag as "the user
+				// cleared the locks", so a lock that is never parsed would be
+				// erased on the first save.
+				locks: parseShapeLocksFromNode(frame, SHAPE_LOCK_CONTAINERS['p:graphicFrame']),
 			};
 
 			// Capture any unrecognised `<a:graphicData>/<a:extLst>/<a:ext>`
@@ -368,10 +534,19 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 			const extensionXml = collectGraphicFrameExtensions(graphicData);
 
 			if (type === 'table' && graphicData) {
-				const tableData = this.context.parseTableData(graphicData);
+				const tableData = this.context.parseTableData(graphicData, slidePath);
+				const tableGridExtent = getTableGridExtent(graphicData);
 				return {
 					...baseElement,
+					...(tableGridExtent
+						? {
+								width: Math.round(tableGridExtent.widthEmu / this.context.emuPerPx),
+								height: Math.round(tableGridExtent.heightEmu / this.context.emuPerPx),
+							}
+						: {}),
 					tableData,
+					...(frameAltText !== undefined ? { altText: frameAltText } : {}),
+					...(frameTitle !== undefined ? { title: frameTitle } : {}),
 					...(extensionXml.length > 0 ? { extensionXml } : {}),
 				} as TablePptxElement;
 			}
@@ -399,9 +574,24 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 
 			if (type === 'media' && graphicData && slidePath) {
 				const mediaInfo = this.context.parseMediaData(graphicData, slidePath);
+				// A freshly-inserted (never round-tripped) media element is written
+				// as this `p:graphicFrame` shape with its trim/fade/speed/bookmarks
+				// on `p:nvGraphicFramePr/p:nvPr/p:extLst` (see
+				// `buildMediaP14Extensions`); a `p:pic`-shaped media (real
+				// PowerPoint's own poster-frame form) is handled by the picture
+				// parser's `resolveP14MediaForPicture` instead.
+				const nvPr = (frame['p:nvGraphicFramePr'] as XmlObject | undefined)?.['p:nvPr'] as
+					| XmlObject
+					| undefined;
+				const p14Media = resolveP14MediaForGraphicFrame(nvPr, id, (value) =>
+					ensureArrayLike(value as XmlObject | XmlObject[] | undefined),
+				);
 				return {
 					...baseElement,
 					...mediaInfo,
+					...p14Media,
+					...(frameAltText !== undefined ? { altText: frameAltText } : {}),
+					...(frameTitle !== undefined ? { title: frameTitle } : {}),
 					...(extensionXml.length > 0 ? { extensionXml } : {}),
 				} as MediaPptxElement;
 			}
@@ -436,6 +626,14 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 						: undefined;
 				let oleTarget: string | undefined;
 				let previewImage: string | undefined;
+
+				// `p:link/@followColorScheme` (ST_OleObjectFollowColorScheme,
+				// ECMA-376 §19.3.1.28): whether a LINKED object's icon recolours
+				// to match the theme. Only meaningful on the `p:link` form.
+				const oleFollowColorScheme = parseOleFollowColorScheme(oleLinkNode);
+				// `p:link/@updateAutomatic` (P1-G3): automatic vs. manual refresh
+				// for a linked object. Only meaningful on the `p:link` form.
+				const oleUpdateAutomatic = parseOleUpdateAutomatic(oleLinkNode);
 
 				const oleRelationshipId = String(
 					oleLinkNode?.['@_r:id'] ||
@@ -478,9 +676,6 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 				const targetExt = inferOleExtensionFromTarget(oleTarget);
 				const oleFileExtension = targetExt ?? detectedExt;
 
-				const cNvPr = (frame?.['p:nvGraphicFramePr'] as XmlObject | undefined)?.['p:cNvPr'] as
-					| XmlObject
-					| undefined;
 				const slideRelationships = slidePath ? this.context.slideRelsMap.get(slidePath) : undefined;
 				const { actionClick, actionHover } = this.context.parseElementActions(
 					cNvPr,
@@ -502,14 +697,24 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 					oleShowAsIcon,
 					oleImgW,
 					oleImgH,
+					oleFollowColorScheme,
+					oleUpdateAutomatic,
 					actionClick,
 					actionHover,
+					...(frameAltText !== undefined ? { altText: frameAltText } : {}),
+					...(frameTitle !== undefined ? { title: frameTitle } : {}),
 					...(extensionXml.length > 0 ? { extensionXml } : {}),
 				} as OlePptxElement;
 			}
 
+			// Whatever remains here is 'chart' / 'smartArt' (their own typed data
+			// is enriched later by the caller from the related chart/diagram
+			// part) or 'unknown'; both ChartPptxElement and SmartArtPptxElement
+			// declare altText/title, so it's safe to attach unconditionally.
 			return {
 				...baseElement,
+				...(frameAltText !== undefined ? { altText: frameAltText } : {}),
+				...(frameTitle !== undefined ? { title: frameTitle } : {}),
 				...(extensionXml.length > 0 ? { extensionXml } : {}),
 			} as PptxElement;
 		} catch {
@@ -526,7 +731,19 @@ export class PptxGraphicFrameParser implements IPptxGraphicFrameParser {
 		if (graphicData['a:tbl'] || uri.includes('/drawingml/2006/table')) {
 			return 'table';
 		}
-		if (graphicData['c:chart'] || uri.includes('/drawingml/2006/chart')) {
+		// A ChartEx frame (waterfall, funnel, treemap, sunburst, histogram,
+		// boxWhisker, regionMap) carries the 2014 chartex URI and a `<cx:chart>`
+		// payload, NOT the 2006 DrawingML `<c:chart>`. Branching on the raw
+		// `c:chart` key alone typed every real chartex frame as `unknown`, so
+		// enrichment skipped it and all seven renderers were dead code on real
+		// decks. The prefix is not fixed either: a deck with several chartex
+		// parts binds them as `cx1:` .. `cx8:`, so match the local name.
+		if (
+			graphicData['c:chart'] ||
+			uri.includes('/drawingml/2006/chart') ||
+			uri.includes('/2014/chartex') ||
+			hasChartExPayload(graphicData)
+		) {
 			return 'chart';
 		}
 		if (graphicData['dgm:relIds'] || uri.includes('/drawingml/2006/diagram')) {

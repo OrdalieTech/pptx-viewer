@@ -1,18 +1,29 @@
 import type {
 	PptxElement,
+	PptxEmbeddedFont,
 	PptxLayoutOption,
+	PptxLayoutPreview,
 	PptxSlide,
 	PptxSlideTransition,
+	PptxPresentationProperties,
 	PptxElementAnimation,
 	PptxAnimationPreset,
+	PptxTheme,
 } from 'pptx-viewer-core';
-import { createBackstagePresentation, DEFAULT_INSERT_CHART_TYPE } from 'pptx-viewer-shared';
-import type { ToolbarActionId } from 'pptx-viewer-shared';
+import {
+	applyMotionPathPreset,
+	createBackstagePresentation,
+	DEFAULT_INSERT_CHART_KIND,
+	resetSlideLayoutPath,
+	templateSchemeFromTheme,
+} from 'pptx-viewer-shared';
+import type { AnimationApplyGroup, ToolbarActionId } from 'pptx-viewer-shared';
 /**
  * ViewerToolbarSection: Renders the top toolbar, signature badge,
  * and hidden file-input elements.
  */
 import React, { useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { Toolbar, SignatureStatusBadge } from '.';
 import type { AutosaveStatus } from '../hooks/useAutosave';
@@ -52,6 +63,7 @@ export interface ViewerToolbarSectionProps {
 		setSlides: React.Dispatch<React.SetStateAction<PptxSlide[]>>;
 		setActiveSlideIndex: React.Dispatch<React.SetStateAction<number>>;
 		setSelectedElementId: React.Dispatch<React.SetStateAction<string | null>>;
+		selectedElementIds: string[];
 		setSelectedElementIds: React.Dispatch<React.SetStateAction<string[]>>;
 		setTemplateElementsBySlideId: React.Dispatch<
 			React.SetStateAction<Record<string, PptxElement[]>>
@@ -75,6 +87,8 @@ export interface ViewerToolbarSectionProps {
 		setShowGrid: React.Dispatch<React.SetStateAction<boolean>>;
 		showRulers: boolean;
 		setShowRulers: React.Dispatch<React.SetStateAction<boolean>>;
+		showGuides: boolean;
+		setShowGuides: React.Dispatch<React.SetStateAction<boolean>>;
 		snapToGrid: boolean;
 		setSnapToGrid: React.Dispatch<React.SetStateAction<boolean>>;
 		snapToShape: boolean;
@@ -82,6 +96,10 @@ export interface ViewerToolbarSectionProps {
 		isOverflowMenuOpen: boolean;
 		setIsOverflowMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
 		layoutOptions: PptxLayoutOption[];
+		/** Loaded deck theme; used to resolve template-gallery scheme colours. */
+		theme?: PptxTheme;
+		/** Fonts the deck embeds, offered as their own font-dropdown group. */
+		embeddedFonts: PptxEmbeddedFont[];
 		hasMacros: boolean;
 		isThemeEditorOpen: boolean;
 		setIsThemeEditorOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -98,7 +116,10 @@ export interface ViewerToolbarSectionProps {
 		setActiveCustomShowId: React.Dispatch<React.SetStateAction<string | null>>;
 		setIsShortcutHelpOpen: React.Dispatch<React.SetStateAction<boolean>>;
 		setShowSlideSorter: React.Dispatch<React.SetStateAction<boolean>>;
-		presentationProperties: { showSubtitles?: boolean };
+		setShowReadingView: React.Dispatch<React.SetStateAction<boolean>>;
+		setShowOutlineView: React.Dispatch<React.SetStateAction<boolean>>;
+		presentationProperties: PptxPresentationProperties;
+		setPresentationProperties: React.Dispatch<React.SetStateAction<PptxPresentationProperties>>;
 		hasDigitalSignatures: boolean;
 		digitalSignatureCount: number;
 		imageInputRef: React.RefObject<HTMLInputElement | null>;
@@ -108,6 +129,8 @@ export interface ViewerToolbarSectionProps {
 	};
 	selectedElement: PptxElement | null;
 	activeSlide: PptxSlide | undefined;
+	/** Index of `activeSlide` in the deck, for per-slide ribbon commands. */
+	activeSlideIndex: number;
 	zoom: {
 		scale: number;
 		handleZoomIn: () => void;
@@ -126,8 +149,18 @@ export interface ViewerToolbarSectionProps {
 	propertyHandlers: PropertyHandlersResult;
 	dialogs: ViewerDialogsResult;
 	slideOps: SlideManagementHandlers;
+	/** Start a new deck section at a slide (Home > Slides > Section). */
+	sectionOps?: { addSection: (name: string, afterSlideIndex: number) => void };
+	/** Re-map the active slide onto another of its master's layouts. */
+	onApplyLayout?: (path: string) => void;
+	/** Builds the New Slide / Layout gallery artwork on first menu open. */
+	loadLayoutPreviews?: () => Promise<PptxLayoutPreview[]>;
+	/** Families registered this session via File > Options > Fonts. */
+	customFontFamilies?: readonly string[];
 	ops: ElementOperations;
 	onSetMode: (mode: ViewerMode) => void;
+	/** "From Beginning" (F5): enters the show on its first slide. */
+	onPresentFromBeginning?: () => void;
 	onEnterPresenterView: () => void;
 	onEnterRehearsalMode: () => void;
 	onOpenSettings?: () => void;
@@ -143,12 +176,32 @@ export interface ViewerToolbarSectionProps {
 	onToggleAutosave?: () => void;
 	/** Host-supplied list of toolbar buttons/ribbon tabs to hide. */
 	hiddenActions?: ToolbarActionId[];
+	/** File > Options > Advanced > "Quickly access this number of Recent Documents". */
+	recentPresentationsCount?: number;
 	/** Whether the AI assistant is available (the host passed the `ai` prop). */
 	aiEnabled?: boolean;
 	/** Whether the AI assistant panel is currently open. */
 	isAiPanelOpen?: boolean;
 	/** Toggle the AI assistant panel. */
 	onToggleAiPanel?: () => void;
+	/**
+	 * True when `canEdit` is false because Trust Center > "Open presentations
+	 * in Protected View" is on (not because the host itself withheld edit
+	 * permission). Turns the toolbar's read-only badge into an "Enable
+	 * Editing" action.
+	 */
+	isProtectedView?: boolean;
+	/** Drops the Protected View override for this session. Only offered when `isProtectedView` is true. */
+	onEnableEditing?: () => void;
+	/**
+	 * Overrides `state.setSnapToGrid`/`setSnapToShape`/`setShowGuides` with a
+	 * handler that also writes the toggle back into `state.viewProperties`
+	 * (`useViewPreferencesSync`), so a save round-trips it. Falls back to the
+	 * raw state setter (no write-back) when omitted.
+	 */
+	onSetSnapToGrid?: (value: boolean) => void;
+	onSetSnapToShape?: (value: boolean) => void;
+	onSetShowGuides?: (value: boolean) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +215,7 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 		state: s,
 		selectedElement,
 		activeSlide,
+		activeSlideIndex,
 		zoom,
 		history,
 		findReplace,
@@ -172,8 +226,13 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 		propertyHandlers,
 		dialogs,
 		slideOps,
+		sectionOps,
+		onApplyLayout,
+		loadLayoutPreviews,
+		customFontFamilies,
 		ops,
 		onSetMode,
+		onPresentFromBeginning,
 		onEnterPresenterView,
 		onEnterRehearsalMode,
 		onOpenSettings,
@@ -187,17 +246,32 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 		autosaveEnabled = true,
 		onToggleAutosave,
 		hiddenActions,
+		recentPresentationsCount,
 		aiEnabled,
 		isAiPanelOpen,
 		onToggleAiPanel,
+		isProtectedView,
+		onEnableEditing,
+		onSetSnapToGrid,
+		onSetSnapToShape,
+		onSetShowGuides,
 	} = props;
 
+	const { t } = useTranslation();
+
 	const handleAddAnimation = useCallback(
-		(preset: string, group: 'entrance' | 'emphasis' | 'exit') => {
+		(preset: string, group: AnimationApplyGroup) => {
 			if (!selectedElement || !activeSlide) {
 				return;
 			}
 			const current = activeSlide.animations ?? [];
+			if (group === 'motionPath') {
+				// `preset` is a motion-path catalogue id here, not a preset name.
+				propertyHandlers.handleUpdateSlide({
+					animations: applyMotionPathPreset(current, selectedElement.id, preset),
+				});
+				return;
+			}
 			const existing = current.find((a) => a.elementId === selectedElement.id);
 			const presetValue = preset as PptxAnimationPreset;
 			if (existing) {
@@ -242,6 +316,48 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 	const scopedLayoutOptions = React.useMemo(
 		() => scopeLayoutOptionsToActiveSlide(s.layoutOptions, activeSlide),
 		[s.layoutOptions, activeSlide],
+	);
+
+	// Home > Slides > Reset re-applies the slide's own layout, which is exactly
+	// what the other three bindings do; the shared helper decides whether there
+	// is a layout to reset to at all.
+	const handleResetSlide = useCallback(() => {
+		const path = resetSlideLayoutPath(activeSlide);
+		if (path) {
+			onApplyLayout?.(path);
+		}
+	}, [activeSlide, onApplyLayout]);
+
+	const handleAddSection = useCallback(() => {
+		sectionOps?.addSection(t('pptx.sections.defaultName'), activeSlideIndex);
+	}, [sectionOps, activeSlideIndex, t]);
+
+	/**
+	 * Design > Slide Size. The size control is the inspector's SLIDE SIZE card,
+	 * which the deck (no-selection) panel renders, so drop the element selection
+	 * and open the pane on Properties. The button used to open Document
+	 * Properties, a dialog with no slide-size control in it at all.
+	 */
+	const handleOpenSlideSize = useCallback(() => {
+		s.setSelectedElementId(null);
+		s.setSelectedElementIds([]);
+		s.setSidebarPanelMode('properties');
+		s.setIsInspectorPaneOpen(true);
+	}, [s]);
+
+	const handleSelectAll = useCallback(() => {
+		const allIds = activeSlide?.elements.map((element) => element.id) ?? [];
+		if (allIds.length > 0) {
+			ops.applySelection(allIds[0], allIds);
+		}
+	}, [activeSlide, ops]);
+
+	const handlePresentationPropertiesChange = useCallback(
+		(updates: Partial<PptxPresentationProperties>) => {
+			s.setPresentationProperties((prev) => ({ ...prev, ...updates }));
+			history.markDirty();
+		},
+		[s, history],
 	);
 
 	const handleApplyTransitionToAll = useCallback(() => {
@@ -305,7 +421,7 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 							insertHandlers.handleAddTable();
 							break;
 						case 'chart':
-							insertHandlers.handleAddChart(DEFAULT_INSERT_CHART_TYPE);
+							insertHandlers.handleAddChart(DEFAULT_INSERT_CHART_KIND);
 							break;
 						case 'smartArt':
 							dialogs.setIsSmartArtDialogOpen(true);
@@ -337,7 +453,7 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 				case 'slideShow':
 					switch (action) {
 						case 'fromBeginning':
-							onSetMode('present');
+							(onPresentFromBeginning ?? (() => onSetMode('present')))();
 							break;
 						case 'presenterView':
 							onEnterPresenterView();
@@ -350,7 +466,10 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 							s.setIsThemeGalleryOpen((p) => !p);
 							break;
 						case 'slideSize':
-							dialogs.setIsSetUpSlideShowOpen(true);
+							// Was `setIsSetUpSlideShowOpen`: the command-palette route to
+							// Slide Size opened the Set Up Show dialog, a third unrelated
+							// surface. Same destination as the ribbon button now.
+							handleOpenSlideSize();
 							break;
 					}
 					break;
@@ -379,7 +498,40 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 					break;
 			}
 		},
-		[ops, insertHandlers, s, dialogs, zoom, onSetMode, onEnterPresenterView, manipulation],
+		[
+			ops,
+			insertHandlers,
+			s,
+			dialogs,
+			zoom,
+			onSetMode,
+			onPresentFromBeginning,
+			onEnterPresenterView,
+			manipulation,
+			handleOpenSlideSize,
+		],
+	);
+
+	/**
+	 * Run a Quick Access Toolbar command by catalog id. Save/Undo/Redo keep
+	 * their dedicated title-bar buttons (they carry undo labels and the
+	 * `hiddenActions` gate), so only the options-configured remainder arrives
+	 * here.
+	 */
+	const handleQuickAccessCommand = useCallback(
+		(id: string) => {
+			const handlers: Record<string, () => void> = {
+				presentFromStart: onPresentFromBeginning ?? (() => onSetMode('present')),
+				print: printHandlers.handlePrint,
+				exportPdf: exportHandlers.handleExportPdf,
+				newSlide: slideOps.handleAddSlide,
+				spellCheck: () => s.setSpellCheckEnabled((p) => !p),
+				zoomIn: zoom.handleZoomIn,
+				zoomOut: zoom.handleZoomOut,
+			};
+			handlers[id]?.();
+		},
+		[onSetMode, onPresentFromBeginning, printHandlers, exportHandlers, slideOps, s, zoom],
 	);
 
 	return (
@@ -403,6 +555,7 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 					findReplaceOpen={findReplace.findReplaceOpen}
 					onToggleFindReplace={() => findReplace.setFindReplaceOpen(!findReplace.findReplaceOpen)}
 					onCommandSearch={handleCommandSearch}
+					onQuickCommand={handleQuickAccessCommand}
 					hiddenActions={hiddenActions}
 				/>
 			)}
@@ -410,7 +563,14 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 				fileName={fileName}
 				mode={mode}
 				canEdit={canEdit}
+				isProtectedView={isProtectedView}
+				onEnableEditing={onEnableEditing}
+				// Below-ribbon Quick Access strip (Options > Quick Access Toolbar >
+				// position = "below"); same dispatcher the title bar's inline strip
+				// uses when position is "above".
+				onQuickCommand={handleQuickAccessCommand}
 				hiddenActions={hiddenActions}
+				recentPresentationsCount={recentPresentationsCount}
 				isNarrowViewport={dialogs.isNarrowViewport}
 				isSidebarCollapsed={!s.isSlidesPaneOpen}
 				isInspectorPaneOpen={s.isInspectorPaneOpen}
@@ -431,6 +591,7 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 				drawingWidth={s.drawingWidth}
 				clipboardPayload={s.clipboardPayload}
 				onSetMode={onSetMode}
+				onPresentFromBeginning={onPresentFromBeginning}
 				onToggleSidebar={() => s.setIsSlidesPaneOpen((p) => !p)}
 				onToggleInspector={() => s.setIsInspectorPaneOpen((p) => !p)}
 				onOpenAnimationPanel={() => {
@@ -469,13 +630,15 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 				spellCheckEnabled={s.spellCheckEnabled}
 				showGrid={s.showGrid}
 				showRulers={s.showRulers}
+				showGuides={s.showGuides}
 				snapToGrid={s.snapToGrid}
 				snapToShape={s.snapToShape}
 				onSetSpellCheckEnabled={s.setSpellCheckEnabled}
 				onSetShowGrid={s.setShowGrid}
 				onSetShowRulers={s.setShowRulers}
-				onSetSnapToGrid={s.setSnapToGrid}
-				onSetSnapToShape={s.setSnapToShape}
+				onSetShowGuides={onSetShowGuides ?? s.setShowGuides}
+				onSetSnapToGrid={onSetSnapToGrid ?? s.setSnapToGrid}
+				onSetSnapToShape={onSetSnapToShape ?? s.setSnapToShape}
 				onAddGuide={dialogs.handleAddGuide}
 				onAlignElements={manipulation.handleAlignElements}
 				onDistributeElements={manipulation.handleDistributeElements}
@@ -486,13 +649,21 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 				onFlip={manipulation.handleFlip}
 				onMoveLayer={manipulation.handleMoveLayer}
 				onMoveLayerToEdge={manipulation.handleMoveLayerToEdge}
+				onGroupElements={manipulation.handleGroupElements}
+				onUngroupElement={manipulation.handleUngroupElement}
+				onUpdateElementStyle={ops.updateSelectedShapeStyle}
+				selectedCount={
+					s.selectedElementIds.length > 0 ? s.selectedElementIds.length : selectedElement ? 1 : 0
+				}
+				selectionGroupable={manipulation.selectionGroupable}
+				onOpenHyperlinkDialog={() => dialogs.setIsHyperlinkDialogOpen(true)}
 				onDuplicate={manipulation.handleDuplicate}
 				onDelete={manipulation.handleDelete}
 				onExportPng={exportHandlers.handleExportPng}
 				onExportPdf={exportHandlers.handleExportPdf}
 				onExportVideo={exportHandlers.handleExportVideo}
 				onExportGif={exportHandlers.handleExportGif}
-				onPackageForSharing={exportHandlers.handlePackageForSharing}
+				onExportJson={exportHandlers.handleExportJson}
 				onOpenFile={onOpenFile}
 				onOpenRecentFile={onOpenRecentFile}
 				onCreatePresentation={(templateId) => {
@@ -514,12 +685,25 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 				onOpenSettings={onOpenSettings}
 				onRunAccessibilityCheck={dialogs.handleRunAccessibilityCheck}
 				onToggleSlideSorter={() => s.setShowSlideSorter((p) => !p)}
+				onOpenReadingView={() => s.setShowReadingView(true)}
+				onOpenOutlineView={() => s.setShowOutlineView(true)}
 				onUpdateTextStyle={ops.updateSelectedTextStyle}
 				onTransformTextCase={ops.updateSelectedTextCase}
 				isOverflowMenuOpen={s.isOverflowMenuOpen}
 				onSetOverflowMenuOpen={s.setIsOverflowMenuOpen}
 				layoutOptions={scopedLayoutOptions}
+				currentLayoutPath={activeSlide?.layoutPath}
+				loadLayoutPreviews={loadLayoutPreviews}
+				themeFonts={{
+					heading: s.theme?.fontScheme?.majorFont?.latin,
+					body: s.theme?.fontScheme?.minorFont?.latin,
+				}}
+				embeddedFontFamilies={s.embeddedFonts.map((font) => font.name)}
+				customFontFamilies={customFontFamilies}
 				onInsertSlideFromLayout={slideOps.handleInsertSlideFromLayout}
+				onApplyLayout={onApplyLayout}
+				onInsertSlideFromTemplate={slideOps.handleInsertSlideFromTemplate}
+				templateScheme={templateSchemeFromTheme(s.theme?.colorScheme)}
 				customShows={s.customShows}
 				activeCustomShowId={s.activeCustomShowId}
 				onSetActiveCustomShowId={s.setActiveCustomShowId}
@@ -533,6 +717,7 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 				onToggleVersionHistory={() => propertyHandlers.setIsVersionHistoryOpen((p) => !p)}
 				onOpenPasswordProtection={() => dialogs.setIsPasswordDialogOpen(true)}
 				onOpenDocumentProperties={() => dialogs.setIsDocPropsDialogOpen(true)}
+				onOpenSlideSize={handleOpenSlideSize}
 				onOpenFontEmbedding={() => dialogs.setIsFontEmbeddingOpen(true)}
 				onOpenDigitalSignatures={() => dialogs.setIsDigitalSigDialogOpen(true)}
 				onEnterPresenterView={onEnterPresenterView}
@@ -560,12 +745,19 @@ export function ViewerToolbarSection(props: ViewerToolbarSectionProps) {
 				eyedropperActive={s.eyedropperActive}
 				onToggleEyedropper={() => s.setEyedropperActive((p) => !p)}
 				onOpenSetUpSlideShow={() => dialogs.setIsSetUpSlideShowOpen(true)}
+				onToggleHideSlide={() => slideOps.handleToggleHideSlides([activeSlideIndex])}
+				activeSlideHidden={Boolean(activeSlide?.hidden)}
 				onOpenBroadcastDialog={() => dialogs.setIsBroadcastDialogOpen(true)}
 				onToggleSubtitles={dialogs.handleToggleSubtitles}
 				showSubtitles={Boolean(s.presentationProperties.showSubtitles)}
 				activeSlide={activeSlide}
 				onTransitionChange={handleTransitionChange}
 				onApplyTransitionToAll={handleApplyTransitionToAll}
+				onResetSlide={handleResetSlide}
+				onAddSection={sectionOps ? handleAddSection : undefined}
+				onSelectAll={handleSelectAll}
+				presentationProperties={s.presentationProperties}
+				onPresentationPropertiesChange={handlePresentationPropertiesChange}
 				aiEnabled={aiEnabled}
 				isAiPanelOpen={isAiPanelOpen}
 				onToggleAiPanel={onToggleAiPanel}

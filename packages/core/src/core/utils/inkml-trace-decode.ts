@@ -28,14 +28,23 @@ export function resolveChannelOrder(root: XmlObject): ChannelOrder {
 /**
  * Decode a raw InkML trace string into per-point channel values.
  *
- * Points are comma-separated; the channel values within a point are
- * whitespace-separated and positionally map to `channelOrder`. InkML also
- * permits value prefixes that switch a channel into a difference encoding:
- * `!` explicit (absolute), `'` single difference (delta from the previous
- * point), `"` second difference (delta of the delta). The mode is sticky per
- * channel until another prefix appears. Absolute traces (the common Office
- * case, no prefixes) decode exactly; difference forms are reconstructed by
- * accumulation, and the second-difference case is a best-effort approximation.
+ * Points are comma-separated; the channel values within a point map
+ * positionally to `channelOrder`. InkML permits value prefixes that switch a
+ * channel into a difference encoding: `!` explicit (absolute), `'` single
+ * difference (delta from the previous point), `"` second difference (delta of
+ * the delta). The mode is sticky per channel until another prefix appears.
+ *
+ * The values are NOT reliably whitespace-separated, which is the trap here.
+ * PowerPoint emits its traces in the compact form, where the sign doubles as
+ * the separator and the prefix binds tight to its number. This is verbatim
+ * PowerPoint SaveAs output for a three-point stroke:
+ *
+ *     100 200,'40'46,"0"-5,0-10
+ *
+ * A whitespace split reads `'40'46` and `0-10` as ONE token each and drops
+ * every point after the first, which is exactly what used to happen: a real
+ * inked slide decoded to a single point and rendered nothing. Values are
+ * therefore scanned, not split.
  */
 export function decodeTracePoints(text: string, channelOrder: ChannelOrder): number[][] {
 	const points: number[][] = [];
@@ -43,10 +52,7 @@ export function decodeTracePoints(text: string, channelOrder: ChannelOrder): num
 	const lastValue: number[] = channelOrder.map(() => 0);
 	const lastVelocity: number[] = channelOrder.map(() => 0);
 	for (const rawPoint of text.split(',')) {
-		const tokens = rawPoint
-			.trim()
-			.split(/\s+/u)
-			.filter((token) => token.length > 0);
+		const tokens = scanValueTokens(rawPoint);
 		if (tokens.length === 0) {
 			continue;
 		}
@@ -73,6 +79,24 @@ type DiffMode = 'explicit' | 'single' | 'double';
 interface ParsedToken {
 	value: number;
 	mode: DiffMode;
+}
+
+/**
+ * One optional InkML encoding prefix followed by one signed decimal number.
+ * Anchored on the number so that `0-10` yields two values and `'40'46` keeps
+ * each prefix attached to the value it qualifies.
+ */
+const VALUE_TOKEN = /([!'"])?\s*(-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)/gu;
+
+/** Scan one comma-delimited point into its channel value tokens. */
+function scanValueTokens(rawPoint: string): string[] {
+	const tokens: string[] = [];
+	VALUE_TOKEN.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = VALUE_TOKEN.exec(rawPoint)) !== null) {
+		tokens.push(`${match[1] ?? ''}${match[2]}`);
+	}
+	return tokens;
 }
 
 /** Parse one whitespace-delimited channel token, honouring InkML mode prefixes. */
@@ -154,6 +178,149 @@ export function pointsToPressures(points: number[][], channelOrder: ChannelOrder
 	return pressures;
 }
 
+/** Decoded per-point pen-tilt lean, derived from whichever tilt channels a trace declared. */
+export interface TiltChannels {
+	/** Lean direction at each point, in radians (page-plane angle). */
+	angles: number[];
+	/** Lean strength at each point, 0 (upright) to 1 (maximally leaned). */
+	magnitudes: number[];
+	/**
+	 * Which channel pair the source trace actually declared: the InkML-
+	 * conventional `OTx`/`OTy` (or `tiltX`/`tiltY`) vector pair, or
+	 * `AZIMUTH`/`ALTITUDE`. Recorded so a save that has to rewrite this part
+	 * (see `inkml-content-part-writer.ts`) can re-declare the SAME channel
+	 * pair instead of silently converting every re-saved stroke to `OTx`/`OTy`;
+	 * the angle/magnitude values themselves are already a lossless decode of
+	 * either encoding, so this field only affects which channel NAMES get
+	 * written back, not the rendered lean.
+	 */
+	encoding: 'vector' | 'azimuthAltitude';
+}
+
+/**
+ * Extract pen-tilt lean (direction + strength) from whichever tilt channels a
+ * trace declares, or `undefined` when none of the recognised names are
+ * present. Two encodings are recognised, in priority order:
+ *
+ * - A vector pair (`OTx`/`OTy`, the InkML-conventional tilt-offset names, or
+ *   the `tiltX`/`tiltY` alias some digitizers use): the angle is the vector's
+ *   direction, and the magnitude is its length, normalised against the
+ *   largest magnitude seen anywhere in the trace (these are arbitrary device
+ *   units with no fixed scale).
+ * - `AZIMUTH` (degrees, the compass direction the pen leans toward), paired
+ *   with an optional `ALTITUDE` (degrees from the writing surface: 90 is
+ *   upright, 0 is flat). When altitude is absent, a fixed mid-range magnitude
+ *   is used since azimuth alone gives a direction but not a lean strength.
+ *
+ * Every other declared channel (timing, or anything unrecognised) is still
+ * decoded positionally by {@link decodeTracePoints} but has no consumer here,
+ * matching the documented behaviour in `docs/guide/limitations.md`.
+ */
+export function pointsToTilt(
+	points: number[][],
+	channelOrder: ChannelOrder,
+): TiltChannels | undefined {
+	const otxIndex = firstIndexOf(channelOrder, ['OTX', 'TILTX']);
+	const otyIndex = firstIndexOf(channelOrder, ['OTY', 'TILTY']);
+	if (otxIndex >= 0 && otyIndex >= 0) {
+		return tiltFromVector(points, otxIndex, otyIndex);
+	}
+	const azimuthIndex = channelOrder.indexOf('AZIMUTH');
+	if (azimuthIndex >= 0) {
+		return tiltFromAzimuthAltitude(points, azimuthIndex, channelOrder.indexOf('ALTITUDE'));
+	}
+	return undefined;
+}
+
+function firstIndexOf(channelOrder: ChannelOrder, names: string[]): number {
+	for (const name of names) {
+		const index = channelOrder.indexOf(name);
+		if (index >= 0) {
+			return index;
+		}
+	}
+	return -1;
+}
+
+/** Derive angle + normalised magnitude from a per-point tilt-offset vector. */
+function tiltFromVector(
+	points: number[][],
+	xIndex: number,
+	yIndex: number,
+): TiltChannels | undefined {
+	const oxs: number[] = [];
+	const oys: number[] = [];
+	for (const point of points) {
+		oxs.push(point[xIndex]);
+		oys.push(point[yIndex]);
+	}
+	return tiltChannelsFromXY(oxs, oys);
+}
+
+/**
+ * Derive per-point angle (radians) + magnitude (0-1, normalised against the
+ * largest magnitude anywhere in `oxs`/`oys`) from parallel tilt-offset vector
+ * arrays. Non-finite pairs are dropped (not zero-filled), matching
+ * {@link tiltFromVector}'s original point-filtering behaviour.
+ *
+ * This is the shared core of {@link tiltFromVector} (InkML `OTx`/`OTy`
+ * channel decode) and of the InkML writer's inverse mapping in
+ * `inkml-content-part.ts` (`tiltOffsetAt`): both need the exact same
+ * vector<->angle/magnitude convention so a written value reads back to the
+ * same angle/magnitude. It is also mirrored (small, dependency-free, no
+ * shared code to import across the core/shared package boundary) as
+ * `tiltChannelsFromVectors` in `pptx-viewer-shared`'s `render/ink-tilt-nib.ts`
+ * for the Draw tool's own live-captured `tiltX`/`tiltY` degrees.
+ */
+export function tiltChannelsFromXY(
+	oxs: readonly number[],
+	oys: readonly number[],
+): TiltChannels | undefined {
+	const angles: number[] = [];
+	const rawMagnitudes: number[] = [];
+	const len = Math.min(oxs.length, oys.length);
+	for (let i = 0; i < len; i++) {
+		const ox = oxs[i];
+		const oy = oys[i];
+		if (!Number.isFinite(ox) || !Number.isFinite(oy)) {
+			continue;
+		}
+		angles.push(Math.atan2(oy, ox));
+		rawMagnitudes.push(Math.hypot(ox, oy));
+	}
+	if (angles.length === 0) {
+		return undefined;
+	}
+	const max = Math.max(0, ...rawMagnitudes);
+	const magnitudes = rawMagnitudes.map((m) => (max > 0 ? Math.min(1, m / max) : 0));
+	return { angles, magnitudes, encoding: 'vector' };
+}
+
+/** Derive angle + magnitude from AZIMUTH (required) and ALTITUDE (optional), both in degrees. */
+function tiltFromAzimuthAltitude(
+	points: number[][],
+	azimuthIndex: number,
+	altitudeIndex: number,
+): TiltChannels | undefined {
+	const angles: number[] = [];
+	const magnitudes: number[] = [];
+	for (const point of points) {
+		const azimuth = point[azimuthIndex];
+		if (!Number.isFinite(azimuth)) {
+			continue;
+		}
+		angles.push((azimuth * Math.PI) / 180);
+		const altitude = altitudeIndex >= 0 ? point[altitudeIndex] : undefined;
+		magnitudes.push(
+			Number.isFinite(altitude) ? Math.max(0, Math.min(1, 1 - (altitude as number) / 90)) : 0.5,
+		);
+	}
+	if (angles.length === 0) {
+		return undefined;
+	}
+	return { angles, magnitudes, encoding: 'azimuthAltitude' };
+}
+
 /** Read a child value by local element name, ignoring any XML namespace prefix. */
 export function nsGet(obj: XmlObject, localName: string): unknown {
 	if (localName in obj) {
@@ -185,6 +352,45 @@ export function nsAttr(obj: XmlObject, localName: string): unknown {
 function localNameOf(key: string): string {
 	const colon = key.indexOf(':');
 	return colon >= 0 ? key.slice(colon + 1) : key;
+}
+
+/**
+ * Every descendant with the given local name, in document order, ignoring
+ * namespace prefixes and nesting depth.
+ *
+ * `<trace>` and `<brush>` are NOT reliably direct children of `<ink>`:
+ * PowerPoint puts its brushes inside `<inkml:definitions>` and a trace may sit
+ * inside an `<inkml:traceGroup>`. A direct-child lookup therefore saw no
+ * brushes at all on a real deck, so every stroke fell back to a 1 px black
+ * default, and any grouped trace was dropped outright.
+ */
+export function collectByLocalName(node: XmlObject, localName: string): XmlObject[] {
+	const found: XmlObject[] = [];
+	const visit = (current: unknown): void => {
+		if (!current || typeof current !== 'object') {
+			return;
+		}
+		if (Array.isArray(current)) {
+			for (const item of current) {
+				visit(item);
+			}
+			return;
+		}
+		for (const [key, value] of Object.entries(current as XmlObject)) {
+			if (key.startsWith('@_') || key === '#text') {
+				continue;
+			}
+			if (localNameOf(key) === localName) {
+				for (const item of ensureArray(value)) {
+					found.push(item);
+				}
+				continue;
+			}
+			visit(value);
+		}
+	};
+	visit(node);
+	return found;
 }
 
 /** Depth-first search for the first descendant element with the given local name. */

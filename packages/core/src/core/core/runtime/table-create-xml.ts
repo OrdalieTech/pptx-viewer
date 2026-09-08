@@ -16,6 +16,8 @@ import {
 	MIN_TABLE_DIMENSION,
 } from '../../constants';
 import type { PptxElement, TextStyle, XmlObject } from '../../types';
+import { createDrawingObjectId } from '../../utils/element-utils';
+import { DEFAULT_POWERPOINT_TABLE_STYLE_ID } from './table-style-defaults';
 
 /**
  * Build the XML object for a single table cell (`<a:tc>`) containing the
@@ -89,14 +91,13 @@ export function createTableGraphicFrameRawXml(
 		1,
 		Math.round((Math.max(element.height, MIN_ELEMENT_SIZE) * EMU_PER_PX) / safeRows),
 	);
-	const objectId = Math.floor(Math.random() * 10000) + 1000;
-	const objectLabel = Math.floor(Math.random() * 100);
+	const objectId = createDrawingObjectId();
 
 	return {
 		'p:nvGraphicFramePr': {
 			'p:cNvPr': {
 				'@_id': String(objectId),
-				'@_name': `Table ${objectLabel}`,
+				'@_name': `Table ${objectId}`,
 			},
 			'p:cNvGraphicFramePr': {
 				'a:graphicFrameLocks': {
@@ -122,9 +123,13 @@ export function createTableGraphicFrameRawXml(
 			'a:graphicData': {
 				'@_uri': 'http://schemas.openxmlformats.org/drawingml/2006/table',
 				'a:tbl': {
+					// Seed PowerPoint's "Insert > Table" default style here, at
+					// creation time. The save pipeline never injects one, so a
+					// loaded table without a style stays that way on round-trip.
 					'a:tblPr': {
 						'@_firstRow': '1',
 						'@_bandRow': '1',
+						'a:tableStyleId': DEFAULT_POWERPOINT_TABLE_STYLE_ID,
 					},
 					'a:tblGrid': {
 						'a:gridCol': Array.from({ length: safeColumns }, () => ({

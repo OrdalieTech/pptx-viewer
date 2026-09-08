@@ -10,13 +10,15 @@
  *   5. Add a table and type into a cell
  *   6. Save as .pptx
  *
- * The resulting file triggers a "needs repair" prompt when opened in
- * PowerPoint. This spec captures the exact editing sequence for debugging.
+ * The resulting file used to trigger a "needs repair" prompt when opened in
+ * PowerPoint. This spec drives the exact historical editing sequence in every
+ * binding and then validates the saved package the way PowerPoint's loader
+ * does (`e2e/support/pptx-integrity.ts`): content-type coverage for every
+ * part, well-formed XML, every relationship target resolving, and the
+ * sldIdLst mapping to real slide parts. A regression to the repair prompt
+ * shows up here as a named packaging fault instead of a silent pass.
  *
- * This historical corruption sequence now runs across all five bindings. Its
- * helpers accept each binding's ribbon and insertion semantics while asserting
- * the same saved-file contract. Focused SmartArt behavior is also covered by
- * `smartart-insert-edit.spec.ts`.
+ * Focused SmartArt behavior is also covered by `smartart-insert-edit.spec.ts`.
  *
  * Run: bunx playwright test save-corruption-repro
  */
@@ -27,6 +29,8 @@ import { test, expect } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 
 import { savePptxViaBackstage } from './save-pptx';
+import { resetTabSession } from './support/deck';
+import { validatePptxIntegrity } from './support/pptx-integrity';
 
 const gifFixturePath = resolve(
 	fileURLToPath(new URL('./fixtures/test-image.gif', import.meta.url)),
@@ -135,9 +139,12 @@ async function selectElement(element: Locator): Promise<void> {
 }
 
 test.describe('save corruption reproduction', () => {
-	test('rect + 2 smartart + gif + table with cell edit triggers repair in PowerPoint', async ({
+	test('rect + 2 smartart + gif + table with cell edit saves a repair-free package', async ({
 		page,
 	}, testInfo) => {
+		// Forget any restored session first, or the deck reopens and the landing
+		// dropzone (the only place #file-input exists) never mounts.
+		await resetTabSession(page);
 		await page.goto('/');
 		await page.locator('#file-input').setInputFiles(deckFixturePath);
 
@@ -224,5 +231,12 @@ test.describe('save corruption reproduction', () => {
 		// Verify the file was saved (non-zero size)
 		const stats = await fs.stat(savePath);
 		expect(stats.size).toBeGreaterThan(100);
+
+		// 10. The saved package must be structurally sound: every part covered by
+		// [Content_Types].xml, all XML well-formed, every relationship target
+		// present, and the slide list resolving. Any entry in this list is a
+		// packaging fault of the kind that makes PowerPoint offer to "repair".
+		const bytes = new Uint8Array(await fs.readFile(savePath));
+		expect(await validatePptxIntegrity(bytes)).toEqual([]);
 	});
 });

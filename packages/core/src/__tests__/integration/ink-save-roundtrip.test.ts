@@ -3,24 +3,29 @@ import { describe, it, expect } from 'vitest';
 
 import { PresentationBuilder } from '../../core/builders/sdk/PresentationBuilder';
 import { PptxHandler } from '../../core/PptxHandler';
-import type { InkPptxElement } from '../../core/types/elements';
+import type { ContentPartPptxElement, InkPptxElement } from '../../core/types/elements';
+import { validatePptx } from '../../core/utils/pptx-validator';
 
 /**
  * Phase 3 Stream A — CH-H2 / CH-H3 regression test.
  *
- * Before the fix:
- *   - `parseGraphicFrameType` did not recognise the 2010 ink URI, so an
- *     `<aink:ink>` graphicFrame parsed as `'unknown'` and slipped through
- *     subsequent typed-element pipelines.
- *   - The save layer re-encoded ink elements as `p:sp` + `a:custGeom`
- *     unconditionally — losing pressure data, the original aink namespace,
- *     and the `mc:AlternateContent` envelope.
- *
- * The combined effect was that any real-world ink element survived only by
- * accident; on a dirty save it was rewritten as a plain freeform shape.
+ * `parseGraphicFrameType` did not recognise the 2010 ink URI, so an
+ * `<aink:ink>` graphicFrame parsed as `'unknown'` and slipped through
+ * subsequent typed-element pipelines. Ink carrying its own `rawXml` is now
+ * detected and passed through verbatim on a dirty save instead of being
+ * re-encoded (which lost pressure data and the `mc:AlternateContent` envelope).
  */
 describe('ink graphicFrame round-trip (CH-H2 / CH-H3)', () => {
-	it('authors editable ink as aink with a fallback and reloads its strokes', async () => {
+	// Draw-tab ink used to go out as a plain `custGeom` freeform shape (a
+	// downgrade from PowerPoint's own `p:contentPart` + InkML representation,
+	// because an EARLIER fix had to stop authoring it as a `p:graphicFrame`
+	// holding `<aink:ink>`: PowerPoint refuses to open a deck containing that
+	// frame, "The file or directory is corrupted and unreadable", 0x80070570).
+	// It now routes through the same `p:contentPart` + InkML writer that
+	// already handles ink parsed back off disk, so authored strokes survive
+	// as editable ink instead of a static shape. See
+	// `PptxHandlerRuntimeSaveContentPartInk`.
+	it('authors Draw-tab ink as a content part with InkML and reloads its strokes', async () => {
 		const { handler, data, createSlide } = await PresentationBuilder.create();
 		const ink: InkPptxElement = {
 			id: 'authored-ink',
@@ -32,27 +37,142 @@ describe('ink graphicFrame round-trip (CH-H2 / CH-H3)', () => {
 			inkPaths: ['M0,0 L50,25 L100,10', 'M10,90 L80,40'],
 			inkColors: ['#112233', '#AABBCC'],
 			inkWidths: [2.5, 6],
+			inkPointPressures: [
+				[0.2, 0.6, 0.9],
+				[0.1, 0.95],
+			],
 		};
 		data.slides.push(createSlide('Blank').addElement(ink).build());
 
 		const saved = await handler.save(data.slides);
 		const zip = await JSZip.loadAsync(saved);
 		const slideXml = await zip.file('ppt/slides/slide1.xml')!.async('string');
-		expect(slideXml).toContain('drawing/2010/ink');
-		expect(slideXml).toContain(
-			'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"',
-		);
-		expect(slideXml).toContain('<aink:trace');
+		const relsXml = await zip.file('ppt/slides/_rels/slide1.xml.rels')!.async('string');
+		const contentTypesXml = await zip.file('[Content_Types].xml')!.async('string');
+		const inkPath = Object.keys(zip.files).find((path) => /^ppt\/ink\/ink\d+\.xml$/u.test(path));
+		expect(inkPath).toBeTruthy();
+		const inkXml = await zip.file(inkPath!)!.async('string');
+
+		expect(slideXml).toContain('<mc:Choice Requires="p14"');
+		expect(slideXml).toContain('<p:contentPart r:id="');
 		expect(slideXml).toContain('<mc:Fallback>');
+		expect(slideXml).not.toContain('drawing/2010/ink');
+		expect(relsXml).toContain(
+			'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml"',
+		);
+		expect(contentTypesXml).toContain(`PartName="/${inkPath}" ContentType="application/inkml+xml"`);
+		expect(inkXml).toContain('<ink:trace');
+		expect(inkXml).toContain('value="#112233"');
+		expect(inkXml).toContain('value="#AABBCC"');
+		// Each drawn stroke gets its own brush (id `brush<n>`), which is what
+		// fixes the "multi-colour drawing collapses to the first stroke" gap:
+		// two brushes, one per stroke colour/width, instead of one shared `a:ln`.
+		expect(inkXml).toContain('id="brush1"');
+		expect(inkXml).toContain('id="brush2"');
+		const validation = await validatePptx(saved.buffer as ArrayBuffer);
+		if (!validation.valid) {
+			throw new Error(validation.issues.map((issue) => issue.message).join('\n'));
+		}
 
 		const reloader = new PptxHandler();
 		const reloaded = await reloader.load(saved.buffer as ArrayBuffer);
 		const reloadedInk = reloaded.slides[0].elements.find(
-			(element): element is InkPptxElement => element.type === 'ink',
+			(element): element is ContentPartPptxElement => element.type === 'contentPart',
 		);
-		expect(reloadedInk?.inkPaths).toStrictEqual(['M0,0 L50,25 L100,10', 'M10,90 L80,40']);
-		expect(reloadedInk?.inkColors).toStrictEqual(ink.inkColors);
-		expect(reloadedInk?.inkWidths).toStrictEqual(ink.inkWidths);
+		expect(reloadedInk?.inkStrokes?.map((stroke) => stroke.path)).toStrictEqual([
+			'M0,0 L50,25 L100,10',
+			'M10,90 L80,40',
+		]);
+		expect(reloadedInk?.inkStrokes?.map((stroke) => stroke.color)).toStrictEqual(ink.inkColors);
+		expect(reloadedInk?.inkStrokes?.map((stroke) => stroke.width)).toStrictEqual(ink.inkWidths);
+		// Per-point pressure (the InkML `F` channel) is authored on save and
+		// decoded back on reload via the SAME decoder that reads a real
+		// PowerPoint-authored pen stroke, closing the "authored pressure is
+		// captured and rendered but not saved" gap.
+		expect(reloadedInk?.inkStrokes?.map((stroke) => stroke.pressures)).toStrictEqual(
+			ink.inkPointPressures,
+		);
+
+		// A second editor save must remain healthy: relationship and fallback
+		// reconstruction bugs often surface only after the first reload.
+		reloaded.slides[0].isDirty = true;
+		const secondSaved = await reloader.save(reloaded.slides);
+		const secondValidation = await validatePptx(secondSaved.buffer as ArrayBuffer);
+		if (!secondValidation.valid) {
+			throw new Error(secondValidation.issues.map((issue) => issue.message).join('\n'));
+		}
+	});
+
+	it('authors Draw-tab pen-tilt as InkML OTx/OTy and reloads it into tiltAngles/tiltMagnitudes', async () => {
+		const { handler, data, createSlide } = await PresentationBuilder.create();
+		const ink: InkPptxElement = {
+			id: 'authored-tilt-ink',
+			type: 'ink',
+			x: 10,
+			y: 20,
+			width: 200,
+			height: 100,
+			inkPaths: ['M0,0 L50,0 L100,0'],
+			inkColors: ['#112233'],
+			inkWidths: [2.5],
+			// A pen leaned fully along +X at the first point, fully along +Y at
+			// the second (the largest lean in the stroke), and flat (upright) at
+			// the third: PointerEvent.tiltX/tiltY degrees, straight from the
+			// capture site.
+			inkPointTiltX: [[45, 0, 0]],
+			inkPointTiltY: [[0, 45, 0]],
+		};
+		data.slides.push(createSlide('Blank').addElement(ink).build());
+
+		const saved = await handler.save(data.slides);
+		const zip = await JSZip.loadAsync(saved);
+		const inkPath = Object.keys(zip.files).find((path) => /^ppt\/ink\/ink\d+\.xml$/u.test(path));
+		expect(inkPath).toBeTruthy();
+		const inkXml = await zip.file(inkPath!)!.async('string');
+		expect(inkXml).toContain('name="OTx"');
+		expect(inkXml).toContain('name="OTy"');
+
+		const validation = await validatePptx(saved.buffer as ArrayBuffer);
+		if (!validation.valid) {
+			throw new Error(validation.issues.map((issue) => issue.message).join('\n'));
+		}
+
+		const reloader = new PptxHandler();
+		const reloaded = await reloader.load(saved.buffer as ArrayBuffer);
+		const reloadedInk = reloaded.slides[0].elements.find(
+			(element): element is ContentPartPptxElement => element.type === 'contentPart',
+		);
+		const [stroke] = reloadedInk?.inkStrokes ?? [];
+		expect(stroke?.tiltAngles).toHaveLength(3);
+		expect(stroke?.tiltAngles?.[0]).toBeCloseTo(0, 5);
+		expect(stroke?.tiltAngles?.[1]).toBeCloseTo(Math.PI / 2, 5);
+		expect(stroke?.tiltMagnitudes?.[0]).toBeCloseTo(1, 5);
+		expect(stroke?.tiltMagnitudes?.[1]).toBeCloseTo(1, 5);
+		expect(stroke?.tiltMagnitudes?.[2]).toBeCloseTo(0, 5);
+	});
+
+	it('a stroke with no tilt data authors an InkML part with no OTx/OTy channel', async () => {
+		const { handler, data, createSlide } = await PresentationBuilder.create();
+		const ink: InkPptxElement = {
+			id: 'authored-no-tilt-ink',
+			type: 'ink',
+			x: 10,
+			y: 20,
+			width: 200,
+			height: 100,
+			inkPaths: ['M0,0 L50,25'],
+			inkColors: ['#112233'],
+			inkWidths: [2.5],
+			inkPointPressures: [[0.2, 0.6]],
+		};
+		data.slides.push(createSlide('Blank').addElement(ink).build());
+
+		const saved = await handler.save(data.slides);
+		const zip = await JSZip.loadAsync(saved);
+		const inkPath = Object.keys(zip.files).find((path) => /^ppt\/ink\/ink\d+\.xml$/u.test(path));
+		const inkXml = await zip.file(inkPath!)!.async('string');
+		expect(inkXml).not.toContain('OTx');
+		expect(inkXml).not.toContain('OTy');
 	});
 
 	it('ink element loaded from rawXml survives a dirty round-trip via passthrough', async () => {

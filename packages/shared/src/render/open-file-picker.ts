@@ -1,12 +1,16 @@
 /**
- * open-file-picker — framework-agnostic helper that opens the native file
- * picker and resolves the chosen file. Every binding's File ▸ Open action wires
+ * open-file-picker: framework-agnostic helper that opens the native file
+ * picker and resolves the chosen file. Every binding's File > Open action wires
  * its built-in picker through here so the accepted extensions and the
- * pick → ArrayBuffer flow stay identical across React / Vue / Angular.
+ * pick-to-ArrayBuffer flow stay identical across all five bindings.
+ *
+ * The accepted-extension list itself lives in `./presentation-file-kinds`,
+ * alongside the matching drop-target predicate, so a picker and a drop zone
+ * cannot disagree about what is loadable.
  */
 
-/** Default `accept` filter for PowerPoint presentations the viewer can load. */
-export const PPTX_OPEN_ACCEPT = '.pptx,.ppsx,.pptm,.potx';
+import { PPTX_OPEN_ACCEPT } from './presentation-file-kinds';
+import { rememberSessionDeck } from './session-restore';
 
 export interface OpenFilePickerOptions {
 	/** Comma-separated `accept` list. Defaults to {@link PPTX_OPEN_ACCEPT}. */
@@ -27,7 +31,7 @@ export function openFilePicker(options: OpenFilePickerOptions = {}): Promise<Fil
 		const input = document.createElement('input');
 		input.type = 'file';
 		input.accept = options.accept ?? PPTX_OPEN_ACCEPT;
-		// Keep it out of the layout — it only needs to exist long enough to click.
+		// Keep it out of the layout: it only needs to exist long enough to click.
 		input.style.position = 'fixed';
 		input.style.left = '-9999px';
 		input.style.opacity = '0';
@@ -61,6 +65,11 @@ export function openFilePicker(options: OpenFilePickerOptions = {}): Promise<Fil
 /**
  * Opens the picker and reads the chosen file into an `ArrayBuffer` ready to hand
  * to the loader. Resolves `null` when the user cancels.
+ *
+ * The picked deck is also remembered for this browser tab (see
+ * `./session-restore`). Every binding's File > Open swaps the deck INSIDE the
+ * viewer without telling the host, so without this a host that restores on load
+ * would reopen the deck it handed in rather than the one the user picked.
  */
 export async function openPptxFile(
 	options: OpenFilePickerOptions = {},
@@ -69,5 +78,7 @@ export async function openPptxFile(
 	if (!file) {
 		return null;
 	}
-	return { file, buffer: await file.arrayBuffer() };
+	const buffer = await file.arrayBuffer();
+	void rememberSessionDeck(file.name, new Uint8Array(buffer));
+	return { file, buffer };
 }

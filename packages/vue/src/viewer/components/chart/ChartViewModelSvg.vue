@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { chartPartToAttrs } from 'pptx-viewer-shared';
+import { chartPartToAttrs, computeChartLegendLayout } from 'pptx-viewer-shared';
 import type {
 	ChartPartRef,
 	ChartViewModel,
@@ -48,10 +48,6 @@ const props = withDefaults(
 	{ preserveAspectRatio: 'none' },
 );
 
-const LEGEND_ITEM_WIDTH = 80;
-
-const isVerticalLegend = computed(() => props.vm.legendAnchor === 'start');
-
 function isRect(p: SvgPrimitive): p is SvgRect {
 	return p.kind === 'rect';
 }
@@ -83,23 +79,7 @@ function partAttrs(part: ChartPartRef | undefined): Record<string, string> {
 	return part ? chartPartToAttrs(part) : {};
 }
 
-interface LegendLayout {
-	x: number;
-	y: number;
-	color: string;
-	label: string;
-}
-
-const legendItems = computed<LegendLayout[]>(() => {
-	const vm = props.vm;
-	return vm.legend.map((entry, i) => {
-		const x = isVerticalLegend.value
-			? vm.legendX
-			: vm.legendX - (vm.legend.length * LEGEND_ITEM_WIDTH) / 2 + i * LEGEND_ITEM_WIDTH;
-		const y = isVerticalLegend.value ? vm.legendY + i * 14 : vm.legendY;
-		return { x, y, color: entry.color, label: entry.label };
-	});
-});
+const legendItems = computed(() => computeChartLegendLayout(props.vm));
 </script>
 
 <template>
@@ -108,19 +88,63 @@ const legendItems = computed<LegendLayout[]>(() => {
 		:viewBox="`0 0 ${vm.svgWidth} ${vm.svgHeight}`"
 		:preserveAspectRatio="preserveAspectRatio"
 	>
-		<rect :x="0" :y="0" :width="vm.svgWidth" :height="vm.svgHeight" fill="#0f172a11" />
+		<defs v-if="vm.defs && vm.defs.length > 0">
+			<pattern
+				v-for="(def, i) in vm.defs"
+				:key="`${elementId}-def-${i}`"
+				:id="def.id"
+				:patternUnits="def.patternUnits"
+				:x="def.x"
+				:y="def.y"
+				:width="def.width"
+				:height="def.height"
+			>
+				<image
+					:href="def.href"
+					:x="0"
+					:y="0"
+					:width="def.width"
+					:height="def.height"
+					:preserveAspectRatio="def.preserveAspectRatio"
+				/>
+			</pattern>
+		</defs>
+
+		<rect
+			v-if="vm.areaFill"
+			:x="0"
+			:y="0"
+			:width="vm.svgWidth"
+			:height="vm.svgHeight"
+			:rx="vm.areaRadius"
+			:fill="vm.areaFill"
+		/>
 
 		<text
 			v-if="vm.title"
 			:x="vm.titleX"
 			:y="vm.titleY"
 			text-anchor="middle"
-			font-size="12"
-			font-weight="600"
-			fill="#1e293b"
+			:font-size="vm.titleStyle?.fontSize ?? 12"
+			:font-weight="vm.titleStyle?.fontWeight ?? 600"
+			:font-family="vm.titleStyle?.fontFamily"
+			:fill="vm.titleStyle?.fill ?? '#1e293b'"
 			data-chart-part="title"
 		>
-			{{ vm.title }}
+			<template v-if="vm.titleRunSpans && vm.titleRunSpans.length > 0">
+				<tspan
+					v-for="(run, i) in vm.titleRunSpans"
+					:key="`${elementId}-title-run-${i}`"
+					:font-size="run.fontSize"
+					:font-weight="run.fontWeight"
+					:font-style="run.fontStyle"
+					:font-family="run.fontFamily"
+					:fill="run.fill"
+				>
+					{{ run.text }}
+				</tspan>
+			</template>
+			<template v-else>{{ vm.title }}</template>
 		</text>
 
 		<line
@@ -214,7 +238,9 @@ const legendItems = computed<LegendLayout[]>(() => {
 				:rx="prim.rx ?? 0"
 				:opacity="prim.opacity ?? 1"
 				v-bind="partAttrs(prim.part)"
-			/>
+			>
+				<title v-if="prim.title !== undefined">{{ prim.title }}</title>
+			</rect>
 			<path
 				v-else-if="isPath(prim)"
 				:d="prim.d"
@@ -223,7 +249,9 @@ const legendItems = computed<LegendLayout[]>(() => {
 				:stroke-width="prim.strokeWidth ?? 0"
 				:fill-opacity="prim.opacity ?? 1"
 				v-bind="partAttrs(prim.part)"
-			/>
+			>
+				<title v-if="prim.title !== undefined">{{ prim.title }}</title>
+			</path>
 			<polyline
 				v-else-if="isPolyline(prim)"
 				:points="prim.points"
@@ -232,7 +260,9 @@ const legendItems = computed<LegendLayout[]>(() => {
 				:fill="prim.fill"
 				:opacity="prim.opacity ?? 1"
 				v-bind="partAttrs(prim.part)"
-			/>
+			>
+				<title v-if="prim.title !== undefined">{{ prim.title }}</title>
+			</polyline>
 			<circle
 				v-else-if="isCircle(prim)"
 				:cx="prim.cx"
@@ -241,7 +271,9 @@ const legendItems = computed<LegendLayout[]>(() => {
 				:fill="prim.fill"
 				:opacity="prim.opacity ?? 1"
 				v-bind="partAttrs(prim.part)"
-			/>
+			>
+				<title v-if="prim.title !== undefined">{{ prim.title }}</title>
+			</circle>
 			<line
 				v-else-if="isLine(prim)"
 				:x1="prim.x1"
@@ -252,7 +284,10 @@ const legendItems = computed<LegendLayout[]>(() => {
 				:stroke-width="prim.strokeWidth"
 				:stroke-dasharray="prim.dashArray"
 				:opacity="prim.opacity ?? 1"
-			/>
+				:transform="prim.transform"
+			>
+				<title v-if="prim.title !== undefined">{{ prim.title }}</title>
+			</line>
 			<polygon
 				v-else-if="isPolygon(prim)"
 				:points="prim.points"
@@ -261,8 +296,11 @@ const legendItems = computed<LegendLayout[]>(() => {
 				:stroke-width="prim.strokeWidth"
 				:opacity="prim.opacity ?? 1"
 				:stroke-dasharray="prim.dashArray"
+				:transform="prim.transform"
 				v-bind="partAttrs(prim.part)"
-			/>
+			>
+				<title v-if="prim.title !== undefined">{{ prim.title }}</title>
+			</polygon>
 			<text
 				v-else-if="isText(prim)"
 				:x="prim.x"
@@ -271,6 +309,8 @@ const legendItems = computed<LegendLayout[]>(() => {
 				:font-size="prim.fontSize"
 				:fill="prim.fill"
 				:font-weight="prim.fontWeight ?? 'normal'"
+				:font-style="prim.fontStyle ?? 'normal'"
+				:font-family="prim.fontFamily"
 				:dominant-baseline="prim.dominantBaseline"
 				:opacity="prim.opacity ?? 1"
 				:transform="prim.transform"
@@ -299,7 +339,17 @@ const legendItems = computed<LegendLayout[]>(() => {
 			:transform="`translate(${entry.x.toFixed(1)},${entry.y.toFixed(1)})`"
 		>
 			<rect :x="0" :y="-7" width="10" height="10" rx="2" :fill="entry.color" />
-			<text :x="13" :y="3" font-size="9" fill="#475569">{{ entry.label }}</text>
+			<text
+				:x="13"
+				:y="3"
+				:font-size="entry.fontSize"
+				:fill="entry.fill"
+				:font-weight="entry.fontWeight"
+				:font-style="entry.fontStyle"
+				:font-family="entry.fontFamily"
+			>
+				{{ entry.label }}
+			</text>
 		</g>
 	</svg>
 </template>

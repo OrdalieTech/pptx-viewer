@@ -39,7 +39,10 @@ function createMockParams(overrides?: Partial<PptxSlideLoaderParams>): PptxSlide
 		extractBackgroundGradient: vi.fn(() => undefined),
 		getLayoutBackgroundGradient: vi.fn(async () => undefined),
 		extractBackgroundImage: vi.fn(async () => undefined),
+		extractBackgroundImageProperties: vi.fn(() => undefined),
 		getLayoutBackgroundImage: vi.fn(async () => undefined),
+		getLayoutBackgroundImageProperties: vi.fn(async () => undefined),
+		rememberSlideBackgroundOrigin: vi.fn(),
 		extractSlideNotes: vi.fn(async () => ({
 			notes: undefined,
 			notesSegments: undefined,
@@ -51,6 +54,7 @@ function createMockParams(overrides?: Partial<PptxSlideLoaderParams>): PptxSlide
 		extractBackgroundShadeToTitle: vi.fn(() => undefined),
 		extractBackgroundShowAnimation: vi.fn(() => undefined),
 		extractShowMasterShapes: vi.fn(() => undefined),
+		extractShowMasterPhAnim: vi.fn(() => undefined),
 		parseSlideTransition: vi.fn(() => undefined),
 		parseEditorAnimations: vi.fn(() => undefined),
 		parseNativeAnimations: vi.fn(() => undefined),

@@ -1,11 +1,23 @@
-import { buildParagraphs, getContainerStyle } from 'pptx-viewer-shared';
+import {
+	buildParagraphs,
+	getContainerStyle,
+	getOverflowSegments,
+	placeholderPromptDescriptor,
+} from 'pptx-viewer-shared';
 
 import { composeTransforms, createEl } from '../dom';
 import { getShapeFillStrokeStyle, getTextBlockStyle } from '../element-styles';
 import type { ElementRenderer } from '../types';
 import { renderEquations } from './equation';
 import { renderExtrusionOverlay } from './extrusion-overlay';
-import { renderShapeFillOverlay, renderShapeFilterDefs } from './shape-filter-defs';
+import {
+	renderHollowHitOutline,
+	renderStrokeOutline,
+	renderShapeFillOverlay,
+	renderShapeFilterDefs,
+	renderReflectionOverlay,
+	renderShapeSubpathFillOverlay,
+} from './shape-filter-defs';
 import { renderTextBlock } from './text-block';
 import { renderWarpedText } from './text-warp';
 
@@ -38,6 +50,13 @@ export const renderTextShapeElement: ElementRenderer = (element, zIndex, context
 	const el = createEl(context.document, 'div', 'pptxv-element pptxv-shape', merged);
 	el.dataset.elementId = element.id;
 
+	// Per-sub-path fill overlay: a multi-sub-path preset or custom geometry whose
+	// sub-paths cannot share one CSS background-color. Painted first (bottom-most)
+	// since it substitutes for the container's own (now suppressed) fill.
+	const subpathFill = renderShapeSubpathFillOverlay(context.document, element);
+	if (subpathFill) {
+		el.appendChild(subpathFill);
+	}
 	const extrusion = renderExtrusionOverlay(context.document, element);
 	if (extrusion) {
 		el.appendChild(extrusion);
@@ -52,6 +71,23 @@ export const renderTextShapeElement: ElementRenderer = (element, zIndex, context
 	if (fillOverlay) {
 		el.appendChild(fillOverlay);
 	}
+	// Gradient / pattern outline: a CSS border takes one flat colour only.
+	const gradientOutline = renderStrokeOutline(context.document, element);
+	if (gradientOutline) {
+		el.appendChild(gradientOutline);
+	}
+	// An unfilled, textless shape is a FRAME: its box is pointer-events:none so
+	// clicks fall through, and this transparent band opts its OUTLINE back in.
+	const hollowHit = renderHollowHitOutline(context.document, element);
+	if (hollowHit) {
+		el.appendChild(hollowHit);
+	}
+	// Mirrored reflection sibling (`a:reflection`): cross-browser, unlike the
+	// `-webkit-box-reflect` `element-styles.ts` used to set.
+	const reflection = renderReflectionOverlay(context.document, element, context.mediaDataUrls);
+	if (reflection) {
+		el.appendChild(reflection);
+	}
 
 	const equation = renderEquations(element, context);
 	const warped = equation ? null : renderWarpedText(element, context);
@@ -60,7 +96,12 @@ export const renderTextShapeElement: ElementRenderer = (element, zIndex, context
 	} else if (warped) {
 		el.appendChild(warped);
 	} else {
-		const paragraphs = buildParagraphs(element, context.fieldContext);
+		// `a:linkedTxbx`: a box in a linked chain paints only the slice of the
+		// chain's text the preceding boxes could not hold, resolved against its
+		// siblings on the slide being rendered. Returns undefined (and costs one
+		// field check) for the overwhelmingly common non-chain element.
+		const linkedSegments = getOverflowSegments(element, context.slide?.elements);
+		const paragraphs = buildParagraphs(element, context.fieldContext, linkedSegments);
 		const hasText = paragraphs.some((p) => p.runs.length > 0 || p.bulletMarker !== undefined);
 		if (hasText) {
 			el.appendChild(
@@ -69,6 +110,19 @@ export const renderTextShapeElement: ElementRenderer = (element, zIndex, context
 					states: context.presentationStates,
 				}),
 			);
+		} else {
+			// An empty inherited placeholder's greyed-out hint ("Click to add
+			// title"): editor stage only, never present/export/thumbnail.
+			const mode = context.interactive && !context.presenting ? 'edit' : 'present';
+			const prompt = placeholderPromptDescriptor(element, mode);
+			if (prompt) {
+				const hint = createEl(context.document, 'div', 'pptxv-placeholder-prompt', {
+					...getTextBlockStyle(element),
+					...prompt.style,
+				});
+				hint.textContent = prompt.text;
+				el.appendChild(hint);
+			}
 		}
 	}
 

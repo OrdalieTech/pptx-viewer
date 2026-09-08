@@ -85,16 +85,16 @@ describe('editor-format-mutations text', () => {
 
 	it('sets and steps the font size, clamped', () => {
 		const set = setFontSize(textElement(), 40) as { textStyle: { fontSize?: number } };
-		expect(set.textStyle.fontSize).toBe(40);
+		expect(set.textStyle.fontSize).toBeCloseTo(40 * (96 / 72));
 		const grown = adjustFontSize(textElement(), 4) as { textStyle: { fontSize?: number } };
-		expect(grown.textStyle.fontSize).toBe(22);
+		expect(grown.textStyle.fontSize).toBeCloseTo(17.5 * (96 / 72));
 		const clamped = setFontSize(textElement(), -100) as { textStyle: { fontSize?: number } };
-		expect(clamped.textStyle.fontSize).toBe(1);
+		expect(clamped.textStyle.fontSize).toBeCloseTo(1 * (96 / 72));
 	});
 
 	it('reads the effective format state', () => {
 		const state = readTextFormatState(textElement());
-		expect(state).toMatchObject({ bold: false, italic: false, underline: false, fontSize: 18 });
+		expect(state).toMatchObject({ bold: false, italic: false, underline: false, fontSize: 13.5 });
 	});
 
 	it('sets text colour on style + runs', () => {
@@ -104,6 +104,26 @@ describe('editor-format-mutations text', () => {
 		};
 		expect(patch.textStyle.color).toBe('#ff0000');
 		expect(patch.textSegments[0].style.color).toBe('#ff0000');
+	});
+
+	it('a theme-swatch pick sets colourRef alongside colour on style + runs (W3-G2)', () => {
+		const ref = { scheme: 'accent1' as const };
+		const patch = setTextColor(textElement(), '#4472c4', ref) as {
+			textStyle: { color?: string; colorRef?: unknown };
+			textSegments: Array<{ style: { color?: string; colorRef?: unknown } }>;
+		};
+		expect(patch.textStyle.color).toBe('#4472c4');
+		expect(patch.textStyle.colorRef).toStrictEqual(ref);
+		expect(patch.textSegments[0].style.colorRef).toStrictEqual(ref);
+	});
+
+	it('a plain hex pick (no ref) clears a previously-stored colourRef', () => {
+		const el = textElement() as { textStyle?: { colorRef?: unknown } };
+		el.textStyle = { ...el.textStyle, colorRef: { scheme: 'accent1' } };
+		const patch = setTextColor(el as PptxElement, '#ff0000') as {
+			textStyle: { colorRef?: unknown };
+		};
+		expect(patch.textStyle.colorRef).toBeUndefined();
 	});
 });
 
@@ -142,6 +162,30 @@ describe('editor-format-mutations extras', () => {
 		el.textSegments[0].text = 'hello world';
 		const patch = changeTextCase(el, 'upper') as { textSegments: Array<{ text: string }> };
 		expect(patch.textSegments[0].text).toBe('HELLO WORLD');
+	});
+
+	it('reconciles against a live open inline editor before transforming case', () => {
+		// The inline editor is uncontrolled: text typed since the edit session
+		// began is not yet on `el.textSegments`. Regression: previously the case
+		// transform ran against that stale snapshot, so anything typed since was
+		// silently left untransformed once the session committed.
+		const surface = document.createElement('div');
+		surface.dataset.inlineEditor = '';
+		surface.textContent = 'hello world, typed more';
+		document.body.appendChild(surface);
+		try {
+			const el = textElement() as PptxElement & { textSegments: Array<{ text: string }> };
+			el.textSegments[0].text = 'hello world'; // stale: missing ", typed more"
+			const patch = changeTextCase(el, 'upper') as {
+				textSegments: Array<{ text: string }>;
+				text: string;
+			};
+			const combined = patch.textSegments.map((s) => s.text).join('');
+			expect(combined).toBe('HELLO WORLD, TYPED MORE');
+			expect(patch.text).toBe('HELLO WORLD, TYPED MORE');
+		} finally {
+			surface.remove();
+		}
 	});
 
 	it('clears character formatting back to defaults', () => {

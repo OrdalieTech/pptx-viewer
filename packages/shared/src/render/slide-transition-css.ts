@@ -20,7 +20,7 @@
  * is rendered faithfully by delegating to {@link getP14TransitionAnimations}
  * (its `@keyframes` live in `p14-transition-keyframes` and are folded into
  * `SLIDE_TRANSITION_KEYFRAMES`). The newer Office 2013+ (p15) cinematic family
- * (`cube`/`flip`/`rotate`/`orbit`/`fallOver`/`drape`/`curtains`/`wind`/
+ * (`cube`/`box`/`flip`/`rotate`/`orbit`/`fallOver`/`drape`/`curtains`/`wind`/
  * `prestige`/`fracture`/`crush`/`peelOff`/`pageCurlSingle`/`pageCurlDouble`/
  * `airplane`/`origami`) is likewise rendered faithfully via
  * {@link getCinematicTransitionAnimations} (its `@keyframes` live in
@@ -37,6 +37,11 @@ import type { PptxSlideTransition, PptxTransitionType } from 'pptx-viewer-core';
 import { getP14TransitionAnimations } from './p14-transition-css';
 import { getCinematicTransitionAnimations } from './slide-transition-cinematic';
 import {
+	resolveCheckerTransition,
+	resolveZoomTransition,
+} from './slide-transition-directional-shapes';
+import {
+	DEFAULT_MORPH_DURATION_MS,
 	DEFAULT_TRANSITION_DURATION_MS,
 	EASE,
 	INSTANT,
@@ -44,12 +49,15 @@ import {
 	resolveDirection,
 	resolveDirection8,
 	resolveOrientation,
+	resolveWheelSpokeCount,
+	TRANSITION_SPEED_DURATION_MS,
 } from './slide-transition-types';
 import type {
 	ResolvedDirection,
 	ResolvedDirection8,
 	SlideTransitionAnimations,
 } from './slide-transition-types';
+import { wheelKeyframeName } from './slide-transition-wheel-keyframes';
 
 /**
  * Map a {@link PptxTransitionType} (+ duration/direction/orient/spokes) to the
@@ -63,11 +71,9 @@ export function getSlideTransitionAnimations(
 	direction: string | undefined,
 	orient?: string | undefined,
 	spokes?: number | undefined,
+	pattern?: string | undefined,
 ): SlideTransitionAnimations {
 	const dur = `${durationMs}ms`;
-	// `spokes` is reserved for future wheel spoke-count support; forwarded only
-	// through recursive calls (random / pull aliases).
-	void spokes;
 
 	// Prefer the faithful Office 2010 (p14) keyframe set for the exotic / 3-D
 	// transition family (conveyor/doors/ferris/flash/flythrough/gallery/glitter/
@@ -76,12 +82,12 @@ export function getSlideTransitionAnimations(
 	// the 2-D CSS cases below. The p14 `@keyframes` are folded into
 	// `SLIDE_TRANSITION_KEYFRAMES`, so every binding that injects that block
 	// animates these faithfully with no per-binding wiring.
-	const p14 = getP14TransitionAnimations(type, durationMs, direction, orient);
+	const p14 = getP14TransitionAnimations(type, durationMs, direction, orient, pattern);
 	if (p14) {
 		return p14;
 	}
 
-	// The Office 2013+ (p15) cinematic family (cube/flip/rotate/orbit/fallOver/
+	// The Office 2013+ (p15) cinematic family (cube/box/flip/rotate/orbit/fallOver/
 	// drape/curtains/wind/prestige/fracture/crush/peelOff/pageCurlSingle/
 	// pageCurlDouble/airplane/origami) is rendered with real 3-D / composite
 	// keyframes. Returns `undefined` for every other type so the classic 2-D
@@ -132,12 +138,20 @@ export function getSlideTransitionAnimations(
 		}
 
 		case 'wipe': {
+			// `p:wipe/@dir` is the direction of TRAVEL, not the starting edge:
+			// PowerPoint's UI offers "From Left / From Right / ..." and stores
+			// the OPPOSITE token (UI "From Left" is written as dir="r", and
+			// desktop PowerPoint reveals such a slide from the LEFT edge
+			// sweeping right). So a token of r starts the reveal at the left
+			// edge, u at the bottom, etc. - the inverse of every other mapping
+			// here, where the token names the motion and the keyframe names it
+			// the same way.
 			const dir = resolveDirection(direction, 'left');
 			const wipeNames: Record<ResolvedDirection, string> = {
-				left: `pptx-tr-wipe-from-left ${dur} ${EASE} forwards`,
-				right: `pptx-tr-wipe-from-right ${dur} ${EASE} forwards`,
-				up: `pptx-tr-wipe-from-top ${dur} ${EASE} forwards`,
-				down: `pptx-tr-wipe-from-bottom ${dur} ${EASE} forwards`,
+				left: `pptx-tr-wipe-from-right ${dur} ${EASE} forwards`,
+				right: `pptx-tr-wipe-from-left ${dur} ${EASE} forwards`,
+				up: `pptx-tr-wipe-from-bottom ${dur} ${EASE} forwards`,
+				down: `pptx-tr-wipe-from-top ${dur} ${EASE} forwards`,
 			};
 			return {
 				outgoing: 'none',
@@ -238,19 +252,17 @@ export function getSlideTransitionAnimations(
 				incoming: `pptx-tr-wedge-in ${dur} ${EASE} forwards`,
 				outgoingOnTop: false,
 			};
-		case 'wheel':
+		case 'wheel': {
+			const spokeCount = resolveWheelSpokeCount(spokes);
 			return {
 				outgoing: 'none',
-				incoming: `pptx-tr-wheel-in ${dur} ${EASE} forwards`,
+				incoming: `${wheelKeyframeName(spokeCount)} ${dur} ${EASE} forwards`,
 				outgoingOnTop: false,
 			};
+		}
 
 		case 'zoom':
-			return {
-				outgoing: `pptx-tr-zoom-out ${dur} ${EASE} forwards`,
-				incoming: `pptx-tr-zoom-in ${dur} ${EASE} forwards`,
-				outgoingOnTop: true,
-			};
+			return resolveZoomTransition(direction, dur);
 
 		case 'blinds': {
 			const o = resolveOrientation(direction, orient);
@@ -265,11 +277,7 @@ export function getSlideTransitionAnimations(
 		}
 
 		case 'checker':
-			return {
-				outgoing: `pptx-tr-fade-out ${dur} ${EASE} forwards`,
-				incoming: `pptx-tr-checker-in ${dur} ${EASE} forwards`,
-				outgoingOnTop: true,
-			};
+			return resolveCheckerTransition(direction, orient, dur);
 
 		case 'comb': {
 			const o = resolveOrientation(direction, orient);
@@ -316,7 +324,14 @@ export function getSlideTransitionAnimations(
 
 		// `pull` is the directional alias of `uncover`.
 		case 'pull':
-			return getSlideTransitionAnimations('uncover', durationMs, direction, orient, spokes);
+			return getSlideTransitionAnimations(
+				'uncover',
+				durationMs,
+				direction,
+				orient,
+				spokes,
+				pattern,
+			);
 
 		case 'morph':
 			return {
@@ -328,7 +343,14 @@ export function getSlideTransitionAnimations(
 		case 'random': {
 			const randomType =
 				RANDOM_ELIGIBLE_TYPES[Math.floor(Math.random() * RANDOM_ELIGIBLE_TYPES.length)];
-			return getSlideTransitionAnimations(randomType, durationMs, direction, orient, spokes);
+			return getSlideTransitionAnimations(
+				randomType,
+				durationMs,
+				direction,
+				orient,
+				spokes,
+				pattern,
+			);
 		}
 
 		// The exotic / 3-D transition family (conveyor/doors/ferris/flash/
@@ -369,6 +391,7 @@ export function resolveSlideTransition(
 		transition.direction,
 		transition.orient,
 		transition.spokes,
+		transition.pattern,
 	);
 }
 
@@ -381,7 +404,20 @@ export function resolveTransitionDurationMs(transition: PptxSlideTransition | un
 	if (!transition || transition.type === 'none' || transition.type === 'cut') {
 		return 0;
 	}
-	return typeof transition.durationMs === 'number' && transition.durationMs > 0
-		? transition.durationMs
-		: DEFAULT_TRANSITION_DURATION_MS;
+	if (typeof transition.durationMs === 'number' && transition.durationMs > 0) {
+		return transition.durationMs;
+	}
+	// The legacy `spd` speed is the next authority, for EVERY effect including
+	// Morph. Verified against PowerPoint via COM (see
+	// `TRANSITION_SPEED_DURATION_MS`): the issue #131 deck's morphs declare
+	// `spd="slow"` and no `p14:dur`, and PowerPoint plays them at 1.0s - we were
+	// playing them at 2.0s, so every transition in that deck ran at half speed.
+	const speedMs = transition.speed ? TRANSITION_SPEED_DURATION_MS[transition.speed] : undefined;
+	if (typeof speedMs === 'number') {
+		return speedMs;
+	}
+	if (transition.type === 'morph') {
+		return DEFAULT_MORPH_DURATION_MS;
+	}
+	return DEFAULT_TRANSITION_DURATION_MS;
 }

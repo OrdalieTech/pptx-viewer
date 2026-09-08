@@ -7,43 +7,14 @@
  * unions of CSS keyword values), never a framework's `CSSProperties` type, so
  * each binding can assign or cast the results into its own style object.
  */
-import type { TextStyle } from 'pptx-viewer-core';
+import type { TextSegment, TextStyle } from 'pptx-viewer-core';
 
-// ── Line height ───────────────────────────────────────────────────────────
+import { proportionalLineHeight } from './text-line-height';
 
-/** Minimal line-spacing fields {@link resolveLineHeight} needs. */
-export interface LineHeightSource {
-	lineSpacing?: number;
-	lineSpacingExactPt?: number;
-}
-
-/**
- * Resolve a CSS `line-height` value from a TextStyle's spacing fields.
- *
- * - If `lineSpacingExactPt` is set (exact point mode from `a:lnSpc > a:spcPts`),
- *   returns a fixed `"<n>pt"` string.
- * - Otherwise the proportional multiplier from `a:spcPct` (`lineSpacing`) is
- *   used, defaulting to `1.25` (or `1.35` when the block carries italics, which
- *   sit slightly taller).
- *
- * Returning a unitless multiplier (rather than relying on the browser's
- * font-dependent `normal`, which is ~1.2-1.5) lets the value scale with the
- * resolved font size, keeping multi-line text inside its box.
- *
- * @param textStyle     The text style carrying the spacing fields (may be
- *                      `undefined`).
- * @param hasItalicRuns Whether the block contains italic runs (loosens the
- *                      default multiplier).
- */
-export function resolveLineHeight(
-	textStyle: LineHeightSource | undefined,
-	hasItalicRuns: boolean,
-): string | number {
-	if (typeof textStyle?.lineSpacingExactPt === 'number' && textStyle.lineSpacingExactPt > 0) {
-		return `${textStyle.lineSpacingExactPt}pt`;
-	}
-	return textStyle?.lineSpacing || (hasItalicRuns ? 1.35 : 1.25);
-}
+// Line-height resolution (`resolveLineHeight` / `proportionalLineHeight` /
+// `lineHeightToPx` / `DEFAULT_LINE_HEIGHT` / `LineHeightSource`) now lives in
+// `text-line-height.ts`; re-exported from the barrel (`render/index.ts`), not
+// here, so importers use that module directly.
 
 // ── Vertical text mapping ──────────────────────────────────────────────────
 
@@ -125,6 +96,56 @@ export function toCssVerticalDirection(
 	return undefined;
 }
 
+/**
+ * Count how many paragraphs `segments` group into (paragraph breaks are
+ * `isParagraphBreak` segments, post-edit, or a bare `"\n"` text segment on
+ * the slide-load path; a soft line break, `isLineBreak`, does not split a
+ * paragraph). Mirrors `text-paragraphs.ts`'s own grouping predicate; kept
+ * deliberately cheap (no bullet/run resolution) since the only thing callers
+ * need is the count.
+ */
+function countParagraphs(segments: readonly TextSegment[] | undefined): number {
+	if (!segments || segments.length === 0) {
+		return 1;
+	}
+	let count = 1;
+	for (const seg of segments) {
+		if (seg.isParagraphBreak || (seg.text === '\n' && !seg.isLineBreak)) {
+			count += 1;
+		}
+	}
+	return count;
+}
+
+/**
+ * Resolve `a:bodyPr/@anchor` to a CSS `justify-content` value for the flex
+ * column {@link buildTextBodyLayoutStyle} lays paragraphs out in (D2-G5:
+ * ECMA-376 §20.1.10.2 `ST_TextAnchoringType`).
+ *
+ * `distributed`/`justified` (`dist`/`just`) stretch paragraph spacing so the
+ * text block fills the box's full vertical extent - CSS has no vertical
+ * justify-text primitive, so this approximates: `space-between` spreads
+ * multiple paragraphs across the box (the closest a flex column gets to
+ * "distribute"), and a single paragraph (nothing to distribute) falls back to
+ * centering, matching PowerPoint's own behaviour for a one-paragraph
+ * distributed body.
+ */
+export function resolveVerticalAnchorJustifyContent(
+	vAlign: TextStyle['vAlign'] | undefined,
+	textSegments: readonly TextSegment[] | undefined,
+): string {
+	if (vAlign === 'distributed' || vAlign === 'justified') {
+		return countParagraphs(textSegments) > 1 ? 'space-between' : 'center';
+	}
+	if (vAlign === 'middle') {
+		return 'center';
+	}
+	if (vAlign === 'bottom') {
+		return 'flex-end';
+	}
+	return 'flex-start';
+}
+
 /** Whether a `textDirection` value represents any vertical writing mode. */
 export function isVerticalTextDirection(
 	textDirection: TextStyle['textDirection'] | undefined,
@@ -141,17 +162,27 @@ export function isVerticalTextDirection(
 
 // ── Auto-fit font scaling ──────────────────────────────────────────────────
 
-/** Inputs to {@link computeAutoFitTextStyle} (geometry + text content). */
+/**
+ * Inputs to {@link computeAutoFitTextStyle} (geometry + text content).
+ *
+ * `text`, `width`, `height` and `bodyInsetVertical` are not read by
+ * {@link computeAutoFitTextStyle} itself: `spAutoFit` no longer derives a font
+ * scale from the measured text (see that function's doc comment), and
+ * `normAutofit`'s scale comes from the authored `fontScale`, not a
+ * measurement. Kept on the interface for call-site stability (`buildTextBlockStyle`
+ * already has this geometry to hand) and because they describe the shape's
+ * box, which is what actually changes size under `spAutoFit`.
+ */
 export interface AutoFitInput {
 	/** The element's text style (carries the autoFit* fields). */
 	textStyle: TextStyle | undefined;
-	/** Plain text content used to estimate the line count (spAutoFit path). */
+	/** Plain text content of the block. */
 	text: string;
 	/** Element box width in px. */
 	width: number;
 	/** Element box height in px. */
 	height: number;
-	/** Combined top + bottom body inset in px (subtracted from height). */
+	/** Combined top + bottom body inset in px. */
 	bodyInsetVertical: number;
 	/** Whether the block has italic runs (loosens the default line height). */
 	hasItalicRuns: boolean;
@@ -166,21 +197,44 @@ export interface AutoFitResult {
 }
 
 /**
+ * The `a:normAutofit/@fontScale` multiplier every RUN of a body must be painted
+ * at, or `1` when the body does not shrink its text.
+ *
+ * The body-level {@link computeAutoFitTextStyle} only scales the block's own
+ * `font-size`, which a run carrying its own `sz` (nearly every authored run)
+ * overrides, so a shrink-to-fit title painted 43% too large. Every binding's run
+ * builder multiplies by this, exactly as React's `renderSingleSegment` does.
+ *
+ * Out-of-range scales are ignored: `>= 1` is not a shrink, `<= 0` is not a size.
+ */
+export function resolveAutoFitFontScale(textStyle: TextStyle | undefined): number {
+	const scale = textStyle?.autoFitFontScale;
+	return typeof scale === 'number' && scale > 0 && scale < 1 ? scale : 1;
+}
+
+/**
  * Compute the auto-fit font-size / line-height overrides for a text block.
  *
- * Mirrors the React `getTextStyleForElement` auto-fit branch:
- *  - `normAutofit` with an explicit `fontScale` (0 < scale < 1) applies that
- *    exact percentage to the base font size (floored at 6px).
- *  - otherwise `spAutoFit` (shrink-to-fit) heuristically estimates how many
- *    lines the text needs and shrinks the font when the estimate overflows the
- *    available height (scale floored at 0.5, font floored at 6px).
- *  - `lnSpcReduction` from `normAutofit` reduces the line-height multiplier.
+ * ECMA-376 (§21.1.2.1.1 / §21.1.2.1.2) gives the two autofit modes opposite
+ * jobs, and this function only ever implements the first one:
+ *  - `a:normAutofit` (`autoFitMode: 'normal'`) scales the TEXT down to fit the
+ *    shape. PowerPoint computes and stores the exact percentage as
+ *    `fontScale` (and, separately, `lnSpcReduction` for line spacing); we
+ *    apply that authored percentage verbatim rather than re-deriving one.
+ *  - `a:spAutoFit` (`autoFitMode: 'shrink'`, the default for a new PowerPoint
+ *    text box) resizes the SHAPE to fit the text, never the font. A shape
+ *    authored or last edited in PowerPoint already has its `a:ext` on disk set
+ *    to the box PowerPoint grew or shrank to fit the text at its authored
+ *    size, so the font must render unshrunk. This function therefore applies
+ *    no override at all for `spAutoFit`: shrinking the font on top of a box
+ *    already sized to fit was rendering every default (spAutoFit) PowerPoint
+ *    text box and title smaller than PowerPoint itself renders it.
  *
  * Returns an empty object when auto-fit is off or no override is needed; the
  * caller spreads the result over its own CSS object.
  */
 export function computeAutoFitTextStyle(input: AutoFitInput): AutoFitResult {
-	const { textStyle: ts, text, width, height, bodyInsetVertical, hasItalicRuns } = input;
+	const { textStyle: ts } = input;
 	if (!ts?.autoFit) {
 		return {};
 	}
@@ -188,30 +242,30 @@ export function computeAutoFitTextStyle(input: AutoFitInput): AutoFitResult {
 	const baseFontSize = ts.fontSize || input.defaultFontSize;
 	const result: AutoFitResult = {};
 
-	// normAutofit with explicit fontScale: use the exact percentage.
-	if (ts.autoFitFontScale !== undefined && ts.autoFitFontScale > 0 && ts.autoFitFontScale < 1) {
+	// normAutofit with explicit fontScale: use the exact percentage PowerPoint
+	// computed. `fontScale` is a `normAutofit`-only attribute (spAutoFit never
+	// carries one), so this branch never fires for `spAutoFit` in practice; the
+	// `autoFitMode` check below is belt-and-braces against a source that sets
+	// both a stale `fontScale` and `autoFitMode: 'shrink'`.
+	if (
+		ts.autoFitMode !== 'shrink' &&
+		ts.autoFitFontScale !== undefined &&
+		ts.autoFitFontScale > 0 &&
+		ts.autoFitFontScale < 1
+	) {
 		result.fontSize = Math.max(6, Math.round(baseFontSize * ts.autoFitFontScale));
-	} else if (ts.autoFitMode !== 'normal') {
-		// spAutoFit (shrink): heuristic estimation.
-		const textLength = text.length;
-		const lineHeight = ts.lineSpacingExactPt
-			? ts.lineSpacingExactPt / baseFontSize
-			: ts.lineSpacing || (hasItalicRuns ? 1.35 : 1.25);
-		const approxCharsPerLine = Math.max(1, Math.floor(width / (baseFontSize * 0.6)));
-		const estimatedLines = Math.max(1, Math.ceil(textLength / approxCharsPerLine));
-		const requiredHeight = estimatedLines * baseFontSize * lineHeight;
-		const availableHeight = height - bodyInsetVertical;
-		if (requiredHeight > availableHeight && availableHeight > 0) {
-			const scale = Math.max(0.5, availableHeight / requiredHeight);
-			result.fontSize = Math.max(6, Math.round(baseFontSize * scale));
-		}
 	}
 
-	// normAutofit with lnSpcReduction: reduce line height.
-	if (ts.autoFitLineSpacingReduction !== undefined && ts.autoFitLineSpacingReduction > 0) {
-		const baseLineHeight =
-			typeof ts.lineSpacing === 'number' ? ts.lineSpacing : hasItalicRuns ? 1.35 : 1.25;
-		result.lineHeight = baseLineHeight * (1 - ts.autoFitLineSpacingReduction);
+	// normAutofit with lnSpcReduction: reduce line height. Also `spAutoFit`-safe
+	// for the same reason: the attribute only exists under `a:normAutofit`.
+	if (
+		ts.autoFitMode !== 'shrink' &&
+		ts.autoFitLineSpacingReduction !== undefined &&
+		ts.autoFitLineSpacingReduction > 0
+	) {
+		result.lineHeight =
+			proportionalLineHeight(ts.lineSpacing, ts.compatibleLineSpacing) *
+			(1 - ts.autoFitLineSpacingReduction);
 	}
 
 	return result;

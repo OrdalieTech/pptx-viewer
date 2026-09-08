@@ -1,3 +1,4 @@
+import { resolveScreenTip } from 'pptx-viewer-shared';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -12,6 +13,7 @@ import { DrawingGroup } from './toolbar/DrawingGroup';
 import { DrawSection } from './toolbar/DrawSection';
 import { EditingSection } from './toolbar/EditingSection';
 import { FileSection } from './toolbar/FileSection';
+import { HelpSection } from './toolbar/HelpSection';
 import { HomeSection } from './toolbar/HomeSection';
 import { InsertSection } from './toolbar/InsertSection';
 import { RecordSection } from './toolbar/RecordSection';
@@ -19,10 +21,11 @@ import { ReviewSection } from './toolbar/ReviewSection';
 import { SlideShowSection } from './toolbar/SlideShowSection';
 import { TabRowActions } from './toolbar/TabRowActions';
 import { TextSection } from './toolbar/TextSection';
-import { pill } from './toolbar/toolbar-constants';
+import { TitleBarQuickExtras } from './toolbar/TitleBarQuickExtras';
 import type { ToolbarProps } from './toolbar/toolbar-types';
 import { ToolbarPrimaryRow } from './toolbar/ToolbarPrimaryRow';
 import { ViewSection } from './toolbar/ViewSection';
+import { useViewerOptionsContext } from './viewer-options-context';
 
 export type { ToolbarProps } from './toolbar/toolbar-types';
 
@@ -30,6 +33,7 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 	const { mode, isNarrowViewport, isCompactToolbarOpen, toolbarSection, onSetToolbarSection } = p;
 	const { t } = useTranslation();
 	const { isTabVisible } = useToolbarVisibility(p.hiddenActions);
+	const viewerOptions = useViewerOptionsContext();
 
 	// Mobile-first: at <768px we swap the entire desktop ribbon for a compact
 	// top bar plus a slide-up sheet exposing every section. The bottom action
@@ -76,6 +80,7 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							type='button'
 							role='tab'
 							aria-selected={toolbarSection === s.id}
+							title={resolveScreenTip(viewerOptions, t(s.labelKey))}
 							onClick={() => onSetToolbarSection(s.id)}
 							className={cn(
 								'relative px-3.5 py-2 text-[12px] font-medium whitespace-nowrap transition-colors max-md:min-h-[36px] max-md:px-3',
@@ -95,7 +100,6 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 					<TabRowActions
 						onEnterRehearsalMode={p.canEdit ? p.onEnterRehearsalMode : undefined}
 						onOpenShareDialog={p.onOpenShareDialog}
-						onPackageForSharing={p.onPackageForSharing}
 						hiddenActions={p.hiddenActions}
 					/>
 					{isNarrowViewport && (
@@ -118,10 +122,39 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 				</div>
 			)}
 
+			{/*
+			 * Quick Access strip, relocated: Options > Quick Access Toolbar >
+			 * position = "below" moves the configured commands (beyond the
+			 * dedicated Save/Undo/Redo trio, which always stays in the title
+			 * bar) into their own row under the ribbon tabs instead of the
+			 * title bar's inline strip, which suppresses itself for the same
+			 * condition (see `TitleBar`).
+			 */}
+			{showRibbon && viewerOptions.quickAccess.position === 'below' && (
+				<div className='flex items-center gap-0.5 border-b border-border/60 px-2 py-1'>
+					<TitleBarQuickExtras
+						quickAccess={viewerOptions.quickAccess}
+						onCommand={p.onQuickCommand}
+					/>
+				</div>
+			)}
+
 			{/* Ribbon Content */}
 			{showRibbon && (
 				<div
 					className={cn(
+						/*
+						 * `items-stretch` (not `items-center`): `RibbonGroup` pins its
+						 * caption to `bottom-0.5` of ITS OWN box (`position: relative`), so
+						 * a group left at its un-stretched intrinsic height sits centered in
+						 * the row with its caption floating well above the row's true bottom
+						 * edge whenever a taller sibling sets the row's height (e.g. View's
+						 * five-row "Show" group next to its two-row "Zoom" group). Stretching
+						 * every direct child to the row's full height lines up every group's
+						 * caption and right-hand divider at the same baseline. File's
+						 * backstage is unaffected: it renders `position: fixed`, outside this
+						 * row's flex layout entirely.
+						 */
 						'flex min-h-[82px] items-stretch gap-0 overflow-x-auto px-1 py-0.5 max-md:min-h-0 max-md:px-1 max-md:py-0.5 flex-nowrap [&>*]:shrink-0',
 						isNarrowViewport && !isCompactToolbarOpen && 'hidden',
 					)}
@@ -137,7 +170,7 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							onExportPdf={p.onExportPdf}
 							onExportVideo={p.onExportVideo}
 							onExportGif={p.onExportGif}
-							onPackageForSharing={p.onPackageForSharing}
+							onExportJson={p.onExportJson}
 							onSaveAsPptx={p.onSaveAsPptx}
 							onSaveAsPpsx={p.onSaveAsPpsx}
 							onSaveAsPptm={p.onSaveAsPptm}
@@ -150,7 +183,9 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							onOpenPasswordProtection={p.onOpenPasswordProtection}
 							onOpenFontEmbedding={p.onOpenFontEmbedding}
 							onOpenDigitalSignatures={p.onOpenDigitalSignatures}
+							onOpenVersionHistory={p.onToggleVersionHistory}
 							hiddenActions={p.hiddenActions}
+							recentPresentationsCount={p.recentPresentationsCount}
 						/>
 					)}
 
@@ -165,9 +200,19 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							onPaste={p.onPaste}
 							onToggleFormatPainter={p.onToggleFormatPainter}
 							layoutOptions={p.layoutOptions}
+							currentLayoutPath={p.currentLayoutPath}
+							loadLayoutPreviews={p.loadLayoutPreviews}
+							themeFonts={p.themeFonts}
+							embeddedFontFamilies={p.embeddedFontFamilies}
+							customFontFamilies={p.customFontFamilies}
 							onInsertSlideFromLayout={p.onInsertSlideFromLayout}
+							onApplyLayout={p.onApplyLayout}
+							onInsertSlideFromTemplate={p.onInsertSlideFromTemplate}
+							templateScheme={p.templateScheme}
 							selectedElement={p.selectedElement}
 							onUpdateTextStyle={p.onUpdateTextStyle}
+							onResetSlide={p.onResetSlide}
+							onAddSection={p.onAddSection}
 						/>
 					)}
 
@@ -187,6 +232,8 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							onOpenHeaderFooter={p.onOpenHeaderFooter}
 							onOpenImagePicker={p.onOpenImagePicker}
 							onOpenMediaPicker={p.onOpenMediaPicker}
+							hasSelection={Boolean(p.selectedElement)}
+							onOpenHyperlinkDialog={p.onOpenHyperlinkDialog}
 						/>
 					)}
 
@@ -200,7 +247,12 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 						/>
 					)}
 
-					{sHome && <EditingSection onToggleFindReplace={p.onToggleFindReplace} />}
+					{sHome && (
+						<EditingSection
+							onToggleFindReplace={p.onToggleFindReplace}
+							onSelectAll={p.onSelectAll}
+						/>
+					)}
 
 					{sHome && (
 						<DrawingGroup
@@ -211,6 +263,7 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							onAddShape={p.onAddShape}
 							onMoveLayer={p.onMoveLayer}
 							onMoveLayerToEdge={p.onMoveLayerToEdge}
+							onUpdateElementStyle={p.onUpdateElementStyle}
 						/>
 					)}
 
@@ -229,16 +282,17 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 						<ArrangeSection
 							canEdit={p.canEdit}
 							selectedElement={p.selectedElement}
-							clipboardPayload={p.clipboardPayload}
+							selectedCount={p.selectedCount}
+							selectionGroupable={p.selectionGroupable}
 							onAlignElements={p.onAlignElements}
 							onDistributeElements={p.onDistributeElements}
 							canDistribute={p.canDistribute}
-							onCopy={p.onCopy}
-							onCut={p.onCut}
-							onPaste={p.onPaste}
 							onFlip={p.onFlip}
 							onMoveLayer={p.onMoveLayer}
 							onMoveLayerToEdge={p.onMoveLayerToEdge}
+							onGroupElements={p.onGroupElements}
+							onUngroupElement={p.onUngroupElement}
+							onUpdateElementStyle={p.onUpdateElementStyle}
 							onDuplicate={p.onDuplicate}
 							onDelete={p.onDelete}
 							formatPainterActive={p.formatPainterActive}
@@ -255,6 +309,7 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							onToggleThemeEditor={p.onToggleThemeEditor}
 							isThemeEditorOpen={p.isThemeEditorOpen}
 							onOpenDocumentProperties={p.onOpenDocumentProperties}
+							onOpenSlideSize={p.onOpenSlideSize}
 							onToggleInspector={p.onToggleInspector}
 							isInspectorPaneOpen={p.isInspectorPaneOpen}
 						/>
@@ -264,6 +319,10 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 						<TransitionsSection
 							isInspectorPaneOpen={p.isInspectorPaneOpen}
 							onToggleInspector={p.onToggleInspector}
+							canEdit={p.canEdit}
+							activeSlide={p.activeSlide}
+							onTransitionChange={p.onTransitionChange}
+							onApplyTransitionToAll={p.onApplyTransitionToAll}
 						/>
 					)}
 
@@ -282,14 +341,20 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 					{sSlw && (
 						<SlideShowSection
 							onPresent={() => p.onSetMode('present')}
+							onPresentFromBeginning={p.onPresentFromBeginning}
 							onEnterPresenterView={p.onEnterPresenterView ?? (() => {})}
 							onEnterRehearsalMode={p.onEnterRehearsalMode ?? (() => {})}
 							onOpenSetUpSlideShow={p.onOpenSetUpSlideShow ?? (() => {})}
+							onToggleHideSlide={p.onToggleHideSlide ?? (() => {})}
+							activeSlideHidden={p.activeSlideHidden ?? false}
 							onOpenBroadcastDialog={p.onOpenBroadcastDialog ?? (() => {})}
 							onToggleSubtitles={p.onToggleSubtitles ?? (() => {})}
 							showSubtitles={p.showSubtitles ?? false}
 							onSetMode={p.onSetMode}
+							customShowControls={p}
 							hiddenActions={p.hiddenActions}
+							presentationProperties={p.presentationProperties}
+							onPresentationPropertiesChange={p.onPresentationPropertiesChange}
 						/>
 					)}
 
@@ -323,10 +388,12 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							onSetSpellCheckEnabled={p.onSetSpellCheckEnabled}
 							showGrid={p.showGrid}
 							showRulers={p.showRulers}
+							showGuides={p.showGuides}
 							snapToGrid={p.snapToGrid}
 							snapToShape={p.snapToShape}
 							onSetShowGrid={p.onSetShowGrid}
 							onSetShowRulers={p.onSetShowRulers}
+							onSetShowGuides={p.onSetShowGuides}
 							onSetSnapToGrid={p.onSetSnapToGrid}
 							onSetSnapToShape={p.onSetSnapToShape}
 							onAddGuide={p.onAddGuide}
@@ -335,29 +402,19 @@ export function Toolbar(p: ToolbarProps): React.ReactElement {
 							onToggleSelectionPane={p.onToggleSelectionPane}
 							eyedropperActive={p.eyedropperActive}
 							onToggleEyedropper={p.onToggleEyedropper}
+							onToggleSlideSorter={p.onToggleSlideSorter}
+							onOpenReadingView={p.onOpenReadingView}
+							onOpenOutlineView={p.onOpenOutlineView}
 							onZoomToFit={p.onZoomToFit}
 						/>
 					)}
 
 					{sHlp && (
-						<>
-							<button
-								type='button'
-								onClick={p.onToggleShortcuts}
-								className={pill}
-								title={t('pptx.settings.keyboardShortcuts')}
-							>
-								{t('pptx.settings.keyboardShortcuts')}
-							</button>
-							<button
-								type='button'
-								onClick={p.onRunAccessibilityCheck}
-								className={pill}
-								title={t('pptx.ribbon.accessibilityCheck')}
-							>
-								{t('pptx.ribbon.accessibilityCheck')}
-							</button>
-						</>
+						<HelpSection
+							onOpenSettings={p.onOpenSettings}
+							onToggleShortcuts={p.onToggleShortcuts}
+							onRunAccessibilityCheck={p.onRunAccessibilityCheck}
+						/>
 					)}
 				</div>
 			)}

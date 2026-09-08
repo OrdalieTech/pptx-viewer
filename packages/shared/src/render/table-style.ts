@@ -1,5 +1,5 @@
 /**
- * table-style.ts — framework-agnostic table render helpers.
+ * table-style.ts - framework-agnostic table render helpers.
  *
  * A focused port of the React table render helpers that operate on the
  * structured {@link PptxTableData} model (not raw OOXML). The renderer is
@@ -20,6 +20,7 @@
  * passed to {@link getTableCellBandStyle}.
  */
 import type {
+	ParsedTableStyleEntry,
 	ParsedTableStyleFill,
 	ParsedTableStyleMap,
 	PptxTableCellStyle,
@@ -31,15 +32,21 @@ import type {
 import { getPatternSvg, normalizeHexColor } from './fill-style';
 import type { CellBorderPosition } from './table-style-borders';
 import { resolveCellBorderCss, resolveStyleDiagonalBorders } from './table-style-borders';
+import { getBuiltinTableStyle } from './table-style-builtins';
+import { resolveTableStyleCell3D } from './table-style-cell3d';
 import {
 	applyStyleFill,
 	applyStyleText,
 	cell3DBevelCss,
 	resolveStyleFillColor,
 } from './table-style-fill';
+import { cellImageFillCss } from './table-style-image';
 
 export { resolveStyleDiagonalBorders } from './table-style-borders';
+export { resolveTableStyleCell3D } from './table-style-cell3d';
 export { cell3DBevelCss, resolveFontRefIdx } from './table-style-fill';
+export { cellImageFillCss } from './table-style-image';
+export type { CellImageFillCss } from './table-style-image';
 
 /** A framework-agnostic CSS style object: camelCased property → value. */
 export type TableCellCss = Record<string, string | number>;
@@ -148,7 +155,7 @@ export function cellPatternFillCss(style: PptxTableCellStyle): CellPatternFillCs
 			backgroundColor: bg,
 		};
 	}
-	// Unknown preset — fall back to solid background colour.
+	// Unknown preset - fall back to solid background colour.
 	const fallback = style.patternFillBackground ?? style.backgroundColor;
 	return fallback ? { backgroundColor: fallback } : null;
 }
@@ -178,23 +185,47 @@ export interface TableStyleContext {
 }
 
 /**
+ * Table-LEVEL CSS: the properties that belong on the `<table>` element rather
+ * than on a cell.
+ *
+ * Currently just `a:tblPr@rtl` (ECMA-376 §21.1.3.15), which lays the table out
+ * right-to-left so the first column is drawn on the right. It was parsed and
+ * round-tripped but rendered by nobody, so every table in an Arabic or Hebrew
+ * deck came out with its columns reversed, and Vanilla's inspector offered a
+ * toggle that changed nothing on screen.
+ *
+ * Returns an empty object for a left-to-right table so a binding can spread it
+ * unconditionally.
+ */
+export function tableContainerCss(tableData: PptxTableData | undefined): TableCellCss {
+	return tableData?.rtl ? { direction: 'rtl' } : {};
+}
+
+/**
  * Look up the table style entry for a style GUID, trying both the raw value
  * and the braced-upper-case normalisation that OOXML uses.
+ *
+ * A GUID the deck does not define is not an error: `ppt/tableStyles.xml` only
+ * carries the styles a deck CUSTOMISED, and PowerPoint's 74 gallery styles are
+ * normally absent from the package altogether. Those fall back to the built-in
+ * catalogue, which holds PowerPoint's own definitions expressed in scheme
+ * colours so the deck's theme still decides the actual colours. A deck-authored
+ * entry always wins over the built-in of the same GUID.
  */
-function resolveTableStyleEntry(
+export function resolveTableStyleEntry(
 	tableStyleId: string | undefined,
 	tableStyleMap: ParsedTableStyleMap | undefined,
-) {
-	if (!tableStyleId || !tableStyleMap) {
+): ParsedTableStyleEntry | undefined {
+	if (!tableStyleId) {
 		return undefined;
 	}
-	const direct = tableStyleMap[tableStyleId];
+	const direct = tableStyleMap?.[tableStyleId];
 	if (direct) {
 		return direct;
 	}
 	const normalised = tableStyleId.trim().toUpperCase();
 	const withBraces = normalised.startsWith('{') ? normalised : `{${normalised}}`;
-	return tableStyleMap[withBraces];
+	return tableStyleMap?.[withBraces] ?? getBuiltinTableStyle(withBraces);
 }
 
 /** Map an OOXML `a:prstDash/@val` value to a CSS `border-style` keyword. */
@@ -232,8 +263,13 @@ export function cellStyleToCss(style?: PptxTableCellStyle): TableCellCss {
 	}
 	const css: TableCellCss = {};
 
+	if (style.fontFamily) {
+		css.fontFamily = style.fontFamily;
+	}
 	if (style.fontSize) {
-		css.fontSize = `${style.fontSize}px`;
+		// Table-cell controls and the OOXML save path use PowerPoint points.
+		// Emitting the same number as CSS pixels makes edited cells 25% smaller.
+		css.fontSize = `${style.fontSize}pt`;
 	}
 	if (style.bold) {
 		css.fontWeight = 'bold';
@@ -248,8 +284,15 @@ export function cellStyleToCss(style?: PptxTableCellStyle): TableCellCss {
 		css.color = style.color;
 	}
 
-	// Cell background fill — gradient takes precedence, then pattern, then solid.
-	if (style.gradientFillCss) {
+	// Cell background fill - image takes precedence, then gradient, then
+	// pattern, then solid. An unresolved image path (still a raw archive path,
+	// not yet patched to a displayable URL by the load pipeline) falls through
+	// to whatever the cell has as a plain background colour, same as an
+	// unresolved picture element shows no image until its path resolves.
+	const imageFill = cellImageFillCss(style);
+	if (imageFill) {
+		Object.assign(css, imageFill);
+	} else if (style.gradientFillCss) {
 		css.background = style.gradientFillCss;
 	} else if (style.fillMode === 'pattern') {
 		// Render the real SVG pattern tile when the preset is known;
@@ -292,7 +335,7 @@ export function cellStyleToCss(style?: PptxTableCellStyle): TableCellCss {
 		css.overflowX = 'visible';
 	}
 
-	// Vertical text direction — map all variants to CSS writing-mode + orientation.
+	// Vertical text direction - map all variants to CSS writing-mode + orientation.
 	if (style.textDirection) {
 		switch (style.textDirection) {
 			case 'vert':
@@ -352,17 +395,20 @@ export function cellStyleToCss(style?: PptxTableCellStyle): TableCellCss {
 		}
 	}
 
-	// Cell margins → padding.
-	if (style.marginLeft) {
+	// Cell margins → padding. `!== undefined` (not truthy) so an explicitly
+	// zeroed margin (`<a:marL w="0"/>`, common in dense or image-filled
+	// tables) still renders as `0px` padding instead of falling through to
+	// the browser's default cell padding.
+	if (style.marginLeft !== undefined) {
 		css.paddingLeft = `${style.marginLeft}px`;
 	}
-	if (style.marginRight) {
+	if (style.marginRight !== undefined) {
 		css.paddingRight = `${style.marginRight}px`;
 	}
-	if (style.marginTop) {
+	if (style.marginTop !== undefined) {
 		css.paddingTop = `${style.marginTop}px`;
 	}
-	if (style.marginBottom) {
+	if (style.marginBottom !== undefined) {
 		css.paddingBottom = `${style.marginBottom}px`;
 	}
 
@@ -498,7 +544,15 @@ export function getTableCellBandStyle(
 	const style: TableCellCss = {};
 	let applied = false;
 
-	// ── Whole-table fill (lowest priority layer). ──
+	// ── a:tblPr's OWN fill (issue G6), the lowest priority layer of all:
+	// independent of a:tblStyleLst, beneath even the style's wholeTbl fill. ──
+	if (tableData.tableFill) {
+		if (applyStyleFill(tableData.tableFill, colorScheme, style, '')) {
+			applied = true;
+		}
+	}
+
+	// ── Whole-table fill (from the referenced table style). ──
 	if (styleEntry?.wholeTblFill) {
 		if (applyStyleFill(styleEntry.wholeTblFill, colorScheme, style, '')) {
 			applied = true;
@@ -553,78 +607,88 @@ export function getTableCellBandStyle(
 		}
 	}
 
+	// ── Emphasis parts, in the ECMA-376 §21.1.3.14 CT_TableStyle sequence. ──
+	// That sequence IS the application order, lowest precedence first:
+	//   wholeTbl, band1H, band2H, band1V, band2V, lastCol, firstCol, lastRow,
+	//   seCell, swCell, firstRow, neCell, nwCell
+	// Column emphasis therefore ranks BELOW row emphasis: a header row keeps
+	// its own colour where it crosses the first column, rather than the first
+	// column overpainting the header. (Verified against PowerPoint 16.0's own
+	// output, which writes the parts back in exactly this order.) The corner
+	// cells straddle the row parts, so `seCell`/`swCell` land between `lastRow`
+	// and `firstRow` while `neCell`/`nwCell` come last of all.
+	const atTop = Boolean(tableData.firstRowHeader) && rowIndex === 0;
+	const atBottom = Boolean(tableData.lastRow) && rowIndex === rowCount - 1;
+	const atLeft = Boolean(tableData.firstCol) && cellIndex === 0;
+	const atRight = Boolean(tableData.lastCol) && cellIndex === columnCount - 1;
+
+	/** Apply one emphasis part's fill + text, with an optional fill fallback. */
+	const applyPart = (
+		active: boolean,
+		fill: ParsedTableStyleFill | undefined,
+		text: ParsedTableStyleEntry['wholeTblText'],
+		fillFallback = '',
+	): void => {
+		if (!active) {
+			return;
+		}
+		if (fill || fillFallback) {
+			applyStyleFill(fill, colorScheme, style, fillFallback);
+		}
+		applyStyleText(text, colorScheme, style, fontScheme);
+		applied = true;
+	};
+
+	// lastCol / firstCol: bold emphasis plus the style's own fill and text.
+	if (atRight || atLeft) {
+		style.fontWeight = 700;
+	}
+	applyPart(atRight, styleEntry?.lastColFill, styleEntry?.lastColText);
+	applyPart(atLeft, styleEntry?.firstColFill, styleEntry?.firstColText);
+
+	// ── Total / last row emphasis. ──
+	if (atBottom) {
+		style.fontWeight = 700;
+		applyPart(true, styleEntry?.lastRowFill, styleEntry?.lastRowText);
+		const borderColor = resolveFill(styleEntry?.firstRowFill, 'rgba(68, 114, 196, 0.7)');
+		style.borderTop = `2px solid ${borderColor}`;
+	}
+
+	// ── Bottom corner cells (seCell, swCell). ──
+	applyPart(atBottom && atRight, styleEntry?.seCellFill, styleEntry?.seCellText);
+	applyPart(atBottom && atLeft, styleEntry?.swCellFill, styleEntry?.swCellText);
+
 	// ── Header row (first row). ──
-	if (tableData.firstRowHeader && rowIndex === 0) {
+	if (atTop) {
 		style.fontWeight = 700;
 		applyStyleFill(styleEntry?.firstRowFill, colorScheme, style, 'rgba(68, 114, 196, 0.85)');
-		style.color = '#ffffff';
+		// White header text belongs with a painted header band. `a:noFill` is an
+		// authored transparent header, and forcing white on it leaves the header
+		// row's text invisible against the slide.
+		if (!styleEntry?.firstRowFill?.noFill) {
+			style.color = '#ffffff';
+		}
 		applyStyleText(styleEntry?.firstRowText, colorScheme, style, fontScheme);
 		applied = true;
 	}
 
-	// ── Total / last row emphasis. ──
-	if (tableData.lastRow && rowIndex === rowCount - 1) {
-		style.fontWeight = 700;
-		if (styleEntry?.lastRowFill) {
-			applyStyleFill(styleEntry.lastRowFill, colorScheme, style, '');
-		}
-		const borderColor = resolveFill(styleEntry?.firstRowFill, 'rgba(68, 114, 196, 0.7)');
-		style.borderTop = `2px solid ${borderColor}`;
-		applyStyleText(styleEntry?.lastRowText, colorScheme, style, fontScheme);
-		applied = true;
-	}
+	// ── Top corner cells (neCell, nwCell): highest precedence of all. ──
+	applyPart(atTop && atRight, styleEntry?.neCellFill, styleEntry?.neCellText);
+	applyPart(atTop && atLeft, styleEntry?.nwCellFill, styleEntry?.nwCellText);
 
-	// ── First column emphasis. ──
-	if (tableData.firstCol && cellIndex === 0) {
-		style.fontWeight = 700;
-		if (styleEntry?.firstColFill) {
-			applyStyleFill(styleEntry.firstColFill, colorScheme, style, '');
-		}
-		applyStyleText(styleEntry?.firstColText, colorScheme, style, fontScheme);
+	// ── 3D bevel (a:tcStyle/a:cell3D): resolved in its own module so this
+	// already-oversized file doesn't grow further (issue G5). A per-cell
+	// explicit a:tcPr/a:cell3D (applied by cellStyleToCss) still wins, since
+	// that call happens after this lower layer in table-cell-css.ts. ──
+	const styleCell3D = resolveTableStyleCell3D(styleEntry, tableData, {
+		rowIndex,
+		cellIndex,
+		rowCount,
+		columnCount,
+	});
+	if (styleCell3D) {
+		Object.assign(style, cell3DBevelCss(styleCell3D));
 		applied = true;
-	}
-
-	// ── Last column emphasis. ──
-	if (tableData.lastCol && cellIndex === columnCount - 1) {
-		style.fontWeight = 700;
-		if (styleEntry?.lastColFill) {
-			applyStyleFill(styleEntry.lastColFill, colorScheme, style, '');
-		}
-		applyStyleText(styleEntry?.lastColText, colorScheme, style, fontScheme);
-		applied = true;
-	}
-
-	// ── Corner cells (highest fill/text precedence, issue #95). ──
-	// Each corner overrides the intersection of a first/last row with a
-	// first/last column (CT_TableStyle, ECMA-376 §21.1.3.16): nw = top-left,
-	// ne = top-right, sw = bottom-left, se = bottom-right. Only applies when
-	// both the row and column emphasis are active for this cell.
-	if (styleEntry) {
-		const atTop = Boolean(tableData.firstRowHeader) && rowIndex === 0;
-		const atBottom = Boolean(tableData.lastRow) && rowIndex === rowCount - 1;
-		const atLeft = Boolean(tableData.firstCol) && cellIndex === 0;
-		const atRight = Boolean(tableData.lastCol) && cellIndex === columnCount - 1;
-		let cornerFill: ParsedTableStyleFill | undefined;
-		let cornerText = undefined as (typeof styleEntry)['nwCellText'];
-		if (atTop && atLeft) {
-			cornerFill = styleEntry.nwCellFill;
-			cornerText = styleEntry.nwCellText;
-		} else if (atTop && atRight) {
-			cornerFill = styleEntry.neCellFill;
-			cornerText = styleEntry.neCellText;
-		} else if (atBottom && atLeft) {
-			cornerFill = styleEntry.swCellFill;
-			cornerText = styleEntry.swCellText;
-		} else if (atBottom && atRight) {
-			cornerFill = styleEntry.seCellFill;
-			cornerText = styleEntry.seCellText;
-		}
-		if (cornerFill && applyStyleFill(cornerFill, colorScheme, style, '')) {
-			applied = true;
-		}
-		if (applyStyleText(cornerText, colorScheme, style, fontScheme)) {
-			applied = true;
-		}
 	}
 
 	// ── Table-style borders (issue #71). ──

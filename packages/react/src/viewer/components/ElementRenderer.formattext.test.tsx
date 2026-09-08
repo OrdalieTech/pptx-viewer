@@ -60,7 +60,7 @@ function makeProps(overrides: Partial<ElementRendererProps>): ElementRendererPro
 		showResizeHandles: false,
 		renderInk: true,
 		renderGroups: true,
-		adjustmentHandleDescriptor: null,
+		adjustmentHandles: [],
 		onResizePointerDown: vi.fn<() => void>(),
 		onAdjustmentPointerDown: vi.fn<() => void>(),
 		onInlineEditChange: vi.fn<() => void>(),
@@ -90,6 +90,18 @@ function getInlineEditor(): HTMLElement {
 	return editor as HTMLElement;
 }
 
+function selectSegment(editor: HTMLElement, index: number): void {
+	const segment = editor.querySelector<HTMLElement>(`[data-seg-idx="${String(index)}"]`);
+	if (!segment) {
+		throw new Error(`segment ${String(index)} not rendered`);
+	}
+	const range = document.createRange();
+	range.selectNodeContents(segment);
+	const selection = window.getSelection();
+	selection?.removeAllRanges();
+	selection?.addRange(range);
+}
+
 describe('elementRenderer - inline formatting shortcut wiring', () => {
 	it('toggles bold through onFormatText on Ctrl+B while inline editing', () => {
 		const onFormatText = vi.fn<(updates: Partial<TextStyle>) => void>();
@@ -114,10 +126,103 @@ describe('elementRenderer - inline formatting shortcut wiring', () => {
 		expect(onFormatText.mock.calls[1][0]).toStrictEqual({ underline: true });
 	});
 
+	it.each([
+		{ key: 'b', property: 'bold', firstValue: true, selectedValue: false, expected: true },
+		{ key: 'b', property: 'bold', firstValue: false, selectedValue: true, expected: false },
+		{ key: 'i', property: 'italic', firstValue: true, selectedValue: false, expected: true },
+		{ key: 'i', property: 'italic', firstValue: false, selectedValue: true, expected: false },
+		{ key: 'u', property: 'underline', firstValue: true, selectedValue: false, expected: true },
+		{ key: 'u', property: 'underline', firstValue: false, selectedValue: true, expected: false },
+	] as const)(
+		'toggles $property from the selected non-first run',
+		({ key, property, firstValue, selectedValue, expected }) => {
+			const onFormatText = vi.fn<(updates: Partial<TextStyle>) => void>();
+			mount(
+				makeProps({
+					element: {
+						...makeTextElement(),
+						text: 'Always Target',
+						textSegments: [
+							{ text: 'Always ', style: { [property]: firstValue } },
+							{ text: 'Target', style: { [property]: selectedValue } },
+						],
+					} as PptxElement,
+					onFormatText,
+				}),
+			);
+
+			const editor = getInlineEditor();
+			selectSegment(editor, 1);
+			pressShortcut(editor, key);
+
+			expect(onFormatText).toHaveBeenCalledOnce();
+			expect(onFormatText.mock.calls[0][0]).toStrictEqual({ [property]: expected });
+		},
+	);
+
 	it('is inert when no handler is provided', () => {
 		mount(makeProps({ onFormatText: undefined }));
 
 		// Must not throw; the shortcut simply does nothing.
 		pressShortcut(getInlineEditor(), 'b');
 	});
+
+	it.each([
+		{
+			name: 'content-carrying first run',
+			segments: [
+				{
+					text: 'Item',
+					style: {},
+					bulletInfo: { autoNumType: 'arabicPeriod', paragraphIndex: 0 },
+				},
+			],
+			contentSegmentIndex: 0,
+		},
+		{
+			name: 'dedicated marker run',
+			segments: [
+				{
+					text: '1. ',
+					style: {},
+					bulletInfo: { autoNumType: 'arabicPeriod', paragraphIndex: 0 },
+				},
+				{ text: 'Item', style: {} },
+			],
+			contentSegmentIndex: 1,
+		},
+	])(
+		'excludes the rendered number for a $name from committed text',
+		({ segments, contentSegmentIndex }) => {
+			const onInlineEditChange = vi.fn<(text: string) => void>();
+			mount(
+				makeProps({
+					element: {
+						...makeTextElement(),
+						text: 'Item',
+						textSegments: segments,
+					} as PptxElement,
+					onInlineEditChange,
+				}),
+			);
+
+			const editor = getInlineEditor();
+			const marker = editor.querySelector<HTMLElement>('[data-pptx-bullet-marker]');
+			const content = editor.querySelector<HTMLElement>(
+				`[data-seg-idx="${String(contentSegmentIndex)}"]`,
+			);
+			expect(marker?.textContent).toBe('1.');
+			expect(marker?.contentEditable).toBe('false');
+			expect(content).not.toBeNull();
+
+			act(() => {
+				if (content) {
+					content.textContent = 'Item edited';
+				}
+				editor.dispatchEvent(new Event('input', { bubbles: true }));
+			});
+
+			expect(onInlineEditChange).toHaveBeenLastCalledWith('Item edited');
+		},
+	);
 });

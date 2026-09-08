@@ -1,19 +1,51 @@
 import { XmlObject, TextStyle } from '../../types';
 import {
 	parseAlignmentAttr,
+	parseParagraphExtraAttributes,
 	parseParagraphMargins,
 	parseParagraphRtl,
 	parseTabStops,
+	resolveParagraphAlignment,
 } from '../../utils/paragraph-properties-parser';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeShapeBodyParsing';
 import type { ShapeTextParsingContext, ParagraphStyleResult } from './PptxHandlerRuntimeTypes';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	/**
+	 * A copy of an `a:lstStyle` level entry without its `a:defRPr`: run
+	 * defaults follow their own precedence chain, so only the paragraph-level
+	 * keys (algn, lnSpc, spacing, margins, tabs) may join the pPr merge.
+	 */
+	private withoutDefaultRunProperties(node: XmlObject | undefined): XmlObject | undefined {
+		if (!node || typeof node !== 'object') {
+			return undefined;
+		}
+		const copy: XmlObject = { ...node };
+		delete copy['a:defRPr'];
+		return copy;
+	}
+
+	/**
 	 * Extract a paragraph's OWN `a:pPr` geometry (align, spacing, margins,
-	 * indent, tabs, rtl) as a partial {@link TextStyle} so per-paragraph
-	 * formatting round-trips rather than collapsing to one shape-level pPr
-	 * (#69). Inherited layout/master values are not re-stamped.
+	 * indent, tabs, rtl, line-breaking and justification flags) as a partial
+	 * {@link TextStyle} so per-paragraph formatting round-trips rather than
+	 * collapsing to one shape-level pPr (#69). Inherited layout/master values
+	 * are not re-stamped.
+	 *
+	 * Every attribute of `CT_TextParagraphProperties` is accounted for here
+	 * except `lvl`, which travels separately as `TextSegment.paragraphLevel`.
+	 * `marL`/`marR`/`indent` come from `parseParagraphMargins`; `algn` and
+	 * `rtl` are read below; and `defTabSz`, `eaLnBrk`, `latinLnBrk`,
+	 * `fontAlgn` and `hangingPunct` come from `parseParagraphExtraAttributes`.
+	 * Those last five used to be omitted, so a paragraph whose values differed
+	 * from the shape-level style (`resolveShapeParagraphStyle` keeps only the
+	 * FIRST paragraph's) lost them at LOAD and no save-side preservation could
+	 * bring them back. Three of the five govern East-Asian line breaking and
+	 * justification, so the loss fell hardest on CJK decks.
+	 *
+	 * The `a:pPr` child elements likewise round-trip: `lnSpc`/`spcBef`/`spcAft`
+	 * and `tabLst` below, `defRPr` and `extLst` verbatim, and the bullet group
+	 * separately as `TextSegment.bulletInfo`.
 	 */
 	protected extractParagraphOwnProperties(
 		p: XmlObject,
@@ -23,7 +55,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		if (!pPr) {
 			return undefined;
 		}
-		const pp: TextStyle = { ...parseParagraphMargins(pPr) };
+		const pp: TextStyle = {
+			...parseParagraphMargins(pPr),
+			...parseParagraphExtraAttributes(pPr),
+		};
 		const align =
 			pPr['@_algn'] !== undefined ? parseAlignmentAttr(String(pPr['@_algn'])) : undefined;
 		if (align) {
@@ -89,31 +124,54 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const inheritedParagraph = this.ensureArray(ctx.inheritedTxBody?.['a:p'])[0] as
 			| XmlObject
 			| undefined;
-		const pPr = this.mergeXmlObjects(
+		const directPPr = this.mergeXmlObjects(
 			inheritedParagraph?.['a:pPr'] as XmlObject | undefined,
 			p['a:pPr'] as XmlObject | undefined,
 		);
+		// A paragraph whose `lvl` attribute is omitted IS a level-0 paragraph
+		// (ECMA-376 21.1.2.2.7 defaults `lvl` to 0): it takes `a:lvl1pPr`, with
+		// `a:defPPr` applying beneath EVERY level as the all-levels base, not as
+		// a substitute consulted only when `lvl` is absent.
+		const parsedLevel = Number.parseInt(String(directPPr?.['@_lvl'] ?? '0'), 10);
+		const level = Number.isFinite(parsedLevel) ? Math.min(Math.max(parsedLevel, 0), 8) : 0;
+		const levelKey = `a:lvl${level + 1}pPr`;
+		// The text body's own `a:lstStyle` level entry carries paragraph-level
+		// properties too (alignment, `a:lnSpc`, spacing, margins). Merge it under
+		// the paragraph's direct `a:pPr` so a text box that keeps its formatting
+		// in `lvl1pPr` (sz/lnSpc with attribute-less runs) resolves like
+		// PowerPoint instead of falling back to presentation defaults. Run
+		// properties (`a:defRPr`) are resolved separately below with their own
+		// precedence, so they are stripped from the paragraph merge.
+		const ownLstStyle = ctx.txBody?.['a:lstStyle'] as XmlObject | undefined;
+		const inheritedLstStyle = ctx.inheritedTxBody?.['a:lstStyle'] as XmlObject | undefined;
+		const lstStyleParagraphDefaults = this.mergeXmlObjects(
+			this.mergeXmlObjects(
+				this.withoutDefaultRunProperties(inheritedLstStyle?.['a:defPPr'] as XmlObject | undefined),
+				this.withoutDefaultRunProperties(inheritedLstStyle?.[levelKey] as XmlObject | undefined),
+			),
+			this.mergeXmlObjects(
+				this.withoutDefaultRunProperties(ownLstStyle?.['a:defPPr'] as XmlObject | undefined),
+				this.withoutDefaultRunProperties(ownLstStyle?.[levelKey] as XmlObject | undefined),
+			),
+		);
+		const pPr = this.mergeXmlObjects(lstStyleParagraphDefaults, directPPr);
 		const paragraphRtl = this.parseOptionalBooleanAttr(pPr?.['@_rtl']);
 		if (paragraphRtl !== undefined && textStyle.rtl === undefined) {
 			textStyle.rtl = paragraphRtl;
 		}
 
-		let paraAlign: TextStyle['align'] = paragraphRtl ? 'right' : 'left';
-		if (pPr?.['@_algn']) {
-			const alignMap: Record<string, TextStyle['align']> = {
-				l: 'left',
-				ctr: 'center',
-				r: 'right',
-				just: 'justify',
-				justify: 'justify',
-				justLow: 'justLow',
-				dist: 'dist',
-				thaiDist: 'thaiDist',
-			};
-			paraAlign = alignMap[pPr['@_algn']] || 'left';
-			if (!textStyle.align) {
-				textStyle.align = paraAlign;
-			}
+		// This paragraph's OWN placeholder-level alignment (not a snapshot from a
+		// sibling paragraph, which `textStyle.align` below can hold once an
+		// earlier paragraph in the same shape declared an explicit `algn`).
+		const ownPlaceholderAlignment = (ctx.effectiveLevelStyles?.[level]?.alignment ??
+			ctx.effectiveLevelStyles?.[-1]?.alignment) as TextStyle['align'] | undefined;
+		const paraAlign: TextStyle['align'] = resolveParagraphAlignment(
+			pPr?.['@_algn'],
+			ownPlaceholderAlignment,
+			paragraphRtl,
+		);
+		if (pPr?.['@_algn'] && !textStyle.align) {
+			textStyle.align = paraAlign;
 		}
 
 		// Percentage spacing (`a:spcPct`) resolves against the paragraph's font size.
@@ -233,13 +291,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			ctx.slideRelationshipMap,
 			false,
 		);
-		// An omitted level inherits a:defPPr. It is distinct from an explicit
-		// lvl="0", which inherits a:lvl1pPr.
-		const level = pPr?.['@_lvl'] === undefined ? -1 : Number.parseInt(String(pPr['@_lvl']), 10);
-		const levelKey =
-			level === -1
-				? 'a:defPPr'
-				: `a:lvl${Number.isFinite(level) ? Math.min(Math.max(level + 1, 1), 9) : 1}pPr`;
+		// `level`/`levelKey` are computed above from the paragraph's direct
+		// properties; `a:defPPr` run defaults already sit beneath this merge via
+		// `ctx.bodyDefaultRunStyle`, so only the level entry is looked up here.
 		const inheritedLevelStyle = this.extractTextRunStyle(
 			(
 				(ctx.inheritedTxBody?.['a:lstStyle'] as XmlObject | undefined)?.[levelKey] as
@@ -258,35 +312,42 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			ctx.slideRelationshipMap,
 			false,
 		);
-		const endParagraphStyle = this.extractTextRunStyle(
-			p?.['a:endParaRPr'] as XmlObject | undefined,
-			paraAlign,
-			ctx.slideRelationshipMap,
-			false,
-		);
 		const mergedDefaultRunStyle = {
 			...ctx.bodyDefaultRunStyle,
 			...inheritedLevelStyle,
 			...bodyLevelStyle,
-			...endParagraphStyle,
 			...defaultRunStyle,
 		} as TextStyle;
 
-		// Apply placeholder level-specific defaults as fallback
+		// The shape's `<p:style><a:fontRef>` reference is the shape-level run
+		// default. It sits BELOW anything the text body itself declares (handled
+		// by the merge above) but ABOVE the placeholder / presentation-wide
+		// `p:defaultTextStyle` levels applied next, which only fill undefined
+		// slots. Seeding it here is what stops a themed accent button
+		// (`<a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>`, runs
+		// with no `a:solidFill`) from inheriting `tx1` black and rendering
+		// black-on-orange instead of white.
+		if (mergedDefaultRunStyle.color === undefined && ctx.styleFontRefColor !== undefined) {
+			mergedDefaultRunStyle.color = ctx.styleFontRefColor;
+		}
+		if (mergedDefaultRunStyle.fontFamily === undefined && ctx.styleFontRefTypeface !== undefined) {
+			mergedDefaultRunStyle.fontFamily = ctx.styleFontRefTypeface;
+		}
+
+		// Apply placeholder level-specific defaults as fallback: the paragraph's
+		// level entry first, then `a:defPPr` (stored at key -1) beneath it as the
+		// all-levels base. Both applications only fill still-undefined slots.
 		if (ctx.effectiveLevelStyles) {
-			const normalizedLevel =
-				level === -1 ? -1 : Number.isFinite(level) ? Math.min(Math.max(level, 0), 8) : 0;
-			const phLevel =
-				ctx.effectiveLevelStyles[normalizedLevel] ??
-				ctx.effectiveLevelStyles[-1] ??
-				(normalizedLevel === -1 ? ctx.effectiveLevelStyles[0] : undefined);
+			const phLevel = ctx.effectiveLevelStyles[level];
+			const phBase = ctx.effectiveLevelStyles[-1];
 			if (phLevel) {
 				this.applyPlaceholderLevelDefaults(mergedDefaultRunStyle, phLevel);
 				this.applyPlaceholderLevelDefaults(textStyle, phLevel);
 			}
-		}
-		if (pPr?.['@_algn'] === undefined && textStyle.align !== undefined) {
-			paraAlign = textStyle.align;
+			if (phBase) {
+				this.applyPlaceholderLevelDefaults(mergedDefaultRunStyle, phBase);
+				this.applyPlaceholderLevelDefaults(textStyle, phBase);
+			}
 		}
 
 		// Per-paragraph indentation (also checking placeholder level defaults)
@@ -301,19 +362,13 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		let effectiveMarginLeft = parMarginLeft;
 		let effectiveIndent = parIndent;
 		if (ctx.effectiveLevelStyles) {
-			const normalizedLevel =
-				level === -1 ? -1 : Number.isFinite(level) ? Math.min(Math.max(level, 0), 8) : 0;
-			const phLevel =
-				ctx.effectiveLevelStyles[normalizedLevel] ??
-				ctx.effectiveLevelStyles[-1] ??
-				(normalizedLevel === -1 ? ctx.effectiveLevelStyles[0] : undefined);
-			if (phLevel) {
-				if (effectiveMarginLeft === undefined && phLevel.marginLeft !== undefined) {
-					effectiveMarginLeft = phLevel.marginLeft;
-				}
-				if (effectiveIndent === undefined && phLevel.indent !== undefined) {
-					effectiveIndent = phLevel.indent;
-				}
+			const phLevel = ctx.effectiveLevelStyles[level];
+			const phBase = ctx.effectiveLevelStyles[-1];
+			if (effectiveMarginLeft === undefined) {
+				effectiveMarginLeft = phLevel?.marginLeft ?? phBase?.marginLeft;
+			}
+			if (effectiveIndent === undefined) {
+				effectiveIndent = phLevel?.indent ?? phBase?.indent;
 			}
 		}
 

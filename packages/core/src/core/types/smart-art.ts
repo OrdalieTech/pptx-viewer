@@ -7,6 +7,7 @@
  */
 
 import type { PptxCustomPathProperties } from './geometry';
+import type { PptxSmartArtChrome } from './smart-art-chrome';
 import type { PptxSmartArtLayoutDefinition } from './smart-art-layout-definition';
 import type { PptxSmartArtNode } from './smart-art-node';
 import type {
@@ -25,6 +26,7 @@ export type {
 	PptxSmartArtTextParagraph,
 	PptxSmartArtNodeStyle,
 	PptxSmartArtNode,
+	SmartArtNodeCustomLayout,
 } from './smart-art-node';
 export type {
 	PptxSmartArtAlgorithmParameter,
@@ -35,6 +37,8 @@ export type {
 	PptxSmartArtLayoutAlgorithm,
 	PptxSmartArtLayoutDefinition,
 	PptxSmartArtLayoutNode,
+	PptxSmartArtLayoutNodeShape,
+	PptxSmartArtShapeAdjustment,
 	PptxSmartArtLocalizedText,
 	PptxSmartArtWhen,
 } from './smart-art-layout-definition';
@@ -177,6 +181,14 @@ export interface PptxSmartArtConnection {
 	siblingTransitionId?: string | null;
 	/** Layout presentation identifier used by presentation connections. */
 	presentationId?: string | null;
+	/**
+	 * Connector text, read from the linked `parTrans`/`sibTrans` transition
+	 * point's `dgm:t` (via {@link parentTransitionId} / {@link siblingTransitionId}).
+	 * PowerPoint's own diagram editor lets a user type text directly onto an
+	 * org-chart relationship connector; `undefined` when the transition point
+	 * carries no text. Written back to that point on save.
+	 */
+	label?: string;
 }
 
 /**
@@ -206,10 +218,21 @@ export interface PptxSmartArtDrawingShape extends PptxCustomPathProperties {
 	height: number;
 	/** Rotation in degrees. */
 	rotation?: number;
+	/** Horizontal/vertical mirrors declared on the cached drawing transform. */
+	flipHorizontal?: boolean;
+	flipVertical?: boolean;
 	/** Skew along the X axis in degrees. */
 	skewX?: number;
 	/** Skew along the Y axis in degrees. */
 	skewY?: number;
+	/** Preset-geometry adjustment values from `a:prstGeom/a:avLst`. */
+	shapeAdjustments?: Record<string, number>;
+	/**
+	 * The cached shape declares `a:noFill`. Renderers must leave it unpainted
+	 * rather than substituting a palette colour, because these shapes usually sit
+	 * on top of a painted shape whose fill has to stay visible.
+	 */
+	fillNone?: boolean;
 	/** Solid fill colour (hex). */
 	fillColor?: string;
 	/**
@@ -250,33 +273,41 @@ export interface PptxSmartArtDrawingShape extends PptxCustomPathProperties {
 	text?: string;
 	/** Standard rich-text segments projected from the associated SmartArt node. */
 	textSegments?: TextSegment[];
-	/** Font size in points. */
+	/** Font size in CSS pixels. */
 	fontSize?: number;
 	/** Font colour (hex). */
 	fontColor?: string;
+	/** Authored font family from the first styled run. */
+	fontFamily?: string;
+	/** Authored font weight (400 or 700). */
+	fontWeight?: number;
+	/** Authored font style. */
+	fontStyle?: 'normal' | 'italic';
+	/** Absolute line height in CSS pixels from `a:spcPts`. */
+	lineHeight?: number;
+	/** Relative line height from `a:spcPct`. */
+	lineHeightRatio?: number;
+	/** Absolute spacing after a paragraph in CSS pixels. */
+	lineSpacingAfter?: number;
+	/** Relative spacing after a paragraph. */
+	lineSpacingAfterRatio?: number;
+	/** Text-body insets in CSS pixels. */
+	textInsetLeft?: number;
+	textInsetTop?: number;
+	textInsetRight?: number;
+	textInsetBottom?: number;
+	/** DiagramML text vertical anchor (`t`, `ctr`, or `b`). */
+	textVerticalAnchor?: string;
+	/** Independent DiagramML text-frame geometry from `dsp:txXfrm`. */
+	textFrameX?: number;
+	textFrameY?: number;
+	textFrameWidth?: number;
+	textFrameHeight?: number;
 }
 
-/**
- * Background / outline extracted from `dgm:bg` and `dgm:whole`.
- *
- * @example
- * ```ts
- * const chrome: PptxSmartArtChrome = {
- *   backgroundColor: "#F0F0F0",
- *   outlineColor: "#333333",
- *   outlineWidth: 1,
- * };
- * // => satisfies PptxSmartArtChrome
- * ```
- */
-export interface PptxSmartArtChrome {
-	/** Background fill colour (hex). */
-	backgroundColor?: string;
-	/** Outline stroke colour (hex). */
-	outlineColor?: string;
-	/** Outline stroke width in points. */
-	outlineWidth?: number;
-}
+// Chrome types (PptxSmartArtChrome, PptxSmartArtRawBackgroundFill) live in
+// `smart-art-chrome.ts` to keep this file within the per-file line budget.
+export type { PptxSmartArtChrome, PptxSmartArtRawBackgroundFill } from './smart-art-chrome';
 
 /**
  * Presentation layout variables from `dgm:prSet/dgm:presLayoutVars` (data model)

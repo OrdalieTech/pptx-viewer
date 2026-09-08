@@ -5,8 +5,11 @@ import type {
 } from 'pptx-vanilla-viewer';
 import {
 	createPptxViewer,
+	forgetSessionDeck,
 	loadPresentationDeck,
 	parsePresentationSessionId,
+	rememberSessionDeck,
+	restoreSessionDeck,
 	themeToCssVars,
 } from 'pptx-vanilla-viewer';
 import { PptxHandler } from 'pptx-viewer-core';
@@ -47,6 +50,21 @@ const userName = resolveAutoName();
 // Opt in to the experimental Three.js SmartArt renderer via `?smartArt3D=1`,
 // mirroring demo-vue's `App.vue`.
 const smartArt3D = new URLSearchParams(window.location.search).get('smartArt3D') === '1';
+// Opt in to the experimental Three.js interactive surface-chart renderer
+// (camera orbit/zoom + raycast hover tooltip) via `?surfaceChart3D=1`.
+const surfaceChart3D = new URLSearchParams(window.location.search).get('surfaceChart3D') === '1';
+// Opt in to the experimental Three.js interactive bar3D-chart renderer
+// (camera orbit/zoom, real box meshes) via `?barChart3D=1`.
+const barChart3D = new URLSearchParams(window.location.search).get('barChart3D') === '1';
+// Opt in to the experimental Three.js interactive line3D-chart renderer
+// (camera orbit/zoom, real tube-path meshes) via `?lineChart3D=1`.
+const lineChart3D = new URLSearchParams(window.location.search).get('lineChart3D') === '1';
+// Opt in to the experimental Three.js interactive area3D-chart renderer
+// (camera orbit/zoom, real tube-path + ribbon meshes) via `?areaChart3D=1`.
+const areaChart3D = new URLSearchParams(window.location.search).get('areaChart3D') === '1';
+// Opt in to the experimental Three.js interactive pie3D-chart renderer
+// (camera orbit/zoom, real wedge meshes) via `?pieChart3D=1`.
+const pieChart3D = new URLSearchParams(window.location.search).get('pieChart3D') === '1';
 
 /** Apply theme vars to :root so the dropzone chrome tracks the theme. */
 function applyRootVars(): void {
@@ -80,11 +98,51 @@ function showError(message: string): void {
 	zone.append(error);
 }
 
+/**
+ * Remember the deck now on screen for THIS tab, so the next load can reopen it
+ * (see the `restoreSessionDeck` call at the bottom of this file). Audience tabs
+ * are fed by the presenter window and never restore themselves.
+ */
+function rememberSource(source: PptxViewerSource, name: string): void {
+	if (parsePresentationSessionId(window.location.hash)) {
+		return;
+	}
+	if (source instanceof File) {
+		void source.arrayBuffer().then((buf) => rememberSessionDeck(name, new Uint8Array(buf)));
+		return;
+	}
+	if (source instanceof Uint8Array) {
+		void rememberSessionDeck(name, source);
+		return;
+	}
+	if (source instanceof ArrayBuffer) {
+		void rememberSessionDeck(name, new Uint8Array(source));
+	}
+}
+
+/**
+ * Drop `?sample=1` from the address bar.
+ *
+ * The docs landing page embeds the demo with `?sample=1` so it opens
+ * pre-populated. Once the user opens a deck of their own that param is stale:
+ * left in place it would re-seed the bundled sample on the next refresh and
+ * throw away what they were looking at.
+ */
+function dropSampleParam(): void {
+	const url = new URL(window.location.href);
+	if (!url.searchParams.has('sample')) {
+		return;
+	}
+	url.searchParams.delete('sample');
+	window.history.replaceState({}, '', url.toString());
+}
+
 function openViewer(
 	source: PptxViewerSource,
 	name: string,
 	collaboration?: CollaborationConfig,
 ): void {
+	rememberSource(source, name);
 	viewer?.destroy();
 	viewer = null;
 	app.replaceChildren();
@@ -103,12 +161,22 @@ function openViewer(
 		messages: viewerMessages,
 		editable: true,
 		autosave: true,
+		// A demo wants snappy crash recovery, and an explicit interval is a host
+		// policy that outranks the File > Options AutoRecover cadence.
+		autosaveIntervalMs: 2000,
 		collaboration,
 		smartArt3D,
+		surfaceChart3D,
+		barChart3D,
+		lineChart3D,
+		areaChart3D,
+		pieChart3D,
 		ai: buildViewerAiConfig(),
 		shareDefaults: { userName },
 		onError: (message, error) => {
 			console.error('pptx-vanilla-viewer failed to load', message, error);
+			// A deck the viewer cannot load must not be reopened on every refresh.
+			void forgetSessionDeck();
 			showLanding();
 			showError(message || t('demo.viewer.loadError'));
 		},
@@ -125,9 +193,11 @@ function showLanding(): void {
 	app.append(
 		createDropzone({
 			onFile: (file) => {
+				dropSampleParam();
 				openViewer(file, file.name);
 			},
 			onNewPresentation: () => {
+				dropSampleParam();
 				void (async () => {
 					const { handler, data } = await PptxHandler.createBlank({
 						title: 'Untitled Presentation',
@@ -189,15 +259,28 @@ if (audienceSession) {
 		handler.dispose();
 		openViewer(bytes, 'Shared Session', buildRoomConfig(joinRoom, userName));
 	})();
-} else if (wantSample) {
-	void fetchSampleDeck().then((sample) => {
-		if (sample) {
-			openViewer(sample, 'sample-deck.pptx');
-		} else {
-			showLanding();
-		}
-		return undefined;
-	});
 } else {
-	showLanding();
+	// Nothing in the URL to join: reopen whatever this tab had before a refresh
+	// (with any autosaved edits, since `restoreSessionDeck` prefers the newer of
+	// the two). A restored deck beats `?sample=1`: this tab has moved on from the
+	// bundled sample, so the flag is retired rather than seeding it again.
+	void restoreSessionDeck().then((deck) => {
+		if (deck) {
+			dropSampleParam();
+			openViewer(deck.data, deck.fileName || 'Presentation');
+			return undefined;
+		}
+		if (!wantSample) {
+			showLanding();
+			return undefined;
+		}
+		return fetchSampleDeck().then((sample) => {
+			if (sample) {
+				openViewer(sample, 'sample-deck.pptx');
+			} else {
+				showLanding();
+			}
+			return undefined;
+		});
+	});
 }

@@ -5,7 +5,18 @@ export {
 	cloneSlide,
 	cloneTemplateElementsBySlideId,
 	cloneXmlObject,
+	deepCloneData,
 } from './clone-utils';
+export {
+	groupElements,
+	ungroupElements,
+	isTemplateElementId,
+	makeStoreAwareId,
+	reassignDescendantIds,
+	type GroupResult,
+	type UngroupOptions,
+	type UngroupResult,
+} from './group-ops';
 export {
 	applyCustomShows,
 	applySections,
@@ -21,6 +32,7 @@ export {
 	getElementTextContent,
 	createUniformTextSegments,
 	createEditorId,
+	createDrawingObjectId,
 	createArrayBufferCopy,
 	ensureArrayValue,
 	formatCommentTimestamp,
@@ -35,6 +47,7 @@ export {
 	colorsEqual,
 	buildSrgbColorChoice,
 	serializeColorChoice,
+	serializeColorChoiceWithRef,
 } from './color-xml-preservation';
 
 export {
@@ -50,9 +63,17 @@ export {
 } from './stroke-utils';
 
 export { ooxmlGradientAngleToCssDegrees, cssDegreesToOoxmlGradientAngle } from './gradient-angle';
+export {
+	normalizePositiveFixedAngleDegrees,
+	positiveFixedAngleAttribute,
+	shadowOffsetToDistanceAndDirection,
+} from './positive-fixed-angle';
 
 export { parseDataUrlToBytes, fetchUrlToBytes } from './data-url-utils';
 export { buildInkMlContent, parseInkMlContent } from './inkml-content-part';
+export type { ParsedInkMlContent } from './inkml-content-part';
+export { inkBounds, inkLengthToPx, inkPointMapper } from './inkml-ink-space';
+export type { InkBounds, InkTargetBox } from './inkml-ink-space';
 
 export { stripParentDirSegments } from './strip-parent-dir-segments';
 
@@ -71,7 +92,7 @@ export {
 	type OleUnwrapResult,
 } from './ole-embedded-extract';
 
-export { decomposeSmartArt } from './smartart-decompose';
+export { decomposeSmartArt, computeSmartArtElementsWithoutCache } from './smartart-decompose';
 
 export {
 	parseDiagramRelationshipIds,
@@ -79,7 +100,104 @@ export {
 	type DiagramRelationshipIds,
 } from './diagram-relationship-ids';
 
-export { resetDecomposeCounter, type ContainerBounds } from './smartart-helpers';
+export {
+	resetDecomposeCounter,
+	buildForest,
+	buildTree,
+	treeWidth,
+	treeDepth,
+	type ContainerBounds,
+	type TreeNode,
+} from './smartart-helpers';
+
+export {
+	colour,
+	nodeFill,
+	nodeStroke,
+	nodeTextStyle,
+	nodeOpacity,
+	styleShadow,
+	styleStroke,
+	truncate,
+	fitFontSize,
+	chevronPoints,
+	gearPoints,
+	strokeFor,
+	flattenNodes,
+} from './smartart-layout-style-helpers';
+
+export type {
+	LayoutRect,
+	RenderedNodeTextStyle,
+	RenderedNodeIdentity,
+	RenderedRectNode,
+	RenderedCircleNode,
+	RenderedPolygonNode,
+	RenderedNode,
+	RenderedConnector,
+	LayoutFamily,
+	SmartArtLayoutResult,
+	BoundingBox,
+} from './smartart-layout-types';
+
+export {
+	rectNode,
+	circleNode,
+	polygonNode,
+	styleContext,
+	type StyleContext,
+} from './smartart-layout-interpreter-render';
+
+export {
+	discoverArrangement,
+	itemNode,
+	findConstraint,
+	ratioConstraint,
+	clampByRules,
+	algorithmParam,
+	numericParam,
+	resolveFlowDirection,
+	type ArrangementKind,
+	type ArrangementPlan,
+	type FlowDirection,
+} from './smartart-layout-interpreter-model';
+
+export {
+	buildConstraintIndex,
+	resolveConstraint,
+	resolveRatioConstraint,
+	roleOf,
+	hasReference,
+	EMPTY_CONSTRAINT_INDEX,
+	type ConstraintIndex,
+} from './smartart-constraint-solver';
+export { selectArrangedNodes, chooseAlgType } from './smartart-layout-interpreter-flow';
+export { arrangeLinear, arrangeSnake } from './smartart-layout-interpreter-linear';
+export { arrangeCycle } from './smartart-layout-interpreter-cycle';
+export { arrangeHierarchy } from './smartart-layout-interpreter-hierarchy';
+export { arrangePyramid } from './smartart-layout-interpreter-pyramid';
+export { arrangeComposite } from './smartart-layout-interpreter-composite';
+export { arrangeConn, arrangeSpacer, arrangeText } from './smartart-layout-interpreter-aux';
+export { applyCustomLayoutOverrides } from './smartart-layout-interpreter-custom';
+export { interpretSmartArtLayout, type InterpretLayoutInput } from './smartart-layout-interpreter';
+export { parseSmartArtPointCustomLayout } from './smartart-data-model-attributes';
+export { interpretedLayoutToElements } from './smartart-interpreter-drawing-bridge';
+export { applySmartArtRoleColors, type SmartArtColorRoleMap } from './smartart-node-role-colors';
+export {
+	resolveSmartArtNodeCoherent3DOff,
+	resolveSmartArtNodeStyleRoles,
+} from './smartart-node-style-role';
+export {
+	resolveSmartArtEffectIntensity,
+	type SmartArtEffectIntensity,
+} from './smartart-effect-intensity';
+export {
+	buildSmartArtColorRoleMap,
+	buildSmartArtColorLists,
+	parseSmartArtColorListHexes,
+	type SmartArtColorListDeps,
+	type SmartArtColorLists,
+} from './smartart-color-lists';
 
 export {
 	addSmartArtNode,
@@ -131,6 +249,7 @@ export {
 	type StandardEncryptionInfo,
 	type EncryptionAlgorithm,
 	type EncryptionOptions,
+	type EncryptionScheme,
 } from './ooxml-crypto';
 
 export {
@@ -141,7 +260,11 @@ export {
 	type Ole2DirectoryEntry,
 } from './ole2-parser';
 
-export { verifyModifyPassword, createModifyVerifier } from './modify-verifier';
+export {
+	verifyModifyPassword,
+	createModifyVerifier,
+	resolveModifyVerifierAlgorithmName,
+} from './modify-verifier';
 
 export {
 	detectDigitalSignatures,
@@ -203,28 +326,33 @@ export { normalizePartPath, resolveReferenceUriToPart } from './signature-refere
 
 export { computeDigestBase64 as computeDigestBase64WebCrypto } from './signature-digest';
 
-export { decodeXmlEntities } from './xml-entities';
+export { decodeXmlEntities, encodeXmlAttributeValue, encodeXmlTextValue } from './xml-entities';
+
+export {
+	preservesSpreadsheetXmlWhitespace,
+	preservesXmlWhitespace,
+	WHITESPACE_PRESERVING_TAGS,
+} from './xml-whitespace';
 
 export { computeDetailStatus, computeVerificationStatus } from './signature-inspection-status';
 
-export {
-	parseSeriesTrendlines,
-	parseSeriesErrBars,
-	parseDataTable,
-	parseLineStyle,
-} from './chart-advanced-parser';
+export { parseSeriesTrendlines, parseSeriesErrBars, parseLineStyle } from './chart-advanced-parser';
+export { parseDataTable } from './chart-data-table-parser';
 
 export {
 	parseSeriesDataPoints,
-	parseSeriesDataLabels,
 	parseSeriesExplosion,
 	parseMarker,
 	parseShapeProps,
 } from './chart-series-detail-parser';
+export { parseSeriesDataLabels, parseChartDataLabelOptions } from './chart-data-label-parser';
 
 export { parseChartAxes, parseChart3DSurfaces } from './chart-axis-parser';
 
 export { parseCxChartSeries } from './chart-cx-parser';
+
+export { flattenChartUserShapes } from './chart-user-shapes-parser';
+export type { ChartUserShapesChartBox } from './chart-user-shapes-parser';
 
 export { parseEmbeddedXlsx } from './chart-xlsx-parser';
 
@@ -236,6 +364,9 @@ export {
 	chartDataAddCategory,
 	chartDataRemoveCategory,
 } from './chart-data-utils';
+
+export { isParetoChartData, resolveDisplayedChartTypeName } from './chart-pareto-detect';
+export type { ParetoDetectableChartData } from './chart-pareto-detect';
 
 export {
 	parseSlideDrawingGuides,
@@ -258,6 +389,7 @@ export {
 export {
 	selectAlternateContentBranch,
 	unwrapAlternateContent,
+	reapplyAlternateContentToTree,
 	areNamespacesSupported,
 	isAlternateContentChoiceSupported,
 	isAlternateContentChoiceXmlSupported,
@@ -290,6 +422,13 @@ export { parseActiveXControlsFromSlide } from './activex-parser';
 export { applyActiveXControlsToSlide, buildActiveXControlNode } from './activex-serializer';
 
 export { parseKinsoku, applyKinsokuToXml } from './kinsoku-parser';
+
+export { parsePresentationSmartTags } from './smart-tags-parser';
+
+export {
+	isHeaderFooterPlaceholder,
+	inheritedPlaceholderFieldType,
+} from './header-footer-placeholder';
 
 export { parseBodyPrBooleanAttrs, writeBodyPrBooleanAttrs } from './body-properties-parser';
 
@@ -336,25 +475,13 @@ export {
 	type RepairResult,
 } from './pptx-validator';
 
-export { reResolveSlideColors, applyThemeToData, buildThemeColorMap } from './theme-switching';
-export { applyThemeOverrideToSlide } from './slide-theme-override';
-
 export {
-	computeSmartArtLayout,
-	computeSnakeLayout,
-	computeLinearLayout,
-	computeHierarchyLayout,
-	computeCycleLayout,
-	computePyramidLayout,
-	computeMatrixLayout,
-	parseLayoutDefinition,
-	layoutEngineShapesToDrawingShapes,
-	type LayoutEngineShape,
-	type LayoutConstraints,
-	type ParsedLayoutDef,
-	type LayoutAlgorithmType,
-	type LayoutRule,
-} from './smartart-layout-engine';
+	reResolveSlideColors,
+	reResolveElementColors,
+	applyThemeToData,
+	buildThemeColorMap,
+} from './theme-switching';
+export { applyThemeOverrideToSlide } from './slide-theme-override';
 
 export {
 	applySmartArtLayoutDefinition,
@@ -366,9 +493,11 @@ export {
 	parseSmartArtColorStyleLabels,
 	parseSmartArtDefinitionMetadata,
 	parseSmartArtQuickStyleLabels,
+	parseSmartArtStyleLabelRefs,
 	validateSmartArtColorStyleLabels,
 	validateSmartArtDefinitionMetadata,
 } from './smartart-definition-metadata';
+export type { SmartArtStyleLabelRefs } from './smartart-definition-metadata';
 
 export {
 	checkPresentation,
@@ -426,15 +555,18 @@ export { resolveLayoutDisplayName, type LayoutDisplayNameInput } from './layout-
 
 export {
 	reorderObjectKeys,
+	reorderObjectKeysByLocalName,
 	EFFECT_LST_ORDER,
 	SP_PR_ORDER,
 	TC_PR_BORDERS_ORDER,
 	BLIP_FILL_ORDER,
+	PRESENTATION_CHILD_ORDER,
 } from './xml-reorder';
 
 export {
 	xmlChild,
 	xmlChildren,
+	ensureXmlChild,
 	xmlAttr,
 	xmlAttrNumber,
 	xmlAttrBool,
@@ -473,3 +605,34 @@ export { parseDrawingLineDash, applyDrawingLineDash } from './drawing-line-dash'
 export { extractStyleReferenceColorXml, withThemePlaceholderColor } from './theme-style-reference';
 
 export { deriveSlideTitle, deriveSlideTitles } from './slide-title';
+
+export {
+	cropShapeForPresetGeometry,
+	presetGeometryForCropShape,
+	syncPictureShapeTypeWithCropShape,
+} from './crop-shape-geometry';
+
+// Auto-numbered bullet markers (`ST_TextAutonumberScheme`). The single copy:
+// the load path stamps the marker onto the parsed segment and
+// `pptx-viewer-shared` re-exports these for the render layer, so the two can
+// never disagree and paint a double marker.
+export {
+	formatAutoNumberMarker,
+	romanNumeral,
+	alphaLabel,
+	TEXT_AUTONUMBER_SCHEMES,
+} from './auto-number-format';
+export {
+	formatScriptAutoNumber,
+	bijectiveLabel,
+	toChineseNumeral,
+	toHebrewNumeral,
+	toArabicAbjadNumeral,
+	toDevanagariDigits,
+	toThaiDigits,
+	toFullWidthDigits,
+	HINDI_VOWELS,
+	HINDI_CONSONANTS,
+	THAI_CONSONANTS,
+	ARABIC_HIJAI_LETTERS,
+} from './auto-number-scripts';

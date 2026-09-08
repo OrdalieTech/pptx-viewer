@@ -508,23 +508,56 @@ describe('interpret hierarchy', () => {
 		expect(layout!.connectors).toHaveLength(2);
 	});
 
-	it('indents and stacks children for a hanging (hierBranch=l) tree', () => {
-		const layout = interpretSmartArtLayout({
-			layoutDefinition: hierDef,
-			nodes: nested,
-			flat: [n('1', 'Root'), n('2', 'A'), n('3', 'B')],
-			box: BOX,
-			palette: PALETTE,
-			style: STYLE,
-			elementId: ID,
-			presLayoutVars: { hierarchyBranch: 'l' },
+	// Measured against genuine PowerPoint org charts (see
+	// `smartart-orgchart-hierbranch.pptx` in the core corpus and the doc comment
+	// on `pptx-viewer-core`'s `smartart-layout-interpreter-hierarchy.ts`): the
+	// root's own children ALWAYS fan out in one row whatever `hierBranch` says,
+	// and only deeper generations hang, all of them the SAME direction ("Left"
+	// and "Right Hanging" do not mirror).
+	const threeLevel = [n('1', 'Root', [n('2', 'A', [n('3', 'A1'), n('4', 'A2')])])];
+	const threeLevelFlat = [n('1', 'Root'), n('2', 'A'), n('3', 'A1'), n('4', 'A2')];
+
+	for (const hierarchyBranch of ['l', 'r'] as const) {
+		it(`fans the root's own children and hangs deeper generations for hierBranch=${hierarchyBranch}`, () => {
+			const layout = interpretSmartArtLayout({
+				layoutDefinition: hierDef,
+				nodes: threeLevel,
+				flat: threeLevelFlat,
+				box: BOX,
+				palette: PALETTE,
+				style: STYLE,
+				elementId: ID,
+				presLayoutVars: { hierarchyBranch },
+			});
+			const boxes = rects(layout!.nodes);
+			const root = boxes.find((b) => b.key.includes('-hier-1-'))!;
+			const a = boxes.find((b) => b.key.includes('-hier-2-'))!;
+			const a1 = boxes.find((b) => b.key.includes('-hier-3-'))!;
+			const a2 = boxes.find((b) => b.key.includes('-hier-4-'))!;
+			expect(a.y).toBeGreaterThan(root.y);
+			// Grandchildren hang: stacked vertically in one indented column.
+			expect(a1.y).toBeGreaterThan(a.y);
+			expect(a2.y).toBeGreaterThan(a1.y);
+			expect(a1.x).toBe(a2.x);
+			expect(a1.x).not.toBe(a.x);
 		});
-		const boxes = rects(layout!.nodes);
-		const root = boxes.find((b) => b.key.includes('-hier-1-'))!;
-		const childA = boxes.find((b) => b.key.includes('-hier-2-'))!;
-		const childB = boxes.find((b) => b.key.includes('-hier-3-'))!;
-		expect(childA.x).toBeGreaterThan(root.x);
-		expect(childB.y).toBeGreaterThan(childA.y);
+	}
+
+	it('hangs the tail the same direction for "Left" and "Right Hanging"', () => {
+		const run = (hierarchyBranch: 'l' | 'r') =>
+			rects(
+				interpretSmartArtLayout({
+					layoutDefinition: hierDef,
+					nodes: threeLevel,
+					flat: threeLevelFlat,
+					box: BOX,
+					palette: PALETTE,
+					style: STYLE,
+					elementId: ID,
+					presLayoutVars: { hierarchyBranch },
+				})!.nodes,
+			).map((b) => [b.x, b.y]);
+		expect(run('l')).toStrictEqual(run('r'));
 	});
 });
 

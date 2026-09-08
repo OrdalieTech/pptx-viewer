@@ -1,6 +1,13 @@
+import { themeColorRefFromColorChoice } from '../../color/theme-color-ref';
 import type { ConnectorArrowType, ShapeStyle, StrokeDashType, XmlObject } from '../../types';
 import { extractColorChoiceXml } from '../../utils/color-xml-preservation';
-import { drawingChild, hasDrawingChild } from './drawing-fill-xml';
+import {
+	captureStyleBaseline,
+	STYLE_MATRIX_EFFECT_KEYS,
+	STYLE_MATRIX_FILL_KEYS,
+	STYLE_MATRIX_LINE_KEYS,
+} from '../runtime/authored-shape-style';
+import { drawingChild, hasDrawingChild, hasEmptyDrawingChild } from './drawing-fill-xml';
 import { extractGradientTileRect } from './PptxGradientStyleCodec';
 import { applyScene3dStyle, applyShape3dStyle } from './shape-style-3d-helpers';
 import { applyLineProperties } from './shape-style-line-helpers';
@@ -34,6 +41,7 @@ export interface PptxShapeStyleExtractorContext {
 	extractReflectionStyle: (shapeProps: XmlObject) => Partial<ShapeStyle>;
 	extractBlurStyle: (shapeProps: XmlObject) => Partial<ShapeStyle>;
 	extractEffectDagStyle: (shapeProps: XmlObject) => Partial<ShapeStyle>;
+	extractFillOverlayStyle: (shapeProps: XmlObject) => Partial<ShapeStyle>;
 }
 
 export interface IPptxShapeStyleExtractor {
@@ -68,6 +76,10 @@ export class PptxShapeStyleExtractor implements IPptxShapeStyleExtractor {
 			const solidFillColorXml = extractColorChoiceXml(solidFill);
 			if (solidFillColorXml) {
 				style.fillColorXml = solidFillColorXml;
+			}
+			const solidFillColorRef = themeColorRefFromColorChoice(solidFill);
+			if (solidFillColorRef) {
+				style.fillColorRef = solidFillColorRef;
 			}
 		} else if (gradFill) {
 			style.fillMode = 'gradient';
@@ -143,16 +155,44 @@ export class PptxShapeStyleExtractor implements IPptxShapeStyleExtractor {
 			style.fillMode = 'group';
 		} else if (styleNode?.['a:fillRef']) {
 			this.context.resolveThemeFillRef(styleNode['a:fillRef'] as XmlObject, style);
+			// Reached only when `spPr` declared NO fill of its own, so the
+			// reference is what paints this shape. Record what it resolved to:
+			// the save path writes a concrete fill only once the flat style
+			// stops agreeing with this, because an `spPr` fill outranks
+			// `a:fillRef` and would cut the shape off from the theme.
+			style.inheritedFillStyle = captureStyleBaseline(style, STYLE_MATRIX_FILL_KEYS);
 		}
 
 		const lineNode = shapeProps['a:ln'] as XmlObject | undefined;
-		if (lineNode) {
-			const earlyReturn = applyLineProperties(lineNode, style, this.context);
-			if (earlyReturn) {
-				return style;
-			}
-		} else if (styleNode?.['a:lnRef']) {
+		// `<p:style><a:lnRef>` is the BASE outline (the theme's `lnStyleLst`
+		// entry plus the referenced colour); `spPr/a:ln` overrides individual
+		// properties on top of it. Treating the two as alternatives dropped the
+		// theme colour for any shape that carried both, which is the ordinary
+		// shape a connector produces: PowerPoint writes the colour into `a:lnRef`
+		// and leaves `a:ln` holding nothing but the arrow ends
+		// (`<a:ln><a:headEnd type="oval"/></a:ln>`). Those connectors fell through
+		// to the default stroke and drew black instead of the theme accent.
+		//
+		// Resolving the ref first is safe because `applyLineProperties` only
+		// writes what the `a:ln` actually declares - and `<a:noFill/>` still wins,
+		// since it returns early after clearing the stroke outright.
+		if (styleNode?.['a:lnRef']) {
 			this.context.resolveThemeLineRef(styleNode['a:lnRef'] as XmlObject, style);
+			// Snapshot the reference's contribution BEFORE `a:ln` overrides part
+			// of it below, so the writer can tell an authored outline property
+			// from one the theme's line style handed down.
+			style.inheritedLineStyle = captureStyleBaseline(style, STYLE_MATRIX_LINE_KEYS);
+		}
+		if (lineNode) {
+			// `applyLineProperties` returns true for `<a:ln><a:noFill/></a:ln>`,
+			// meaning "outline fully resolved as none". That is a statement about
+			// the OUTLINE only. Returning from the whole extractor on it also
+			// threw away every shape-level effect below (shadow, glow, soft edge,
+			// reflection, blur, effectRef), the `<a:fontRef>` style reference, and
+			// the 3D scene/shape styles - for the very common case of a shape with
+			// no outline. Losing `fontRef` is what made themed accent buttons
+			// resolve their text colour to black.
+			applyLineProperties(lineNode, style, this.context);
 		}
 
 		Object.assign(style, this.context.extractShadowStyle(shapeProps));
@@ -162,9 +202,46 @@ export class PptxShapeStyleExtractor implements IPptxShapeStyleExtractor {
 		Object.assign(style, this.context.extractReflectionStyle(shapeProps));
 		Object.assign(style, this.context.extractBlurStyle(shapeProps));
 		Object.assign(style, this.context.extractEffectDagStyle(shapeProps));
+		Object.assign(style, this.context.extractFillOverlayStyle(shapeProps));
 
 		if (styleNode?.['a:effectRef']) {
+			// An EMPTY `<a:effectLst/>` on `spPr` is PowerPoint's spelling of
+			// "this shape has no effects" - it is what the UI writes when the user
+			// switches a themed shadow off. Because the container holds nothing,
+			// none of the extractors above set an effect property, and
+			// `resolveThemeEffectRef` only skips a property the shape already
+			// claimed; so the theme's shadow was handed straight back and the
+			// author's explicit "none" was silently overruled. That is the
+			// inheritance-flattening class inverted: an authored ABSENCE lost to
+			// inheritance.
+			//
+			// The ref is still resolved, then its contribution rolled back, so
+			// `effectRefIdx` / `effectRefColorXml` survive for the save path and
+			// `<a:effectRef>` still round-trips. Only keys this call ADDED are
+			// removed, so nothing authored can be caught by it.
+			const suppressInherited = hasEmptyDrawingChild(shapeProps, 'effectLst');
+			// Snapshot what the shape already carries BEFORE the ref runs, so we
+			// can tell "the ref set this" from "the shape already had this" -
+			// `resolveThemeEffectRef` only fills gaps (`!style.shadowColor` etc.),
+			// so anything it adds here was not authored on `spPr`.
+			const authoredBefore = new Set(Object.keys(style));
 			this.context.resolveThemeEffectRef(styleNode['a:effectRef'] as XmlObject, style);
+			if (suppressInherited) {
+				for (const key of Object.keys(style) as (keyof ShapeStyle)[]) {
+					if (!authoredBefore.has(key) && key !== 'effectRefIdx' && key !== 'effectRefColorXml') {
+						delete style[key];
+					}
+				}
+			} else {
+				// Record exactly what the reference contributed so the save path
+				// can leave `spPr` effect-less while the flat style still agrees
+				// with it, instead of baking a resolved shadow/glow/3D scene back
+				// in and outranking `<a:effectRef>` on the very next save (the
+				// effect-scope twin of `inheritedFillStyle` / `inheritedLineStyle`
+				// above).
+				const inheritedKeys = STYLE_MATRIX_EFFECT_KEYS.filter((key) => !authoredBefore.has(key));
+				style.inheritedEffectStyle = captureStyleBaseline(style, inheritedKeys);
+			}
 		}
 
 		// Persist `<a:fontRef>` indices and override-color XML so they can be

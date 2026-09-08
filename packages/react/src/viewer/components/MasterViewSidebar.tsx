@@ -4,6 +4,8 @@ import type {
 	PptxHandoutMaster,
 	MasterViewTab,
 } from 'pptx-viewer-core';
+import type { MasterViewCrudAction, MasterViewCrudActionId } from 'pptx-viewer-shared';
+import { masterViewBackgroundColor } from 'pptx-viewer-shared';
 import React, { useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { LuPanelLeftClose } from 'react-icons/lu';
@@ -37,13 +39,20 @@ interface MasterViewSidebarProps {
 	notesMaster: PptxNotesMaster | undefined;
 	handoutMaster: PptxHandoutMaster | undefined;
 	handoutSlidesPerPage: number;
+	/** Editing affordances are offered only on an editable deck. */
+	canEdit?: boolean;
 	onSelectMaster: (index: number) => void;
 	onSelectLayout: (masterIndex: number, layoutIndex: number) => void;
 	onCollapse: () => void;
 	onTabChange: (tab: MasterViewTab) => void;
+	/** The sidebar's Insert/Duplicate/Delete/Rename Layout|Master buttons. */
+	crudActions: MasterViewCrudAction[];
+	onCrudAction: (id: MasterViewCrudActionId) => void;
 	onHandoutSlidesPerPageChange: (count: number) => void;
 	onNotesMasterBackgroundChange: (color: string) => void;
 	onHandoutMasterBackgroundChange: (color: string) => void;
+	/** Format Background for the selected slide master or layout. */
+	onSlidesBackgroundChange: (color: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,16 +68,27 @@ export function MasterViewSidebar({
 	notesMaster,
 	handoutMaster,
 	handoutSlidesPerPage,
+	canEdit,
 	onSelectMaster,
 	onSelectLayout,
 	onCollapse,
 	onTabChange,
+	crudActions,
+	onCrudAction,
 	onHandoutSlidesPerPageChange,
 	onNotesMasterBackgroundChange,
 	onHandoutMasterBackgroundChange,
+	onSlidesBackgroundChange,
 }: MasterViewSidebarProps): React.ReactElement {
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const { t } = useTranslation();
+
+	// Which part's background the swatch shows, decided by the same shared rule
+	// that decides where a colour is written.
+	const slidesBackground = masterViewBackgroundColor(
+		{ slideMasters },
+		{ tab: 'slides', masterIndex: activeMasterIndex, layoutIndex: activeLayoutIndex },
+	);
 
 	const handleMasterClick = useCallback(
 		(index: number) => {
@@ -135,6 +155,39 @@ export function MasterViewSidebar({
 
 			{/* Scrollable content per tab */}
 			<div ref={scrollRef} className='flex-1 space-y-2 overflow-y-auto px-1.5 pb-2 pt-1'>
+				{masterViewTab === 'slides' && canEdit && (
+					<section className='space-y-1.5 rounded-md border border-border/60 p-2'>
+						<div className='text-[11px] text-muted-foreground'>
+							{t('pptx.master.notesMasterBackground')}
+						</div>
+						<input
+							type='color'
+							aria-label={t('pptx.master.backgroundColorLabel')}
+							className='h-7 w-full cursor-pointer rounded border border-border/60 bg-transparent'
+							value={slidesBackground ?? '#ffffff'}
+							onChange={(event) => onSlidesBackgroundChange(event.target.value)}
+						/>
+					</section>
+				)}
+
+				{masterViewTab === 'slides' && canEdit && crudActions.length > 0 && (
+					<section className='grid grid-cols-2 gap-1 rounded-md border border-border/60 p-2'>
+						{crudActions.map((action) => (
+							<button
+								key={action.id}
+								type='button'
+								data-testid={`pptx-master-crud-${action.id}`}
+								disabled={!action.enabled}
+								title={action.disabledReasonKey ? t(action.disabledReasonKey) : undefined}
+								onClick={() => onCrudAction(action.id)}
+								className='rounded border border-border/60 px-1.5 py-1 text-[10px] hover:bg-accent/60 disabled:cursor-not-allowed disabled:opacity-40'
+							>
+								{t(action.labelKey)}
+							</button>
+						))}
+					</section>
+				)}
+
 				{masterViewTab === 'slides' && (
 					<SlideMastersList
 						slideMasters={slideMasters}

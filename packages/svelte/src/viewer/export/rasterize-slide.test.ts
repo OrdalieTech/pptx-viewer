@@ -37,6 +37,12 @@ describe('createRasterizeSlide', () => {
 			getMediaDataUrls: () => new Map(),
 			getTranslator: () => createTranslator(() => 'en'),
 			smartArt3D: false,
+			surfaceChart3D: false,
+			barChart3D: false,
+			lineChart3D: false,
+			areaChart3D: false,
+			pieChart3D: false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 
@@ -61,6 +67,12 @@ describe('createRasterizeSlide', () => {
 			getMediaDataUrls: () => new Map(),
 			getTranslator: () => createTranslator(() => 'en'),
 			smartArt3D: false,
+			surfaceChart3D: false,
+			barChart3D: false,
+			lineChart3D: false,
+			areaChart3D: false,
+			pieChart3D: false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 
@@ -93,6 +105,12 @@ describe('createRasterizeSlide', () => {
 			getMediaDataUrls: () => new Map(),
 			getTranslator: () => createTranslator(() => 'en'),
 			smartArt3D: false,
+			surfaceChart3D: false,
+			barChart3D: false,
+			lineChart3D: false,
+			areaChart3D: false,
+			pieChart3D: false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 
@@ -114,6 +132,12 @@ describe('createRasterizeSlide', () => {
 			getMediaDataUrls: () => new Map(),
 			getTranslator: () => createTranslator(() => 'en'),
 			smartArt3D: false,
+			surfaceChart3D: false,
+			barChart3D: false,
+			lineChart3D: false,
+			areaChart3D: false,
+			pieChart3D: false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 
@@ -137,6 +161,12 @@ describe('createRasterizeSlide', () => {
 			getMediaDataUrls: () => new Map(),
 			getTranslator: () => createTranslator(() => 'en'),
 			smartArt3D: false,
+			surfaceChart3D: false,
+			barChart3D: false,
+			lineChart3D: false,
+			areaChart3D: false,
+			pieChart3D: false,
+			getImageResolutionScale: () => 1,
 			waitForFrame: () => Promise.resolve(),
 		});
 

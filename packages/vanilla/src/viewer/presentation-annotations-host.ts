@@ -9,6 +9,13 @@ import type { ViewerChrome } from './ui';
 
 export interface PresentationAnnotationsHost {
 	sync(snapshot: PresentationSnapshot): void;
+	/**
+	 * Discard the show's ink. The controller owns the strokes, so emptying
+	 * `snapshot.inkStrokes` alone never erased anything: the next `sync` remounted
+	 * the overlay from the controller's own (untouched) list and the ink came
+	 * straight back.
+	 */
+	clear(): void;
 	finish(): Promise<'none' | 'kept' | 'discarded'>;
 	dispose(): void;
 }
@@ -21,12 +28,15 @@ export function createPresentationAnnotationsHost(options: {
 	getChrome(): ViewerChrome;
 	getSnapshot(): PresentationSnapshot;
 	updateSnapshot(patch: Partial<PresentationSnapshot>): void;
+	/** File > Options > Advanced > "Prompt to keep ink annotations when exiting". */
+	shouldPromptKeepAnnotations?(): boolean;
 }): PresentationAnnotationsHost {
 	const controller: PresentationAnnotationsController = createPresentationAnnotationsController({
 		doc: options.doc,
 		t: options.t,
 		getSlides: () => options.store.get().slides,
 		commitSlides: (slides) => options.editor.commitSlides(slides),
+		shouldPromptKeepAnnotations: options.shouldPromptKeepAnnotations,
 		onStrokesChange: (inkStrokes) => options.updateSnapshot({ inkStrokes }),
 		onPointerMove: ({ x, y }) =>
 			options.updateSnapshot({
@@ -50,8 +60,10 @@ export function createPresentationAnnotationsHost(options: {
 				slideIndex: state.currentSlide,
 				canvasSize: state.canvasSize,
 				pointer: snapshot.pointer,
+				blackout: snapshot.blackout,
 			});
 		},
+		clear: () => controller.clear(),
 		finish: () => controller.finishPresentation(),
 		dispose: () => controller.dispose(),
 	};

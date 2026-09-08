@@ -11,11 +11,14 @@
 	 * context menu). This binding has no such menu, so those two ops are
 	 * re-housed into the New Slide split button's dropdown rather than dropped.
 	 */
-	import type { PptxLayoutOption } from 'pptx-viewer-core';
+	import type { PptxLayoutOption, PptxLayoutPreview } from 'pptx-viewer-core';
+	import { scopeLayoutOptionsToSlide } from 'pptx-viewer-shared';
 
 	import { useTranslator } from '../../../../i18n/context';
 	import type { EditorState } from '../../../editor/editor-state.svelte';
 	import { anchoredPopup } from '../anchored-popup';
+	import LayoutGalleryMenu from './LayoutGalleryMenu.svelte';
+	import SlideTemplatesLauncher from './SlideTemplatesLauncher.svelte';
 
 	const { editor, onnavigate }: { editor: EditorState; onnavigate: (index: number) => void } =
 		$props();
@@ -23,10 +26,22 @@
 
 	let openMenu = $state<'new' | 'layout' | null>(null);
 	let layouts = $state<PptxLayoutOption[]>([]);
+	/**
+	 * Layout artwork for the thumbnails, fetched alongside the layout list.
+	 *
+	 * Parsing every layout part is only worth doing once the user opens the
+	 * menu; core memoises the result, so reopening it costs nothing.
+	 */
+	let previews = $state<ReadonlyMap<string, PptxLayoutPreview>>(new Map());
 	// eslint-disable-next-line prefer-const
 	let newSplitEl: HTMLElement | undefined = $state();
 	// eslint-disable-next-line prefer-const
 	let layoutSplitEl: HTMLElement | undefined = $state();
+
+	/** Layout gallery scoped to the active slide's own master (shared `scopeLayoutOptionsToSlide`); dedupes same-named layouts across a multi-master deck. */
+	const scopedLayouts = $derived(
+		scopeLayoutOptionsToSlide(layouts, editor.slides[editor.currentSlideIndex]?.layoutPath),
+	);
 
 	function run(action: () => number | null): void {
 		const index = action();
@@ -57,6 +72,7 @@
 			return;
 		}
 		layouts = await editor.slidesOps.availableLayouts();
+		previews = await editor.slidesOps.layoutPreviews();
 		openMenu = 'layout';
 	}
 </script>
@@ -83,8 +99,8 @@
 				disabled={!editor.editable}
 				aria-haspopup="menu"
 				aria-expanded={openMenu === 'new'}
-				aria-label={t('pptx.ribbon.duplicateSlide')}
-				title={t('pptx.ribbon.duplicateSlide')}
+				aria-label={t('pptx.home.chooseLayout')}
+				title={t('pptx.home.chooseLayout')}
 				onclick={() => (openMenu = openMenu === 'new' ? null : 'new')}
 			>
 				<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
@@ -96,6 +112,9 @@
 				</div>
 			{/if}
 		</div>
+
+		<!-- Slide Templates gallery: pre-designed starter slides (React parity). -->
+		<SlideTemplatesLauncher {editor} {onnavigate} />
 
 		<!-- Layout dropdown: re-map the current slide onto another layout. -->
 		<div class="pptx-svelte-rgroup-split" bind:this={layoutSplitEl} onfocusout={onFocusOut}>
@@ -113,14 +132,13 @@
 				<span>{t('pptx.master.layout')}</span>
 			</button>
 			{#if openMenu === 'layout'}
-				<div class="pptx-svelte-rgroup-pop" role="menu" use:anchoredPopup={{ anchor: layoutSplitEl }}>
-					{#if layouts.length === 0}
-						<span class="pptx-svelte-rgroup-pop-empty">{t('pptx.statusBar.noSlides')}</span>
-					{:else}
-						{#each layouts as layout (layout.path)}
-							<button type="button" role="menuitem" onclick={() => void runAsync(() => editor.slidesOps.applyLayout(layout.path))}>{layout.name}</button>
-						{/each}
-					{/if}
+				<div class="pptx-svelte-rgroup-pop pptx-svelte-rgroup-pop-wide" role="menu" use:anchoredPopup={{ anchor: layoutSplitEl }}>
+					<LayoutGalleryMenu
+						layouts={scopedLayouts}
+						{previews}
+						currentLayoutPath={editor.slides[editor.currentSlideIndex]?.layoutPath}
+						onselect={(layout) => void runAsync(() => editor.slidesOps.applyLayout(layout.path))}
+					/>
 				</div>
 			{/if}
 		</div>
@@ -129,7 +147,6 @@
 			type="button"
 			class="pptx-svelte-rgroup-main"
 			disabled={!editor.editable}
-			aria-label={t('pptx.sections.resetSlideTitle')}
 			title={t('pptx.sections.resetSlideTitle')}
 			onclick={() => void runAsync(() => editor.slidesOps.resetSlide())}
 		>
@@ -141,7 +158,6 @@
 			type="button"
 			class="pptx-svelte-rgroup-main"
 			disabled={!editor.editable || editor.slides.length === 0}
-			aria-label={t('pptx.sections.addSection')}
 			title={t('pptx.sections.addSection')}
 			onclick={() => editor.sectionOps.add(t('pptx.sections.defaultName'))}
 		>
@@ -274,9 +290,11 @@
 		color: #fecaca !important;
 	}
 
-	.pptx-svelte-rgroup-pop-empty {
-		padding: 6px 10px;
-		color: var(--pptx-muted-foreground, #94a3b8);
-		font-size: 11px;
+	/* The gallery brings its own grid width and padding. */
+	.pptx-svelte-rgroup-pop-wide {
+		min-width: 0;
+		max-height: none;
+		overflow: visible;
+		padding: 0;
 	}
 </style>

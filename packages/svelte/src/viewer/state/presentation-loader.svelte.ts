@@ -1,26 +1,39 @@
 import type {
 	ParsedTableStyleMap,
 	PptxAppProperties,
+	PptxCommentAuthor,
 	PptxCoreProperties,
 	PptxCustomProperty,
 	PptxEmbeddedFont,
+	PptxCompatibilityWarning,
 	PptxHandoutMaster,
 	PptxHeaderFooter,
+	PptxHandlerLoadOptions,
+	PptxModernCommentAuthor,
+	PptxModifyVerifier,
 	PptxNotesMaster,
 	PptxPresentationProperties,
 	PptxCustomShow,
 	PptxSection,
 	PptxSlide,
 	PptxSlideMaster,
+	PptxTagCollection,
 	PptxThemeColorScheme,
 	PptxTheme,
 	PptxThemeOption,
+	PptxViewProperties,
 } from 'pptx-viewer-core';
 import { EncryptedFileError, PptxHandler } from 'pptx-viewer-core';
-import type { CanvasSize } from 'pptx-viewer-shared';
+import type { CanvasSize, CollabLoadOrigin, SlideSizeEmu } from 'pptx-viewer-shared';
 import { DEFAULT_CANVAS_HEIGHT, DEFAULT_CANVAS_WIDTH } from 'pptx-viewer-shared';
 
-import { resolveLazyImages, resolveMediaUrls, revokeBlobUrls } from './loader-helpers';
+import {
+	resolveLazyImages,
+	resolveLazyTableCellImages,
+	resolveLazyTableStyleImages,
+	resolveMediaUrls,
+	revokeBlobUrls,
+} from './loader-helpers';
 
 /**
  * Reactive load pipeline for the Svelte viewer: the runes port of the Vue
@@ -41,10 +54,33 @@ export class PresentationLoader {
 	sections = $state.raw<PptxSection[]>([]);
 	headerFooter = $state.raw<PptxHeaderFooter>({});
 	presentationProperties = $state.raw<PptxPresentationProperties>({});
+	/**
+	 * View properties (`ppt/viewProps.xml`, `p:viewPr`): grid spacing, snap /
+	 * guide toggles, last view, splitter state, etc. `gridSpacing` lives here,
+	 * NOT on `presentationProperties` -- `p:gridSpacing` is a child of
+	 * `p:viewPr`, and a real PowerPoint file never populates it under
+	 * `p:presentationPr`.
+	 */
+	viewProperties = $state.raw<PptxViewProperties | undefined>(undefined);
+	/** Write-protection verifier from `p:modifyVerifier` (`presentation.xml`). */
+	modifyVerifier = $state.raw<PptxModifyVerifier | undefined>(undefined);
+	/**
+	 * Every compatibility warning the load (and any save/patch so far this
+	 * session) has raised, from `handler.getCompatibilityWarnings()`: unmodelled
+	 * markup round-tripped only via `rawXml`, an external image reference that
+	 * cannot be embedded, and so on. Feeds the compat-toast stack (wave 4 #3).
+	 */
+	compatibilityWarnings = $state.raw<PptxCompatibilityWarning[]>([]);
 	customShows = $state.raw<PptxCustomShow[]>([]);
+	/** Modern comment authors (`ppt/authors.xml`, Office 2021 `p188:author`), for the @-mention typeahead (wave-4 B5). */
+	modernCommentAuthors = $state.raw<PptxModernCommentAuthor[]>([]);
+	/** Legacy comment authors (`ppt/commentAuthors.xml`), round-tripped and offered to the typeahead alongside the modern list. */
+	commentAuthors = $state.raw<PptxCommentAuthor[]>([]);
 	coreProperties = $state.raw<PptxCoreProperties | undefined>(undefined);
 	appProperties = $state.raw<PptxAppProperties | undefined>(undefined);
 	customProperties = $state.raw<PptxCustomProperty[]>([]);
+	/** Parsed `ppt/tags/*.xml` collections, editable in the inspector's Tags section. */
+	tagCollections = $state.raw<PptxTagCollection[]>([]);
 	embeddedFonts = $state.raw<PptxEmbeddedFont[]>([]);
 	hasDigitalSignatures = $state(false);
 	digitalSignatureCount = $state(0);
@@ -59,6 +95,17 @@ export class PresentationLoader {
 		width: DEFAULT_CANVAS_WIDTH,
 		height: DEFAULT_CANVAS_HEIGHT,
 	});
+	/**
+	 * The deck's `p:sldSz` in EMU, seeded from the parse and re-written by the
+	 * inspector's Slide Size preset / orientation controls.
+	 *
+	 * Held alongside {@link canvasSize} rather than derived from it because the
+	 * pixel size is lossy: Ledger is 12179300 EMU (1278.5px), so a round-trip
+	 * through an integer pixel would move it 6350 EMU and cost the deck its
+	 * `ppSlideSizeLedgerPaper` identity. `resolveSlideSizeSelection` decides
+	 * which of the two wins at save time.
+	 */
+	slideSize = $state.raw<SlideSizeEmu | undefined>(undefined);
 	/** Archive-path -> displayable URL map for media + poster frames. */
 	mediaDataUrls = $state.raw<Map<string, string>>(new Map());
 	/** Presentation theme colours used to resolve scheme-based table styles. */
@@ -66,6 +113,14 @@ export class PresentationLoader {
 	presentationTheme = $state.raw<PptxTheme | undefined>(undefined);
 	/** Parsed presentation table-style definitions keyed by style id. */
 	tableStyleMap = $state.raw<ParsedTableStyleMap | undefined>(undefined);
+	/** `ppt/tableStyles.xml`'s `<a:tblStyleLst @def>` default style GUID. */
+	tableStylesDefaultId = $state.raw<string | undefined>(undefined);
+	/**
+	 * Style GUIDs deleted from `tableStyleMap` via the table style editor,
+	 * pending removal from `ppt/tableStyles.xml` on the next save. See
+	 * `tableStyleSaveOptions` / `applyTableStyleDelete` in `pptx-viewer-shared`.
+	 */
+	tableStylesToDelete = $state.raw<string[]>([]);
 	/** True while a load is in flight. */
 	loading = $state(false);
 	/** Error message from the last failed load, or null. */
@@ -80,8 +135,28 @@ export class PresentationLoader {
 	#renderToken = 0;
 	#activeBlobUrls: string[] = [];
 
+	/**
+	 * Why the deck now loaded was loaded. A collaboration room may replace the
+	 * host's own `source` (a late joiner's bootstrap) but never a file the user
+	 * opened during the session (`shouldRoomSlidesReplaceLoad`).
+	 */
+	loadOrigin: CollabLoadOrigin = $state('user');
+
+	/**
+	 * Options-derived load flags for `PptxHandler.load` (currently just Trust
+	 * Center > "Allow external content", which core reads as
+	 * `allowExternalImages`). The composition root overwrites this once
+	 * `ViewerOptionsState` exists, so every load call site (open file, restore
+	 * version, collaboration bootstrap, ...) picks up the live Trust Center
+	 * value without threading options through each of them individually. Left
+	 * as its safe default (external images blocked) for callers that never set
+	 * it, e.g. this class used stand-alone in a test.
+	 */
+	getLoadOptions: () => Pick<PptxHandlerLoadOptions, 'allowExternalImages'> = () => ({});
+
 	/** Parse a `.pptx` buffer into reactive viewer state. */
-	async load(raw: Uint8Array | ArrayBuffer): Promise<void> {
+	async load(raw: Uint8Array | ArrayBuffer, origin: CollabLoadOrigin = 'user'): Promise<void> {
+		this.loadOrigin = origin;
 		const token = ++this.#renderToken;
 		const loadBlobUrls: string[] = [];
 
@@ -100,7 +175,7 @@ export class PresentationLoader {
 			const previousHandler = this.handler;
 
 			const newHandler = new PptxHandler();
-			const parsed = await newHandler.load(buffer as ArrayBuffer);
+			const parsed = await newHandler.load(buffer as ArrayBuffer, this.getLoadOptions());
 			if (token !== this.#renderToken) {
 				newHandler.dispose();
 				return;
@@ -111,7 +186,9 @@ export class PresentationLoader {
 			revokeBlobUrls(this.mediaDataUrls.values());
 			const media = await resolveMediaUrls(newHandler, parsed.slides);
 			loadBlobUrls.push(...media.blobUrls);
-			const nextSlides = await resolveLazyImages(newHandler, parsed.slides);
+			const imageResolvedSlides = await resolveLazyImages(newHandler, parsed.slides);
+			const nextSlides = await resolveLazyTableCellImages(newHandler, imageResolvedSlides);
+			const nextTableStyleMap = await resolveLazyTableStyleImages(newHandler, parsed.tableStyleMap);
 
 			// Commit reactive state.
 			revokeBlobUrls(this.#activeBlobUrls);
@@ -124,10 +201,16 @@ export class PresentationLoader {
 			this.sections = parsed.sections ?? [];
 			this.headerFooter = parsed.headerFooter ?? {};
 			this.presentationProperties = parsed.presentationProperties ?? {};
+			this.viewProperties = parsed.viewProperties;
+			this.modifyVerifier = parsed.modifyVerifier;
+			this.compatibilityWarnings = newHandler.getCompatibilityWarnings();
 			this.customShows = parsed.customShows ?? [];
+			this.modernCommentAuthors = parsed.modernCommentAuthors ?? [];
+			this.commentAuthors = parsed.commentAuthors ?? [];
 			this.coreProperties = parsed.coreProperties;
 			this.appProperties = parsed.appProperties;
 			this.customProperties = parsed.customProperties ?? [];
+			this.tagCollections = parsed.tags ?? [];
 			this.embeddedFonts = parsed.embeddedFonts ?? [];
 			this.hasDigitalSignatures = parsed.hasDigitalSignatures ?? false;
 			this.digitalSignatureCount = parsed.digitalSignatureCount ?? 0;
@@ -145,11 +228,26 @@ export class PresentationLoader {
 			this.mediaDataUrls = media.urls;
 			this.colorScheme = parsed.theme?.colorScheme;
 			this.presentationTheme = parsed.theme;
-			this.tableStyleMap = parsed.tableStyleMap;
+			this.tableStyleMap = nextTableStyleMap;
+			this.tableStylesDefaultId = parsed.tableStylesDefaultId;
+			this.tableStylesToDelete = [];
 			this.canvasSize = {
 				width: parsed.width ?? DEFAULT_CANVAS_WIDTH,
 				height: parsed.height ?? DEFAULT_CANVAS_HEIGHT,
 			};
+			// `p:sldSz` verbatim. Kept even when it matches no preset, so a save
+			// re-emits the authored dimensions instead of a pixel round-trip.
+			this.slideSize =
+				typeof parsed.widthEmu === 'number' &&
+				typeof parsed.heightEmu === 'number' &&
+				parsed.widthEmu > 0 &&
+				parsed.heightEmu > 0
+					? {
+							widthEmu: parsed.widthEmu,
+							heightEmu: parsed.heightEmu,
+							type: parsed.slideSizeType ?? '',
+						}
+					: undefined;
 			this.loadCount += 1;
 		} catch (err) {
 			if (token === this.#renderToken) {
@@ -164,6 +262,19 @@ export class PresentationLoader {
 				this.loading = false;
 			}
 		}
+	}
+
+	/**
+	 * Replace the live handler with one core rebuilt (master-view CRUD returns
+	 * a fresh package rather than a patch). Disposes the previous handler; the
+	 * Blob URLs stay valid because the media parts are unchanged.
+	 */
+	adoptHandler(next: PptxHandler): void {
+		if (next === this.handler) {
+			return;
+		}
+		this.handler?.dispose();
+		this.handler = next;
 	}
 
 	/** Cancel in-flight loads, revoke Blob URLs, dispose the handler. */

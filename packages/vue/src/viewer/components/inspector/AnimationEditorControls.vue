@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { X } from 'lucide-vue-next';
 import type {
+	PptxAfterAnimationAction,
 	PptxAnimationDirection,
 	PptxAnimationRepeatMode,
 	PptxAnimationSequence,
@@ -9,9 +10,27 @@ import type {
 	PptxElement,
 	PptxElementAnimation,
 } from 'pptx-viewer-core';
+import {
+	getEffectSoundState,
+	schemaLabel,
+	setAfterAnimation,
+	setAfterAnimationColor,
+	setDelay,
+	setDuration,
+	setEffectSound,
+	setRepeatCount,
+} from 'pptx-viewer-shared';
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import AfterAnimationRow from './AfterAnimationRow.vue';
+import {
+	ANIMATION_DIRECTION_LABEL_KEYS,
+	ANIMATION_SEQUENCE_LABEL_KEYS,
+	ANIMATION_TIMING_CURVE_LABEL_KEYS,
+} from './animation-editor-label-keys';
 import { animationElementLabel, animationPresetLabel } from './animation-panel-model';
+import EffectSoundRow from './EffectSoundRow.vue';
 
 const props = defineProps<{
 	animation: PptxElementAnimation;
@@ -54,6 +73,84 @@ function numberValue(event: Event): number {
 function label(element: PptxElement): string {
 	return animationElementLabel(element, element.id);
 }
+
+/**
+ * Clamp a granular timing field through the shared setter (a single-entry
+ * scratch array keyed by the row's own `elementId`) so Vue rejects
+ * out-of-range input the same way Angular/Svelte do, instead of forwarding
+ * the raw number straight into the patch.
+ */
+function clampedDurationMs(raw: number): number {
+	const [result] = setDuration([props.animation], props.animation.elementId, raw);
+	return result?.durationMs ?? raw;
+}
+function clampedDelayMs(raw: number): number {
+	const [result] = setDelay([props.animation], props.animation.elementId, raw);
+	return result?.delayMs ?? raw;
+}
+function clampedRepeatCount(raw: number): number {
+	const [result] = setRepeatCount([props.animation], props.animation.elementId, raw);
+	return result?.repeatCount ?? raw;
+}
+
+/**
+ * Run a whole-array shared setter against a scratch array holding only this
+ * row's entry, and return the resulting entry's patch-worthy fields. Mirrors
+ * `clampedDurationMs` / `clampedDelayMs` above: this component only ever
+ * emits a `Partial<PptxElementAnimation>` patch, never the array itself.
+ */
+const soundState = computed(() =>
+	getEffectSoundState([props.animation], props.animation.elementId),
+);
+
+function soundPatch(
+	pick: { dataUrl: string; fileName?: string } | undefined,
+): Partial<PptxElementAnimation> {
+	const [result] = setEffectSound([props.animation], props.animation.elementId, pick);
+	return {
+		soundData: result?.soundData,
+		soundFileName: result?.soundFileName,
+		soundRId: result?.soundRId,
+		soundPath: result?.soundPath,
+	};
+}
+
+function afterAnimationPatch(action: PptxAfterAnimationAction): Partial<PptxElementAnimation> {
+	const [result] = setAfterAnimation([props.animation], props.animation.elementId, action);
+	return {
+		afterAnimation: result?.afterAnimation,
+		afterAnimationColor: result?.afterAnimationColor,
+	};
+}
+
+function afterAnimationColorPatch(color: string): Partial<PptxElementAnimation> {
+	const [result] = setAfterAnimationColor([props.animation], props.animation.elementId, color);
+	return { afterAnimationColor: result?.afterAnimationColor };
+}
+
+/** The row's effect name (`t` is an overloaded generic, hence the lambda). */
+function presetLabel(animation: PptxElementAnimation): string {
+	return animationPresetLabel(animation, (key: string) => t(key));
+}
+
+/**
+ * Spell the direction / sequence / timing-curve wire tokens for display.
+ *
+ * Each select keeps its existing value list and still emits the raw token; only
+ * the option text changes. `t` is an overloaded generic, hence the narrowing
+ * lambda that `schemaLabel` expects.
+ */
+function directionLabel(direction: PptxAnimationDirection): string {
+	return schemaLabel(ANIMATION_DIRECTION_LABEL_KEYS, direction, (key: string) => t(key));
+}
+
+function sequenceLabel(sequence: PptxAnimationSequence): string {
+	return schemaLabel(ANIMATION_SEQUENCE_LABEL_KEYS, sequence, (key: string) => t(key));
+}
+
+function curveLabel(curve: PptxAnimationTimingCurve): string {
+	return schemaLabel(ANIMATION_TIMING_CURVE_LABEL_KEYS, curve, (key: string) => t(key));
+}
 </script>
 
 <template>
@@ -62,7 +159,7 @@ function label(element: PptxElement): string {
 		data-animation-editor
 	>
 		<div class="flex items-center gap-1">
-			<strong class="flex-1 truncate">{{ animationPresetLabel(animation) }}</strong>
+			<strong class="flex-1 truncate">{{ presetLabel(animation) }}</strong>
 			<button type="button" class="text-primary" @click="emit('preview')">
 				{{ t('pptx.animation.preview') }}
 			</button>
@@ -85,7 +182,7 @@ function label(element: PptxElement): string {
 					max="10000"
 					step="50"
 					:value="animation.durationMs ?? 500"
-					@change="emit('patch', { durationMs: numberValue($event) })"
+					@change="emit('patch', { durationMs: clampedDurationMs(numberValue($event)) })"
 				/>
 			</label>
 			<label
@@ -97,7 +194,7 @@ function label(element: PptxElement): string {
 					max="10000"
 					step="50"
 					:value="animation.delayMs ?? 0"
-					@change="emit('patch', { delayMs: numberValue($event) })"
+					@change="emit('patch', { delayMs: clampedDelayMs(numberValue($event)) })"
 				/>
 			</label>
 		</div>
@@ -108,7 +205,9 @@ function label(element: PptxElement): string {
 				:value="animation.direction ?? 'fromLeft'"
 				@change="emit('patch', { direction: value($event) as PptxAnimationDirection })"
 			>
-				<option v-for="item in directions" :key="item" :value="item">{{ item }}</option>
+				<option v-for="item in directions" :key="item" :value="item">
+					{{ directionLabel(item) }}
+				</option>
 			</select>
 		</label>
 		<label
@@ -118,7 +217,9 @@ function label(element: PptxElement): string {
 				:value="animation.sequence ?? 'asOne'"
 				@change="emit('patch', { sequence: value($event) as PptxAnimationSequence })"
 			>
-				<option v-for="item in sequences" :key="item" :value="item">{{ item }}</option>
+				<option v-for="item in sequences" :key="item" :value="item">
+					{{ sequenceLabel(item) }}
+				</option>
 			</select>
 		</label>
 		<label
@@ -155,6 +256,13 @@ function label(element: PptxElement): string {
 				</option>
 			</select>
 		</label>
+		<EffectSoundRow :sound-state="soundState" @pick="(pick) => emit('patch', soundPatch(pick))" />
+		<AfterAnimationRow
+			:action="animation.afterAnimation ?? 'none'"
+			:color="animation.afterAnimationColor"
+			@action="(action) => emit('patch', afterAnimationPatch(action))"
+			@color="(color) => emit('patch', afterAnimationColorPatch(color))"
+		/>
 		<label
 			>Timing curve
 			<select
@@ -162,7 +270,9 @@ function label(element: PptxElement): string {
 				:value="animation.timingCurve ?? 'ease'"
 				@change="emit('patch', { timingCurve: value($event) as PptxAnimationTimingCurve })"
 			>
-				<option v-for="item in curves" :key="item" :value="item">{{ item }}</option>
+				<option v-for="item in curves" :key="item" :value="item">
+					{{ curveLabel(item) }}
+				</option>
 			</select>
 		</label>
 		<div class="grid grid-cols-2 gap-2">
@@ -174,7 +284,7 @@ function label(element: PptxElement): string {
 					min="1"
 					max="100"
 					:value="animation.repeatCount ?? 1"
-					@change="emit('patch', { repeatCount: numberValue($event) })"
+					@change="emit('patch', { repeatCount: clampedRepeatCount(numberValue($event)) })"
 				/>
 			</label>
 			<label

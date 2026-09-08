@@ -16,6 +16,7 @@ import {
 import type { PptxElement, PptxTableData, TablePptxElement } from 'pptx-viewer-core';
 
 import type { TableStyleContext } from '../internal/shared';
+import { canDrillDown, DEFAULT_FONT_FAMILY, tableContainerCss } from '../internal/shared';
 import type { StyleMap } from './element-style';
 import { LoadContentService } from './load-content.service';
 import { buildColStyles, buildTableViewModel } from './table-renderer-helpers';
@@ -34,6 +35,21 @@ export interface TableCellCommit {
 interface EditingCell {
 	rowIndex: number;
 	colIndex: number;
+}
+
+/**
+ * May this table's individual cells be selected/edited at all?
+ *
+ * Pure (no DI, no signals) so it is unit-testable without a full Angular
+ * injection context: `TableRendererComponent`'s constructor runs an
+ * `effect()` that needs a `ChangeDetectionScheduler` this package's
+ * TestBed-free suite doesn't provide (see `ribbon-home-section.component.ts`'s
+ * `performResetSlide` for the same extraction pattern). G8: `a:
+ * graphicFrameLocks/@noDrilldown` forbids selecting/editing this table's
+ * individual cells, even on an otherwise-editable deck.
+ */
+export function canDrillDownIntoTable(editable: boolean, element: PptxElement): boolean {
+	return editable && canDrillDown(element);
 }
 
 /**
@@ -56,125 +72,17 @@ interface EditingCell {
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
 	imports: [NgStyle, TableResizeOverlayComponent],
-	template: `
-		<pptx-table-resize-overlay
-			[columnWidths]="columnWidths()"
-			[editable]="editable()"
-			(resizeColumns)="onResizeColumns($event)"
-			(resizeRow)="onResizeRow($event)"
-		>
-			<div class="pptx-ng-table-wrapper">
-				<table class="pptx-ng-table">
-					@if (colStyles().length > 0) {
-						<colgroup>
-							@for (colStyle of colStyles(); track $index) {
-								<col [ngStyle]="colStyle" />
-							}
-						</colgroup>
-					}
-					<tbody>
-						@for (row of rows(); track $index) {
-							<tr [ngStyle]="row.rowStyle">
-								@for (vm of row.cells; track $index) {
-									<td
-										class="pptx-ng-cell"
-										[class.is-selected]="isSelectedAnchor(vm.rowIndex, vm.colIndex)"
-										[class.is-in-range]="isInRange(vm.rowIndex, vm.colIndex)"
-										[class.is-editable]="editable()"
-										[ngStyle]="vm.tdStyle"
-										[attr.colspan]="vm.colSpan ?? null"
-										[attr.rowspan]="vm.rowSpan ?? null"
-										(click)="onCellClick($event, vm.rowIndex, vm.colIndex)"
-										(dblclick)="onCellDblClick($event, vm.rowIndex, vm.colIndex)"
-									>
-										@if (isEditing(vm.rowIndex, vm.colIndex)) {
-											<input
-												#cellInput
-												type="text"
-												class="pptx-ng-cell-input"
-												[value]="vm.cell.text ?? ''"
-												(pointerdown)="$event.stopPropagation()"
-												(mousedown)="$event.stopPropagation()"
-												(click)="$event.stopPropagation()"
-												(dblclick)="$event.stopPropagation()"
-												(blur)="commitCellEdit($event)"
-												(keydown)="onCellInputKeydown($event)"
-											/>
-										} @else if (vm.paragraphs.length > 0) {
-											@for (para of vm.paragraphs; track $index) {
-												<p class="pptx-ng-cell-para">
-													@for (run of para; track $index) {
-														@if (run.isLineBreak) {
-															<br />
-														} @else {
-															<span [ngStyle]="run.style">{{ run.text }}</span>
-														}
-													}
-												</p>
-											}
-										} @else {
-											{{ vm.displayText }}
-										}
-										@if (vm.diagonal; as diag) {
-											<svg class="pptx-ng-cell-diag" aria-hidden="true">
-												@if (diag.diagDownColor && diag.diagDownWidth) {
-													<line
-														x1="0"
-														y1="0"
-														x2="100%"
-														y2="100%"
-														[attr.stroke]="diag.diagDownColor"
-														[attr.stroke-width]="diag.diagDownWidth"
-													/>
-												}
-												@if (diag.diagUpColor && diag.diagUpWidth) {
-													<line
-														x1="0"
-														y1="100%"
-														x2="100%"
-														y2="0"
-														[attr.stroke]="diag.diagUpColor"
-														[attr.stroke-width]="diag.diagUpWidth"
-													/>
-												}
-											</svg>
-										}
-									</td>
-								}
-							</tr>
-						}
-					</tbody>
-				</table>
-			</div>
-		</pptx-table-resize-overlay>
-	`,
-	styles: `
-		.pptx-ng-cell {
-			position: relative;
-		}
-		.pptx-ng-cell.is-editable {
-			cursor: cell;
-		}
-		.pptx-ng-cell.is-selected {
-			outline: 2px solid rgba(59, 130, 246, 0.9);
-			outline-offset: -2px;
-		}
-		.pptx-ng-cell.is-in-range {
-			background-color: rgba(59, 130, 246, 0.15);
-			outline: 1px solid rgba(96, 165, 250, 0.5);
-			outline-offset: -1px;
-		}
-		.pptx-ng-cell-diag {
-			position: absolute;
-			inset: 0;
-			width: 100%;
-			height: 100%;
-			pointer-events: none;
-			overflow: visible;
-		}
-	`,
+	templateUrl: './table-renderer.component.html',
+	styleUrl: './table-renderer.component.css',
 })
 export class TableRendererComponent {
+	/**
+	 * Font stack for table text with no authored typeface, declared on the
+	 * `<table>` root. Load-bearing: an unstyled cell otherwise inherits the HOST
+	 * chrome's font, so the same table measured a different stack in every
+	 * binding's demo. All five bindings declare this same shared default.
+	 */
+	readonly defaultTableFontFamily = DEFAULT_FONT_FAMILY;
 	private readonly injector = inject(Injector);
 	/** Shared cell-selection state (present only inside the editor subtree). */
 	private readonly selectionSvc = inject(TableSelectionService, { optional: true });
@@ -203,6 +111,17 @@ export class TableRendererComponent {
 
 	/** The mounted `<input>` for the active cell edit, if any. */
 	private readonly cellInput = viewChild<ElementRef<HTMLInputElement>>('cellInput');
+
+	/**
+	 * `<table>`-level style beyond the font stack: `a:tblPr@rtl` mirrors the
+	 * column order for right-to-left decks. Decided in shared so all five
+	 * bindings honour the flag identically.
+	 */
+	readonly tableRootStyle = computed<StyleMap>(() => {
+		const el = this.element();
+		const data = el.type === 'table' ? el.tableData : undefined;
+		return tableContainerCss(data) as StyleMap;
+	});
 
 	/** Pre-computed `<col>` styles for the colgroup. */
 	readonly colStyles = computed<StyleMap[]>(() => buildColStyles(this.element()));
@@ -284,7 +203,7 @@ export class TableRendererComponent {
 
 	/** Single click selects the cell; Shift+Click extends a rectangular range. */
 	onCellClick(event: MouseEvent, rowIndex: number, colIndex: number): void {
-		if (!this.editable() || !this.selectionSvc) {
+		if (!canDrillDownIntoTable(this.editable(), this.element()) || !this.selectionSvc) {
 			return;
 		}
 		event.stopPropagation();
@@ -299,7 +218,7 @@ export class TableRendererComponent {
 
 	/** Double-click on a cell enters inline edit mode. */
 	onCellDblClick(event: Event, rowIndex: number, colIndex: number): void {
-		if (!this.editable()) {
+		if (!canDrillDownIntoTable(this.editable(), this.element())) {
 			return;
 		}
 		event.stopPropagation();

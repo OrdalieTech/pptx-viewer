@@ -1,4 +1,5 @@
 import type { PptxElement, PptxSlide, TextStyle } from 'pptx-viewer-core';
+import type { PlaceholderPromptMode } from 'pptx-viewer-shared';
 import type React from 'react';
 
 import type { TableCellEditorState } from '../../types';
@@ -45,6 +46,22 @@ export interface RenderBodyOptions {
 	findHl?: ElementFindHighlights;
 	onHyperlinkClick?: (url: string) => void;
 	isPresentationPassive?: boolean;
+	/**
+	 * True when this body is painted onto a STILL of a slide (the presenter
+	 * console's panes, a thumbnail, any `StaticElementRenderer` surface) rather
+	 * than onto the canvas or the live show stage. Media reads it: a still never
+	 * carries the browser's native transport, and `isPresentationPassive` cannot
+	 * answer that on its own, because a still is not in presentation mode.
+	 */
+	isStaticSurface?: boolean;
+	/**
+	 * The surface this body is painted on, for the shared
+	 * `placeholderPromptDescriptor` rule: an empty inherited placeholder's
+	 * "Click to add title" hint renders on the editing canvas (`'edit'`) only.
+	 * Defaults to `'present'`, so a caller that says nothing never leaks the
+	 * authoring hint onto an audience screen or a still.
+	 */
+	placeholderPromptMode?: PlaceholderPromptMode;
 	handleMediaPlayStateChange?: (isPlaying: boolean) => void;
 	presentationElementStates?: ReadonlyMap<string, ElementAnimationState>;
 	/** All elements on the current slide, used for linked text box overflow distribution. */

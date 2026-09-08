@@ -3,6 +3,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { OOXML_PATTERN_PRESETS } from '../../utils/color';
+import { useRecentColors } from './RecentColorsContext';
 
 // ---------------------------------------------------------------------------
 // Shared CSS
@@ -39,6 +40,7 @@ export function GradientControls({
 	onUpdateCellStyle,
 }: SubControlProps): React.ReactElement {
 	const { t } = useTranslation();
+	const { pushColor } = useRecentColors();
 	const stops = cellStyle.gradientFillStops ?? [];
 	const gradType = cellStyle.gradientFillType ?? 'linear';
 
@@ -59,6 +61,7 @@ export function GradientControls({
 				<label className='flex flex-col gap-0.5'>
 					<span className={LBL}>{t('pptx.table.gradientType')}</span>
 					<select
+						aria-label={t('pptx.table.gradientType')}
 						disabled={!canEdit}
 						className={SEL}
 						value={gradType}
@@ -99,7 +102,10 @@ export function GradientControls({
 						disabled={!canEdit}
 						className='h-6 w-6 rounded border border-border cursor-pointer'
 						value={stop.color}
-						onChange={(e) => updateStop(idx, { color: e.target.value })}
+						onChange={(e) => {
+							updateStop(idx, { color: e.target.value });
+							pushColor(e.target.value);
+						}}
 					/>
 					<input
 						type='number'
@@ -135,12 +141,14 @@ export function PatternControls({
 	onUpdateCellStyle,
 }: SubControlProps): React.ReactElement {
 	const { t } = useTranslation();
+	const { pushColor } = useRecentColors();
 
 	return (
 		<div className='space-y-1.5'>
 			<label className='flex flex-col gap-0.5'>
 				<span className={LBL}>{t('pptx.table.patternPreset')}</span>
 				<select
+					aria-label={t('pptx.table.patternPreset')}
 					disabled={!canEdit}
 					className={SEL}
 					value={cellStyle.patternFillPreset ?? 'ltDnDiag'}
@@ -161,7 +169,10 @@ export function PatternControls({
 						disabled={!canEdit}
 						className='w-full h-7 rounded border border-border bg-transparent cursor-pointer'
 						value={cellStyle.patternFillForeground ?? '#000000'}
-						onChange={(e) => onUpdateCellStyle({ patternFillForeground: e.target.value })}
+						onChange={(e) => {
+							onUpdateCellStyle({ patternFillForeground: e.target.value });
+							pushColor(e.target.value);
+						}}
 					/>
 				</label>
 				<label className='flex flex-col gap-0.5'>
@@ -171,7 +182,10 @@ export function PatternControls({
 						disabled={!canEdit}
 						className='w-full h-7 rounded border border-border bg-transparent cursor-pointer'
 						value={cellStyle.patternFillBackground ?? '#FFFFFF'}
-						onChange={(e) => onUpdateCellStyle({ patternFillBackground: e.target.value })}
+						onChange={(e) => {
+							onUpdateCellStyle({ patternFillBackground: e.target.value });
+							pushColor(e.target.value);
+						}}
 					/>
 				</label>
 			</div>

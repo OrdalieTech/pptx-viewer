@@ -1,5 +1,14 @@
 import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
-import { getGroupChildParentFill } from 'pptx-viewer-shared';
+import {
+	buildTextStyleOverrideCss,
+	getGroupChildParentFill,
+	isHollowShapeElement,
+	resolveElementAriaAttributes,
+	isElementRendered,
+	inlineElementPointerEvents,
+	LINK_TOOLTIP_HOST_CLASS,
+	resolveElementInteractivity,
+} from 'pptx-viewer-shared';
 import React, { useState, useCallback, useMemo } from 'react';
 
 import { DEFAULT_TEXT_COLOR } from '../constants';
@@ -8,29 +17,24 @@ import {
 	getImageEffectsFilter,
 	getImageEffectsOpacity,
 	getImageRenderStyle,
-	getElementTransformWithoutRotation,
 	getShapeVisualStyle,
 	getTextStyleForElement,
 	isConnectorOrLineElement,
 	isEditableTextElement,
 	renderVectorShape,
 } from '../utils';
-import { getAriaRole, getAriaLabel, getAriaRoleDescription } from '../utils/accessibility';
 import { build3DExtrusionData } from '../utils/shape-visual-3d';
+import { ActionAffordances, useActionAffordance } from './elements/ActionAffordance';
 import { ConnectorElementRenderer } from './elements/ConnectorElementRenderer';
 import { getElementInteractionProps } from './elements/element-interaction-props';
 import {
 	renderDagDuotoneFilterForElement,
 	getContainerStyle,
-	ActionIndicator,
-	elementHasTextHyperlink,
 } from './elements/element-renderer-helpers';
 import type { ElementRendererProps } from './elements/element-renderer-types';
 import { shapeParams } from './elements/element-shape-params';
 import { renderBody } from './elements/ElementBody';
 import { Extrusion3DOverlay } from './elements/Extrusion3DOverlay';
-import { LinkTooltip } from './elements/LinkTooltip';
-import { ResizeHandles } from './elements/ResizeHandles';
 import { getScopedElementHandlers } from './elements/scoped-element-handlers';
 import { ShapeEffectOverlay } from './elements/ShapeEffectOverlay';
 import { StaticElementRenderer } from './StaticElementRenderer';
@@ -47,6 +51,7 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 		isInlineEditing,
 		inlineEditingText,
 		canInteract,
+		presenting,
 		spellCheckEnabled,
 		mediaDataUrls,
 		tableEditorState,
@@ -59,10 +64,9 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 		showResizeHandles,
 		renderInk: doInk,
 		renderGroups: doGrp,
-		adjustmentHandleDescriptor: adjH,
+		adjustmentHandles: adjH,
 		onResizePointerDown,
 		onAdjustmentPointerDown,
-		onRotate,
 		onInlineEditChange,
 		onInlineEditCommit,
 		onInlineEditCancel,
@@ -98,29 +102,41 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 		});
 		const chartUpdateHandler = smartArtUpdateHandler;
 		const { hf, fc, sw, sc } = shapeParams(el);
-		const elementLocks = el.locks;
-		const isTxt = isEditableTextElement(el) && !elementLocks?.noTextEdit;
+		// One shared verdict on what `a:spLocks` still allows, rather than five
+		// bindings each reading a different subset of the flags off the element.
+		const allow = resolveElementInteractivity(el);
+		const backgroundAnimationState = presentationElementStates?.get(`${el.id}::pptx-bg`);
+		const visualAnimationState = backgroundAnimationState ?? animationState;
+		const isTxt = isEditableTextElement(el) && allow.textEditable;
 		const txtSE = hasTextProperties(el) ? el.textStyle : undefined;
+		// A font-style emphasis effect (Bold Flash, Bold Reveal, Underline, Change
+		// Font Style/Size) overrides the runs' own inline bold/italic/underline/
+		// size, which plain CSS inheritance cannot reach (the runs declare those
+		// unconditionally). See `animation-text-style-css.ts`. NOT gated on
+		// `hasTextProperties`: a table cell, a chart title/label/legend, and a
+		// SmartArt node caption all animate this way too, and shared's selector
+		// already scopes itself to this element's `data-element-id`.
+		const textStyleOverrideCss = buildTextStyleOverrideCss(el.id, visualAnimationState?.textStyle);
 		const ss = getShapeVisualStyle(
 			el,
 			hf,
 			fc,
 			sw,
 			sc,
-			animationState?.animatesFill,
-			animationState?.animatesStroke,
+			visualAnimationState?.animatesFill,
+			visualAnimationState?.animatesStroke,
 		);
 		const ts = getTextStyleForElement(el, DEFAULT_TEXT_COLOR);
+		const isImg = el.type === 'picture' || el.type === 'image';
 		const vs = renderVectorShape(
 			el,
-			hf,
+			isImg ? false : hf,
 			fc,
 			sw,
 			sc,
-			animationState?.animatesFill,
-			animationState?.animatesStroke,
+			visualAnimationState?.animatesFill,
+			visualAnimationState?.animatesStroke,
 		);
-		const isImg = el.type === 'picture' || el.type === 'image';
 		const isModel3D = el.type === 'model3d';
 		const isConn = isConnectorOrLineElement(el);
 
@@ -131,10 +147,29 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 			[shapeStyle3d?.shape3d, shapeStyle3d?.scene3d, fc, el.width, el.height],
 		);
 
+		// Authoring chrome for an Action Setting (amber badge + hover tooltip).
+		// Resolved through shared so all five bindings agree on when it shows and
+		// what it says; a hook, so it must sit above the early returns below.
+		const actionAffordance = useActionAffordance(el, canInteract);
+
 		const [isMediaPlaying, setIsMediaPlaying] = useState(false);
 		const handleMediaPlayStateChange = useCallback((playing: boolean): void => {
 			setIsMediaPlaying(playing);
 		}, []);
+
+		// The Selection Pane hid this element: draw nothing at all, exactly as
+		// PowerPoint does. Skipping the subtree (rather than painting it with
+		// `visibility: hidden`) is what keeps it out of hit-testing, the tab
+		// order, the accessibility tree, and the html2canvas export raster. The
+		// element is still listed in and selectable from the Selection Pane,
+		// which reads the slide model rather than the rendered DOM.
+		//
+		// Placed after the hooks above, never before them: an early return at the
+		// top of the component would make those hook calls conditional on a flag
+		// the user toggles at runtime.
+		if (!isElementRendered(el)) {
+			return null;
+		}
 
 		if (isConn) {
 			return (
@@ -142,53 +177,61 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 					el={el}
 					isSelected={isSelected}
 					canInteract={canInteract}
-					showResizeHandles={showResizeHandles && !elementLocks?.noResize}
+					showResizeHandles={showResizeHandles && allow.resizable}
 					showHoverBorder={showHoverBorder}
 					selectionColorClass={selClr}
 					opacity={opacity}
 					zIndex={zIndex}
-					adjustmentHandleDescriptor={adjH}
+					adjustmentHandles={adjH}
 					onResizePointerDown={onResizePointerDown}
 					onAdjustmentPointerDown={onAdjustmentPointerDown}
 					animationState={animationState}
+					textStyleOverrideCss={textStyleOverrideCss}
 				/>
 			);
 		}
 
-		const effectiveCanInteract = canInteract && !elementLocks?.noSelect;
-		const effectiveShowResizeHandles = showResizeHandles && !elementLocks?.noResize;
-		const effectiveIsInlineEditing = isInlineEditing && !elementLocks?.noTextEdit;
-		const canEditSmartArt = effectiveCanInteract && !elementLocks?.noTextEdit;
+		const effectiveCanInteract = canInteract && allow.selectable;
+		const effectiveIsInlineEditing = isInlineEditing && allow.textEditable;
+		const canEditSmartArt = effectiveCanInteract && allow.textEditable;
 		const canEditChart = effectiveCanInteract;
 
 		const hasAction = Boolean(el.actionClick && onActionClick);
-		const hasHoverAction = Boolean(el.actionHover);
-		const hasHyperlinks = Boolean(onHyperlinkClick) && elementHasTextHyperlink(el);
 		const isZoom = el.type === 'zoom' && Boolean(onZoomClick);
-		const isActionable = hasAction || hasHoverAction || hasHyperlinks || isZoom;
+		// The actionable rule itself lives in shared, so the four non-React
+		// bindings (which classify in a post-render DOM pass) reach the same
+		// verdict for the same deck instead of re-deriving it, or not at all.
+		const aria = resolveElementAriaAttributes(el, {
+			hasActionHandler: Boolean(onActionClick),
+			hasHyperlinkHandler: Boolean(onHyperlinkClick),
+			hasZoomHandler: Boolean(onZoomClick),
+		});
+		const isActionable = aria.actionable;
 
+		// Selection / hover affordance. Drawn as an `outline` inset by 1px so it
+		// lands exactly where the old 1px border did WITHOUT participating in
+		// layout: as a border it was consuming 2px of every unstroked element's
+		// content box (`box-sizing: border-box`), leaving shapes 2px small and
+		// 1px off-origin versus PowerPoint.
 		const selB = isSelected
-			? `border-${selClr} ring-2 ring-${selClr}/50`
+			? `outline-1 -outline-offset-1 outline-${selClr} ring-2 ring-${selClr}/50`
 			: showHoverBorder
-				? 'border-transparent hover:border-primary/40'
-				: 'border-transparent';
+				? 'outline-1 -outline-offset-1 outline-transparent hover:outline-primary/40'
+				: '';
 		const cur = effectiveIsInlineEditing
 			? 'cursor-text'
 			: effectiveCanInteract
-				? elementLocks?.noMove
+				? !allow.movable
 					? 'cursor-default'
 					: 'cursor-move'
 				: hasAction || isZoom
 					? 'cursor-pointer'
 					: '';
 
-		const isPresentationPassive = !effectiveCanInteract;
+		const isPresentationPassive = presenting === true;
 		const isFullscreenMedia =
 			el.type === 'media' && Boolean(el.fullScreen) && isPresentationPassive && isMediaPlaying;
 
-		const ariaRole = isActionable ? 'button' : getAriaRole(el);
-		const ariaLabel = getAriaLabel(el);
-		const ariaRoleDescription = getAriaRoleDescription(el);
 		const isFocusable = effectiveCanInteract || isActionable;
 		const interactionProps = getElementInteractionProps({
 			element: el,
@@ -205,19 +248,44 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 			<div
 				data-pptx-element='true'
 				data-element-id={el.id}
-				role={ariaRole}
-				aria-label={ariaLabel}
-				aria-roledescription={ariaRoleDescription}
+				// The neutral marker `PRESENTATION_INERT_CLICK_SELECTOR` keys off, so
+				// a tap or swipe on an action shape never ALSO steps the show on.
+				// `StaticElementRenderer` and the four non-React bindings' DOM pass
+				// stamp the same attribute.
+				data-pptx-action={isActionable ? 'click' : undefined}
+				role={aria.role}
+				aria-label={aria.label}
+				aria-roledescription={aria.roleDescription}
+				aria-hidden={aria.hidden ? true : undefined}
 				aria-selected={isSelected ? true : undefined}
 				tabIndex={isFocusable ? 0 : -1}
 				className={cn(
-					'absolute border',
+					'absolute',
 					'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500',
 					cur,
-					effectiveCanInteract || isActionable ? '' : 'pointer-events-none',
+					// During a show this must stay EMPTY: `PRESENTATION_HIT_TEST_CSS`
+					// (injected by `PresentationStage`) owns hit-testing there, because
+					// it is the only form that can re-enable an action shape nested
+					// inside inert scenery - an inline `pointer-events: none` on the
+					// group could never do that, and React was the one binding that
+					// wrote it. Off the show stage the inline rule still applies.
+					inlineElementPointerEvents({
+						interactive: effectiveCanInteract || isActionable,
+						presenting: presenting === true,
+					}) === 'none'
+						? 'pointer-events-none'
+						: '',
+					// An unfilled, textless shape is a FRAME: PowerPoint hit-tests it on its
+					// outline only, so its interior must not swallow clicks meant for what it
+					// is drawn over. ShapeEffectOverlay paints a transparent
+					// pointer-events:stroke band that opts the outline back in.
+					isHollowShapeElement(el) ? 'pointer-events-none' : '',
 					isFullscreenMedia ? 'pointer-events-auto' : '',
 					selB,
-					effectiveCanInteract && el.actionClick && 'group/link',
+					// Shared class the tooltip's `:hover` rule keys off (see
+					// `ACTION_AFFORDANCE_CSS`), replacing React's Tailwind `group/link`
+					// so the four non-Tailwind bindings reveal it the same way.
+					actionAffordance.showLinkTooltip && LINK_TOOLTIP_HOST_CLASS,
 				)}
 				style={getContainerStyle({
 					el,
@@ -226,15 +294,45 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 					zIndex,
 					opacity,
 					animationState,
-					shapeVisualStyle: ss,
+					shapeVisualStyle: backgroundAnimationState ? {} : ss,
 					has3DExtrusion: extrusionData.hasExtrusion,
 					templateEditing,
 				})}
 				{...interactionProps}
 			>
 				{renderDagDuotoneFilterForElement(el)}
-				<ShapeEffectOverlay element={el} />
-				{extrusionData.hasExtrusion && <Extrusion3DOverlay data={extrusionData} />}
+				{textStyleOverrideCss && <style>{textStyleOverrideCss}</style>}
+				{backgroundAnimationState ? (
+					<div
+						data-pptx-animation-layer='background'
+						style={{
+							...ss,
+							position: 'absolute',
+							inset: 0,
+							transformOrigin: 'center',
+							visibility: backgroundAnimationState.visible === false ? 'hidden' : 'visible',
+							animation: backgroundAnimationState.cssAnimation,
+							pointerEvents: 'none',
+						}}
+					>
+						<ShapeEffectOverlay
+							element={el}
+							animatesFill={visualAnimationState?.animatesFill}
+							animatesStroke={visualAnimationState?.animatesStroke}
+						/>
+						{extrusionData.hasExtrusion && <Extrusion3DOverlay data={extrusionData} />}
+						{isImg ? null : vs}
+					</div>
+				) : (
+					<>
+						<ShapeEffectOverlay
+							element={el}
+							animatesFill={visualAnimationState?.animatesFill}
+							animatesStroke={visualAnimationState?.animatesStroke}
+						/>
+						{extrusionData.hasExtrusion && <Extrusion3DOverlay data={extrusionData} />}
+					</>
+				)}
 				{renderBody({
 					el,
 					isImg,
@@ -243,7 +341,7 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 					spellCheck: spellCheckEnabled,
 					txtSE,
 					txtS: ts,
-					vecShape: vs,
+					vecShape: backgroundAnimationState && !isImg ? null : vs,
 					imgStyle: getImageRenderStyle(el),
 					imgFilter: getImageEffectsFilter(el),
 					imgOpacity: getImageEffectsOpacity(el),
@@ -263,7 +361,21 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 							mediaDataUrls={mediaDataUrls}
 							sourceSlideIndex={sourceSlideIndex}
 							zIndex={index}
+							// A morph pairs a `!!`-named shape across a grouping boundary
+							// (shared `morph-flatten`) and keys the animation by the
+							// CHILD's id, so the child needs both its own animation and a
+							// `data-element-id` to be addressable - the group node alone
+							// cannot express a child moving independently of its siblings.
+							animation={presentationElementStates?.get(child.id)?.cssAnimation}
+							exposeElementId
 							parentGroupFill={getGroupChildParentFill(el)}
+							// A grouped child keeps its own `a:hlinkClick`; PowerPoint
+							// treats it as an individually clickable target even though
+							// the group is a single selectable object. Only wire it up
+							// where the group itself is not the action target, so a
+							// child link cannot shadow one set on the group.
+							onActionClick={el.actionClick ? undefined : onActionClick}
+							actionRequiresModifier={effectiveCanInteract}
 						/>
 					),
 					onEditChange: onInlineEditChange,
@@ -276,6 +388,9 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 					findHl: findHighlights,
 					onHyperlinkClick,
 					isPresentationPassive,
+					// Same rule as the other four bindings: the hint belongs to the
+					// editable canvas, not to a read-only viewer or the show stage.
+					placeholderPromptMode: canInteract && !isPresentationPassive ? 'edit' : 'present',
 					handleMediaPlayStateChange,
 					presentationElementStates,
 					slideElements: activeSlide?.elements,
@@ -290,29 +405,29 @@ export const ElementRenderer: React.FC<ElementRendererProps> = React.memo(
 					onUpdateChartElement: chartUpdateHandler,
 					onFormatText,
 				})}
-				{(el.actionClick || el.actionHover) && canInteract && (
-					<ActionIndicator
-						clickTooltip={el.actionClick?.tooltip}
-						hoverTooltip={el.actionHover?.tooltip}
-					/>
-				)}
-				{effectiveCanInteract && el.actionClick && (
-					<LinkTooltip
-						label={el.actionClick.tooltip || el.actionClick.url || el.actionClick.action || 'Link'}
-						hasUrl={Boolean(el.actionClick.url)}
-					/>
-				)}
-				{effectiveShowResizeHandles && !effectiveIsInlineEditing && (
-					<ResizeHandles
-						elementId={el.id}
-						adjustmentHandleDescriptor={adjH}
-						onResizePointerDown={onResizePointerDown}
-						onAdjustmentPointerDown={onAdjustmentPointerDown}
-						rotation={el.rotation}
-						nonRotationTransform={getElementTransformWithoutRotation(el)}
-						onRotate={elementLocks?.noRotation ? undefined : onRotate}
-					/>
-				)}
+				<ActionAffordances affordance={actionAffordance} />
+				{/* Resize/rotate/adjustment handles do NOT render here. This div
+				    carries the preset's `clip-path` (`shapeVisualStyle`'s clipPath
+				    cascade for a non-rectangular preset like `rightArrow`), which
+				    excludes every DESCENDANT from hit-testing wherever it falls
+				    outside the polygon, not just from paint. An adjustment handle is
+				    deliberately measured onto a preset geometry VERTEX (PowerPoint's
+				    own convention), and for a preset like `rightArrow` that vertex
+				    sits exactly on a sharp convex corner of the clip polygon, so a
+				    handle nested here had roughly half its hit area, including its
+				    own centre, excluded from hit-testing: pointer events fell
+				    through to whatever was drawn underneath instead of reaching the
+				    handle (`canvas-interaction.spec.ts`: "dragging the second handle
+				    of a multi-adjust preset moves it, not the first"). There is no
+				    per-descendant CSS escape from an ancestor's `clip-path`, so
+				    `SlideCanvas` renders `SelectionHandleOverlay` as an UNCLIPPED
+				    stage-level sibling of this div for the selected element instead,
+				    the same place `ConnectorEndpointOverlay` and `MotionPathOverlay`
+				    already live. This div's own class/style pointer-events rules
+				    (see above) are untouched by that: they still exist to make
+				    exactly the shape's own silhouette clickable, which is a
+				    different, unrelated concern from where its auxiliary handle UI
+				    paints. */}
 			</div>
 		);
 	},

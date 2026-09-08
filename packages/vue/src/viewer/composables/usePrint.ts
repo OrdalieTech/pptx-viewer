@@ -1,12 +1,17 @@
-import type { PptxSlide } from 'pptx-viewer-core';
+import type { PptxHandoutMaster, PptxSlide } from 'pptx-viewer-core';
 import {
 	buildHandoutsHtml,
 	buildNotesHtml,
 	buildPrintDocument as buildSvgPrintDocument,
 	buildPrintHtmlDocument,
 	buildSlidesHtml,
+	DEFAULT_VIEWER_OPTIONS,
+	filterHiddenSlideIndices,
+	finishPrintWindow as finishPendingPrintWindow,
+	openPendingPrintWindow,
+	openPrintWindow as sharedOpenPrintWindow,
 } from 'pptx-viewer-shared';
-import { ref } from 'vue';
+import { inject, ref } from 'vue';
 import type { Ref } from 'vue';
 
 import {
@@ -17,6 +22,8 @@ import {
 import type { PrintSettings } from '../components/print-dialog-types';
 import { exportSlideToSvg } from '../export-svg';
 import type { CanvasSize } from '../types';
+import { useSafeTranslate } from './useSafeTranslate';
+import { ViewerOptionsKey } from './useViewerOptionsStore';
 
 /**
  * usePrint: print-dialog state + the print-with-settings flow for the Vue
@@ -33,8 +40,16 @@ import type { CanvasSize } from '../types';
  * Slide titles for outline mode reuse the shared `buildOutlineHtml`.
  */
 
-/** Rasterise the slide at `index` to a canvas. Host-supplied (DOM-coupled). */
-export type RasterizeSlide = (index: number) => Promise<HTMLCanvasElement>;
+/**
+ * Rasterise the slide at `index` to a canvas. Host-supplied (DOM-coupled).
+ * `scaleMultiplier` (default 1) is an extra factor the Print dialog's
+ * notes/handouts raster path applies on top of the host's own baseline scale
+ * when Options > Advanced > "High quality" is on.
+ */
+export type RasterizeSlide = (
+	index: number,
+	scaleMultiplier?: number,
+) => Promise<HTMLCanvasElement>;
 
 /**
  * Open a print window for a complete HTML document and trigger printing.
@@ -50,6 +65,12 @@ export interface UsePrintOptions {
 	slideSize?: Ref<CanvasSize>;
 	/** Override the print-window opener (defaults to a `window.open` impl). */
 	openPrintWindow?: OpenPrintWindow;
+	/**
+	 * The deck's handout master, consumed for its background, header/footer/
+	 * date/page-number placeholders, and (when authored) positioned slide
+	 * rects, in the `handouts` print mode.
+	 */
+	handoutMaster?: Ref<PptxHandoutMaster | undefined>;
 }
 
 export interface UsePrintResult {
@@ -63,20 +84,18 @@ export interface UsePrintResult {
 	print: (settings: PrintSettings) => Promise<void>;
 }
 
-/** Default print-window opener: writes a full HTML doc and calls `print()`. */
+/**
+ * Default print-window opener: writes a full HTML doc and calls `print()`.
+ * Delegates to the shared `openPrintWindow` (this composable used to carry
+ * its own copy that passed `noopener` to `window.open`, which made Chrome
+ * return `null` from the call even though the tab genuinely opened, so this
+ * always read as "popup blocked" and left a stray blank tab with nothing
+ * ever written into it - see `pptx-viewer-shared`'s `print-window.ts` for
+ * why `noopener` doesn't belong on a same-origin window the app fills
+ * itself).
+ */
 function defaultOpenPrintWindow(htmlDocument: string): boolean {
-	const printWindow = window.open('', '_blank', 'noopener,noreferrer');
-	if (!printWindow) {
-		return false;
-	}
-	printWindow.document.open();
-	printWindow.document.write(htmlDocument);
-	printWindow.document.close();
-	printWindow.focus();
-	setTimeout(() => {
-		printWindow.print();
-	}, 300);
-	return true;
+	return sharedOpenPrintWindow(htmlDocument);
 }
 
 /**
@@ -91,14 +110,27 @@ function buildPrintDocument(
 	orientation: 'landscape' | 'portrait',
 	colorFilter: string,
 	frameSlides: boolean,
+	scaleToFit: boolean | undefined,
 ): string {
-	return buildPrintHtmlDocument({ title, bodyHtml, orientation, colorFilter, frameSlides });
+	return buildPrintHtmlDocument({
+		title,
+		bodyHtml,
+		orientation,
+		colorFilter,
+		frameSlides,
+		scaleToFit,
+	});
 }
 
 export function usePrint(options: UsePrintOptions): UsePrintResult {
 	const { slides, activeSlideIndex, rasterizeSlide } = options;
-	const openWindow = options.openPrintWindow ?? defaultOpenPrintWindow;
+	// A custom opener gets the complete document in one call, as documented;
+	// only the default `window.open` path gets the early-open popup-blocking
+	// fix (see `openPendingPrintWindow`), since it owns the window's timing.
+	const customOpenWindow = options.openPrintWindow;
 	const slideSize = options.slideSize ?? ref<CanvasSize>({ width: 960, height: 540 });
+	const t = useSafeTranslate();
+	const injectedViewerOptions = inject(ViewerOptionsKey, undefined);
 
 	const isPrintDialogOpen = ref(false);
 
@@ -115,24 +147,30 @@ export function usePrint(options: UsePrintOptions): UsePrintResult {
 
 		const slideList = slides.value;
 		const colorFilter = computeColorFilter(settings.colorMode);
-		const slideIndices = computeSlideIndices(
-			settings.slideRange,
-			activeSlideIndex.value,
-			slideList.length,
-			settings.customRangeFrom,
-			settings.customRangeTo,
+		const viewerOptions = injectedViewerOptions?.value ?? DEFAULT_VIEWER_OPTIONS;
+		const slideIndices = filterHiddenSlideIndices(
+			computeSlideIndices(
+				settings.slideRange,
+				activeSlideIndex.value,
+				slideList.length,
+				settings.customRangeFrom,
+				settings.customRangeTo,
+			),
+			slideList,
+			viewerOptions.advanced.printHiddenSlides,
 		);
 
 		// ── Outline: text-only, no rasterisation needed ─────────────────────
 		if (settings.printWhat === 'outline') {
 			const outlineHtml = buildOutlineHtml(slideIndices, slideList);
-			openWindow(
+			(customOpenWindow ?? defaultOpenPrintWindow)(
 				buildPrintDocument(
 					'Outline',
 					`<div class="outline-page">${outlineHtml}</div>`,
 					settings.orientation,
 					colorFilter,
 					settings.frameSlides,
+					settings.scaleToFit,
 				),
 			);
 			return;
@@ -146,11 +184,12 @@ export function usePrint(options: UsePrintOptions): UsePrintResult {
 			try {
 				const { width, height } = slideSize.value;
 				const svgs = slideIndices.map((index) => exportSlideToSvg(slideList[index], width, height));
-				openWindow(
+				(customOpenWindow ?? defaultOpenPrintWindow)(
 					buildSvgPrintDocument(svgs, width, height, {
 						title: 'Slides (Vector)',
 						orientation: settings.orientation,
 						colorFilter,
+						scaleToFit: settings.scaleToFit,
 					}),
 				);
 				return;
@@ -159,34 +198,61 @@ export function usePrint(options: UsePrintOptions): UsePrintResult {
 			}
 		}
 
+		// From here on the raster path awaits `rasterizeSlide` per slide, so the
+		// default opener must grab the window NOW, before that first await, or
+		// the browser silently blocks it as a popup. A host-supplied opener owns
+		// its own timing (see `customOpenWindow` above).
+		const pendingWindow = customOpenWindow
+			? undefined
+			: openPendingPrintWindow(t('pptx.print.preparingToPrint'));
+		if (!customOpenWindow && !pendingWindow) {
+			console.warn(
+				'[PowerPointViewer] Print window was blocked by the browser. Allow popups for this site to print.',
+			);
+			return;
+		}
+		const commit = (html: string): void => {
+			if (pendingWindow) {
+				finishPendingPrintWindow(pendingWindow, html);
+			} else {
+				customOpenWindow?.(html);
+			}
+		};
+
 		try {
+			// Options > Advanced > "High quality" raster scale for this
+			// notes/handouts fallback path, composed on top of the host's own
+			// baseline (2x * Options > Advanced > Image Size/Quality) scale.
+			const printScaleMultiplier = viewerOptions.advanced.printHighQuality ? 2 : 1;
 			// Rasterise each selected slide to a PNG data URL.
 			const images: string[] = [];
 			for (const idx of slideIndices) {
-				const canvas = await rasterizeSlide(idx);
+				const canvas = await rasterizeSlide(idx, printScaleMultiplier);
 				images.push(canvas.toDataURL('image/png'));
 			}
 			if (settings.printWhat === 'slides') {
-				openWindow(
+				commit(
 					buildPrintDocument(
 						'Slides',
 						buildSlidesHtml(images, slideIndices),
 						settings.orientation,
 						colorFilter,
 						settings.frameSlides,
+						settings.scaleToFit,
 					),
 				);
 				return;
 			}
 
 			if (settings.printWhat === 'notes') {
-				openWindow(
+				commit(
 					buildPrintDocument(
 						'Notes Pages',
 						buildNotesHtml(images, slideIndices, slideList),
 						'portrait',
 						colorFilter,
 						settings.frameSlides,
+						settings.scaleToFit,
 					),
 				);
 				return;
@@ -194,17 +260,19 @@ export function usePrint(options: UsePrintOptions): UsePrintResult {
 
 			// ── Handouts ─────────────────────────────────────────────────────
 			const spp = settings.slidesPerPage;
-			openWindow(
+			commit(
 				buildPrintDocument(
 					`Handout ${spp} per page`,
-					buildHandoutsHtml(images, slideIndices, spp),
+					buildHandoutsHtml(images, slideIndices, spp, options.handoutMaster?.value),
 					'portrait',
 					colorFilter,
 					settings.frameSlides,
+					settings.scaleToFit,
 				),
 			);
 		} catch (err) {
 			console.error('[PowerPointViewer] Print layout failed:', err);
+			pendingWindow?.close();
 		}
 	}
 

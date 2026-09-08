@@ -125,7 +125,6 @@ export const translations = {
 	'pptx.ribbon.toggleGridOverlay': 'Alternar superposición de cuadrícula',
 	'pptx.ribbon.guides': 'Guías',
 	'pptx.ribbon.toggleGuides': 'Alternar líneas guía centrales',
-	'pptx.ribbon.toggleSelectionPane': 'Mostrar/ocultar el panel de selección',
 	'pptx.ribbon.snapToGridTitle': 'Ajustar elementos a la cuadrícula mientras se mueve',
 	'pptx.ribbon.templatesOn': 'Plantillas activadas',
 	'pptx.ribbon.templatesOff': 'Plantillas desactivadas',
@@ -158,6 +157,7 @@ export const translations = {
 	'pptx.ribbon.advanceAfterSeconds': 'Avanzar después de la duración especificada',
 	'pptx.ribbon.sound': 'Sonido:',
 	'pptx.ribbon.soundNone': '[Sin sonido]',
+	'pptx.ribbon.soundOther': 'Otro sonido...',
 	'pptx.ribbon.inspector': 'Inspector',
 	'pptx.ribbon.openInspectorTransitions':
 		'Abra el Inspector para ver opciones de transición completas',
@@ -172,6 +172,8 @@ export const translations = {
 	'pptx.ribbon.customColour': 'Color personalizado...',
 	'pptx.ribbon.textHighlightColour': 'Color de resaltado del texto',
 	'pptx.ribbon.highlightColourValue': 'Color destacado {{color}}',
+	'pptx.ribbon.fillColourValue': 'Color de relleno {{color}}',
+	'pptx.ribbon.outlineColourValue': 'Color de contorno {{color}}',
 	'pptx.ribbon.bulletList': 'lista de viñetas',
 	'pptx.ribbon.justify': 'Justificar',
 	'pptx.home.chooseLayout': 'Elige el diseño',
@@ -192,4 +194,7 @@ export const translations = {
 	'pptx.ribbon.textDirectionRotate90': 'Girar 90°',
 	'pptx.ribbon.textDirectionStacked': 'apilados',
 	'pptx.ribbon.groupShapeStyles': 'Estilos de forma',
+	'pptx.ribbon.editing': 'Edición',
+	'pptx.ribbon.selectionPane': 'Panel de selección',
+	'pptx.ribbon.slides': 'Diapositivas',
 } as const;

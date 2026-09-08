@@ -55,6 +55,35 @@ export interface PptxSmartArtChoose {
 	rawXml?: XmlObject;
 }
 
+/** A single `dgm:adj/@val` adjustment, keyed by its `@idx` (1-based, like `a:gd`). */
+export interface PptxSmartArtShapeAdjustment {
+	index: number;
+	value: number;
+}
+
+/**
+ * Typed DiagramML CT_Shape data (`dgm:shape`) attached to a layout node: the
+ * per-node preset geometry override real (and third-party/custom) layout
+ * definitions use so a layoutNode can be e.g. an ellipse or a chevron instead
+ * of the arranger family's hardcoded default shape.
+ */
+export interface PptxSmartArtLayoutNodeShape {
+	/** `dgm:shape/@type`: a preset geometry name (`roundRect`, `ellipse`, `chevron`, `conn`, ...). */
+	presetGeometry?: string;
+	/** `dgm:adjLst/dgm:adj` entries (adjustment index -> value, as authored). */
+	adjustments?: PptxSmartArtShapeAdjustment[];
+	/** `dgm:shape/@hideGeom`: the shape is present only to size text, never painted. */
+	hideGeometry?: boolean;
+	/**
+	 * `dgm:shape/@lkTxEntry` (CT_Shape, boolean, default false): this node is a
+	 * decorative shape that should mirror its paired content node's text
+	 * rather than always rendering blank. See `smartart-layout-interpreter-
+	 * pyramid.ts`'s `arrangePyramid`, the interpreter's one existing
+	 * synthesized-decorative-shape call site.
+	 */
+	lkTxEntry?: boolean;
+}
+
 /** Identity and ordering metadata from DiagramML CT_LayoutNode. */
 export interface PptxSmartArtLayoutNode {
 	name?: string;
@@ -66,6 +95,8 @@ export interface PptxSmartArtLayoutNode {
 	choose?: PptxSmartArtChoose[];
 	constraints?: PptxSmartArtConstraint[];
 	rules?: PptxSmartArtNumericRule[];
+	/** `dgm:shape`: this node's own preset geometry override, when present. */
+	shape?: PptxSmartArtLayoutNodeShape;
 	children?: PptxSmartArtLayoutNode[];
 }
 

@@ -8,9 +8,10 @@ export interface FileSectionProps {
 	onOpenRecentFile?: (key: string) => void;
 	onExportPng: () => void;
 	onExportPdf: () => void;
+	/** Serialise the deck to pptx-viewer-json and download it (Export page card). */
+	onExportJson: () => void;
 	onExportVideo: () => void;
 	onExportGif: () => void;
-	onPackageForSharing: () => void;
 	onSaveAsPptx: () => void;
 	onSaveAsPpsx: () => void;
 	onSaveAsPptm: () => void;
@@ -23,6 +24,9 @@ export interface FileSectionProps {
 	onOpenPasswordProtection?: () => void;
 	onOpenFontEmbedding?: () => void;
 	onOpenDigitalSignatures?: () => void;
+	onOpenVersionHistory?: () => void;
 	/** Toolbar buttons the host has asked to hide (gates the Export page's action cards). */
 	hiddenActions?: ToolbarActionId[];
+	/** File > Options > Advanced > "Quickly access this number of Recent Documents". */
+	recentPresentationsCount?: number;
 }

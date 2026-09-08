@@ -1,29 +1,50 @@
 /**
  * viewer-keyboard.service.ts: Viewer-scoped editing keyboard-shortcut handler.
- * Only acts when the host is editable and not presenting and the user is not
- * typing in a field: Escape (disarm painter), "?" (shortcut cheat-sheet),
- * Ctrl/Cmd+Z/Y (undo/redo), Ctrl/Cmd+D/C/X/V/A/G (duplicate/copy/cut/paste/
- * select-all/(un)group), Delete/Backspace, arrow-key nudge (Shift = x10).
+ *
+ * Key-to-action resolution is delegated to `mapEditorKey`, the shared editor
+ * keymap every binding resolves against, so Angular cannot drift from React /
+ * Vue / Vanilla / Svelte again. This service only supplies the guard state, then
+ * performs the resolved action against {@link EditorStateService}.
+ *
+ * F5 / Shift+F5 (real PowerPoint's "start the show") are resolved separately by
+ * the shared `mapSlideShowStartKey`, ahead of `mapEditorKey`, because they must
+ * fire regardless of `canEdit` or the event target: PowerPoint starts the show
+ * even from a read-only deck and even with the caret in a text box.
  *
  * Extracted from {@link PowerPointViewerComponent}: the component keeps the thin
  * `@HostListener('document:keydown')` (a decorator can only live on the
  * component) and forwards the event to {@link handleKeyDown}; the host binds the
- * canEdit / presenting / active-slide-index accessors via {@link bind}.
+ * canEdit / presenting / active-slide-index / navigation accessors via
+ * {@link bind}.
  *
  * Provide it once on the viewer component (`providers: [ViewerKeyboardService]`).
  */
 
 import { inject, Injectable } from '@angular/core';
 
+import { isEditorTextInputTarget, mapEditorKey, mapSlideShowStartKey } from '../internal/shared';
 import { EditorStateService } from './editor-state.service';
 import { ViewerDialogsService } from './viewer-dialogs.service';
+import { ViewerFindReplaceService } from './viewer-find-replace.service';
 import { ViewerFormatPainterService } from './viewer-format-painter.service';
+import { ViewerPresentationModeService } from './viewer-presentation-mode.service';
 
 /** Live host accessors the shortcut handler consults. */
 interface KeyboardHost {
 	readonly canEdit: () => boolean;
 	readonly presenting: () => boolean;
 	readonly activeSlideIndex: () => number;
+	/**
+	 * A Draw-tab tool other than the selection arrow is armed. The shared keymap
+	 * stands its whole editing set down while one is, so a pen stroke is not also
+	 * a Delete: every other binding passes this flag and Angular did not, which
+	 * left Delete, Ctrl+D and the arrow nudges live over an armed pen.
+	 */
+	readonly isDrawing?: () => boolean;
+	/** Go back one slide (the arrows page the deck when nothing is selected). */
+	readonly goPrev?: () => void;
+	/** Go forward one slide. */
+	readonly goNext?: () => void;
 }
 
 @Injectable()
@@ -31,6 +52,8 @@ export class ViewerKeyboardService {
 	private readonly editor = inject(EditorStateService);
 	private readonly dialogs = inject(ViewerDialogsService);
 	private readonly formatPainter = inject(ViewerFormatPainterService);
+	private readonly findReplace = inject(ViewerFindReplaceService);
+	private readonly presentationMode = inject(ViewerPresentationModeService);
 
 	private host: KeyboardHost | null = null;
 
@@ -41,111 +64,124 @@ export class ViewerKeyboardService {
 
 	handleKeyDown(event: KeyboardEvent): void {
 		const host = this.host;
-		if (!host || !host.canEdit() || host.presenting()) {
-			return;
-		}
-		const target = event.target as HTMLElement | null;
-		const tag = target?.tagName;
-		if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) {
+		if (!host) {
 			return;
 		}
 
-		// Escape disarms the format painter first (mirrors React/Vue).
-		if (event.key === 'Escape' && this.formatPainter.active()) {
+		// F5 / Shift+F5 must start the show even with editing disabled and even
+		// with the caret parked in a text box, exactly like real PowerPoint, so
+		// this runs ahead of (and unguarded by) the canEdit/text-input gates
+		// `mapEditorKey` applies below. `event.preventDefault()` only on a match:
+		// otherwise the browser reloads the page on a bare F5.
+		const showAction = mapSlideShowStartKey(event, { isPresenting: host.presenting() });
+		if (showAction !== null) {
 			event.preventDefault();
-			this.formatPainter.cancel();
+			if (showAction === 'fromBeginning') {
+				this.presentationMode.presentFromBeginning();
+			} else {
+				this.presentationMode.present();
+			}
 			return;
 		}
 
-		// "?" opens the keyboard-shortcut cheat sheet (mirrors React).
-		if (event.key === '?' && !event.ctrlKey && !event.metaKey && !event.altKey) {
-			event.preventDefault();
-			this.dialogs.showShortcuts.set(true);
+		const { action, dx, dy } = mapEditorKey(event, {
+			canEdit: host.canEdit(),
+			isPresenting: host.presenting(),
+			hasSelection: this.editor.hasSelection(),
+			isDrawing: host.isDrawing?.() ?? false,
+			isTextInputTarget: isEditorTextInputTarget(event.target),
+		});
+		if (action === null) {
 			return;
 		}
+		event.preventDefault();
 
-		const mod = event.ctrlKey || event.metaKey;
 		const idx = host.activeSlideIndex();
-
-		if (mod && (event.key === 'z' || event.key === 'Z')) {
-			event.preventDefault();
-			if (event.shiftKey) {
-				this.editor.redo();
-			} else {
+		switch (action) {
+			case 'escape':
+				this.handleEscape();
+				break;
+			case 'toggleShortcuts':
+				this.dialogs.showShortcuts.set(!this.dialogs.showShortcuts());
+				break;
+			case 'find':
+				this.toggleFind();
+				break;
+			case 'undo':
 				this.editor.undo();
-			}
-			return;
-		}
-		if (mod && (event.key === 'y' || event.key === 'Y')) {
-			event.preventDefault();
-			this.editor.redo();
-			return;
-		}
-		if (mod && (event.key === 'd' || event.key === 'D')) {
-			event.preventDefault();
-			this.editor.duplicateSelected(idx);
-			return;
-		}
-		if (mod && (event.key === 'c' || event.key === 'C')) {
-			event.preventDefault();
-			this.editor.copySelected(idx);
-			return;
-		}
-		if (mod && (event.key === 'x' || event.key === 'X')) {
-			event.preventDefault();
-			this.editor.cutSelected(idx);
-			return;
-		}
-		if (mod && (event.key === 'v' || event.key === 'V')) {
-			event.preventDefault();
-			this.editor.paste(idx);
-			return;
-		}
-		if (mod && (event.key === 'a' || event.key === 'A')) {
-			event.preventDefault();
-			this.editor.selectAll(idx);
-			return;
-		}
-		if (mod && (event.key === 'g' || event.key === 'G')) {
-			event.preventDefault();
-			if (event.shiftKey) {
-				this.editor.ungroupSelected(idx);
-			} else {
+				break;
+			case 'redo':
+				this.editor.redo();
+				break;
+			case 'duplicate':
+				this.editor.duplicateSelected(idx);
+				break;
+			case 'copy':
+				this.editor.copySelected(idx);
+				break;
+			case 'cut':
+				this.editor.cutSelected(idx);
+				break;
+			case 'paste':
+				this.editor.paste(idx);
+				break;
+			case 'selectAll':
+				this.editor.selectAll(idx);
+				break;
+			case 'group':
 				this.editor.groupSelected(idx);
-			}
-			return;
-		}
-
-		if (!this.editor.hasSelection()) {
-			return;
-		}
-
-		if (event.key === 'Delete' || event.key === 'Backspace') {
-			event.preventDefault();
-			this.editor.deleteSelected(idx);
-			return;
-		}
-
-		const step = event.shiftKey ? 10 : 1;
-		switch (event.key) {
-			case 'ArrowLeft':
-				event.preventDefault();
-				this.editor.moveSelectedBy(idx, -step, 0);
 				break;
-			case 'ArrowRight':
-				event.preventDefault();
-				this.editor.moveSelectedBy(idx, step, 0);
+			case 'ungroup':
+				this.editor.ungroupSelected(idx);
 				break;
-			case 'ArrowUp':
-				event.preventDefault();
-				this.editor.moveSelectedBy(idx, 0, -step);
+			case 'delete':
+				this.editor.deleteSelected(idx);
 				break;
-			case 'ArrowDown':
-				event.preventDefault();
-				this.editor.moveSelectedBy(idx, 0, step);
+			case 'nudge':
+				this.editor.moveSelectedBy(idx, dx ?? 0, dy ?? 0);
+				break;
+			case 'prevSlide':
+				host.goPrev?.();
+				break;
+			case 'nextSlide':
+				host.goNext?.();
 				break;
 			default:
 				break;
+		}
+	}
+
+	/**
+	 * Ctrl/Cmd+F toggles the find bar. Angular has shipped the bar since the
+	 * find-replace port but had no shortcut for it at all, because the chord was
+	 * hand-wired in React and Vue instead of living in the shared keymap.
+	 *
+	 * The full find-and-replace bar counts as "open" for the toggle: pressing the
+	 * chord while it is up closes it rather than swapping it for the smaller find
+	 * bar, which is what every other binding's single-panel toggle does.
+	 */
+	private toggleFind(): void {
+		if (this.findReplace.showFind() || this.findReplace.showFindReplace()) {
+			this.findReplace.showFind.set(false);
+			this.findReplace.showFindReplace.set(false);
+			return;
+		}
+		this.findReplace.showFind.set(true);
+	}
+
+	/**
+	 * Escape unwinds the transient chrome one layer at a time: an armed format
+	 * painter first (it is modal over the pointer), then the shortcut cheat
+	 * sheet. Before this the branch stopped after the painter, so the panel "?"
+	 * had just opened stayed on screen with no key that could dismiss it.
+	 */
+	private handleEscape(): void {
+		if (this.formatPainter.active()) {
+			this.formatPainter.cancel();
+			return;
+		}
+		if (this.dialogs.showShortcuts()) {
+			this.dialogs.showShortcuts.set(false);
 		}
 	}
 }

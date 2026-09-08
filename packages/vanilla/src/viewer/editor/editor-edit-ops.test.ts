@@ -1,6 +1,9 @@
+/* oxlint-disable eslint/one-var -- many independent `it()` blocks, each with
+   its own short arrange/act/assert consts. */
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 import { describe, expect, it, vi } from 'vitest';
 
+import { createTranslator } from '../i18n';
 import { createInitialViewerState, createStore } from '../state';
 import type { ViewerState } from '../state';
 import { createEditActions } from './editor-edit-ops';
@@ -36,7 +39,14 @@ function setup(overrides: Partial<ViewerState> = {}) {
 		...overrides,
 	});
 	const ops = createEditorOps({ store, getHandler: () => null, onHistoryChange: vi.fn() });
-	const actions = createEditActions({ doc: document, store, ops, getHandler: () => null });
+	const actions = createEditActions({
+		doc: document,
+		getTranslator: () => createTranslator(),
+		store,
+		ops,
+		getHandler: () => null,
+		setHandler: () => {},
+	});
 	return { store, ops, actions };
 }
 
@@ -60,11 +70,24 @@ describe('createEditActions formatting', () => {
 		expect(reverted.textStyle.bold).toBeFalsy();
 	});
 
-	it('sets the shape fill colour', () => {
+	it('sets the shape fill colour and forces solid fill mode (shared shapeFillChange)', () => {
 		const { store, actions } = setup();
 		actions.setShapeFill('#abcdef');
-		const el = elementById(store, 'a') as PptxElement & { shapeStyle: { fillColor?: string } };
+		const el = elementById(store, 'a') as PptxElement & {
+			shapeStyle: { fillColor?: string; fillMode?: string };
+		};
 		expect(el.shapeStyle.fillColor).toBe('#abcdef');
+		expect(el.shapeStyle.fillMode).toBe('solid');
+	});
+
+	it('sets the shape outline (stroke) colour without disturbing the fill', () => {
+		const { store, actions } = setup();
+		actions.setShapeStroke('#123456');
+		const el = elementById(store, 'a') as PptxElement & {
+			shapeStyle: { fillColor?: string; strokeColor?: string };
+		};
+		expect(el.shapeStyle.strokeColor).toBe('#123456');
+		expect(el.shapeStyle.fillColor).toBe('#ffffff');
 	});
 
 	it('does nothing when the viewer is not editable', () => {
@@ -139,5 +162,47 @@ describe('createEditActions z-order', () => {
 		const { ops, actions } = setup({ selectedElementId: 'b' });
 		actions.bringToFront();
 		expect(ops.canUndo()).toBeFalsy();
+	});
+});
+
+describe('createEditActions toggleViewOption', () => {
+	it('flips a plain view toggle with no p:viewPr equivalent, outside history', () => {
+		const { store, ops, actions } = setup({ showGrid: false });
+		actions.toggleViewOption('showGrid');
+		expect(store.get().showGrid).toBeTruthy();
+		expect(ops.canUndo()).toBeFalsy();
+	});
+
+	it('flips snapToGrid AND writes it back into viewProperties.slideViewPr', () => {
+		const { store, actions } = setup({
+			snapToGrid: false,
+			viewProperties: { slideViewPr: { snapToObjects: true, showGuides: true } },
+		});
+		actions.toggleViewOption('snapToGrid');
+		expect(store.get().snapToGrid).toBeTruthy();
+		expect(store.get().viewProperties?.slideViewPr).toStrictEqual({
+			snapToGrid: true,
+			snapToObjects: true,
+			showGuides: true,
+		});
+	});
+
+	it('flips snapToShape (== OOXML snapToObjects) and writes it back too', () => {
+		const { store, actions } = setup({ snapToShape: true });
+		actions.toggleViewOption('snapToShape');
+		expect(store.get().snapToShape).toBeFalsy();
+		expect(store.get().viewProperties?.slideViewPr?.snapToObjects).toBeFalsy();
+	});
+
+	it('toggles the `.pptxv-<option>` class on every mounted root', () => {
+		const { actions } = setup({ showGuides: true });
+		const root = document.createElement('div');
+		root.className = 'pptxv pptxv-showGuides';
+		document.body.appendChild(root);
+
+		actions.toggleViewOption('showGuides');
+
+		expect(root.classList.contains('pptxv-showGuides')).toBeFalsy();
+		root.remove();
 	});
 });

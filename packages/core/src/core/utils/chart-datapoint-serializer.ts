@@ -11,8 +11,16 @@
  * @module utils/chart-datapoint-serializer
  */
 
-import type { PptxChartDataPoint, XmlObject } from '../types';
+import type { PptxChartDataPoint, PptxChartDataPointPicture, XmlObject } from '../types';
+import type { ResolveChartColor } from './chart-color-choice';
+import { buildDptPictureOptions } from './chart-datapoint-picture';
 import { buildChartMarkerXml } from './chart-marker-serializer';
+import { writeChartShapeProps } from './chart-shape-props-writer';
+
+export {
+	parseChartDataPointPicture,
+	parseChartDataPointPictureBlipRel,
+} from './chart-datapoint-picture';
 
 type GetLocalName = (key: string) => string;
 
@@ -35,10 +43,6 @@ function findKey(obj: XmlObject, local: string, getLocalName: GetLocalName): str
 	return Object.keys(obj).find((k) => getLocalName(k) === local);
 }
 
-function hex(color: string): string {
-	return color.replace(/^#/u, '').toUpperCase();
-}
-
 function ensureArray<T>(v: T | T[] | undefined): T[] {
 	if (v === undefined) {
 		return [];
@@ -46,28 +50,37 @@ function ensureArray<T>(v: T | T[] | undefined): T[] {
 	return Array.isArray(v) ? v : [v];
 }
 
-/** Build/merge the `c:spPr` for a data point from its modeled fill colour. */
+/**
+ * Build/merge the `c:spPr` for a data point from its modeled shape props.
+ * Delegates to the shared {@link writeChartShapeProps} writer so a stroke
+ * width or dash-style edit is not silently dropped: the ad-hoc writer this
+ * replaced only ever re-emitted `fillColor`, even though
+ * `parseShapeProps` (chart-series-detail-parser.ts) has always read the full
+ * fill/stroke-colour/width/dash shape back out of an authored `c:dPt/c:spPr`.
+ */
 function buildDptSpPr(
 	existing: XmlObject | undefined,
 	dp: PptxChartDataPoint,
 	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
 ): XmlObject | undefined {
 	const props = dp.spPr;
-	if (!props || !props.fillColor) {
+	if (!props) {
 		return existing;
 	}
-	const spPr: XmlObject = existing ? { ...existing } : {};
-	const fillKey = findKey(spPr, 'solidFill', getLocalName) ?? 'a:solidFill';
-	const noFillKey = findKey(spPr, 'noFill', getLocalName);
-	if (noFillKey) {
-		delete spPr[noFillKey];
-	}
-	spPr[fillKey] = { 'a:srgbClr': { '@_val': hex(props.fillColor) } };
-	return spPr;
+	return writeChartShapeProps(existing, props, getLocalName, resolveColor);
 }
 
 /** Local names this serializer owns; everything else on the existing node is preserved. */
-const MODELED = new Set(['idx', 'invertIfNegative', 'marker', 'bubble3D', 'explosion', 'spPr']);
+const MODELED = new Set([
+	'idx',
+	'invertIfNegative',
+	'marker',
+	'bubble3D',
+	'explosion',
+	'spPr',
+	'pictureOptions',
+]);
 
 function assertDataPoint(dp: PptxChartDataPoint): void {
 	if (!Number.isInteger(dp.idx) || dp.idx < 0 || dp.idx > 0xffffffff) {
@@ -86,6 +99,7 @@ function buildDataPoint(
 	existing: XmlObject | undefined,
 	dp: PptxChartDataPoint,
 	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
 ): XmlObject {
 	assertDataPoint(dp);
 	const node: XmlObject = {};
@@ -97,7 +111,7 @@ function buildDataPoint(
 		? (existing[findKey(existing, 'marker', getLocalName) ?? ''] as XmlObject | undefined)
 		: undefined;
 	if (dp.marker) {
-		node['c:marker'] = buildChartMarkerXml(existingMarker, dp.marker, getLocalName);
+		node['c:marker'] = buildChartMarkerXml(existingMarker, dp.marker, getLocalName, resolveColor);
 	} else if (existingMarker) {
 		node['c:marker'] = existingMarker;
 	}
@@ -115,11 +129,18 @@ function buildDataPoint(
 	const existingSpPr = existing
 		? (existing[findKey(existing, 'spPr', getLocalName) ?? ''] as XmlObject | undefined)
 		: undefined;
-	const spPr = buildDptSpPr(existingSpPr, dp, getLocalName);
+	const spPr = buildDptSpPr(existingSpPr, dp, getLocalName, resolveColor);
 	if (spPr) {
 		node['c:spPr'] = spPr;
 	}
-	// Preserve children the model does not capture (e.g. pictureOptions and extLst).
+	const existingPictureOptions = existing
+		? (existing[findKey(existing, 'pictureOptions', getLocalName) ?? ''] as XmlObject | undefined)
+		: undefined;
+	const pictureOptions = buildDptPictureOptions(existingPictureOptions, dp.picture);
+	if (pictureOptions) {
+		node['c:pictureOptions'] = pictureOptions;
+	}
+	// Preserve children the model does not capture (e.g. extLst).
 	if (existing) {
 		for (const key of Object.keys(existing)) {
 			if (key.startsWith('@_') || key === '#text') {
@@ -143,6 +164,7 @@ export function applySeriesDataPointsToXml(
 	seriesNode: XmlObject,
 	dataPoints: PptxChartDataPoint[] | undefined,
 	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
 ): void {
 	const existingKey = findKey(seriesNode, 'dPt', getLocalName);
 	const existingNodes = (existingKey ? ensureArray(seriesNode[existingKey]) : []) as XmlObject[];
@@ -158,7 +180,9 @@ export function applySeriesDataPointsToXml(
 	}
 
 	const points = dataPoints ?? [];
-	const built = points.map((dp) => buildDataPoint(byIdx.get(dp.idx), dp, getLocalName));
+	const built = points.map((dp) =>
+		buildDataPoint(byIdx.get(dp.idx), dp, getLocalName, resolveColor),
+	);
 
 	if (existingKey) {
 		delete seriesNode[existingKey];
@@ -174,6 +198,47 @@ export function applySeriesDataPointsToXml(
 	const entries = keys.map((k) => [k, seriesNode[k]] as const);
 	const at = beforeIdx === -1 ? entries.length : beforeIdx;
 	entries.splice(at, 0, ['c:dPt', value] as const);
+	for (const k of keys) {
+		delete seriesNode[k];
+	}
+	for (const [k, v] of entries) {
+		seriesNode[k] = v;
+	}
+}
+
+/** CT_BarSer children that follow `c:pictureOptions` in schema order (`c:dPt` itself, plus everything after it). */
+const AFTER_PICTURE_OPTIONS = new Set(['dPt', ...AFTER_DPT]);
+
+/**
+ * Apply a series-level `c:ser/c:pictureOptions` override (legal wherever a
+ * per-point `c:dPt/c:pictureOptions` is, CT_BarSer): paints every point in
+ * the series unless a `c:dPt` overrides it. Inserted in schema order (after
+ * `c:invertIfNegative`/`c:spPr`, before `c:dPt`). `undefined` removes the
+ * element AND preserves an existing one (the "typed edit wins once touched"
+ * convention {@link buildDptPictureOptions} already uses for `c:dPt`); an
+ * empty object removes it outright.
+ */
+export function applySeriesPictureOptionsToXml(
+	seriesNode: XmlObject,
+	picture: PptxChartDataPointPicture | undefined,
+	getLocalName: GetLocalName,
+): void {
+	const existingKey = findKey(seriesNode, 'pictureOptions', getLocalName);
+	const existing = existingKey ? (seriesNode[existingKey] as XmlObject) : undefined;
+	const built = buildDptPictureOptions(existing, picture);
+
+	if (existingKey) {
+		delete seriesNode[existingKey];
+	}
+	if (!built) {
+		return;
+	}
+
+	const keys = Object.keys(seriesNode);
+	const beforeIdx = keys.findIndex((k) => AFTER_PICTURE_OPTIONS.has(getLocalName(k)));
+	const entries = keys.map((k) => [k, seriesNode[k]] as const);
+	const at = beforeIdx === -1 ? entries.length : beforeIdx;
+	entries.splice(at, 0, ['c:pictureOptions', built] as const);
 	for (const k of keys) {
 		delete seriesNode[k];
 	}

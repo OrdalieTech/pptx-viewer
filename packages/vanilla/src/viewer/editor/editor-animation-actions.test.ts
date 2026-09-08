@@ -1,4 +1,10 @@
-import type { PptxElement, PptxElementAnimation, PptxSlide } from 'pptx-viewer-core';
+import type {
+	PptxAnimationTimelineAnchor,
+	PptxElement,
+	PptxElementAnimation,
+	PptxSlide,
+} from 'pptx-viewer-core';
+import { motionPathPresetById } from 'pptx-viewer-shared';
 import { describe, expect, it, vi } from 'vitest';
 
 import { createInitialViewerState, createStore } from '../state';
@@ -189,6 +195,54 @@ describe('createAnimationActions', () => {
 		expect(updated.find(({ elementId }) => elementId === 'el2')?.order).toBe(0);
 	});
 
+	it('setAnimationTiming patches the "after animation" dim-to-colour action', () => {
+		const animations: PptxElementAnimation[] = [{ elementId: 'el1', entrance: 'fadeIn', order: 0 }];
+		const store = createStore({
+			...createInitialViewerState(),
+			slides: [{ ...buildSlide('a', [buildElement('el1')]), animations }],
+			currentSlide: 0,
+			editable: true,
+			selectedElementId: 'el1',
+		});
+		const ops = createEditorOps({ store, getHandler: () => null, onHistoryChange: vi.fn() });
+		const actions = createAnimationActions({ store, ops });
+
+		actions.setAnimationTiming('el1', {
+			afterAnimation: 'dimToColor',
+			afterAnimationColor: '#ff0000',
+		});
+
+		const updated = store.get().slides[0].animations!;
+		expect(updated[0]).toMatchObject({
+			afterAnimation: 'dimToColor',
+			afterAnimationColor: '#ff0000',
+		});
+	});
+
+	it('setAnimationSound stages a picked file and clears it back to no sound', () => {
+		const animations: PptxElementAnimation[] = [{ elementId: 'el1', entrance: 'fadeIn', order: 0 }];
+		const store = createStore({
+			...createInitialViewerState(),
+			slides: [{ ...buildSlide('a', [buildElement('el1')]), animations }],
+			currentSlide: 0,
+			editable: true,
+			selectedElementId: 'el1',
+		});
+		const ops = createEditorOps({ store, getHandler: () => null, onHistoryChange: vi.fn() });
+		const actions = createAnimationActions({ store, ops });
+
+		actions.setAnimationSound('el1', { dataUrl: 'data:audio/mpeg;base64,AA==', fileName: 'x.mp3' });
+		expect(store.get().slides[0].animations![0]).toMatchObject({
+			soundData: 'data:audio/mpeg;base64,AA==',
+			soundFileName: 'x.mp3',
+		});
+
+		actions.setAnimationSound('el1', undefined);
+		const cleared = store.get().slides[0].animations![0];
+		expect(cleared.soundData).toBeUndefined();
+		expect(cleared.soundRId).toBeUndefined();
+	});
+
 	it('setAnimationEffect sets one bucket on the selected element and marks dirty', () => {
 		const store = createStore({
 			...createInitialViewerState(),
@@ -265,5 +319,115 @@ describe('createAnimationActions', () => {
 				.sort((left, right) => left.order! - right.order!)
 				.map(({ elementId }) => elementId),
 		).toStrictEqual(['c', 'a', 'b']);
+	});
+
+	it('moves an editor-authored effect ahead of a deck-native anchor', () => {
+		const animations: PptxElementAnimation[] = [{ elementId: 'el1', entrance: 'fadeIn', order: 1 }];
+		const store = createStore({
+			...createInitialViewerState(),
+			slides: [
+				{
+					...buildSlide('a', [buildElement('el1')]),
+					animations,
+					animationTimelineAnchors: [
+						{ order: 0, targetIds: ['native-1'], presetClasses: ['entr'] },
+					] as PptxAnimationTimelineAnchor[],
+				},
+			],
+			currentSlide: 0,
+			editable: true,
+			selectedElementId: 'el1',
+		});
+		const ops = createEditorOps({ store, getHandler: () => null, onHistoryChange: vi.fn() });
+		const actions = createAnimationActions({ store, ops });
+
+		actions.reorderAnimation('el1', 'up');
+
+		expect(store.get().slides[0].animations?.[0]).toMatchObject({ elementId: 'el1', order: 0 });
+	});
+
+	it('moveAnimation can drop an editor effect onto a native anchor slot', () => {
+		const animations: PptxElementAnimation[] = [{ elementId: 'el1', entrance: 'fadeIn', order: 1 }];
+		const store = createStore({
+			...createInitialViewerState(),
+			slides: [
+				{
+					...buildSlide('a', [buildElement('el1')]),
+					animations,
+					animationTimelineAnchors: [
+						{ order: 0, targetIds: ['native-1'], presetClasses: ['entr'] },
+					] as PptxAnimationTimelineAnchor[],
+				},
+			],
+			currentSlide: 0,
+			editable: true,
+			selectedElementId: 'el1',
+		});
+		const ops = createEditorOps({ store, getHandler: () => null, onHistoryChange: vi.fn() });
+		const actions = createAnimationActions({ store, ops });
+
+		actions.moveAnimation('el1', 0);
+
+		expect(store.get().slides[0].animations?.[0]).toMatchObject({ elementId: 'el1', order: 0 });
+	});
+
+	it('applies, keeps, edits and clears a motion path on the selected element', () => {
+		const store = createStore({
+			...createInitialViewerState(),
+			slides: [buildSlide('a', [buildElement('el1')])],
+			currentSlide: 0,
+			editable: true,
+			selectedElementId: 'el1',
+		});
+		const ops = createEditorOps({ store, getHandler: () => null, onHistoryChange: vi.fn() });
+		const actions = createAnimationActions({ store, ops });
+
+		actions.applyMotionPath('arcUp');
+		expect(store.get().slides[0].animations?.[0]).toMatchObject({
+			elementId: 'el1',
+			motionPath: motionPathPresetById('arcUp')?.path,
+			motionPathEditMode: 'relative',
+		});
+
+		// A path coexists with a preset on the same entry rather than replacing it.
+		actions.addAnimation('entrance', 'fadeIn');
+		expect(store.get().slides[0].animations?.[0]).toMatchObject({
+			entrance: 'fadeIn',
+			motionPath: motionPathPresetById('arcUp')?.path,
+		});
+
+		// The canvas end-handle drag commit.
+		actions.setMotionPathData('M 0 0 L 0.4 0.1');
+		expect(store.get().slides[0].animations?.[0].motionPath).toBe('M 0 0 L 0.4 0.1');
+
+		// `custom` is the inspector's read-only marker for a dragged path; picking
+		// it again must not snap the geometry back to a catalogue entry.
+		actions.applyMotionPath('custom');
+		expect(store.get().slides[0].animations?.[0].motionPath).toBe('M 0 0 L 0.4 0.1');
+
+		actions.applyMotionPath('none');
+		const cleared = store.get().slides[0].animations?.[0];
+		expect(cleared?.motionPath).toBeUndefined();
+		expect(cleared?.entrance).toBe('fadeIn');
+	});
+
+	it('refuses motion-path edits without a selection or edit rights', () => {
+		const store = createStore({
+			...createInitialViewerState(),
+			slides: [buildSlide('a', [buildElement('el1')])],
+			currentSlide: 0,
+			editable: false,
+			selectedElementId: 'el1',
+		});
+		const ops = createEditorOps({ store, getHandler: () => null, onHistoryChange: vi.fn() });
+		const actions = createAnimationActions({ store, ops });
+
+		actions.applyMotionPath('lineRight');
+		actions.setMotionPathData('M 0 0 L 0.4 0.1');
+		expect(store.get().slides[0].animations).toBeUndefined();
+
+		store.set({ editable: true, selectedElementId: undefined });
+		actions.applyMotionPath('lineRight');
+		expect(store.get().slides[0].animations).toBeUndefined();
 	});
 });

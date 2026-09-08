@@ -1,3 +1,4 @@
+/* oxlint-disable eslint/one-var -- pre-existing throughout this file; independent concerns, not one statement */
 import { NgClass, NgStyle } from '@angular/common';
 import {
 	ChangeDetectionStrategy,
@@ -23,24 +24,51 @@ import type {
 	PptxHandoutMaster,
 	PptxNotesMaster,
 	PptxSlide,
+	PptxSlideMaster,
 	PptxTheme,
 } from 'pptx-viewer-core';
 
 import {
+	applyMasterViewCrudAction,
 	applyPreferenceToOptions,
+	buildDeckSaveOptions,
 	createBackstagePresentation,
+	deleteAutosaveSnapshot,
+	endAudienceDisplay,
+	listAutosaveSnapshots,
+	masterViewCrudActions,
+	masterViewCrudFailureKey,
 	readBackstageRecentFile,
 	readStoredViewerPrefs,
+	recoverySnapshotIntent,
+	resolve3DRenderingFlags,
+	resolveAutosaveActivation,
+	resolveAutosaveIntervalMs,
+	resolveAuthoredSlideRange,
+	resolveExpiredAutosaveSnapshots,
 	resolveThemeCatalogEntry,
+	shouldShowAutosaveRecoveryPrompt,
+	setMasterViewBackgroundColor,
+	setMotionPath,
 	shouldAutoFollowBroadcaster,
+	templateSchemeFromTheme,
 	THEME_CATALOG,
 	viewerOptionsToPreferences,
+	viewerPreferencesFromViewProperties,
+	viewPropertiesPatchFromPreferences,
 	writeStoredViewerPrefs,
 } from '../internal/shared';
 import type {
 	AccountAuthConfig,
+	DeckViewPreferences,
+	MasterViewCrudActionId,
+	MasterViewTarget,
+	PowerPointViewerAPI,
+	SlideTemplateId,
 	ThemeCatalogEntry,
 	ToolbarActionId,
+	ViewerMode,
+	ViewerQuickAccessOptions,
 	ViewerSettings,
 	ViewerTheme,
 } from '../internal/shared';
@@ -54,16 +82,25 @@ import { createAngularAiBridge } from './ai/ai-bridge';
 import { AiChatPanelComponent } from './ai/ai-chat-panel.component';
 import { aiToggleVisible } from './ai/ai-gating';
 import { AiPanelStore } from './ai/ai-panel-store';
+import { AreaChart3DService } from './area-chart-3d.service';
+import { AutosaveRecoveryDialogComponent } from './autosave-recovery-dialog.component';
+import { AutosaveRecoveryService } from './autosave-recovery.service';
 import { AutosaveService } from './autosave.service';
+import { BarChart3DService } from './bar-chart-3d.service';
 import { BroadcastDialogComponent } from './broadcast-dialog.component';
 import { CollaborationCursorsComponent } from './collaboration-cursors.component';
 import { CollaborationService } from './collaboration.service';
+import { CommentMarkersOverlayComponent } from './comment-markers-overlay.component';
 import {
 	addCommentToList,
 	removeCommentFromList,
+	replyToCommentInList,
 	toggleCommentResolvedInList,
 } from './comments-helpers';
+import { withMentionsOnLast, withMentionsOnLastReply } from './comments-mentions-patch';
+import type { CommentSubmission } from './comments-panel.component';
 import { CommentsPanelComponent } from './comments-panel.component';
+import { CompatToastsComponent } from './compat-toasts.component';
 import { CustomShowsComponent } from './custom-shows.component';
 import { EditorContextMenuComponent } from './editor-context-menu.component';
 import { newChartElement, newShapeElement, newTableElement, newTextElement } from './editor-insert';
@@ -74,20 +111,28 @@ import { ExportProgressModalComponent } from './export-progress-modal.component'
 import { FindBarComponent } from './find-bar.component';
 import { FindReplaceBarComponent } from './find-replace-bar.component';
 import { FollowModeBarComponent } from './follow-mode-bar.component';
+import { GoogleWebfontsService } from './google-webfonts.service';
 import { HyperlinkDialogComponent } from './hyperlink-dialog.component';
 import { InsertSmartArtDialogComponent } from './insert-smart-art-dialog.component';
 import type { SmartArtInsertEvent } from './insert-smart-art-dialog.component';
 import { IsMobileService } from './is-mobile';
+import { LineChart3DService } from './line-chart-3d.service';
 import { LoadContentService } from './load-content.service';
+import { LoadNoticesService } from './load-notices.service';
 import { MasterViewCanvasComponent } from './master-view-canvas.component';
 import { MasterViewSidebarComponent } from './master-view-sidebar.component';
+import { applyMobileBarSheetTap } from './mobile-bar-sheet-tap';
 import { MobileBottomBarComponent } from './mobile-bottom-bar.component';
 import type { MobileBarSheet } from './mobile-bottom-bar.component';
 import { MobileMenuSheetComponent } from './mobile-menu-sheet.component';
 import { MobilePresenterViewComponent } from './mobile-presenter-view.component';
 import { MobileSlidesSheetComponent } from './mobile-slides-sheet.component';
 import { MobileToolbarComponent } from './mobile-toolbar.component';
+import { MotionPathOverlayComponent } from './motion-path-overlay.component';
 import { NotesPanelComponent } from './notes-panel.component';
+import { OutlineViewOverlayComponent } from './outline-view-overlay.component';
+import type { OutlineCommit } from './outline-view-overlay.component';
+import { PieChart3DService } from './pie-chart-3d.service';
 import { POWER_POINT_VIEWER_PROVIDERS } from './power-point-viewer.providers';
 import { PresentationOverlayComponent } from './presentation-overlay.component';
 import { PresenterViewComponent } from './presenter-view.component';
@@ -95,6 +140,10 @@ import { parseAudienceNonce, PresenterWindowService } from './presenter-window.s
 import { PrintDialogComponent } from './print-dialog.component';
 import { PrintService } from './print.service';
 import { PropertiesDialogComponent } from './properties-dialog.component';
+import { QuickAccessStripComponent } from './quick-access-strip.component';
+import { ReadingViewOverlayComponent } from './reading-view-overlay.component';
+import { ReadOnlyBannerComponent } from './readonly-banner.component';
+import { RecentColorsService } from './recent-colors.service';
 import { RehearseTimingsComponent } from './rehearse-timings.component';
 import { RemoteSelectionOverlayComponent } from './remote-selection-overlay.component';
 import { patchTextStyle } from './ribbon-text-helpers';
@@ -105,13 +154,16 @@ import { SignaturesPanelComponent } from './signatures-panel.component';
 import { SlideCanvasComponent } from './slide-canvas.component';
 import { SlideDefaultInspectorComponent } from './slide-default-inspector.component';
 import { SlideSorterOverlayComponent } from './slide-sorter-overlay.component';
+import { SlideTemplateGalleryDialogComponent } from './slide-template-gallery-dialog.component';
 import { SlidesPanelComponent } from './slides-panel.component';
 import { SmartArt3DService } from './smart-art-3d.service';
 import { buildSmartArtInsertElement } from './smart-art-insert-helpers';
 import { StatusBarComponent } from './status-bar.component';
+import { SurfaceChart3DService } from './surface-chart-3d.service';
 import { buildSaveSlides } from './template-mode';
 import { ThemeGalleryComponent } from './theme-gallery.component';
-import { TitleBarComponent } from './title-bar.component';
+import { resolveBelowRibbonQuickAccess, TitleBarComponent } from './title-bar.component';
+import { mergeHiddenActions } from './toolbar-visibility';
 import type { CollaborationConfig } from './types';
 import { ViewerCanvasEditingService } from './viewer-canvas-editing.service';
 import { ViewerCollabCursorService } from './viewer-collab-cursor.service';
@@ -164,6 +216,8 @@ import { ZoomTargetService } from './zoom-target.service';
 		PresenterViewComponent,
 		MobilePresenterViewComponent,
 		SlideSorterOverlayComponent,
+		OutlineViewOverlayComponent,
+		ReadingViewOverlayComponent,
 		SlideDefaultInspectorComponent,
 		FindBarComponent,
 		FindReplaceBarComponent,
@@ -172,11 +226,15 @@ import { ZoomTargetService } from './zoom-target.service';
 		EditorToolbarComponent,
 		EditorContextMenuComponent,
 		ExportProgressModalComponent,
+		CommentMarkersOverlayComponent,
 		CommentsPanelComponent,
+		CompatToastsComponent,
+		ReadOnlyBannerComponent,
 		SignaturesPanelComponent,
 		AccessibilityPanelComponent,
 		CollaborationCursorsComponent,
 		RemoteSelectionOverlayComponent,
+		MotionPathOverlayComponent,
 		FollowModeBarComponent,
 		PropertiesDialogComponent,
 		HyperlinkDialogComponent,
@@ -190,13 +248,16 @@ import { ZoomTargetService } from './zoom-target.service';
 		MasterViewCanvasComponent,
 		MasterViewSidebarComponent,
 		NotesPanelComponent,
+		QuickAccessStripComponent,
 		RibbonComponent,
 		TitleBarComponent,
 		ThemeGalleryComponent,
 		SelectionPaneComponent,
 		CustomShowsComponent,
 		InsertSmartArtDialogComponent,
+		SlideTemplateGalleryDialogComponent,
 		ViewerExtraDialogsComponent,
+		AutosaveRecoveryDialogComponent,
 		RehearseTimingsComponent,
 		AiChatPanelComponent,
 		TranslatePipe,
@@ -223,21 +284,54 @@ import { ZoomTargetService } from './zoom-target.service';
 					<pre class="pptx-ng-error-detail">{{ loader.error() }}</pre>
 				</div>
 			} @else {
-				@if (!mobile.isMobile()) {
+				@if (protectedViewActive() && chromeVisible()) {
+					<div
+						class="pptx-ng-protected-view-banner flex items-center gap-3 border-b border-amber-700/30 bg-amber-900/20 px-4 py-2"
+						role="status"
+					>
+						<span class="h-4 w-4 shrink-0 text-amber-400" aria-hidden="true">&#128274;</span>
+						<p class="flex-1 text-xs text-amber-200">
+							<strong>{{ 'pptx.security.protectedViewTitle' | translate }}</strong
+							>:
+							{{ 'pptx.options.trust.protectedViewInfo' | translate }}
+						</p>
+						<button
+							type="button"
+							class="shrink-0 rounded border border-amber-600/50 px-3 py-1 text-xs font-medium text-amber-100 transition-colors hover:bg-amber-700/30"
+							(click)="enableEditing()"
+						>
+							{{ 'pptx.security.enableEditing' | translate }}
+						</button>
+					</div>
+				}
+				@if (loadNotices.bannerActive() && chromeVisible()) {
+					<pptx-readonly-banner
+						[kind]="loadNotices.recommendation().kind"
+						[messageKey]="loadNotices.recommendation().messageKey"
+						[passwordPromptOpen]="loadNotices.passwordPromptOpen()"
+						[passwordError]="loadNotices.passwordError()"
+						[checkingPassword]="loadNotices.checkingPassword()"
+						(editAnyway)="loadNotices.editAnyway()"
+						(dismiss)="loadNotices.dismissBanner()"
+						(submitPassword)="loadNotices.submitPassword($event)"
+						(cancelPassword)="loadNotices.cancelPasswordPrompt()"
+					/>
+				}
+				@if (!mobile.isMobile() && chromeVisible()) {
 					<pptx-title-bar
 						[canEdit]="canEdit()"
 						[fileName]="fileName()"
 						[isDirty]="editor.dirty()"
 						[autosaveStatus]="autosave.status()"
-						[autosaveEnabled]="autosaveEnabled()"
+						[autosaveEnabled]="autosaveActivation().active"
 						[canUndo]="editor.canUndo()"
 						[canRedo]="editor.canRedo()"
 						[undoLabel]="editor.undoLabel()"
 						[redoLabel]="editor.redoLabel()"
 						[findReplaceOpen]="findReplace.showFind() || findReplace.showFindReplace()"
-						[hiddenActions]="hiddenActions()"
+						[hiddenActions]="effectiveHiddenActions()"
 						[quickAccess]="viewerOpts.options().quickAccess"
-						(toggleAutosave)="autosaveEnabled.update(v => !v)"
+						(toggleAutosave)="toggleAutosave()"
 						(save)="fileIO.saveAsPptx()"
 						(undo)="editor.undo()"
 						(redo)="editor.redo()"
@@ -246,104 +340,129 @@ import { ZoomTargetService } from './zoom-target.service';
 						(commandSearch)="handleCommandSearch($event)"
 					/>
 					<pptx-ribbon
-					[slideIndex]="activeSlideIndex()"
-					[slideCount]="slideCount()"
-					[canEdit]="canEdit()"
-					[selectedElement]="selectedElement()"
-					[hiddenActions]="hiddenActions()"
-					[zoomPercent]="zoomSvc.zoomPercent()"
-					[formatPainterActive]="formatPainter.active()"
-					[canActivateFormatPainter]="formatPainter.canActivate()"
-					[exporting]="xport.exporting()"
-					[hasMacros]="loader.hasMacros()"
-					[sidebarCollapsed]="slidesPanelCollapsed()"
-					[inspectorOpen]="inspectorPanel.inspectorPaneOpen()"
-					[commentsOpen]="inspectorPanel.activePanel() === 'comments'"
-					[commentCount]="activeComments().length"
-					[findOpen]="findReplace.showFind() || findReplace.showFindReplace()"
-					[collabConnected]="collab.connected()"
-					[connectedCount]="collab.connectedCount()"
-					[spellCheckEnabled]="spellCheck()"
-					[showSubtitles]="presentationMode.subtitlesVisible()"
-					(toggleSidebar)="slidesPanelCollapsed.update(v => !v)"
-					(prev)="goPrev()"
-					(next)="goNext()"
-					(zoomIn)="zoomSvc.zoomIn()"
-					(zoomOut)="zoomSvc.zoomOut()"
-					(zoomReset)="zoomSvc.zoomReset()"
-					(find)="findReplace.showFind.set(true)"
-					(present)="presentationMode.present()"
-					(presentFromBeginning)="presentationMode.presentFromBeginning()"
-					(presenter)="presentationMode.presentPresenter()"
-					(record)="presentationMode.startRehearsalFromCurrent()"
-					(recordFromBeginning)="presentationMode.startRehearsalFromBeginning()"
-					(recordFromCurrent)="presentationMode.startRehearsalFromCurrent()"
-					(spellCheckChange)="spellCheck.set($event)"
-					(rehearseTimings)="presentationMode.startRehearsalFromCurrent()"
-					(toggleSubtitles)="presentationMode.toggleSubtitles()"
-					(openSubtitleSettings)="presentationMode.toggleSubtitles()"
-					(share)="session.showShare.set(true)"
-					(broadcast)="session.showBroadcast.set(true)"
-					(openFile)="fileIO.openFile()"
-					(openRecentFile)="onOpenRecentFile($event)"
-					(createPresentation)="onCreatePresentation($event)"
-					(save)="fileIO.saveAsPptx()"
-					(savePpsx)="fileIO.saveAsPpsx()"
-					(savePptm)="fileIO.saveAsPptm()"
-					(packageForSharing)="fileIO.packageForSharing()"
-					(info)="docProperties.showProperties.set(true)"
-					(print)="print.openDialog()"
-					(comments)="inspectorPanel.togglePanel('comments')"
-					(signatures)="inspectorPanel.togglePanel('signatures')"
-					(a11y)="inspectorPanel.togglePanel('accessibility')"
-					(link)="docProperties.showHyperlink.set(true)"
-					(openSorter)="showSorter.set(true)"
-					(toggleNotes)="mobileSheetSvc.toggleNotes()"
-					(toggleFormatPainter)="formatPainter.toggle()"
-					(exportPng)="xport.exportPng()"
-					(exportPdf)="xport.exportPdf()"
-					(exportGif)="xport.exportGif()"
-					(exportVideo)="xport.exportVideo()"
-					(copySlideAsImage)="xport.copySlideAsImage()"
-					(replace)="findReplace.openFindReplace()"
-					(toggleInspector)="inspectorPanel.toggleFormatPanel()"
-					(drawToolChange)="onDrawToolChange($event)"
-					[showGrid]="showGrid()"
-					[showRulers]="showRulers()"
-					[showGuides]="showGuides()"
-					[snapToGrid]="snapToGrid()"
-					[snapToShape]="snapToShape()"
-					[eyedropperActive]="formatPainter.eyedropperActive()"
-					(toggleGrid)="showGrid.update(v => !v)"
-					(toggleRulers)="showRulers.update(v => !v)"
-					(toggleGuides)="showGuides.update(v => !v)"
-					(toggleSnapToGrid)="snapToGrid.update(v => !v)"
-					(toggleSnapToShape)="snapToShape.update(v => !v)"
-					(addGuide)="addGuide($event)"
-					(zoomToFit)="zoomSvc.zoomReset()"
-					(toggleEyedropper)="formatPainter.toggleEyedropper()"
-					[themeGalleryOpen]="themeGallery.showThemeGallery()"
-					(toggleThemeGallery)="themeGallery.showThemeGallery.update(v => !v)"
-					(toggleSelectionPane)="inspectorPanel.togglePanel('selection')"
-					(openCustomShows)="customShowsCtl.showDialog.set(true)"
-					(openSmartArtDialog)="showSmartArtInsert.set(true)"
-					(openEquationDialog)="dialogs.openEquationInsert()"
-					(openMasterView)="openMasterView()"
-					(openSetUpSlideShow)="dialogs.showSetUpSlideShow.set(true)"
-					(openCompare)="onOpenCompare()"
-					(openPassword)="dialogs.showPassword.set(true)"
-					(openFontEmbedding)="dialogs.showFontEmbedding.set(true)"
-					(openVersionHistory)="dialogs.showVersionHistory.set(true)"
-					(openShortcuts)="dialogs.showShortcuts.set(true)"
-					(openSettings)="dialogs.showSettings.set(true)"
-					[accountAuth]="accountAuth()"
-					[aiEnabled]="aiEnabled()"
-					[aiPanelOpen]="aiPanelOpen()"
-					(toggleAiPanel)="aiPanelOpen.update(v => !v)"
+						[slideIndex]="activeSlideIndex()"
+						[slideCount]="slideCount()"
+						[canEdit]="canEdit()"
+						[selectedElement]="selectedElement()"
+						[hiddenActions]="effectiveHiddenActions()"
+						[zoomPercent]="zoomSvc.zoomPercent()"
+						[formatPainterActive]="formatPainter.active()"
+						[canActivateFormatPainter]="formatPainter.canActivate()"
+						[exporting]="xport.exporting()"
+						[hasMacros]="loader.hasMacros()"
+						[sidebarCollapsed]="slidesPanelCollapsed()"
+						[inspectorOpen]="inspectorPanel.inspectorPaneOpen()"
+						[commentsOpen]="inspectorPanel.activePanel() === 'comments'"
+						[commentCount]="activeComments().length"
+						[findOpen]="findReplace.showFind() || findReplace.showFindReplace()"
+						[collabConnected]="collab.connected()"
+						[connectedCount]="collab.connectedCount()"
+						[spellCheckEnabled]="spellCheck()"
+						[showSubtitles]="presentationMode.subtitlesVisible()"
+						(toggleSidebar)="slidesPanelCollapsed.update((v) => !v)"
+						(prev)="goPrev()"
+						(next)="goNext()"
+						(zoomIn)="zoomSvc.zoomIn()"
+						(zoomOut)="zoomSvc.zoomOut()"
+						(zoomReset)="zoomSvc.zoomReset()"
+						(find)="findReplace.showFind.set(true)"
+						(present)="presentationMode.present()"
+						(presentFromBeginning)="presentationMode.presentFromBeginning()"
+						(presenter)="presentationMode.presentPresenter()"
+						(record)="presentationMode.startRehearsalFromCurrent()"
+						(recordFromBeginning)="presentationMode.startRehearsalFromBeginning()"
+						(recordFromCurrent)="presentationMode.startRehearsalFromCurrent()"
+						(spellCheckChange)="spellCheck.set($event)"
+						(rehearseTimings)="presentationMode.startRehearsalFromCurrent()"
+						(toggleSubtitles)="presentationMode.toggleSubtitles()"
+						(openSubtitleSettings)="presentationMode.toggleSubtitles()"
+						(share)="session.showShare.set(true)"
+						(broadcast)="session.showBroadcast.set(true)"
+						(openFile)="fileIO.openFile()"
+						(openRecentFile)="onOpenRecentFile($event)"
+						(createPresentation)="onCreatePresentation($event)"
+						(save)="fileIO.saveAsPptx()"
+						(savePpsx)="fileIO.saveAsPpsx()"
+						(savePptm)="fileIO.saveAsPptm()"
+						(info)="docProperties.showProperties.set(true)"
+						(print)="print.openDialog()"
+						(comments)="inspectorPanel.togglePanel('comments')"
+						(signatures)="inspectorPanel.togglePanel('signatures')"
+						(a11y)="inspectorPanel.togglePanel('accessibility')"
+						(shortcuts)="dialogs.showShortcuts.set(true)"
+						(versionHistory)="dialogs.showVersionHistory.set(true)"
+						(passwordProtection)="dialogs.showPassword.set(true)"
+						(fontEmbedding)="dialogs.showFontEmbedding.set(true)"
+						(link)="docProperties.showHyperlink.set(true)"
+						(openSorter)="showSorter.set(true)"
+						(openReadingView)="showReadingView.set(true)"
+						(openOutlineView)="showOutlineView.set(true)"
+						(toggleNotes)="mobileSheetSvc.toggleNotes()"
+						(toggleFormatPainter)="formatPainter.toggle()"
+						(exportPng)="xport.exportPng()"
+						(exportPdf)="xport.exportPdf()"
+						(exportGif)="xport.exportGif()"
+						(exportVideo)="xport.exportVideo()"
+						(exportJson)="fileIO.exportJson(fileName())"
+						(copySlideAsImage)="xport.copySlideAsImage()"
+						(replace)="findReplace.openFindReplace()"
+						(toggleInspector)="inspectorPanel.toggleFormatPanel()"
+						(drawToolChange)="onDrawToolChange($event)"
+						[showGrid]="showGrid()"
+						[showRulers]="showRulers()"
+						[showGuides]="showGuides()"
+						[snapToGrid]="snapToGrid()"
+						[snapToShape]="snapToShape()"
+						[eyedropperActive]="formatPainter.eyedropperActive()"
+						(toggleGrid)="showGrid.update((v) => !v)"
+						(toggleRulers)="showRulers.update((v) => !v)"
+						(toggleGuides)="showGuides.update((v) => !v)"
+						(toggleSnapToGrid)="snapToGrid.update((v) => !v)"
+						(toggleSnapToShape)="snapToShape.update((v) => !v)"
+						(addGuide)="addGuide($event)"
+						(zoomToFit)="zoomSvc.zoomReset()"
+						(toggleEyedropper)="formatPainter.toggleEyedropper()"
+						[themeGalleryOpen]="themeGallery.showThemeGallery()"
+						(toggleThemeGallery)="onBrowseThemes()"
+						(editTheme)="onEditTheme()"
+						(openSlideSize)="onOpenSlideSize()"
+						(toggleSelectionPane)="inspectorPanel.togglePanel('selection')"
+						(openCustomShows)="customShowsCtl.showDialog.set(true)"
+						(openSmartArtDialog)="showSmartArtInsert.set(true)"
+						(openTemplateGallery)="showTemplateGallery.set(true)"
+						(openEquationDialog)="dialogs.openEquationInsert()"
+						(openMasterView)="openMasterView()"
+						(openSetUpSlideShow)="dialogs.showSetUpSlideShow.set(true)"
+						[activeSlideHidden]="!!displaySlides()[activeSlideIndex()]?.hidden"
+						(toggleHideSlide)="toggleHideSlides([activeSlideIndex()])"
+						(openCompare)="onOpenCompare()"
+						(openPassword)="dialogs.showPassword.set(true)"
+						(openFontEmbedding)="dialogs.showFontEmbedding.set(true)"
+						(openVersionHistory)="dialogs.showVersionHistory.set(true)"
+						(openShortcuts)="dialogs.showShortcuts.set(true)"
+						(openSettings)="dialogs.showSettings.set(true)"
+						[accountAuth]="accountAuth()"
+						[aiEnabled]="aiEnabled()"
+						[aiPanelOpen]="aiPanelOpen()"
+						(toggleAiPanel)="aiPanelOpen.update((v) => !v)"
 					/>
+
+					@if (belowRibbonQuickAccess(); as belowQuickAccess) {
+						<div
+							class="flex items-center gap-0.5 border-b border-border/60 px-2 py-0.5"
+							data-pptx-quick-access="below"
+						>
+							<pptx-quick-access-strip
+								[quickAccess]="belowQuickAccess"
+								[canUndo]="editor.canUndo()"
+								[canRedo]="editor.canRedo()"
+								(command)="onQuickAccessCommand($event)"
+							/>
+						</div>
+					}
 				}
 
-				@if (mobile.isMobile()) {
+				@if (mobile.isMobile() && chromeVisible()) {
 					<pptx-mobile-toolbar
 						[canEdit]="canEdit()"
 						[canUndo]="editor.canUndo()"
@@ -352,9 +471,13 @@ import { ZoomTargetService } from './zoom-target.service';
 						[menuOpen]="mobileSheetSvc.mobileSheet() === 'menu'"
 						[aiEnabled]="aiEnabled()"
 						[aiPanelOpen]="aiPanelOpen()"
-						[hiddenActions]="hiddenActions()"
-						(toggleMenu)="mobileSheetSvc.mobileSheet.set(mobileSheetSvc.mobileSheet() === 'menu' ? null : 'menu')"
-						(toggleAiPanel)="aiPanelOpen.update(v => !v)"
+						[hiddenActions]="effectiveHiddenActions()"
+						(toggleMenu)="
+							mobileSheetSvc.mobileSheet.set(
+								mobileSheetSvc.mobileSheet() === 'menu' ? null : 'menu'
+							)
+						"
+						(toggleAiPanel)="aiPanelOpen.update((v) => !v)"
 						(undo)="editor.undo()"
 						(redo)="editor.redo()"
 						(share)="session.showShare.set(true)"
@@ -364,14 +487,14 @@ import { ZoomTargetService } from './zoom-target.service';
 				}
 
 				<div class="pptx-ng-body">
-					@if (canEdit() && !mobile.isMobile() && !slidesPanelCollapsed()) {
+					@if (canEdit() && !mobile.isMobile() && !slidesPanelCollapsed() && chromeVisible()) {
 						<pptx-slides-panel
 							[canvasSize]="loader.canvasSize()"
 							[mediaDataUrls]="loader.mediaDataUrls()"
 							[activeIndex]="activeSlideIndex()"
 							(select)="goTo($event)"
 						/>
-					} @else if (!canEdit()) {
+					} @else if (!canEdit() && chromeVisible()) {
 						<nav class="pptx-ng-thumbnails" [attr.aria-label]="'pptx.sections.slides' | translate">
 							@for (slide of displaySlides(); track slide.id; let i = $index) {
 								<button
@@ -398,6 +521,7 @@ import { ZoomTargetService } from './zoom-target.service';
 							[showRulers]="showRulers()"
 							[showGuides]="showGuides()"
 							[snapToGrid]="snapToGrid()"
+							[gridSpacing]="loader.viewProperties()?.gridSpacing"
 							[snapToShape]="snapToShape()"
 							[guideCommand]="guideCommand()"
 							[spellCheck]="spellCheck()"
@@ -417,6 +541,13 @@ import { ZoomTargetService } from './zoom-target.service';
 							(marqueeSelect)="editor.select($event)"
 							(transformStart)="editor.beginTransform($event.label)"
 							(transformUpdate)="editor.applyTransform(activeSlideIndex(), $event.id, $event.box)"
+							(transformEnd)="editor.rerouteConnectors(activeSlideIndex(), $event.ids)"
+							(adjustUpdate)="
+								editor.applyShapeAdjustments(activeSlideIndex(), $event.id, $event.adjustments)
+							"
+							(connectorEndpointUpdate)="
+								editor.applyConnectorEndpoint(activeSlideIndex(), $event.id, $event.element)
+							"
 							(rotateUpdate)="
 								editor.applyTransform(activeSlideIndex(), $event.id, { rotation: $event.rotation })
 							"
@@ -431,16 +562,52 @@ import { ZoomTargetService } from './zoom-target.service';
 							(eraserHit)="canvasEditing.onEraserHit($event)"
 							(cellCommit)="canvasEditing.onTableCellCommit($event)"
 							(tableChange)="canvasEditing.onTableChange($event)"
-						/>
-						@if (collab.connected()) {
-							<pptx-collaboration-cursors [cursors]="collabCursor.cursors()" [zoom]="zoomSvc.zoom()" />
-							<pptx-remote-selection-overlay
-								[presences]="collab.presence()"
-								[elements]="activeSlide()?.elements ?? []"
-								[activeSlideIndex]="activeSlideIndex()"
-								[zoom]="zoomSvc.zoom()"
+						>
+							<!--
+								Collaboration overlays are PROJECTED INTO the slide canvas so they
+								render inside the scaled stage: the stage transform applies the
+								on-screen scale (auto-fit folded with the user's zoom) exactly
+								once, and both overlays are authored in raw slide coordinates.
+								Rendering them as siblings of the canvas instead put them in
+								main-element space, which offset every cursor/selection box by
+								the stage origin and scaled it by the user zoom alone.
+							-->
+							@if (collab.connected()) {
+								<pptx-collaboration-cursors [cursors]="collabCursor.cursors()" />
+								<pptx-remote-selection-overlay
+									[presences]="collab.presence()"
+									[elements]="activeSlide()?.elements ?? []"
+									[activeSlideIndex]="activeSlideIndex()"
+								/>
+							}
+							<!--
+								Motion path of the selected element: projected for the same
+								reason the collaboration overlays are, and authored in raw
+								slide coordinates. It draws nothing unless the deck is
+								editable and the selection actually carries a path.
+							-->
+							<pptx-motion-path-overlay
+								[element]="selectedElement()"
+								[animations]="activeSlide()?.animations ?? []"
+								[canvasSize]="loader.canvasSize()"
+								[canEdit]="canEdit()"
+								(pathChange)="onMotionPathChange($event)"
 							/>
-						}
+							<!--
+								Numbered comment markers: projected for the same reason the
+								collaboration overlays are (inside the scaled stage, raw slide
+								coordinates). Shown whenever an editable slide has comments,
+								matching Vue's visibility semantics; a click opens the
+								comments panel.
+							-->
+							@if (canEdit() && !presentationMode.presenting() && activeComments().length > 0) {
+								<pptx-comment-markers-overlay
+									[comments]="activeComments()"
+									[canvasSize]="loader.canvasSize()"
+									(markerClick)="onCommentMarkerClick()"
+								/>
+							}
+						</pptx-slide-canvas>
 						@if (collab.active() && collab.presence().length > 0) {
 							<div class="pptx-ng-collab-follow">
 								<pptx-follow-mode-bar
@@ -459,7 +626,7 @@ import { ZoomTargetService } from './zoom-target.service';
 						swipe past the threshold sets mobileInspectorHidden so the user
 						reclaims the canvas.
 					-->
-					@if (inspectorPanel.visibleInspectorKind(); as kind) {
+					@if (chromeVisible() ? inspectorPanel.visibleInspectorKind() : null; as kind) {
 						<!--
 							Mobile-only tap-to-dismiss backdrop behind the inspector sheet
 							(hidden on desktop via CSS, mirroring React's MobileDismissSheet).
@@ -475,9 +642,13 @@ import { ZoomTargetService } from './zoom-target.service';
 							class="pptx-ng-inspector-host"
 							[attr.aria-label]="inspectorPanel.inspectorLabel() | translate"
 							[style.transform]="
-								inspectorPanel.inspectorDrag.dragY() > 0 ? 'translateY(' + inspectorPanel.inspectorDrag.dragY() + 'px)' : null
+								inspectorPanel.inspectorDrag.dragY() > 0
+									? 'translateY(' + inspectorPanel.inspectorDrag.dragY() + 'px)'
+									: null
 							"
-							[style.transition]="inspectorPanel.inspectorDrag.dragging() ? 'none' : 'transform 150ms ease-out'"
+							[style.transition]="
+								inspectorPanel.inspectorDrag.dragging() ? 'none' : 'transform 150ms ease-out'
+							"
 						>
 							<!-- Swipe-down-to-dismiss grab handle (mobile only; hidden on desktop). -->
 							<div
@@ -502,9 +673,11 @@ import { ZoomTargetService } from './zoom-target.service';
 								@case ('comments') {
 									<pptx-comments-panel
 										[comments]="activeComments()"
+										[modernCommentAuthors]="loader.modernCommentAuthors()"
 										(add)="onCommentAdd($event)"
 										(remove)="onCommentRemove($event)"
 										(resolve)="onCommentResolve($event)"
+										(reply)="onCommentReply($event)"
 									/>
 								}
 								@case ('selection') {
@@ -515,6 +688,7 @@ import { ZoomTargetService } from './zoom-target.service';
 										(bringForward)="canvasEditing.onSelectionPaneBringForward($event)"
 										(sendBackward)="canvasEditing.onSelectionPaneSendBackward($event)"
 										(toggleHidden)="canvasEditing.onToggleElementHidden($event)"
+										(renameElement)="canvasEditing.onSelectionPaneRename($event)"
 									/>
 								}
 								@default {
@@ -533,9 +707,11 @@ import { ZoomTargetService } from './zoom-target.service';
 										[canEdit]="canEdit()"
 										[selectedElement]="selectedElement()"
 										[comments]="activeComments()"
+										[modernCommentAuthors]="loader.modernCommentAuthors()"
 										(commentAdd)="onCommentAdd($event)"
 										(commentRemove)="onCommentRemove($event)"
 										(commentResolve)="onCommentResolve($event)"
+										(commentReply)="onCommentReply($event)"
 									/>
 								}
 							}
@@ -549,7 +725,7 @@ import { ZoomTargetService } from './zoom-target.service';
 					-->
 					@defer (when ai() && aiPanelOpen()) {
 						@if (ai(); as aiConfig) {
-							@if (aiPanelOpen()) {
+							@if (aiPanelOpen() && chromeVisible()) {
 								<pptx-ai-chat-panel
 									[bridge]="aiBridge"
 									[config]="aiConfig"
@@ -566,18 +742,19 @@ import { ZoomTargetService } from './zoom-target.service';
 					status bar to match React/Vanilla, rather than nested under the
 					canvas column inside <main>.
 				-->
-				@if (canEdit() && !mobile.isMobile()) {
+				@if (canEdit() && !mobile.isMobile() && chromeVisible()) {
 					<aside class="pptx-ng-notes" [attr.aria-label]="'pptx.notes.speakerNotes' | translate">
 						<pptx-notes-panel
 							[slide]="activeSlide()"
 							[expanded]="mobileSheetSvc.showNotes()"
+							[notesStyle]="loader.notesMaster()?.notesStyle"
 							(update)="canvasEditing.onNotesUpdate($event)"
 							(notesToggle)="mobileSheetSvc.toggleNotes()"
 						/>
 					</aside>
 				}
 
-				@if (!mobile.isMobile()) {
+				@if (!mobile.isMobile() && chromeVisible()) {
 					<pptx-status-bar
 						[slideIndex]="activeSlideIndex()"
 						[slideCount]="slideCount()"
@@ -588,7 +765,7 @@ import { ZoomTargetService } from './zoom-target.service';
 						[zoomPercent]="zoomSvc.zoomPercent()"
 						[sorterActive]="showSorter()"
 						[presenting]="presentationMode.presenting()"
-						[hiddenActions]="hiddenActions()"
+						[hiddenActions]="effectiveHiddenActions()"
 						(toggleNotes)="mobileSheetSvc.toggleNotes()"
 						(normalView)="showSorter.set(false)"
 						(openSorter)="showSorter.set(true)"
@@ -601,7 +778,11 @@ import { ZoomTargetService } from './zoom-target.service';
 			}
 
 			@if (showMasterView()) {
-				<div class="pptx-ng-master-overlay" role="dialog" [attr.aria-label]="'pptx.view.masterViews' | translate">
+				<div
+					class="pptx-ng-master-overlay"
+					role="dialog"
+					[attr.aria-label]="'pptx.view.masterViews' | translate"
+				>
 					<pptx-master-view-sidebar
 						[tab]="masterViewTab()"
 						[slideMasters]="loader.slideMasters()"
@@ -610,11 +791,16 @@ import { ZoomTargetService } from './zoom-target.service';
 						[activeMasterIndex]="activeMasterIndex()"
 						[activeLayoutIndex]="activeLayoutIndex()"
 						[handoutSlidesPerPage]="loader.handoutMaster()?.slidesPerPage ?? 4"
+						[editable]="canEdit()"
+						[crudActions]="masterViewCrudActionsList()"
 						(tabChange)="selectMasterTab($event)"
 						(selectMaster)="activeMasterIndex.set($event); activeLayoutIndex.set(null)"
-						(selectLayout)="activeMasterIndex.set($event.masterIndex); activeLayoutIndex.set($event.layoutIndex)"
+						(selectLayout)="
+							activeMasterIndex.set($event.masterIndex); activeLayoutIndex.set($event.layoutIndex)
+						"
 						(slidesPerPageChange)="setHandoutSlidesPerPage($event)"
 						(backgroundChange)="setMasterBackground($event)"
+						(crudAction)="onMasterViewCrudAction($event)"
 						(close)="closeMasterView()"
 					/>
 					<pptx-master-view-canvas
@@ -629,18 +815,54 @@ import { ZoomTargetService } from './zoom-target.service';
 						[editable]="canEdit()"
 						(notesMasterChange)="updateNotesMaster($event)"
 						(handoutMasterChange)="updateHandoutMaster($event)"
+						(slideMastersChange)="updateSlideMasters($event)"
 					/>
 				</div>
 			}
 
 			@if (showSorter()) {
 				<pptx-slide-sorter-overlay
-					[slides]="loader.slides()"
+					[slides]="[...displaySlides()]"
 					[canvasSize]="loader.canvasSize()"
 					[mediaDataUrls]="loader.mediaDataUrls()"
 					[activeIndex]="activeSlideIndex()"
+					[canEdit]="canEdit()"
 					(select)="goTo($event); showSorter.set(false)"
 					(closed)="showSorter.set(false)"
+					(deleteSlide)="editor.deleteSlide($event)"
+					(duplicateSlide)="editor.duplicateSlide($event)"
+					(toggleHiddenSlide)="toggleHideSlides([$event])"
+				/>
+			}
+
+			@if (showOutlineView()) {
+				<!--
+					The EDITABLE deck, not the merged display deck: the merged one has
+					each slide's inherited master/layout elements folded in, and
+					committing that back would bake the template layer into the slides.
+				-->
+				<pptx-outline-view-overlay
+					[slides]="editor.slides()"
+					[canvasSize]="loader.canvasSize()"
+					[canEdit]="canEdit()"
+					(commit)="onOutlineCommit($event)"
+					(closed)="showOutlineView.set(false)"
+				/>
+			}
+
+			@if (showReadingView()) {
+				<!--
+					The merged deck, so each slide carries its own inherited template
+					elements: the reader pages through the deck inside the overlay, and
+					a single active-slide template layer would paint one slide's master
+					over another's.
+				-->
+				<pptx-reading-view-overlay
+					[slides]="displaySlidesMut()"
+					[canvasSize]="loader.canvasSize()"
+					[mediaDataUrls]="loader.mediaDataUrls()"
+					[activeSlideIndex]="activeSlideIndex()"
+					(exit)="closeReadingView($event)"
 				/>
 			}
 
@@ -650,12 +872,24 @@ import { ZoomTargetService } from './zoom-target.service';
 					[canvasSize]="loader.canvasSize()"
 					[mediaDataUrls]="loader.mediaDataUrls()"
 					[startIndex]="customShowsCtl.presentationStartIndex()"
+					[activeCustomShow]="customShowsCtl.activeCustomShow()"
+					[authoredRange]="presentationAuthoredRange()"
+					[loopContinuously]="loader.presentationProperties().loopContinuously ?? false"
 					[showWithAnimation]="loader.presentationProperties().showWithAnimation"
+					[useTimings]="loader.presentationProperties().advanceMode !== 'manual'"
 					[subtitlesVisible]="presentationMode.subtitlesVisible()"
+					[sessionEnded]="audienceSessionEnded()"
+					[endWithBlackSlide]="viewerOpts.options().advanced.slideShowEndWithBlackSlide"
+					[showMenuOnRightClick]="viewerOpts.options().advanced.slideShowShowMenuOnRightClick"
+					[showPopupToolbar]="viewerOpts.options().advanced.slideShowShowPopupToolbar"
+					[presenterMode]="presentationMode.presentingPresenter()"
+					(presenterViewToggle)="presentationMode.togglePresenterView()"
 					(subtitlesChange)="presentationMode.subtitlesVisible.set($event)"
 					(indexChange)="presentationMode.onPresentationIndexChange($event)"
 					(annotationsExit)="presentationMode.onPresentationAnnotationsExit($event)"
 					(closed)="presentationMode.closePresentation()"
+					(customShowRequest)="onPresentationCustomShow($event)"
+					(endOfShowChange)="onPresentationEndOfShow($event)"
 				/>
 			}
 			@if (presentationMode.rehearsing()) {
@@ -682,6 +916,8 @@ import { ZoomTargetService } from './zoom-target.service';
 					<pptx-mobile-presenter-view
 						[slides]="loader.slides()"
 						[currentSlideIndex]="activeSlideIndex()"
+						[activeCustomShow]="customShowsCtl.activeCustomShow()"
+						[authoredRange]="presentationAuthoredRange()"
 						[canvasSize]="loader.canvasSize()"
 						[mediaDataUrls]="loader.mediaDataUrls()"
 						[presentationStartTime]="presentationMode.presenterStartTime()"
@@ -692,6 +928,8 @@ import { ZoomTargetService } from './zoom-target.service';
 					<pptx-presenter-view
 						[slides]="loader.slides()"
 						[currentSlideIndex]="activeSlideIndex()"
+						[activeCustomShow]="customShowsCtl.activeCustomShow()"
+						[authoredRange]="presentationAuthoredRange()"
 						[canvasSize]="loader.canvasSize()"
 						[mediaDataUrls]="loader.mediaDataUrls()"
 						[presentationStartTime]="presentationMode.presenterStartTime()"
@@ -733,16 +971,21 @@ import { ZoomTargetService } from './zoom-target.service';
 					[showAiActions]="aiEnabled() && !!selectedElement()"
 					(askAi)="onContextMenuAskAi()"
 					(fixAi)="onContextMenuFixAi()"
+					(editHyperlink)="docProperties.showHyperlink.set(true)"
+					(addComment)="onContextMenuAddComment()"
 					(closed)="canvasEditing.contextMenuPos.set(null)"
 				/>
 			}
 
 			<pptx-theme-gallery
 				[open]="themeGallery.showThemeGallery()"
+				[startCustomizing]="themeEditorRequested()"
 				[activeName]="themeGallery.activeThemeName()"
 				[theme]="loader.theme()"
 				(applyTheme)="themeGallery.applyThemePreset($event)"
-				(applyCustomTheme)="themeGallery.applyCustomTheme($event.colorScheme, $event.fontScheme, $event.name)"
+				(applyCustomTheme)="
+					themeGallery.applyCustomTheme($event.colorScheme, $event.fontScheme, $event.name)
+				"
 				(close)="themeGallery.showThemeGallery.set(false)"
 			/>
 
@@ -771,6 +1014,15 @@ import { ZoomTargetService } from './zoom-target.service';
 				(localeSelect)="selectLocale($event)"
 			/>
 
+			<!-- A running show has no editor chrome, and this prompt is modal: left
+			     mounted it puts a full-area backdrop over the stage that swallows
+			     action-button clicks. The offer is deferred, not dropped. -->
+			<pptx-autosave-recovery-dialog
+				[prompt]="visibleRecoveryPrompt()"
+				(restore)="autosaveRecovery.restore()"
+				(discard)="autosaveRecovery.discard()"
+			/>
+
 			@if (canEdit()) {
 				<pptx-hyperlink-dialog
 					[open]="docProperties.showHyperlink()"
@@ -784,7 +1036,14 @@ import { ZoomTargetService } from './zoom-target.service';
 				<pptx-print-dialog
 					[slides]="displaySlidesMut()"
 					[activeSlideIndex]="activeSlideIndex()"
-					(print)="xport.onPrint($event)"
+					[defaultSettings]="viewerOpts.printDefaults()"
+					(print)="
+						xport.onPrint(
+							$event,
+							viewerOpts.options().advanced.printHiddenSlides,
+							viewerOpts.options().advanced.printHighQuality
+						)
+					"
 					(cancel)="print.closeDialog()"
 				/>
 			}
@@ -804,6 +1063,9 @@ import { ZoomTargetService } from './zoom-target.service';
 				[userCount]="collab.connectedCount()"
 				[shareUrl]="session.shareUrl()"
 				[p2p]="session.activeSessionP2p()"
+				[activeRoomId]="session.activeCollaboration()?.roomId ?? ''"
+				[activeServerUrl]="session.activeCollaboration()?.serverUrl ?? ''"
+				[users]="session.users()"
 				[defaults]="session.shareDialogDefaults()"
 				(start)="session.onShareStart($event)"
 				(stop)="session.onShareStop()"
@@ -842,6 +1104,14 @@ import { ZoomTargetService } from './zoom-target.service';
 					(insert)="onInsertSmartArt($event)"
 					(close)="showSmartArtInsert.set(false)"
 				/>
+
+				<!-- ── Slide Templates gallery dialog ─────────────────────────── -->
+				<pptx-slide-template-gallery-dialog
+					[open]="showTemplateGallery()"
+					[scheme]="templateScheme()"
+					(insert)="onInsertTemplateSlide($event)"
+					(close)="showTemplateGallery.set(false)"
+				/>
 			}
 
 			<!-- ── Mobile chrome (narrow / touch viewports only) ─────────────── -->
@@ -862,7 +1132,7 @@ import { ZoomTargetService } from './zoom-target.service';
 					[exporting]="xport.exporting()"
 					[showNotes]="mobileSheetSvc.showNotes()"
 					[canEdit]="canEdit()"
-					[hiddenActions]="hiddenActions()"
+					[hiddenActions]="effectiveHiddenActions()"
 					(closed)="mobileSheetSvc.mobileSheet.set(null)"
 					(openFind)="findReplace.showFind.set(true)"
 					(openSorter)="showSorter.set(true)"
@@ -889,8 +1159,14 @@ import { ZoomTargetService } from './zoom-target.service';
 				@if (mobileSheetSvc.showNotes()) {
 					<div
 						class="pptx-ng-mobile-notes-sheet"
-						[style.transform]="mobileSheetSvc.notesDrag.dragY() > 0 ? 'translateY(' + mobileSheetSvc.notesDrag.dragY() + 'px)' : null"
-						[style.transition]="mobileSheetSvc.notesDrag.dragging() ? 'none' : 'transform 150ms ease-out'"
+						[style.transform]="
+							mobileSheetSvc.notesDrag.dragY() > 0
+								? 'translateY(' + mobileSheetSvc.notesDrag.dragY() + 'px)'
+								: null
+						"
+						[style.transition]="
+							mobileSheetSvc.notesDrag.dragging() ? 'none' : 'transform 150ms ease-out'
+						"
 					>
 						<!-- Swipe-down-to-dismiss grab handle (kept in-flow so the keyboard
 						     can't push the textarea out of reach). -->
@@ -906,6 +1182,7 @@ import { ZoomTargetService } from './zoom-target.service';
 						<pptx-notes-panel
 							[slide]="activeSlide()"
 							[expanded]="true"
+							[notesStyle]="loader.notesMaster()?.notesStyle"
 							(update)="canvasEditing.onNotesUpdate($event)"
 							(notesToggle)="mobileSheetSvc.toggleNotes()"
 						/>
@@ -922,17 +1199,23 @@ import { ZoomTargetService } from './zoom-target.service';
 					[slideCount]="slideCount()"
 					[commentCount]="activeComments().length"
 					[activeSheet]="mobileBarSheet()"
-					(openSlides)="mobileSheetSvc.mobileSheet.set(mobileSheetSvc.mobileSheet() === 'slides' ? null : 'slides')"
+					(openSlides)="applyMobileSheetTap('slides')"
 					(insert)="mobileSheetSvc.onMobileInsert()"
-					(openFormat)="onMobileFormat()"
-					(openComments)="inspectorPanel.togglePanel('comments')"
-					(notes)="mobileSheetSvc.toggleNotes()"
+					(openFormat)="applyMobileSheetTap('inspector')"
+					(openComments)="applyMobileSheetTap('comments')"
+					(notes)="applyMobileSheetTap('notes')"
 				/>
 			}
+
+			<pptx-compat-toasts
+				[toasts]="loadNotices.visibleToasts()"
+				(dismissOne)="loadNotices.dismissToast($event)"
+				(dismissAll)="loadNotices.dismissAllToasts()"
+			/>
 		</div>
 	`,
 })
-export class PowerPointViewerComponent {
+export class PowerPointViewerComponent implements PowerPointViewerAPI {
 	/** PowerPoint content as Uint8Array (or ArrayBuffer). */
 	readonly content = input<Uint8Array | ArrayBuffer | null>(null);
 	/** Licensed fonts supplied by the host application. No fonts are bundled. */
@@ -989,6 +1272,29 @@ export class PowerPointViewerComponent {
 	 * Mirrors React's `fileName` prop.
 	 */
 	readonly fileName = input<string | undefined>(undefined);
+	/**
+	 * Recovery autosave: after an edit the deck is re-serialised (always as a
+	 * plain, unencrypted package, because recovery has no password) and stashed
+	 * in the shared IndexedDB store keyed by {@link filePath}. It is a crash-
+	 * safety net and never replaces the user's real Save: the document stays
+	 * dirty. On load, a newer snapshot is offered back through a recovery prompt.
+	 *
+	 * **The input is a policy ceiling; the title-bar AutoSave toggle is the
+	 * user's preference inside it.** `false` turns autosave off and makes the
+	 * toggle inert (a user cannot switch on what the application forbade).
+	 * `true` or omitted permits it, and the toggle decides, defaulting to on.
+	 * Identical in all five bindings; see `resolveAutosaveActivation` in
+	 * `pptx-viewer-shared`.
+	 *
+	 * @default true
+	 */
+	readonly autosaveInput = input<boolean | undefined>(undefined, { alias: 'autosave' });
+	/**
+	 * Recovery cadence in milliseconds. An explicit value is a host policy and is
+	 * honoured as given; omit it to follow the user's File > Options > Save >
+	 * "Save AutoRecover information every N minutes" (two minutes by default).
+	 */
+	readonly autosaveIntervalMs = input<number | undefined>(undefined);
 	/** Optional real-time collaboration config; when set, connects and shows remote cursors. */
 	readonly collaboration = input<CollaborationConfig | undefined>(undefined);
 	/**
@@ -1021,6 +1327,60 @@ export class PowerPointViewerComponent {
 	 */
 	readonly smartArt3D = input<boolean>(false);
 	/**
+	 * Opt in to the interactive Three.js surface-chart renderer. When `true`,
+	 * `surface`/`surface3D` charts render as a camera-orbitable WebGL mesh
+	 * (drag to rotate, scroll to zoom) instead of the static SVG isometric
+	 * projection. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable grid), the viewer transparently falls back
+	 * to the SVG surface renderer. Default `false`.
+	 */
+	readonly surfaceChart3D = input<boolean>(false);
+	/**
+	 * Opt in to the interactive Three.js bar3D-chart renderer. When `true`,
+	 * `bar3D` charts render as camera-orbitable real box meshes (drag to
+	 * rotate, scroll to zoom) instead of the flat SVG oblique-projection
+	 * illusion. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable grid, or it is a horizontal 3-D Bar), the
+	 * viewer transparently falls back to the flat SVG bar3D renderer. Default
+	 * `false`.
+	 */
+	readonly barChart3D = input<boolean>(false);
+	/**
+	 * Opt in to the interactive Three.js line3D-chart renderer. When `true`,
+	 * `line3D` charts render as a camera-orbitable real tube-path mesh per
+	 * series, one per depth ("series") plane (drag to rotate, scroll to zoom),
+	 * instead of the flat SVG oblique-projection illusion. Chart marks are not
+	 * selectable/draggable in this mode. Requires the optional `three` peer
+	 * dependency; when it is not installed (or the chart has no plottable
+	 * grid), the viewer transparently falls back to the flat SVG line3D
+	 * renderer. Default `false`.
+	 */
+	readonly lineChart3D = input<boolean>(false);
+	/**
+	 * Opt in to the interactive Three.js area3D-chart renderer. When `true`,
+	 * `area3D` charts render as a camera-orbitable real tube path + filled
+	 * ribbon mesh per series, one per depth ("series") plane (drag to rotate,
+	 * scroll to zoom), instead of the flat SVG oblique-projection illusion.
+	 * Chart marks are not selectable/draggable in this mode. Requires the
+	 * optional `three` peer dependency; when it is not installed (or the chart
+	 * has no plottable grid), the viewer transparently falls back to the flat
+	 * SVG area3D renderer. Default `false`.
+	 */
+	readonly areaChart3D = input<boolean>(false);
+
+	/**
+	 * Opt in to the interactive Three.js pie3D-chart renderer. When `true`,
+	 * `pie3D` charts render as a camera-orbitable real wedge-mesh scene (drag
+	 * to rotate, scroll to zoom) instead of the flat SVG oblique-projection
+	 * illusion. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable series), the viewer transparently falls
+	 * back to the flat SVG pie3D renderer. Default `false`.
+	 */
+	readonly pieChart3D = input<boolean>(false);
+	/**
 	 * Toolbar buttons and ribbon tabs the host wants hidden (share, broadcast,
 	 * export, undo, redo, record, notes, fullscreen, zoom, navigation, or any
 	 * ribbon tab id). Default `[]` hides nothing, matching prior behaviour.
@@ -1044,7 +1404,7 @@ export class PowerPointViewerComponent {
 	/** Fired when the user edits document properties in the Info dialog. */
 	readonly propertiesChange = output<Partial<PptxCoreProperties>>();
 	/** Fired when the viewer mode changes (preview, edit, present, master). */
-	readonly modeChange = output<string>();
+	readonly modeChange = output<ViewerMode>();
 	/** Fired when the zoom level changes. */
 	readonly zoomChange = output<number>();
 	/** Fired when element selection changes. */
@@ -1061,14 +1421,22 @@ export class PowerPointViewerComponent {
 	readonly stopCollaboration = output<void>();
 
 	protected readonly loader = inject(LoadContentService);
+	protected readonly loadNotices = inject(LoadNoticesService);
 	protected readonly editor = inject(EditorStateService);
 	private readonly fonts = inject(EmbeddedFontsService);
+	private readonly googleWebfonts = inject(GoogleWebfontsService);
 	protected readonly collab = inject(CollaborationService);
 	protected readonly accessibility = inject(AccessibilityService);
 	protected readonly autosave = inject(AutosaveService);
+	protected readonly autosaveRecovery = inject(AutosaveRecoveryService);
 	protected readonly print = inject(PrintService);
 	protected readonly mobile = inject(IsMobileService);
 	private readonly smartArt3DSvc = inject(SmartArt3DService);
+	private readonly surfaceChart3DSvc = inject(SurfaceChart3DService);
+	private readonly barChart3DSvc = inject(BarChart3DService);
+	private readonly lineChart3DSvc = inject(LineChart3DService);
+	private readonly areaChart3DSvc = inject(AreaChart3DService);
+	private readonly pieChart3DSvc = inject(PieChart3DService);
 	private readonly zoomTarget = inject(ZoomTargetService);
 	protected readonly presenterWindow = inject(PresenterWindowService);
 	private readonly destroyRef = inject(DestroyRef);
@@ -1078,6 +1446,20 @@ export class PowerPointViewerComponent {
 	protected readonly xport = inject(ViewerExportService);
 	protected readonly findReplace = inject(ViewerFindReplaceService);
 	protected readonly customShowsCtl = inject(ViewerCustomShowsService);
+	protected readonly recentColors = inject(RecentColorsService);
+	/**
+	 * The `p:showPr/p:sldRg` slide-range restriction, when the deck is authored
+	 * to open into a range (`showSlidesMode === 'range'`) rather than the whole
+	 * deck or a custom show. Fed to the presentation overlay's navigator
+	 * alongside `activeCustomShow` so a running show honours it.
+	 */
+	protected readonly presentationAuthoredRange = computed(
+		() =>
+			resolveAuthoredSlideRange(
+				this.loader.presentationProperties(),
+				this.loader.slides().length,
+			) ?? null,
+	);
 	protected readonly session = inject(ViewerCollaborationSessionService);
 	protected readonly formatPainter = inject(ViewerFormatPainterService);
 	private readonly keyboard = inject(ViewerKeyboardService);
@@ -1109,15 +1491,76 @@ export class PowerPointViewerComponent {
 	private readonly mainEl = viewChild<ElementRef<HTMLElement>>('mainEl');
 
 	/**
+	 * Whether the CURRENT document's Protected View lock was lifted via the
+	 * banner's "Enable Editing" button this session. A document the host
+	 * opened read-only (`canEditInput()` false) never shows the banner, so
+	 * there is nothing to dismiss for it; reset to `false` whenever a new
+	 * presentation finishes loading (see the `loader.slides()` effect below),
+	 * so re-opening (or opening another) file starts protected again,
+	 * mirroring PowerPoint's own per-document banner.
+	 */
+	protected readonly protectedViewDismissed = signal(false);
+
+	/**
 	 * Effective edit permission: the host's `canEdit` input gated by Trust
-	 * Center > "Open presentations in Protected View", which forces the deck
-	 * read-only while enabled (File > Options wiring, mirrors PowerPoint).
+	 * Center > "Open presentations in Protected View" (forces the deck
+	 * read-only while enabled, mirrors PowerPoint, unless the user has lifted
+	 * it via `enableEditing()` for this document) and by the deck's own
+	 * read-only recommendation (`p:modifyVerifier` / "Mark as Final"; lifted by
+	 * the read-only banner's "Edit anyway", see {@link LoadNoticesService}).
 	 */
 	protected readonly canEdit = computed(
-		() => this.canEditInput() && !this.viewerOpts.options().trust.openInProtectedView,
+		() =>
+			this.canEditInput() &&
+			(!this.viewerOpts.options().trust.openInProtectedView || this.protectedViewDismissed()) &&
+			!this.loadNotices.lockActive(),
+	);
+
+	/** Whether the Protected View banner should show: host allows editing, the option still blocks it, and the user hasn't dismissed it yet. */
+	protected readonly protectedViewActive = computed(
+		() =>
+			this.canEditInput() &&
+			this.viewerOpts.options().trust.openInProtectedView &&
+			!this.protectedViewDismissed(),
+	);
+
+	/** Lift Protected View's read-only lock for the current document (File > Options > Trust Center). */
+	protected enableEditing(): void {
+		this.protectedViewDismissed.set(true);
+	}
+
+	/**
+	 * Toolbar/ribbon ids to hide: the host's own `hiddenActions` input, UNIONED
+	 * with File > Options > Customize Ribbon's `ribbon.hiddenTabIds` (see
+	 * {@link mergeHiddenActions}). Every chrome component downstream (ribbon,
+	 * title bar, mobile toolbar/menu, status bar) must see BOTH, or ticking a
+	 * tab off in Customize Ribbon changes what the pane displays without
+	 * changing what actually renders.
+	 */
+	protected readonly effectiveHiddenActions = computed<ToolbarActionId[]>(() =>
+		mergeHiddenActions(this.hiddenActions(), this.viewerOpts.options().ribbon.hiddenTabIds),
+	);
+
+	/**
+	 * File > Options > Quick Access Toolbar > Position "Below the Ribbon": the
+	 * configured commands beyond the dedicated Save/Undo/Redo trio (which stay
+	 * in the title bar regardless of position), or `null` when the strip has
+	 * nothing to show there (hidden, `above`, or no extra commands configured).
+	 * {@link TitleBarComponent} independently suppresses its own inline strip
+	 * under the identical {@link resolveBelowRibbonQuickAccess} condition, so
+	 * the commands render in exactly one place.
+	 */
+	protected readonly belowRibbonQuickAccess = computed<ViewerQuickAccessOptions | null>(() =>
+		resolveBelowRibbonQuickAccess(this.viewerOpts.options().quickAccess),
 	);
 
 	protected readonly activeSlideIndex = signal(0);
+	/**
+	 * True in an audience display once the presenter ended the session and the
+	 * browser refused to close this tab: the overlay then shows the black
+	 * end-of-slide-show screen rather than falling back to the editor.
+	 */
+	protected readonly audienceSessionEnded = signal(false);
 	/** Slides to display: the editable deck when `canEdit`, else the loaded deck. */
 	protected readonly displaySlides = computed(() =>
 		this.canEdit() ? this.editor.slides() : this.loader.slides(),
@@ -1191,6 +1634,18 @@ export class PowerPointViewerComponent {
 
 	/** Slide-sorter grid overlay visibility. */
 	protected readonly showSorter = signal(false);
+	/**
+	 * Which face the theme gallery opens on: its preset grid, or the theme
+	 * editor that Design > Edit Theme names. Set by the two Design commands.
+	 */
+	protected readonly themeEditorRequested = signal(false);
+	/**
+	 * Reading View visibility: the deck at full window size with the editor
+	 * chrome cut back to a nav bar. Not the slide show (no fullscreen, no
+	 * pointer tools, no presenter console).
+	 */
+	protected readonly showReadingView = signal(false);
+	protected readonly showOutlineView = signal(false);
 	/** Full-canvas master editor visibility and active target. */
 	protected readonly showMasterView = signal(false);
 	protected readonly masterViewTab = signal<MasterViewTab>('slides');
@@ -1198,8 +1653,53 @@ export class PowerPointViewerComponent {
 	protected readonly activeLayoutIndex = signal<number | null>(null);
 	/** Whether the left slides panel is collapsed (top-bar sidebar toggle). */
 	protected readonly slidesPanelCollapsed = signal(false);
-	/** Whether periodic autosave is enabled (title-bar AutoSave toggle; default on). */
+	/**
+	 * Whether the editor chrome renders at all.
+	 *
+	 * A running slide show has no editing chrome, exactly as PowerPoint's does
+	 * not: no ribbon, no title bar, no slide rail, no inspector, no notes pane
+	 * and no status bar. The show overlay is `position: fixed`, so leaving them
+	 * mounted LOOKS the same while keeping every one of those controls in the
+	 * tab order and the accessibility tree underneath it - a screen-reader user
+	 * would still be walked through the whole editor mid-presentation, and the
+	 * "Slide Show" button would still be reachable during the show it starts.
+	 * React, Svelte and Vanilla already suppress theirs; `e2e/present-mode.spec.ts`
+	 * pins the rule for all five.
+	 */
+	protected readonly chromeVisible = computed(() => !this.presentationMode.presenting());
+	/**
+	 * The user PREFERENCE (title-bar AutoSave toggle; default on). What actually
+	 * runs is {@link autosaveActivation}, which folds in the host's `autosave`
+	 * input as a ceiling the preference cannot exceed.
+	 */
 	protected readonly autosaveEnabled = signal(true);
+	/** The shared verdict: does autosave run, may the toggle move, and if not why. */
+	protected readonly autosaveActivation = computed(() =>
+		resolveAutosaveActivation({
+			hostAutosave: this.autosaveInput(),
+			userEnabled: this.autosaveEnabled(),
+			canEdit: this.canEdit(),
+			filePath: this.filePath(),
+		}),
+	);
+
+	/** The recovery offer, or null while a slide show is running. */
+	protected readonly visibleRecoveryPrompt = computed(() => {
+		const prompt = this.autosaveRecovery.prompt();
+		return shouldShowAutosaveRecoveryPrompt({
+			prompt,
+			presenting: this.presentationMode.presenting(),
+		})
+			? prompt
+			: null;
+	});
+
+	/** Flip the AutoSave preference, unless the host forbade autosave outright. */
+	protected toggleAutosave(): void {
+		if (this.autosaveActivation().toggleAvailable) {
+			this.autosaveEnabled.update((v) => !v);
+		}
+	}
 
 	// ── Draw tool state (forwarded to slide-canvas) ───────────────────────────
 	/** Active drawing tool (from the ribbon Draw tab). */
@@ -1276,6 +1776,12 @@ export class PowerPointViewerComponent {
 	]);
 	/** Whether the Insert SmartArt gallery dialog is open. */
 	protected readonly showSmartArtInsert = signal(false);
+	/** Whether the Slide Templates gallery dialog is open. */
+	protected readonly showTemplateGallery = signal(false);
+	/** Deck scheme map for template gallery previews (deck theme colours). */
+	protected readonly templateScheme = computed<Record<string, string>>(() =>
+		templateSchemeFromTheme(this.loader.theme()?.colorScheme),
+	);
 	/** The single selected element on the active slide (for the inspector). */
 	protected readonly selectedElement = computed<PptxElement | null>(() => {
 		const ids = this.editor.selectedIds();
@@ -1335,6 +1841,10 @@ export class PowerPointViewerComponent {
 		getCustomProperties: () => this.loader.customProperties(),
 		getCoreProperties: () => this.loader.coreProperties(),
 		getAppProperties: () => this.loader.appProperties(),
+		getViewProperties: () => this.loader.viewProperties(),
+		getTableStyleMap: () => this.loader.tableStyleMap(),
+		getTableStylesDefaultId: () => this.loader.tableStylesDefaultId(),
+		getTagCollections: () => this.loader.tagCollections(),
 		setCanvasSize: (size) => {
 			this.loader.canvasSize.set(size);
 			this.editor.dirty.set(true);
@@ -1357,6 +1867,22 @@ export class PowerPointViewerComponent {
 		},
 		setAppProperties: (props) => {
 			this.loader.appProperties.set(props);
+			this.editor.dirty.set(true);
+		},
+		setViewProperties: (props) => {
+			this.loader.viewProperties.set(props);
+			this.editor.dirty.set(true);
+		},
+		setTableStyleMap: (map) => {
+			this.loader.tableStyleMap.set(map);
+			this.editor.dirty.set(true);
+		},
+		setTableStylesDefaultId: (id) => {
+			this.loader.tableStylesDefaultId.set(id);
+			this.editor.dirty.set(true);
+		},
+		setTagCollections: (tags) => {
+			this.loader.tagCollections.set([...tags]);
 			this.editor.dirty.set(true);
 		},
 		// Scope the assistant to the user's AI picks / pinned focus / live
@@ -1435,10 +1961,35 @@ export class PowerPointViewerComponent {
 			}
 		});
 
-		// Surface the `smartArt3D` opt-in to the element dispatcher via the
-		// viewer-scoped SmartArt3DService.
+		// Surface the six 3D opt-in props to their viewer-scoped services, each
+		// ANDed with Options > Advanced > "Disable 3D rendering" (see
+		// `resolve3DRenderingFlags`) so a viewer user can force flat 2D even in a
+		// deck the host enabled 3D for. One effect (not six) so they all react to
+		// the same options-changed signal read.
 		effect(() => {
-			this.smartArt3DSvc.enabled.set(this.smartArt3D());
+			const effective = resolve3DRenderingFlags(
+				{
+					smartArt3D: this.smartArt3D(),
+					surfaceChart3D: this.surfaceChart3D(),
+					barChart3D: this.barChart3D(),
+					lineChart3D: this.lineChart3D(),
+					areaChart3D: this.areaChart3D(),
+					pieChart3D: this.pieChart3D(),
+				},
+				this.viewerOpts.options(),
+			);
+			this.smartArt3DSvc.enabled.set(effective.smartArt3D);
+			this.surfaceChart3DSvc.enabled.set(effective.surfaceChart3D);
+			this.barChart3DSvc.enabled.set(effective.barChart3D);
+			this.lineChart3DSvc.enabled.set(effective.lineChart3D);
+			this.areaChart3DSvc.enabled.set(effective.areaChart3D);
+			this.pieChart3DSvc.enabled.set(effective.pieChart3D);
+		});
+
+		// Advanced > "Maximum number of undos", re-applied live on every change
+		// (not just at construction).
+		effect(() => {
+			this.editor.setHistoryDepth(this.viewerOpts.historyDepth());
 		});
 
 		// A new host `content` input supersedes any in-place picked file.
@@ -1447,9 +1998,15 @@ export class PowerPointViewerComponent {
 			this.fileIO.contentOverride.set(null);
 		});
 
-		// Load whenever the active content (picked override, else input) changes.
+		// Load whenever the active content (picked override, else input) changes,
+		// and ONLY then (React: `useEffect(..., [content])`). The call itself is
+		// untracked so no signal `load()` reads before its first await (it used
+		// to read the Options store for Trust Center > "Allow external content")
+		// can re-arm this effect: a tracked read there made every preference
+		// write re-parse the deck and re-seed the editor from the original bytes.
 		effect(() => {
-			void this.loader.load(this.fileIO.activeContent());
+			const content = this.fileIO.activeContent();
+			untracked(() => void this.loader.load(content));
 		});
 
 		// Reset to the first slide and seed the editable deck whenever a new
@@ -1465,6 +2022,39 @@ export class PowerPointViewerComponent {
 			untracked(() => {
 				this.editor.setSlides(slides, this.loader.sections());
 				this.activeSlideIndex.set(0);
+				// A newly opened document is protected again even if the previous
+				// one was unlocked via "Enable Editing" this session.
+				this.protectedViewDismissed.set(false);
+				// The read-only banner and compatibility toasts are per-document
+				// diagnostics; a newly opened deck starts with neither dismissed.
+				this.loadNotices.resetForLoad();
+				// Seed the grid/snap/guides toggles from THIS deck's own
+				// `ppt/viewProps.xml`, falling back to whatever the toggles already
+				// read (a deck that says nothing about a field keeps the prior one).
+				// gridSpacing has no toggle here; it is read straight off
+				// `loader.viewProperties()` where it is displayed, so it needs no seed.
+				const seededPrefs = viewerPreferencesFromViewProperties(
+					{ viewProperties: this.loader.viewProperties() },
+					{
+						autoSave: false,
+						spellCheck: false,
+						showGrid: false,
+						showRulers: false,
+						reducedMotion: false,
+						snapToGrid: this.snapToGrid(),
+						showGuides: this.showGuides(),
+						snapToObjects: this.snapToShape(),
+					},
+				);
+				this.snapToGrid.set(seededPrefs.snapToGrid);
+				this.showGuides.set(seededPrefs.showGuides ?? this.showGuides());
+				this.snapToShape.set(seededPrefs.snapToObjects ?? this.snapToShape());
+				// Adopt `p:showPr/p:custShow/@id`: a deck authored to open into a
+				// named custom show must actually play it. A manual pick made later
+				// overwrites this and wins until the next deck loads.
+				this.customShowsCtl.seedFromDeck();
+				// Seed the "Recent colours" row from the deck's own `p:clrMru`.
+				this.recentColors.seed(this.loader.parsedData());
 				// A load that lands mid-session must not clobber remotely synced
 				// slides: when the shared doc already holds the room's content, a
 				// late joiner's bootstrap deck (parsed slower than the doc sync)
@@ -1473,7 +2063,38 @@ export class PowerPointViewerComponent {
 				// so the broadcast effect below (which only runs after this effect
 				// completes) sees the adopted deck, never the placeholder, and its
 				// write dedupes against the adopted baseline.
-				this.collab.adoptDocSlidesAfterLoad();
+				// ...but only for the deck the HOST supplied. A file opened from
+				// File > Open (which sets `contentOverride`) is what the user asked
+				// for, and used to be discarded the instant it finished parsing.
+				this.collab.adoptDocSlidesAfterLoad(
+					this.fileIO.contentOverride() === null ? 'bootstrap' : 'user',
+				);
+			});
+		});
+
+		// Write the grid/snap/guides toggles back into `ppt/viewProps.xml` so a
+		// save round-trips them, mirroring PowerPoint (a view toggle is not an
+		// undoable edit, so this deliberately writes straight to the loader's
+		// signal rather than going through `EditorStateService`).
+		effect(() => {
+			const snapToGrid = this.snapToGrid();
+			const showGuides = this.showGuides();
+			const snapToObjects = this.snapToShape();
+			const patch = viewPropertiesPatchFromPreferences({
+				autoSave: false,
+				spellCheck: false,
+				showGrid: false,
+				showRulers: false,
+				reducedMotion: false,
+				snapToGrid,
+				showGuides,
+				snapToObjects,
+			} as DeckViewPreferences);
+			untracked(() => {
+				this.loader.viewProperties.update((current) => ({
+					...current,
+					slideViewPr: { ...current?.slideViewPr, ...patch.slideViewPr },
+				}));
 			});
 		});
 
@@ -1544,6 +2165,12 @@ export class PowerPointViewerComponent {
 		});
 		effect(() => {
 			this.fonts.setHostFonts(this.fontsInput());
+		});
+		// Fetch Google-hosted webfonts for referenced families that are neither
+		// installed nor embedded (Microsoft 365 "cloud fonts" have no browser
+		// equivalent).
+		effect(() => {
+			this.googleWebfonts.sync(this.mergedSlides(), this.loader.embeddedFonts());
 		});
 
 		// Feed the live deck (templates merged back) to the accessibility checker.
@@ -1629,6 +2256,7 @@ export class PowerPointViewerComponent {
 			slideCount: () => this.slideCount(),
 			mergedSlides: () => this.mergedSlides(),
 			resolveStage: () => this.stageElement(),
+			imageExportScale: () => this.viewerOpts.imageExportScale(),
 		});
 
 		// Hand the find/replace controller a slide-navigation callback so a match
@@ -1654,6 +2282,30 @@ export class PowerPointViewerComponent {
 			applyRemoteSlides: (slides) => this.editor.applyRemoteSlides(slides),
 			canvasSize: () => this.loader.canvasSize(),
 			getSourceBytes: () => this.fileIO.sourceBytes(),
+			// Session-level save options (view properties, table styles, tags, deck
+			// properties, ...), built the same way as `loader.saveSlides`, so an
+			// owner's write-back file no longer drops every session-level edit
+			// outside `slides`.
+			getSaveOptions: () =>
+				buildDeckSaveOptions({
+					headerFooter: this.loader.headerFooter(),
+					presentationProperties: this.loader.presentationProperties(),
+					viewProperties: this.loader.viewProperties(),
+					customShows: this.loader.customShows(),
+					sections: this.loader.sections(),
+					coreProperties: this.loader.coreProperties(),
+					appProperties: this.loader.appProperties(),
+					customProperties: this.loader.customProperties(),
+					tagCollections: this.loader.tagCollections(),
+					slideMasters: this.loader.slideMasters(),
+					notesMaster: this.loader.notesMaster(),
+					handoutMaster: this.loader.handoutMaster(),
+					slideSize: this.loader.slideSizeSelection().size,
+					tableStyleMap: this.loader.tableStyleMap(),
+					tableStylesDefaultId: this.loader.tableStylesDefaultId(),
+					tableStylesToDelete: this.loader.tableStylesToDelete(),
+					embedFonts: this.loader.embedFonts(),
+				}),
 			currentSlides: () => this.editor.slides(),
 			emitStart: (config) => this.startCollaboration.emit(config),
 			emitStop: () => this.stopCollaboration.emit(),
@@ -1673,6 +2325,13 @@ export class PowerPointViewerComponent {
 			canEdit: () => this.canEdit(),
 			presenting: () => this.presentationMode.presenting(),
 			activeSlideIndex: () => this.activeSlideIndex(),
+			// An armed Draw-tab tool owns the keyboard, exactly as it does in the
+			// other four bindings: the shared keymap stands down while one is up.
+			isDrawing: () => this.activeDrawTool() !== 'select',
+			// With nothing selected the horizontal arrows page the deck, which is
+			// what the other four bindings do and what a reader expects.
+			goPrev: () => this.goPrev(),
+			goNext: () => this.goNext(),
 		});
 
 		// Attach multi-touch gestures (pinch-zoom / swipe-nav / long-press menu)
@@ -1698,6 +2357,7 @@ export class PowerPointViewerComponent {
 			clearSelection: () => this.editor.clearSelection(),
 			sourceContent: () => this.fileIO.activeContent(),
 			canEdit: () => this.canEdit(),
+			authoredRange: () => this.presentationAuthoredRange(),
 			promptKeepAnnotations: (map) => this.extraDialogs()?.promptKeepAnnotations(map),
 			applyRehearsalTimings: (timings) => {
 				const slides = this.editor.snapshot().map((slide, index) => {
@@ -1719,7 +2379,14 @@ export class PowerPointViewerComponent {
 		if (parseAudienceNonce()) {
 			const disconnectAudience = this.presenterWindow.connectAudience(
 				(index) => this.activeSlideIndex.set(index),
-				() => this.presentationMode.presenting.set(false),
+				// The presenter ended the session. Close this tab; when the browser
+				// refuses, raise the end-of-slide-show screen. Leaving presentation
+				// mode would drop the room into the editor.
+				() => {
+					if (endAudienceDisplay(window)) {
+						this.audienceSessionEnded.set(true);
+					}
+				},
 			);
 			this.presentationMode.presenting.set(true);
 			this.destroyRef.onDestroy(disconnectAudience);
@@ -1752,6 +2419,40 @@ export class PowerPointViewerComponent {
 			sections: () => this.editor.sections(),
 			templateElementsBySlideId: () => this.editor.templateElementsBySlideId(),
 			emitContentChange: (bytes) => this.contentChange.emit(bytes),
+			// File ▸ Info ▸ Protect Presentation: a password set here makes every
+			// save produce an encrypted OLE2 file (shared `planDeckSave`).
+			saveIntent: () => ({
+				password: this.dialogs.presentationPassword(),
+				passwordProtected: this.dialogs.isPasswordProtected(),
+			}),
+			afterSuccessfulSave: (format) => {
+				this.viewerOpts.playFeedback();
+				const filePath = this.filePath();
+				if (format === 'pptx' && filePath && this.viewerOpts.shouldDiscardAutosaveOnSave()) {
+					void deleteAutosaveSnapshot(filePath);
+				}
+			},
+		});
+
+		// File > Options > Save > "cache retention": a one-time sweep per mount is
+		// enough, since a fresh snapshot only ever lands with a fresh timestamp.
+		void (async () => {
+			try {
+				const snapshots = await listAutosaveSnapshots();
+				const expired = resolveExpiredAutosaveSnapshots(snapshots, this.viewerOpts.options());
+				await Promise.all(expired.map((key) => deleteAutosaveSnapshot(key)));
+			} catch {
+				// Best-effort background maintenance; a blocked IndexedDB skips it.
+			}
+		})();
+
+		// File > Options > Save > "clear cache on close": also cover the viewer
+		// being destroyed without a page unload (the `beforeunload` listener
+		// above covers the tab actually closing/navigating away).
+		this.destroyRef.onDestroy(() => {
+			if (this.viewerOpts.shouldClearCacheOnClose()) {
+				void this.viewerOpts.clearCache();
+			}
 		});
 
 		// Hand the canvas-editing controller the accessors it alone needs from the
@@ -1760,13 +2461,13 @@ export class PowerPointViewerComponent {
 			canEdit: () => this.canEdit(),
 			activeSlide: () => this.activeSlide(),
 			activeSlideIndex: () => this.activeSlideIndex(),
+			activeTemplateElements: () => this.activeTemplateElements(),
 		});
 
 		// Hand the collab-cursor controller the accessors it alone needs from the
-		// component (the `<main>` host, zoom, canvas size, active-slide-index).
+		// component (the slide stage, canvas size, active-slide-index).
 		this.collabCursor.bind({
-			mainElement: () => this.mainEl()?.nativeElement,
-			zoom: () => this.zoomSvc.zoom(),
+			stageElement: () => this.stageElement(),
 			canvasSize: () => this.loader.canvasSize(),
 			activeSlideIndex: () => this.activeSlideIndex(),
 		});
@@ -1780,16 +2481,45 @@ export class PowerPointViewerComponent {
 			emitPropertiesChange: (patch) => this.propertiesChange.emit(patch),
 		});
 
+		// Offer a crash-recovery snapshot back once the deck has loaded. Angular
+		// wrote snapshots and never looked for one again, so the feature was
+		// invisible to the user; the decision and the copy are the shared ones.
+		this.autosaveRecovery.bind({
+			filePath: () => this.filePath(),
+			loading: () => this.loader.loading(),
+			error: () => this.loader.error(),
+			slideCount: () => this.displaySlidesMut().length,
+			autosaveAllowed: () => this.autosaveInput() !== false,
+			restore: (bytes) => this.fileIO.contentOverride.set(bytes),
+		});
+
 		// Hand the autosave engine the reactive accessors it reads (enabled toggle,
 		// file-path key, dirty flag) and a deck serialiser. It writes a recovery
 		// snapshot to the shared IndexedDB store every N seconds while dirty.
 		this.autosave.bind({
-			enabled: () => this.autosaveEnabled(),
+			enabled: () => this.autosaveActivation().active,
+			disabledReason: () => this.autosaveActivation().reason,
 			filePath: () => this.filePath(),
 			isDirty: () => this.editor.dirty(),
 			serialize: () => this.serializeForAutosave(),
-			// Options > Save > "Save AutoRecover information every N minutes".
-			intervalSeconds: () => this.viewerOpts.autosaveIntervalSeconds(),
+			// Host input first (an explicit policy), else Options > Save > "Save
+			// AutoRecover information every N minutes", else the shared 120s.
+			intervalMs: () =>
+				resolveAutosaveIntervalMs({
+					hostIntervalMs: this.autosaveIntervalMs(),
+					optionsIntervalSeconds: this.viewerOpts.autosaveIntervalSeconds(),
+				}),
+			// Everything `serializeForAutosave` reads that changes by
+			// REASSIGNMENT, so a tick that finds all of them unchanged can skip
+			// re-serializing a deck it has already snapshotted.
+			changeSources: () => [
+				this.editor.slides(),
+				this.editor.templateElementsBySlideId(),
+				this.editor.sections(),
+				this.canEdit(),
+				this.dialogs.presentationPassword(),
+				this.dialogs.isPasswordProtected(),
+			],
 		});
 	}
 
@@ -1799,6 +2529,35 @@ export class PowerPointViewerComponent {
 	 */
 	async getContent(): Promise<Uint8Array> {
 		return this.fileIO.getContent();
+	}
+
+	/**
+	 * Design > Browse Themes: toggle the gallery on its preset grid. Clearing
+	 * the editor request matters when the theme editor was the last face shown.
+	 */
+	protected onBrowseThemes(): void {
+		this.themeEditorRequested.set(false);
+		this.themeGallery.showThemeGallery.update((open) => !open);
+	}
+
+	/**
+	 * Design > Edit Theme: the real theme editor lives inside the gallery
+	 * overlay, so open the gallery already switched to it (it used to open the
+	 * Document Properties dialog, which has nothing to do with themes).
+	 */
+	protected onEditTheme(): void {
+		this.themeEditorRequested.set(true);
+		this.themeGallery.showThemeGallery.set(true);
+	}
+
+	/**
+	 * Design > Slide Size: the size control is the inspector's SLIDE SIZE card,
+	 * which the deck (no-selection) panel renders. Drop the element selection so
+	 * that panel is what the format pane shows, then make sure it is open.
+	 */
+	protected onOpenSlideSize(): void {
+		this.editor.clearSelection();
+		this.inspectorPanel.openFormatPanel();
 	}
 
 	protected openMasterView(): void {
@@ -1821,41 +2580,136 @@ export class PowerPointViewerComponent {
 		this.editor.clearSelection();
 	}
 
-	protected setMasterBackground(backgroundColor: string): void {
-		if (this.masterViewTab() === 'notes') {
-			const current = this.loader.notesMaster();
-			if (current) {
-				this.updateNotesMaster({ ...current, backgroundColor });
-			}
+	/**
+	 * `ppaction://customshow?id=<id>[&return=true]` clicked during a running
+	 * show: switch to the named custom show and open its resolved entry slide.
+	 * An id naming no surviving show is a no-op (`resolveCustomShowEntry`
+	 * returns `null`).
+	 */
+	protected onPresentationCustomShow(event: { customShowId: string; returnAfter: boolean }): void {
+		const index = this.customShowsCtl.runCustomShow(event.customShowId, event.returnAfter);
+		if (index !== null) {
+			this.activeSlideIndex.set(index);
+		}
+	}
+
+	/**
+	 * The presentation overlay's end-of-show flag changed. Only relevant on the
+	 * rising edge: if a `ppaction://customshow ... &return=true` is pending,
+	 * restore the origin show and slide instead of leaving the black end
+	 * screen up (`syncFromHost`'s host-forced jump clears it once the new
+	 * index lands).
+	 */
+	protected onPresentationEndOfShow(isEnd: boolean): void {
+		if (!isEnd) {
 			return;
 		}
-		if (this.masterViewTab() === 'handout') {
-			const current = this.loader.handoutMaster();
-			if (current) {
-				this.updateHandoutMaster({ ...current, backgroundColor });
-			}
+		const originIndex = this.customShowsCtl.consumeReturnAfterOnEnd();
+		if (originIndex !== null) {
+			this.activeSlideIndex.set(originIndex);
+		}
+	}
+
+	/** The Slide Master view sidebar's current selection, in `master-view-crud`'s shape. */
+	protected readonly masterViewTarget = computed<MasterViewTarget>(() => ({
+		tab: this.masterViewTab(),
+		masterIndex: this.activeMasterIndex(),
+		layoutIndex: this.activeLayoutIndex(),
+	}));
+
+	/** The Insert/Duplicate/Delete/Rename Layout+Master sidebar commands for the current selection. */
+	protected readonly masterViewCrudActionsList = computed(() =>
+		masterViewCrudActions(
+			this.loader.parsedData() ?? { slides: [], width: 0, height: 0 },
+			this.masterViewTarget(),
+		),
+	);
+
+	/**
+	 * Run one Slide Master view sidebar CRUD command.
+	 *
+	 * rename* prompts for a name first (`window.prompt`, matching the pattern
+	 * `SlidesPanelComponent`'s section-rename already uses); every command then
+	 * runs through `applyMasterViewCrudAction` and, on success, adopts the
+	 * returned handler + data through `LoadContentService.adoptMasterViewData`
+	 * (that helper reloads through a FRESH `PptxHandler`, so it cannot be
+	 * applied as a plain signal patch) and moves the sidebar selection to the
+	 * returned target. A failure is surfaced with `window.alert`: Angular has
+	 * no generic toast/notice channel for an arbitrary action failure (the
+	 * compat-toast stack is load-diagnostics only).
+	 */
+	protected async onMasterViewCrudAction(id: MasterViewCrudActionId): Promise<void> {
+		const handler = this.loader.getHandler();
+		const data = this.loader.parsedData();
+		if (!handler || !data) {
 			return;
 		}
-		const masters = [...this.loader.slideMasters()];
-		const index = this.activeMasterIndex();
-		const current = masters[index];
-		if (!current) {
-			return;
-		}
-		const layoutIndex = this.activeLayoutIndex();
-		if (layoutIndex === null) {
-			masters[index] = { ...current, backgroundColor };
-		} else {
-			const layouts = [...(current.layouts ?? [])];
-			const layout = layouts[layoutIndex];
-			if (!layout) {
+		const target = this.masterViewTarget();
+		let name: string | undefined;
+		if (id === 'renameLayout' || id === 'renameMaster') {
+			// Branch on the COMMAND, not on whether a layout happens to be
+			// selected: "Rename Slide Master" must prompt with the master's own
+			// name even while the sidebar has one of its layouts selected.
+			const current =
+				id === 'renameMaster'
+					? (data.slideMasters?.[target.masterIndex]?.name ?? '')
+					: target.layoutIndex === null
+						? ''
+						: (data.slideMasters?.[target.masterIndex]?.layouts?.[target.layoutIndex]?.name ?? '');
+			const typed = window.prompt(
+				this.translateService.instant('pptx.masterView.renamePrompt'),
+				current,
+			);
+			if (typed === null || typed.trim().length === 0) {
 				return;
 			}
-			layouts[layoutIndex] = { ...layout, backgroundColor };
-			masters[index] = { ...current, layouts };
+			name = typed.trim();
 		}
-		this.loader.slideMasters.set(masters);
+		const result = await applyMasterViewCrudAction(handler, data, id, target, { name });
+		if (!result.ok) {
+			window.alert(this.translateService.instant(masterViewCrudFailureKey(id, result.reason)));
+			return;
+		}
+		this.loader.adoptMasterViewData(result.handler, result.data);
 		this.editor.dirty.set(true);
+		this.activeMasterIndex.set(result.target.masterIndex);
+		this.activeLayoutIndex.set(result.target.layoutIndex);
+	}
+
+	/**
+	 * Format Background for whichever master-view part is selected.
+	 *
+	 * This used to be a hand-rolled tab/layout walk; the routing decision now
+	 * lives in `pptx-viewer-shared` alongside the element write path, so the
+	 * five bindings cannot disagree about which part a colour lands on.
+	 */
+	protected setMasterBackground(backgroundColor: string): void {
+		const write = setMasterViewBackgroundColor(
+			{
+				slideMasters: this.loader.slideMasters(),
+				notesMaster: this.loader.notesMaster(),
+				handoutMaster: this.loader.handoutMaster(),
+			},
+			{
+				tab: this.masterViewTab(),
+				masterIndex: this.activeMasterIndex(),
+				layoutIndex: this.activeLayoutIndex(),
+			},
+			backgroundColor,
+		);
+		if (!write) {
+			return;
+		}
+		if (write.notesMaster) {
+			this.updateNotesMaster(write.notesMaster);
+		}
+		if (write.handoutMaster) {
+			this.updateHandoutMaster(write.handoutMaster);
+		}
+		if (write.slideMasters) {
+			this.loader.slideMasters.set(write.slideMasters);
+			this.editor.dirty.set(true);
+		}
 	}
 
 	protected setHandoutSlidesPerPage(slidesPerPage: number): void {
@@ -1863,6 +2717,12 @@ export class PowerPointViewerComponent {
 		if (current) {
 			this.updateHandoutMaster({ ...current, slidesPerPage });
 		}
+	}
+
+	/** Shape-tree edits made on the Slide Master view's Slides tab. */
+	protected updateSlideMasters(masters: PptxSlideMaster[]): void {
+		this.loader.slideMasters.set(masters);
+		this.editor.dirty.set(true);
 	}
 
 	protected updateNotesMaster(master: PptxNotesMaster): void {
@@ -1880,6 +2740,27 @@ export class PowerPointViewerComponent {
 			return;
 		}
 		this.activeSlideIndex.set(index);
+	}
+	/**
+	 * Leave Reading View on the slide the reader ended on, which is what leaving
+	 * any PowerPoint view does: the editor should not snap back to wherever it
+	 * was when the reader entered.
+	 */
+	protected closeReadingView(slideIndex: number): void {
+		this.showReadingView.set(false);
+		this.goTo(slideIndex);
+	}
+
+	/**
+	 * Commit an outline edit as ONE undoable entry.
+	 *
+	 * `applyReplacement` rather than `setSlides`: the latter resets the undo
+	 * stack and the selection, which would make every keystroke in the outline
+	 * throw away the user's history.
+	 */
+	protected onOutlineCommit(commit: OutlineCommit): void {
+		this.editor.applyReplacement(commit.slides);
+		this.goTo(commit.activeSlideIndex);
 	}
 	goPrev(): void {
 		this.goTo(this.activeSlideIndex() - 1);
@@ -1975,9 +2856,9 @@ export class PowerPointViewerComponent {
 	getZoom(): number {
 		return this.zoomSvc.zoom();
 	}
-	/** Set the zoom level (clamped to min/max bounds). */
+	/** Set the zoom level (clamped by the shared cross-binding bounds). */
 	setZoom(level: number): void {
-		this.zoomSvc.zoom.set(Math.min(Math.max(level, 0.2), 3));
+		this.zoomSvc.setZoom(level);
 	}
 	/** Zoom in by one step. */
 	zoomIn(): void {
@@ -1993,7 +2874,7 @@ export class PowerPointViewerComponent {
 	}
 
 	/** Get the current viewer mode. */
-	getMode(): string {
+	getMode(): ViewerMode {
 		if (this.presentationMode.presenting()) {
 			return 'present';
 		}
@@ -2003,7 +2884,7 @@ export class PowerPointViewerComponent {
 		return this.canEdit() ? 'edit' : 'preview';
 	}
 	/** Switch the viewer mode (e.g. 'edit', 'preview', 'present'). */
-	setMode(mode: string): void {
+	setMode(mode: ViewerMode): void {
 		if (mode === 'present') {
 			this.presentationMode.present();
 		} else if (mode === 'master') {
@@ -2041,6 +2922,24 @@ export class PowerPointViewerComponent {
 		this.canvasEditing.onElementSelect(event);
 	}
 
+	/**
+	 * Commit a motion path dragged on the canvas.
+	 *
+	 * `setMotionPath` rather than a preset apply: the dragged geometry no longer
+	 * matches any catalogue entry, and it is written onto the SAME animation
+	 * entry the preset buckets use, so the element's entrance survives the edit.
+	 */
+	protected onMotionPathChange(path: string): void {
+		const element = this.selectedElement();
+		const slide = this.activeSlide();
+		if (!this.canEdit() || !element || !slide) {
+			return;
+		}
+		this.editor.updateSlide(this.activeSlideIndex(), {
+			animations: setMotionPath(slide.animations ?? [], element.id, path),
+		});
+	}
+
 	/** Context-menu "Ask AI about this": scope + open the assistant, empty composer. */
 	protected onContextMenuAskAi(): void {
 		this.aiPanelStore.askAboutSelection();
@@ -2051,6 +2950,24 @@ export class PowerPointViewerComponent {
 	protected onContextMenuFixAi(): void {
 		this.aiPanelStore.fixSelection();
 		this.aiPanelOpen.set(true);
+	}
+
+	/**
+	 * Context-menu "Add Comment": show the comments panel, mirroring React's
+	 * `setIsInspectorPaneOpen(true) + setSidebarPanelMode('comments')`. It sets
+	 * the panel rather than toggling it, because choosing Add Comment while the
+	 * panel is already open must not close it; the mobile swipe-dismiss flag is
+	 * cleared for the same reason.
+	 */
+	protected onContextMenuAddComment(): void {
+		this.inspectorPanel.mobileInspectorHidden.set(false);
+		this.inspectorPanel.activePanel.set('comments');
+	}
+
+	/** Canvas marker click: bring the comments panel on screen (same as above). */
+	protected onCommentMarkerClick(): void {
+		this.inspectorPanel.mobileInspectorHidden.set(false);
+		this.inspectorPanel.activePanel.set('comments');
 	}
 
 	/** Get the IDs of currently selected elements. */
@@ -2177,16 +3094,17 @@ export class PowerPointViewerComponent {
 				break;
 			case 'slideShow':
 				if (action === 'fromBeginning') {
-					this.presentationMode.present();
+					this.presentationMode.presentFromBeginning();
 				} else if (action === 'presenterView') {
 					this.presentationMode.presentPresenter();
 				}
 				break;
 			case 'design':
 				if (action === 'browseThemes') {
-					this.themeGallery.showThemeGallery.update((v) => !v);
+					this.onBrowseThemes();
 				} else if (action === 'slideSize') {
-					this.dialogs.showSetUpSlideShow.set(true);
+					// Was the Set Up Slide Show dialog, which has no size control.
+					this.onOpenSlideSize();
 				}
 				break;
 			case 'arrange':
@@ -2248,7 +3166,9 @@ export class PowerPointViewerComponent {
 				this.editor.addElement(idx, newTableElement());
 				break;
 			case 'chart':
-				this.editor.addElement(idx, newChartElement('bar'));
+				// Default insert entry (column: vertical bars, what 'bar' drew before
+				// the renderer learned horizontal bars).
+				this.editor.addElement(idx, newChartElement());
 				break;
 			case 'smartArt':
 				this.showSmartArtInsert.set(true);
@@ -2293,6 +3213,12 @@ export class PowerPointViewerComponent {
 	 * autosave engine skips the write. Distinct from {@link getContent}, this does
 	 * NOT emit `contentChange` (autosave is a background recovery write, not a
 	 * host-visible save).
+	 *
+	 * The `recoverySnapshotIntent` is load-bearing, not decoration: it keeps the
+	 * snapshot a plain ZIP even when the deck is password protected, because
+	 * recovery reopens it with no password. Angular used to get that right only
+	 * by omitting the argument, which is one refactor away from silently writing
+	 * an unrecoverable encrypted snapshot (the bug React and Vue shipped).
 	 */
 	private async serializeForAutosave(): Promise<Uint8Array | null> {
 		if (!this.canEdit()) {
@@ -2302,6 +3228,10 @@ export class PowerPointViewerComponent {
 			buildSaveSlides(this.editor.slides(), this.editor.templateElementsBySlideId()),
 			'pptx',
 			this.editor.sections(),
+			recoverySnapshotIntent({
+				password: this.dialogs.presentationPassword(),
+				passwordProtected: this.dialogs.isPasswordProtected(),
+			}),
 		);
 	}
 
@@ -2370,16 +3300,33 @@ export class PowerPointViewerComponent {
 	}
 
 	/**
-	 * Mobile "Format" slot: surface the inspector for the current selection.
-	 * On mobile the format pane starts closed (React parity: the canvas owns
-	 * the first paint), so this explicitly opens it; with an element selected
-	 * it shows the element inspector, otherwise the slide-properties view.
+	 * Mobile bottom-bar tap: decide the next sheet with shared's `toggleSheet`
+	 * (via `applyMobileBarSheetTap`), same priority every binding follows -
+	 * tapping the open sheet closes it, tapping a different one switches to it.
+	 * `mobileSheetSvc` and `inspectorPanel` back different bar slots (slides/
+	 * notes vs. format/comments), so this is the one place that coordinates
+	 * both from the shared decision.
 	 */
-	protected onMobileFormat(): void {
-		this.mobileSheetSvc.mobileSheet.set(null);
-		// Close any tool panel, clear the mobile-closed default, and undo a
-		// prior swipe-down dismissal so the format pane surfaces.
-		this.inspectorPanel.openFormatPanel();
+	protected applyMobileSheetTap(tapped: Exclude<MobileBarSheet, null>): void {
+		applyMobileBarSheetTap(tapped, this.mobileBarSheet(), {
+			openSlides: () => this.mobileSheetSvc.mobileSheet.set('slides'),
+			// Close any tool panel, clear the mobile-closed default, and undo a
+			// prior swipe-down dismissal so the format pane surfaces (with an
+			// element selected it shows the element inspector, otherwise slide
+			// properties).
+			openInspector: () => this.inspectorPanel.openFormatPanel(),
+			openComments: () => {
+				this.inspectorPanel.activePanel.set('comments');
+				this.inspectorPanel.mobileInspectorHidden.set(false);
+			},
+			openNotes: () => this.mobileSheetSvc.showNotes.set(true),
+			closeAll: () => {
+				this.mobileSheetSvc.mobileSheet.set(null);
+				this.mobileSheetSvc.showNotes.set(false);
+				this.inspectorPanel.activePanel.set(null);
+				this.inspectorPanel.formatPanelClosed.set(true);
+			},
+		});
 	}
 
 	/** Receive draw-tool state changes from the ribbon Draw tab. */
@@ -2389,11 +3336,27 @@ export class PowerPointViewerComponent {
 		this.activeDrawWidth.set(state.width);
 	}
 
-	/** Append a comment to the active slide (one history entry). */
-	onCommentAdd(text: string): void {
-		const next = addCommentToList(this.activeComments(), text, 'You');
+	/**
+	 * Comment/reply author: the host `authorName` input wins, otherwise fall
+	 * back to Options > General > "User name" before the generic "You".
+	 */
+	private commentAuthorName(): string {
+		return this.authorName() || this.viewerOpts.options().general.userName || 'You';
+	}
+
+	/**
+	 * Append a comment to the active slide (one history entry).
+	 *
+	 * `addCommentToList` (shared) has no `mentions` parameter, so the `@`-mention
+	 * spans the typeahead recorded are patched onto the newly-appended comment
+	 * (the array's last element) here, rather than in the shared helper.
+	 */
+	onCommentAdd(submission: CommentSubmission): void {
+		const next = addCommentToList(this.activeComments(), submission.text, this.commentAuthorName());
 		if (next) {
-			this.editor.updateSlide(this.activeSlideIndex(), { comments: next });
+			this.editor.updateSlide(this.activeSlideIndex(), {
+				comments: withMentionsOnLast(next, submission.mentions),
+			});
 		}
 	}
 
@@ -2413,6 +3376,25 @@ export class PowerPointViewerComponent {
 		}
 	}
 
+	/**
+	 * Append a threaded reply under a top-level comment on the active slide.
+	 * See {@link onCommentAdd}: `mentions` is patched on afterwards, since
+	 * `replyToCommentInList` (shared) has no `mentions` parameter.
+	 */
+	onCommentReply(event: { parentId: string } & CommentSubmission): void {
+		const next = replyToCommentInList(
+			this.activeComments(),
+			event.parentId,
+			event.text,
+			this.commentAuthorName(),
+		);
+		if (next) {
+			this.editor.updateSlide(this.activeSlideIndex(), {
+				comments: withMentionsOnLastReply(next, event.parentId, event.mentions),
+			});
+		}
+	}
+
 	// ── Insert SmartArt ────────────────────────────────────────────────────────
 
 	/**
@@ -2427,6 +3409,18 @@ export class PowerPointViewerComponent {
 	}
 
 	/**
+	 * Insert the chosen slide template after the active slide (one undoable
+	 * history entry via {@link EditorStateService.insertSlideFromTemplate}) and
+	 * select the new slide, mirroring React's `handleInsertSlideFromTemplate`.
+	 */
+	protected onInsertTemplateSlide(templateId: SlideTemplateId): void {
+		const insertAt = this.activeSlideIndex() + 1;
+		this.editor.insertSlideFromTemplate(this.activeSlideIndex(), templateId);
+		this.goTo(insertAt);
+		this.showTemplateGallery.set(false);
+	}
+
+	/**
 	 * Editing keyboard shortcuts (only when `canEdit` and not typing in a
 	 * field or presenting). The decorator must live on the component; the logic
 	 * is delegated to {@link ViewerKeyboardService}.
@@ -2434,6 +3428,14 @@ export class PowerPointViewerComponent {
 	@HostListener('document:keydown', ['$event'])
 	onKeyDown(event: KeyboardEvent): void {
 		this.keyboard.handleKeyDown(event);
+	}
+
+	/** Options > Save > "clear cache on close": wipe recovery snapshots when the tab closes. */
+	@HostListener('window:beforeunload')
+	protected clearCacheOnUnload(): void {
+		if (this.viewerOpts.shouldClearCacheOnClose()) {
+			void this.viewerOpts.clearCache();
+		}
 	}
 
 	/** Resolve the live slide-stage element within `<main>`. */

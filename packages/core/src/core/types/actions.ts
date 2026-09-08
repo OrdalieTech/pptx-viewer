@@ -43,6 +43,12 @@ export interface PptxAction {
 	soundRId?: string;
 	/** Resolved media target path for the optional click sound. */
 	soundPath?: string;
+	/**
+	 * `CT_Hyperlink/@endSnd` (ECMA-376 20.1.2.2.23): PowerPoint's Action
+	 * Settings "Stop previous sound" checkbox. Round-tripped for now (issue
+	 * G14); not yet wired into playback.
+	 */
+	endSnd?: boolean;
 }
 
 /**
@@ -52,7 +58,7 @@ export interface PptxAction {
  * @example
  * ```ts
  * const type: ElementActionType = "slide";
- * // => "slide" — one of: "none" | "url" | "slide" | "firstSlide" | "lastSlide" | "prevSlide" | "nextSlide" | "endShow"
+ * // => "slide": one of: "none" | "url" | "slide" | "firstSlide" | "lastSlide" | "prevSlide" | "nextSlide" | "endShow" | "lastViewed" | "customShow" | "openFile" | "openPresentation" | "playMedia" | "oleVerb"
  * ```
  */
 export type ElementActionType =
@@ -63,7 +69,25 @@ export type ElementActionType =
 	| 'lastSlide'
 	| 'prevSlide'
 	| 'nextSlide'
-	| 'endShow';
+	| 'endShow'
+	/** `ppaction://hlinkshowjump?jump=lastslideviewed` - back to the last slide the audience saw. */
+	| 'lastViewed'
+	/** `ppaction://customshow?id=N[&return=true]` - jump into a named custom show. */
+	| 'customShow'
+	/** `ppaction://hlinkfile` - open an external file via the action's `r:id`. */
+	| 'openFile'
+	/** `ppaction://hlinkpres` - open another presentation via the action's `r:id`. */
+	| 'openPresentation'
+	/** `ppaction://media` - play (or toggle) the element's own embedded media. */
+	| 'playMedia'
+	/** `ppaction://ole?verb=N` - run a numbered OLE verb on an embedded object. */
+	| 'oleVerb'
+	/**
+	 * `ppaction://program` - PowerPoint's "Run program:" action; the program
+	 * path resolves via the hyperlink's `r:id` relationship, the same shape
+	 * as `hlinkfile` (issue G15).
+	 */
+	| 'runProgram';
 
 /**
  * User-facing action configuration stored on an element.
@@ -91,10 +115,16 @@ export interface ElementAction {
 	trigger: 'click' | 'hover';
 	/** What kind of action to perform. */
 	type: ElementActionType;
-	/** External URL (for 'url' type). */
+	/** External URL (for 'url' type), or the resolved external target (for 'openFile' / 'openPresentation'). */
 	url?: string;
 	/** Zero-based slide index (for 'slide' type). */
 	slideIndex?: number;
+	/** Custom show identifier (for 'customShow' type), from `ppaction://customshow?id=`. */
+	customShowId?: string;
+	/** Whether the show returns to its origin after the custom show ends (`&return=true`), for 'customShow'. */
+	returnAfter?: boolean;
+	/** OLE verb number (for 'oleVerb' type), from `ppaction://ole?verb=`. */
+	oleVerb?: number;
 }
 
 /**

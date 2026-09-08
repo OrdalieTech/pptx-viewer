@@ -37,6 +37,11 @@ export interface ViewerUIState {
 	setSidebarPanelMode: React.Dispatch<React.SetStateAction<string>>;
 	showSlideSorter: boolean;
 	setShowSlideSorter: React.Dispatch<React.SetStateAction<boolean>>;
+	showReadingView: boolean;
+	setShowReadingView: React.Dispatch<React.SetStateAction<boolean>>;
+	/** PowerPoint's Outline view: the deck as editable indented text. */
+	showOutlineView: boolean;
+	setShowOutlineView: React.Dispatch<React.SetStateAction<boolean>>;
 	isShortcutHelpOpen: boolean;
 	setIsShortcutHelpOpen: React.Dispatch<React.SetStateAction<boolean>>;
 	isAccessibilityPanelOpen: boolean;
@@ -53,6 +58,9 @@ export interface ViewerUIState {
 	setShowGrid: React.Dispatch<React.SetStateAction<boolean>>;
 	showRulers: boolean;
 	setShowRulers: React.Dispatch<React.SetStateAction<boolean>>;
+	/** Whether the drawing guides are painted on the canvas (View ▸ Guides). */
+	showGuides: boolean;
+	setShowGuides: React.Dispatch<React.SetStateAction<boolean>>;
 	snapToGrid: boolean;
 	setSnapToGrid: React.Dispatch<React.SetStateAction<boolean>>;
 	snapToShape: boolean;
@@ -109,6 +117,8 @@ export function useViewerUIState(): ViewerUIState {
 	const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 	const [sidebarPanelMode, setSidebarPanelMode] = useState<string>('properties');
 	const [showSlideSorter, setShowSlideSorter] = useState(false);
+	const [showReadingView, setShowReadingView] = useState(false);
+	const [showOutlineView, setShowOutlineView] = useState(false);
 	const [isShortcutHelpOpen, setIsShortcutHelpOpen] = useState(false);
 	const [isAccessibilityPanelOpen, setIsAccessibilityPanelOpen] = useState(false);
 	const [accessibilityIssues, setAccessibilityIssues] = useState<AccessibilityIssue[]>([]);
@@ -119,6 +129,9 @@ export function useViewerUIState(): ViewerUIState {
 	const [spellCheckEnabled, setSpellCheckEnabled] = useState(true);
 	const [showGrid, setShowGrid] = useState(false);
 	const [showRulers, setShowRulers] = useState(false);
+	// Guides start visible so a deck that carries authored guides shows them,
+	// which is also what PowerPoint does with a deck's saved guide positions.
+	const [showGuides, setShowGuides] = useState(true);
 	const [snapToGrid, setSnapToGrid] = useState(true);
 	const [snapToShape, setSnapToShape] = useState(true);
 	const [guides, setGuides] = useState<Array<{ id: string; axis: 'h' | 'v'; position: number }>>(
@@ -157,6 +170,10 @@ export function useViewerUIState(): ViewerUIState {
 		setSidebarPanelMode,
 		showSlideSorter,
 		setShowSlideSorter,
+		showReadingView,
+		setShowReadingView,
+		showOutlineView,
+		setShowOutlineView,
 		isShortcutHelpOpen,
 		setIsShortcutHelpOpen,
 		isAccessibilityPanelOpen,
@@ -173,6 +190,8 @@ export function useViewerUIState(): ViewerUIState {
 		setShowGrid,
 		showRulers,
 		setShowRulers,
+		showGuides,
+		setShowGuides,
 		snapToGrid,
 		setSnapToGrid,
 		snapToShape,

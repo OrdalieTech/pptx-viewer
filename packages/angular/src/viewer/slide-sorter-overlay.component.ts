@@ -6,11 +6,19 @@ import {
 	computed,
 	input,
 	output,
+	signal,
 } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
 import type { PptxSlide } from 'pptx-viewer-core';
 
-import type { CanvasSize } from '../internal/shared';
+import {
+	HIDDEN_SLIDE_LABEL_KEY,
+	HIDDEN_SLIDE_SLASH_GRADIENT,
+	hiddenSlideCue,
+	isEditorTextInputTarget,
+	mapSlideSorterKey,
+} from '../internal/shared';
+import type { CanvasSize, HiddenSlideCue } from '../internal/shared';
 import { SlideCanvasComponent } from './slide-canvas.component';
 import { thumbnailHeight, thumbnailZoom } from './slide-sorter-overlay-helpers';
 
@@ -25,9 +33,13 @@ const GRID_GAP = 16;
  *
  * Renders a fixed full-screen modal overlay containing a responsive grid of
  * scaled slide previews. Clicking a thumbnail emits `select(index)`; pressing
- * Escape or clicking the ✕ button emits `closed`.
+ * Escape or clicking the ✕ button emits `closed`. Right-clicking a thumbnail
+ * (when `canEdit`) opens a small context menu (Duplicate / Hide-Show /
+ * Delete), matching React's `SorterContextMenu` and Vue's `ContextMenu`
+ * wiring: this overlay previously had no mouse path to any of the three, and
+ * no path to hide/show at all (mouse or keyboard).
  *
- * Viewer-first scope: no drag-reorder, no context menu, no section grouping.
+ * Viewer-first scope: no drag-reorder, no section grouping.
  *
  * Usage:
  * ```html
@@ -46,209 +58,8 @@ const GRID_GAP = 16;
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
 	imports: [NgStyle, SlideCanvasComponent, TranslatePipe],
-	template: `
-		<!-- Backdrop -->
-		<div class="pptx-ng-sorter-backdrop" (click)="onBackdropClick($event)">
-			<!-- Modal panel -->
-			<div class="pptx-ng-sorter-panel" (click)="$event.stopPropagation()">
-				<!-- Header -->
-				<header class="pptx-ng-sorter-header">
-					<h2 class="pptx-ng-sorter-title">{{ 'pptx.slideSorter.title' | translate }}</h2>
-					<span class="pptx-ng-sorter-count">{{
-						'pptx.slideSorter.slideCount' | translate: { count: slides().length }
-					}}</span>
-					<button
-						type="button"
-						class="pptx-ng-sorter-close"
-						[attr.aria-label]="'pptx.slideSorter.close' | translate"
-						(click)="closed.emit()"
-					>
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							width="16"
-							height="16"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
-						>
-							<line x1="18" y1="6" x2="6" y2="18" />
-							<line x1="6" y1="6" x2="18" y2="18" />
-						</svg>
-					</button>
-				</header>
-
-				<!-- Scrollable grid -->
-				<div class="pptx-ng-sorter-grid-scroll">
-					<div class="pptx-ng-sorter-grid" [ngStyle]="gridStyle()">
-						@for (slide of slides(); track slide.id; let i = $index) {
-							<button
-								type="button"
-								class="pptx-ng-sorter-cell"
-								[class.is-active]="i === activeIndex()"
-								[class.is-hidden]="isHiddenSlide(slide)"
-								[attr.aria-label]="'pptx.notes.slideN' | translate: { n: i + 1 }"
-								[attr.aria-current]="i === activeIndex() ? 'true' : null"
-								(click)="onThumbClick(i)"
-							>
-								<!-- Thumbnail clipping wrapper -->
-								<div class="pptx-ng-sorter-thumb-clip" [ngStyle]="clipStyle()">
-									<pptx-slide-canvas
-										[slide]="slide"
-										[canvasSize]="canvasSize()"
-										[mediaDataUrls]="mediaDataUrls()"
-										[zoom]="thumbZoom()"
-										[autoFit]="false"
-										[interactive]="false"
-									/>
-								</div>
-								<!-- Slide number badge -->
-								<span class="pptx-ng-sorter-index" aria-hidden="true">{{ i + 1 }}</span>
-							</button>
-						}
-					</div>
-				</div>
-			</div>
-		</div>
-	`,
-	styles: [
-		`
-			:host {
-				display: contents;
-			}
-
-			.pptx-ng-sorter-backdrop {
-				position: fixed;
-				inset: 0;
-				z-index: 50;
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				background: rgba(0, 0, 0, 0.7);
-				backdrop-filter: blur(4px);
-			}
-
-			.pptx-ng-sorter-panel {
-				display: flex;
-				flex-direction: column;
-				width: min(96vw, 1200px);
-				max-height: 90vh;
-				border-radius: 0.5rem;
-				background: #1a1a1a;
-				color: #e5e5e5;
-				box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
-				overflow: hidden;
-			}
-
-			.pptx-ng-sorter-header {
-				display: flex;
-				align-items: center;
-				gap: 0.75rem;
-				padding: 0.75rem 1.25rem;
-				border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-				flex-shrink: 0;
-			}
-
-			.pptx-ng-sorter-title {
-				margin: 0;
-				font-size: 0.875rem;
-				font-weight: 500;
-			}
-
-			.pptx-ng-sorter-count {
-				font-size: 0.75rem;
-				color: rgba(255, 255, 255, 0.5);
-				flex: 1;
-			}
-
-			.pptx-ng-sorter-close {
-				display: flex;
-				align-items: center;
-				justify-content: center;
-				/* Touch-friendly: at least 44x44 CSS px so it can be tapped
-				   without a keyboard on mobile. */
-				width: 44px;
-				height: 44px;
-				min-width: 44px;
-				min-height: 44px;
-				padding: 0;
-				border: none;
-				border-radius: 50%;
-				background: rgba(255, 255, 255, 0.1);
-				color: #e5e5e5;
-				cursor: pointer;
-				transition: background 0.15s;
-				flex-shrink: 0;
-				touch-action: manipulation;
-			}
-
-			.pptx-ng-sorter-close:hover {
-				background: rgba(255, 255, 255, 0.2);
-			}
-
-			.pptx-ng-sorter-grid-scroll {
-				flex: 1;
-				overflow-y: auto;
-				padding: 1.25rem;
-			}
-
-			.pptx-ng-sorter-grid {
-				display: grid;
-				gap: 1rem;
-			}
-
-			.pptx-ng-sorter-cell {
-				display: flex;
-				flex-direction: column;
-				align-items: center;
-				gap: 0.5rem;
-				padding: 0.5rem;
-				border: 2px solid transparent;
-				border-radius: 0.375rem;
-				background: transparent;
-				cursor: pointer;
-				transition:
-					border-color 0.15s,
-					background 0.15s;
-				color: inherit;
-			}
-
-			.pptx-ng-sorter-cell:hover {
-				background: rgba(255, 255, 255, 0.06);
-				border-color: rgba(255, 255, 255, 0.2);
-			}
-
-			.pptx-ng-sorter-cell.is-active {
-				border-color: #3b82f6;
-				background: rgba(59, 130, 246, 0.1);
-			}
-
-			.pptx-ng-sorter-cell.is-hidden {
-				opacity: 0.4;
-			}
-
-			.pptx-ng-sorter-thumb-clip {
-				overflow: hidden;
-				border-radius: 2px;
-				/* Width/height set via [ngStyle] to match computed thumbnail size. */
-			}
-
-			/* Remove the 1rem auto margin that SlideCanvasComponent adds to its wrapper
-		   so the stage sits flush inside the clipping box. */
-			.pptx-ng-sorter-thumb-clip ::ng-deep .pptx-ng-canvas-wrapper {
-				margin: 0 !important;
-			}
-
-			.pptx-ng-sorter-index {
-				font-size: 0.6875rem;
-				color: rgba(255, 255, 255, 0.55);
-				user-select: none;
-			}
-		`,
-	],
+	templateUrl: './slide-sorter-overlay.component.html',
+	styleUrl: './slide-sorter-overlay.component.css',
 })
 export class SlideSorterOverlayComponent {
 	/** Full list of slides to display. */
@@ -263,11 +74,23 @@ export class SlideSorterOverlayComponent {
 	/** Zero-based index of the currently active slide (highlighted in blue). */
 	readonly activeIndex = input<number>(0);
 
+	/** Whether the host allows edits; gates the deck-writing shortcuts. */
+	readonly canEdit = input<boolean>(false);
+
 	/** Emits the zero-based index of the thumbnail the user clicked. */
 	readonly select = output<number>();
 
 	/** Emits when the user closes the overlay (✕ button or Escape key). */
 	readonly closed = output<void>();
+
+	/** Delete the active slide (Delete / Backspace). */
+	readonly deleteSlide = output<number>();
+
+	/** Duplicate the active slide (Ctrl/Cmd+D). */
+	readonly duplicateSlide = output<number>();
+
+	/** Toggle the hidden flag on a slide (context-menu only, no keyboard chord). */
+	readonly toggleHiddenSlide = output<number>();
 
 	// -------------------------------------------------------------------------
 	// Derived display values
@@ -296,12 +119,37 @@ export class SlideSorterOverlayComponent {
 	// Event handlers
 	// -------------------------------------------------------------------------
 
-	/** Keyboard handler: Escape closes the overlay. */
+	/**
+	 * Keyboard handler, resolved by the shared sorter keymap.
+	 *
+	 * This used to test for `Escape` and nothing else, so the sorter's Delete and
+	 * Ctrl+D were dead in Angular alone. Only the commands this overlay can
+	 * perform are dispatched: there is no slide clipboard, no multi-selection and
+	 * no thumbnail zoom here, so those chords are left to the host instead of
+	 * being swallowed by a branch that would do nothing.
+	 */
 	@HostListener('document:keydown', ['$event'])
 	onKeydown(event: KeyboardEvent): void {
-		if (event.key === 'Escape') {
+		if (this.contextMenu()) {
+			this.closeContextMenu();
+		}
+		const { action } = mapSlideSorterKey(event, {
+			canEdit: this.canEdit(),
+			isTextInputTarget: isEditorTextInputTarget(event.target),
+		});
+		if (action === 'close') {
 			event.preventDefault();
 			this.closed.emit();
+			return;
+		}
+		if (action === 'delete') {
+			event.preventDefault();
+			this.deleteSlide.emit(this.activeIndex());
+			return;
+		}
+		if (action === 'duplicate') {
+			event.preventDefault();
+			this.duplicateSlide.emit(this.activeIndex());
 		}
 	}
 
@@ -319,6 +167,63 @@ export class SlideSorterOverlayComponent {
 	}
 
 	// -------------------------------------------------------------------------
+	// Context menu (right-click a thumbnail)
+	// -------------------------------------------------------------------------
+
+	/** Open state + screen position of the context menu, or null when closed. */
+	readonly contextMenu = signal<{ x: number; y: number; index: number } | null>(null);
+
+	/**
+	 * Right-clicking a thumbnail opens the menu for THAT slide.
+	 *
+	 * Deliberately does not also emit `select`: the host's `select` handler
+	 * closes the whole overlay (it navigates the canvas and dismisses the
+	 * sorter), so doing that here would tear down the menu before a single
+	 * mouse action against it was reachable.
+	 */
+	onThumbContextMenu(event: MouseEvent, index: number): void {
+		if (!this.canEdit()) {
+			return;
+		}
+		event.preventDefault();
+		this.contextMenu.set({ x: event.clientX, y: event.clientY, index });
+	}
+
+	closeContextMenu(): void {
+		this.contextMenu.set(null);
+	}
+
+	/** Whether the context menu's target slide is currently hidden. */
+	contextMenuTargetHidden(): boolean {
+		const menu = this.contextMenu();
+		return menu ? (this.slides()[menu.index]?.hidden ?? false) : false;
+	}
+
+	menuDuplicate(): void {
+		const menu = this.contextMenu();
+		if (menu) {
+			this.duplicateSlide.emit(menu.index);
+		}
+		this.closeContextMenu();
+	}
+
+	menuToggleHidden(): void {
+		const menu = this.contextMenu();
+		if (menu) {
+			this.toggleHiddenSlide.emit(menu.index);
+		}
+		this.closeContextMenu();
+	}
+
+	menuDelete(): void {
+		const menu = this.contextMenu();
+		if (menu) {
+			this.deleteSlide.emit(menu.index);
+		}
+		this.closeContextMenu();
+	}
+
+	// -------------------------------------------------------------------------
 	// Utilities
 	// -------------------------------------------------------------------------
 
@@ -329,5 +234,20 @@ export class SlideSorterOverlayComponent {
 		// may not exist on all versions of the core type.
 		const s = slide as unknown as Record<string, unknown>;
 		return s['hidden'] === true;
+	}
+
+	/** Dictionary key for the word shown and announced on a hidden slide's cell. */
+	readonly hiddenLabelKey = HIDDEN_SLIDE_LABEL_KEY;
+
+	/** Shared slash mark, bound inline so a stylesheet copy cannot drift. */
+	readonly slashGradient = HIDDEN_SLIDE_SLASH_GRADIENT;
+
+	/**
+	 * The shared cue for one cell. The dim already came off `.is-hidden`, but
+	 * opacity is a colour-only signal and said nothing to a screen reader, so
+	 * this adds the number slash, the word, and the neutral marker attribute.
+	 */
+	hiddenCue(slide: PptxSlide, index: number): HiddenSlideCue {
+		return hiddenSlideCue(this.isHiddenSlide(slide), 'sorter', index);
 	}
 }

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { LuPlay } from 'react-icons/lu';
 
 import { cn, getElementLabel } from '../../utils';
+import { AfterAnimationRow } from './AfterAnimationRow';
 import {
 	INPUT_CLS,
 	SELECT_CLS,
@@ -17,6 +18,8 @@ import {
 	SEQUENCE_OPTIONS,
 } from './animation-panel-constants';
 import { AnimationTimelineSection } from './AnimationTimelineSection';
+import { EffectSoundRow } from './EffectSoundRow';
+import { MotionPathRow } from './MotionPathRow';
 import { useAnimationHandlers } from './useAnimationHandlers';
 
 // ==========================================================================
@@ -84,6 +87,11 @@ export function AnimationPanel({
 		handleRepeatModeChange,
 		handleDirectionChange,
 		handleSequenceChange,
+		handleMotionPathChange,
+		effectSoundState,
+		handleEffectSoundPick,
+		handleAfterAnimationChange,
+		handleAfterAnimationColorChange,
 		handlePreviewClick,
 	} = handlers;
 
@@ -110,6 +118,7 @@ export function AnimationPanel({
 			<label className='flex flex-col gap-1'>
 				<span className='text-muted-foreground text-[11px]'>{t('pptx.animation.entrance')}</span>
 				<select
+					aria-label={t('pptx.animation.entrance')}
 					value={selectedElementAnimation?.entrance ?? 'none'}
 					onChange={handleEntranceChange}
 					disabled={!canEdit}
@@ -128,6 +137,7 @@ export function AnimationPanel({
 			<label className='flex flex-col gap-1'>
 				<span className='text-muted-foreground text-[11px]'>{t('pptx.animation.emphasis')}</span>
 				<select
+					aria-label={t('pptx.animation.emphasis')}
 					value={selectedElementAnimation?.emphasis ?? 'none'}
 					onChange={handleEmphasisChange}
 					disabled={!canEdit}
@@ -146,6 +156,7 @@ export function AnimationPanel({
 			<label className='flex flex-col gap-1'>
 				<span className='text-muted-foreground text-[11px]'>{t('pptx.animation.exit')}</span>
 				<select
+					aria-label={t('pptx.animation.exit')}
 					value={selectedElementAnimation?.exit ?? 'none'}
 					onChange={handleExitChange}
 					disabled={!canEdit}
@@ -159,6 +170,13 @@ export function AnimationPanel({
 					))}
 				</select>
 			</label>
+
+			{/* Motion path: geometry, not a preset, so it gets its own row */}
+			<MotionPathRow
+				motionPath={selectedElementAnimation?.motionPath}
+				canEdit={canEdit}
+				onChange={handleMotionPathChange}
+			/>
 
 			{/* Effect options: only show when an animation is set */}
 			{hasAnimation && (
@@ -201,6 +219,7 @@ export function AnimationPanel({
 							{t('pptx.animation.sequence')}
 						</span>
 						<select
+							aria-label={t('pptx.animation.sequence')}
 							value={selectedElementAnimation?.sequence ?? 'asOne'}
 							onChange={handleSequenceChange}
 							disabled={!canEdit}
@@ -214,6 +233,22 @@ export function AnimationPanel({
 						</select>
 					</label>
 
+					{/* Effect sound + after animation, on their own divider like PowerPoint's Effect Options */}
+					<div className='pt-1 border-t border-border flex flex-col gap-2'>
+						<EffectSoundRow
+							soundState={effectSoundState}
+							canEdit={canEdit}
+							onPick={handleEffectSoundPick}
+						/>
+						<AfterAnimationRow
+							action={selectedElementAnimation?.afterAnimation ?? 'none'}
+							color={selectedElementAnimation?.afterAnimationColor}
+							canEdit={canEdit}
+							onActionChange={handleAfterAnimationChange}
+							onColorChange={handleAfterAnimationColorChange}
+						/>
+					</div>
+
 					<div className='text-[11px] uppercase tracking-wide text-muted-foreground pt-1 border-t border-border'>
 						{t('pptx.animation.timing')}
 					</div>
@@ -222,6 +257,7 @@ export function AnimationPanel({
 					<label className='flex flex-col gap-1'>
 						<span className='text-muted-foreground text-[11px]'>{t('pptx.animation.trigger')}</span>
 						<select
+							aria-label={t('pptx.animation.trigger')}
 							value={selectedElementAnimation?.trigger ?? 'onClick'}
 							onChange={handleTriggerChange}
 							disabled={!canEdit}
@@ -242,6 +278,7 @@ export function AnimationPanel({
 								{t('pptx.animation.trigger.shapeLabel')}
 							</span>
 							<select
+								aria-label={t('pptx.animation.trigger.shapeLabel')}
 								value={selectedElementAnimation?.triggerShapeId ?? ''}
 								onChange={handleTriggerShapeChange}
 								disabled={!canEdit}
@@ -293,6 +330,7 @@ export function AnimationPanel({
 							{t('pptx.animation.timingCurve')}
 						</span>
 						<select
+							aria-label={t('pptx.animation.timingCurve')}
 							value={selectedElementAnimation?.timingCurve ?? 'ease'}
 							onChange={handleTimingCurveChange}
 							disabled={!canEdit}
@@ -325,6 +363,7 @@ export function AnimationPanel({
 							{t('pptx.animation.repeatUntil')}
 						</span>
 						<select
+							aria-label={t('pptx.animation.repeatUntil')}
 							value={selectedElementAnimation?.repeatMode ?? 'none'}
 							onChange={handleRepeatModeChange}
 							disabled={!canEdit}

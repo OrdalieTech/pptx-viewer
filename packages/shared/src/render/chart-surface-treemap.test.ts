@@ -79,10 +79,10 @@ describe('buildSurfaceViewModel — isometric (≥2 series, ≥2 categories)', (
 		expect(vm.zeroLine).toBeUndefined();
 	});
 
-	it('svgWidth and svgHeight are at least 320x180', () => {
+	it('svgWidth and svgHeight match the element frame box exactly', () => {
 		const vm = buildSurfaceViewModel(makeElement(50, 50), makeSurfaceData(2, 2), ['C1', 'C2']);
-		expect(vm.svgWidth).toBeGreaterThanOrEqual(320);
-		expect(vm.svgHeight).toBeGreaterThanOrEqual(180);
+		expect(vm.svgWidth).toBe(50);
+		expect(vm.svgHeight).toBe(50);
 	});
 
 	it('includes legend entries when hasLegend is true', () => {
@@ -99,6 +99,21 @@ describe('buildSurfaceViewModel — isometric (≥2 series, ≥2 categories)', (
 		expect(vm.legend).toHaveLength(0);
 	});
 
+	it('carries a valueDrag context so a cell can be dragged to a new value', () => {
+		const vm = buildSurfaceViewModel(el, data, labels);
+		expect(vm.valueDrag).toBeDefined();
+		expect(vm.valueDrag?.range.min).toBeLessThan(vm.valueDrag!.range.max);
+		expect(vm.valueDrag?.plotTop).toBeLessThan(vm.valueDrag!.plotBottom);
+	});
+
+	it('tags each face polygon with the dataPoint part valueDrag commits through', () => {
+		const vm = buildSurfaceViewModel(el, data, labels);
+		const facePolygons = vm.primitives.filter((p) => p.kind === 'polygon' && p.fill !== 'none');
+		for (const p of facePolygons) {
+			expect(p.part?.role).toBe('dataPoint');
+		}
+	});
+
 	it('exposes the chart title when hasTitle is true', () => {
 		const titled: PptxChartData = {
 			...data,
@@ -107,6 +122,58 @@ describe('buildSurfaceViewModel — isometric (≥2 series, ≥2 categories)', (
 		};
 		const vm = buildSurfaceViewModel(el, titled, labels);
 		expect(vm.title).toBe('My Surface Chart');
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildSurfaceViewModel - c:bandFmts and c:floor/sideWall/backWall
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildSurfaceViewModel - bandFmts and floor/wall panels', () => {
+	const el = makeElement();
+	const data = makeSurfaceData(3, 4);
+	const labels = data.categories;
+
+	it('adds no extra polygons when no floor/wall is authored', () => {
+		const vm = buildSurfaceViewModel(el, data, labels);
+		const polygons = vm.primitives.filter((p) => p.kind === 'polygon');
+		expect(polygons).toHaveLength(12);
+	});
+
+	it('prepends floor/wall backdrop panels ahead of the mesh facets', () => {
+		const withWalls: PptxChartData = {
+			...data,
+			floor: { spPr: { fillColor: '#111111' } },
+			backWall: { spPr: { fillColor: '#222222' } },
+			sideWall: { spPr: { fillColor: '#333333' } },
+		};
+		const vm = buildSurfaceViewModel(el, withWalls, labels);
+		const polygons = vm.primitives.filter((p) => p.kind === 'polygon');
+		// 3 backdrop panels + 12 mesh polygons (6 cells x 2).
+		expect(polygons).toHaveLength(15);
+		expect(polygons.slice(0, 3).map((p) => p.fill)).toStrictEqual([
+			'#222222',
+			'#333333',
+			'#111111',
+		]);
+	});
+
+	it('uses bandFmts colours for the mesh face fill instead of the continuous ramp', () => {
+		const withBands: PptxChartData = {
+			...data,
+			bandFmts: [
+				{ index: 0, spPr: { fillColor: '#FF0000' } },
+				{ index: 1, spPr: { fillColor: '#00FF00' } },
+			],
+		};
+		const vm = buildSurfaceViewModel(el, withBands, labels);
+		const faceFills = vm.primitives
+			.filter((p) => p.kind === 'polygon' && p.part?.role === 'dataPoint')
+			.map((p) => p.fill);
+		expect(faceFills.length).toBeGreaterThan(0);
+		for (const fill of faceFills) {
+			expect(['#FF0000', '#00FF00']).toContain(fill);
+		}
 	});
 });
 
@@ -140,6 +207,34 @@ describe('buildSurfaceViewModel — flat fallback (<2 series or <2 categories)',
 		const rects = vm.primitives.filter((p) => p.kind === 'rect');
 		// 1 series × 3 categories = 3 cells.
 		expect(rects).toHaveLength(3);
+	});
+
+	it('carries a valueDrag context so a cell can be dragged to a new value', () => {
+		const el = makeElement();
+		const data = makeSurfaceData(1, 3);
+		const vm = buildSurfaceViewModel(el, data, data.categories);
+		expect(vm.valueDrag).toBeDefined();
+		expect(vm.valueDrag?.range.min).toBeLessThan(vm.valueDrag!.range.max);
+		expect(vm.valueDrag?.plotTop).toBeLessThan(vm.valueDrag!.plotBottom);
+		for (const p of vm.primitives) {
+			expect(p.part?.role).toBe('dataPoint');
+		}
+	});
+
+	it('uses bandFmts colours for rect fills instead of the continuous ramp', () => {
+		const el = makeElement();
+		const data: PptxChartData = {
+			...makeSurfaceData(1, 2),
+			bandFmts: [
+				{ index: 0, spPr: { fillColor: '#FF0000' } },
+				{ index: 1, spPr: { fillColor: '#00FF00' } },
+			],
+		};
+		const vm = buildSurfaceViewModel(el, data, data.categories);
+		const fills = vm.primitives.filter((p) => p.kind === 'rect').map((p) => p.fill);
+		for (const fill of fills) {
+			expect(['#FF0000', '#00FF00']).toContain(fill);
+		}
 	});
 });
 
@@ -423,7 +518,7 @@ describe('buildTreemapViewModel — edge cases', () => {
 		expect(areas[0]).toBeGreaterThan(areas[1] ?? 0);
 	});
 
-	it('svgWidth and svgHeight are at least 320x180', () => {
+	it('svgWidth and svgHeight match the element frame box exactly', () => {
 		const el = makeElement(10, 10);
 		const data: PptxChartData = {
 			chartType: 'treemap',
@@ -431,7 +526,65 @@ describe('buildTreemapViewModel — edge cases', () => {
 			series: [{ name: 'S', values: [1] }],
 		};
 		const vm = buildTreemapViewModel(el, data, data.categories);
-		expect(vm.svgWidth).toBeGreaterThanOrEqual(320);
-		expect(vm.svgHeight).toBeGreaterThanOrEqual(180);
+		expect(vm.svgWidth).toBe(10);
+		expect(vm.svgHeight).toBe(10);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Selectable marks
+//
+// Surface was the one kind whose primitives carried no `ChartPartRef` at all,
+// so its marks could not be selected on canvas in any binding. A mesh facet
+// spans four data points, so it is tagged with the grid vertex it is anchored
+// at; the flat fallback maps one rect to exactly one authored value.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('surface: interactive marks', () => {
+	it('tags every isometric facet with its anchoring grid vertex', () => {
+		const chartData: PptxChartData = {
+			chartType: 'surface',
+			categories: ['Q1', 'Q2', 'Q3'],
+			series: [
+				{ name: 'A', values: [10, 20, 30] },
+				{ name: 'B', values: [15, 25, 35] },
+				{ name: 'C', values: [12, 22, 32] },
+			],
+			style: {},
+		};
+		const vm = buildSurfaceViewModel(
+			{ id: 'el', type: 'chart', x: 0, y: 0, width: 400, height: 300 } as never,
+			chartData,
+			chartData.categories,
+		);
+		const faces = vm.primitives.filter(
+			(primitive) => primitive.kind === 'polygon' && primitive.part !== undefined,
+		);
+		// (3 series - 1) x (3 categories - 1) = 4 facets.
+		expect(faces).toHaveLength(4);
+		for (const face of faces) {
+			expect(face.part!.role).toBe('dataPoint');
+			expect(face.part!.seriesIndex).toBeGreaterThanOrEqual(0);
+			expect(face.part!.pointIndex).toBeGreaterThanOrEqual(0);
+		}
+	});
+
+	it('tags each flat-fallback cell with its own (series, category)', () => {
+		const chartData: PptxChartData = {
+			chartType: 'surface',
+			categories: ['Q1', 'Q2', 'Q3'],
+			series: [{ name: 'A', values: [10, 20, 30] }],
+			style: {},
+		};
+		const vm = buildSurfaceViewModel(
+			{ id: 'el', type: 'chart', x: 0, y: 0, width: 400, height: 300 } as never,
+			chartData,
+			chartData.categories,
+		);
+		const cells = vm.primitives.filter(
+			(primitive) => primitive.kind === 'rect' && primitive.part !== undefined,
+		);
+		expect(cells).toHaveLength(3);
+		expect(cells.map((cell) => cell.part!.pointIndex)).toStrictEqual([0, 1, 2]);
 	});
 });

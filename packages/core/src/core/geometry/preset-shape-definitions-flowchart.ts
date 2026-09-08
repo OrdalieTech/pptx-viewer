@@ -1,12 +1,14 @@
 /**
  * ECMA-376 ST_ShapeType preset geometry definitions — flowchart family.
  *
- * Mirrors Microsoft's `presetShapeDefinitions.xml` for the 28 `flowChart*`
- * shapes catalogued in ISO/IEC 29500-1 §20.1.10.55. The data here is
- * authored using the same conventions as
- * `preset-shape-definitions-table.ts`; see that module's header comment for
- * the full procedure (each `<a:gd>` is captured verbatim, every `<a:path>`
- * child becomes a `PresetPathCommand`, coordinates are guide-formula tokens).
+ * Mirrors Microsoft's `presetShapeDefinitions.xml` for every `flowChart*`
+ * shape catalogued in ISO/IEC 29500-1 §20.1.10.55 (all 29 of them), plus the
+ * non-spec `flowChartStoredData` alias PowerPoint's UI exposes for
+ * `flowChartOnlineStorage`. The data here is authored using the same
+ * conventions as `preset-shape-definitions-table.ts`; see that module's header
+ * comment for the full procedure (each `<a:gd>` is captured verbatim, every
+ * `<a:path>` child becomes a `PresetPathCommand`, coordinates are
+ * guide-formula tokens).
  *
  * None of the flowchart shapes have an `avLst` (no user adjustments) so all
  * `gdLst` entries are deterministic — the geometry depends only on the
@@ -51,8 +53,13 @@ const flowChartProcess: PresetShapeGeometryDefinition = {
 // flowChartDecision — diamond.
 const flowChartDecision: PresetShapeGeometryDefinition = {
 	name: 'flowChartDecision',
-	gdLst: [gd('ir', '*/ wd2 3 4'), gd('ib', '*/ hd2 3 4')],
-	rect: { l: 'wd4', t: 'hd4', r: 'ir', b: 'ib' },
+	// Same mirror bug as `diamond` (see its comment in
+	// preset-shape-definitions-table.ts): `ir`/`ib` used `wd2*3/4`/`hd2*3/4`
+	// (75/37.5 at 200x100pt) instead of mirroring `wd4`/`hd4` off the far edge
+	// (`w - wd4 = 150`, `h - hd4 = 75`), collapsing the rect to a quarter-box.
+	// COM-measured at 200x100pt confirms l=50,t=25,r=150,b=75 (identical to
+	// `diamond`, as expected for the same silhouette).
+	rect: { l: 'wd4', t: 'hd4', r: '+- r 0 wd4', b: '+- b 0 hd4' },
 	pathLst: [
 		{
 			commands: [
@@ -243,37 +250,72 @@ const flowChartMultidocument: PresetShapeGeometryDefinition = {
 	],
 };
 
-// flowChartTerminator — pill shape: rounded rect with corner radius that
-// reaches the vertical centre. Uses an ss-based radius (≈1075/3600 · ss).
+// flowChartTerminator — pill shape (ECMA-376 §20.1.9.29).
+//
+// Transcribed straight from the spec's 21600-space cubic Beziers. The earlier
+// port approximated the caps with four `arcTo`s whose start angles and sweeps
+// did not chain: the pen ended each cap somewhere other than where the next
+// segment began, so the outline ran half the shape height BELOW its own box and
+// the pill rendered as a torn scribble. The evaluator scales a path that
+// declares `w`/`h` into the shape box, so the constants are used verbatim.
 const flowChartTerminator: PresetShapeGeometryDefinition = {
 	name: 'flowChartTerminator',
 	gdLst: [
-		gd('x1', '*/ w 1075 21600'),
-		gd('x2', '*/ w 20525 21600'),
-		gd('y1', '*/ h 17467 21600'),
-		gd('y2', '*/ h 4135 21600'),
+		gd('il', '*/ w 1018 21600'),
+		gd('ir', '*/ w 20582 21600'),
+		gd('it', '*/ h 3163 21600'),
+		gd('ib', '*/ h 18437 21600'),
 	],
-	rect: { l: 'x1', t: 't', r: 'x2', b: 'b' },
+	rect: { l: 'il', t: 'it', r: 'ir', b: 'ib' },
 	pathLst: [
 		{
+			w: 21600,
+			h: 21600,
 			commands: [
-				{ kind: 'moveTo', x: 'l', y: 'vc' },
-				{ kind: 'arcTo', wR: 'x1', hR: 'hd2', stAng: 'cd2', swAng: 'cd4' },
-				{ kind: 'lnTo', x: 'x2', y: 't' },
-				{ kind: 'arcTo', wR: 'x1', hR: 'hd2', stAng: '3cd4', swAng: 'cd4' },
-				{ kind: 'lnTo', x: 'x2', y: 'b' },
-				{ kind: 'arcTo', wR: 'x1', hR: 'hd2', stAng: '0', swAng: 'cd4' },
-				{ kind: 'lnTo', x: 'x1', y: 'b' },
-				{ kind: 'arcTo', wR: 'x1', hR: 'hd2', stAng: 'cd4', swAng: 'cd4' },
+				{ kind: 'moveTo', x: '3475', y: '0' },
+				{ kind: 'lnTo', x: '18125', y: '0' },
+				{
+					kind: 'cubicBezTo',
+					x1: '20044',
+					y1: '0',
+					x2: '21600',
+					y2: '4837',
+					x3: '21600',
+					y3: '10800',
+				},
+				{
+					kind: 'cubicBezTo',
+					x1: '21600',
+					y1: '16763',
+					x2: '20044',
+					y2: '21600',
+					x3: '18125',
+					y3: '21600',
+				},
+				{ kind: 'lnTo', x: '3475', y: '21600' },
+				{
+					kind: 'cubicBezTo',
+					x1: '1556',
+					y1: '21600',
+					x2: '0',
+					y2: '16763',
+					x3: '0',
+					y3: '10800',
+				},
+				{
+					kind: 'cubicBezTo',
+					x1: '0',
+					y1: '4837',
+					x2: '1556',
+					y2: '0',
+					x3: '3475',
+					y3: '0',
+				},
 				{ kind: 'close' },
 			],
 		},
 	],
-	// y1/y2 retained above for reference; rect uses x1/x2.
 };
-
-// Drop the unused y1/y2 references? No — leave gdLst entries intact to mirror
-// the canonical XML so consumers can introspect them.
 
 // flowChartPreparation — extended hexagon with horizontal sides.
 const flowChartPreparation: PresetShapeGeometryDefinition = {
@@ -724,6 +766,73 @@ const flowChartStoredData: PresetShapeGeometryDefinition = {
 	],
 };
 
+// flowChartInputOutput - the "Data" parallelogram. Verbatim transcription of
+// the canonical `presetShapeDefinitions.xml` entry: a single sub-path authored
+// in a 5x5 coordinate space, slanted by one fifth of the width.
+const flowChartInputOutput: PresetShapeGeometryDefinition = {
+	name: 'flowChartInputOutput',
+	gdLst: [gd('x3', '*/ w 2 5'), gd('x4', '*/ w 3 5'), gd('x5', '*/ w 4 5'), gd('x6', '*/ w 9 10')],
+	rect: { l: 'wd5', t: 't', r: 'x5', b: 'b' },
+	pathLst: [
+		{
+			w: 5,
+			h: 5,
+			commands: [
+				{ kind: 'moveTo', x: '0', y: '5' },
+				{ kind: 'lnTo', x: '1', y: '0' },
+				{ kind: 'lnTo', x: '5', y: '0' },
+				{ kind: 'lnTo', x: '4', y: '5' },
+				{ kind: 'close' },
+			],
+		},
+	],
+};
+
+// flowChartOfflineStorage - downward-pointing triangle with a rule across its
+// lower third. Verbatim transcription: a filled unstroked triangle (2x2
+// space), the stroke-only rule (5x5 space), then the stroked triangle outline.
+const flowChartOfflineStorage: PresetShapeGeometryDefinition = {
+	name: 'flowChartOfflineStorage',
+	gdLst: [gd('x4', '*/ w 3 4')],
+	rect: { l: 'wd4', t: 't', r: 'x4', b: 'vc' },
+	pathLst: [
+		{
+			w: 2,
+			h: 2,
+			stroke: false,
+			extrusionOk: false,
+			commands: [
+				{ kind: 'moveTo', x: '0', y: '0' },
+				{ kind: 'lnTo', x: '2', y: '0' },
+				{ kind: 'lnTo', x: '1', y: '2' },
+				{ kind: 'close' },
+			],
+		},
+		{
+			w: 5,
+			h: 5,
+			fill: 'none',
+			extrusionOk: false,
+			commands: [
+				{ kind: 'moveTo', x: '2', y: '4' },
+				{ kind: 'lnTo', x: '3', y: '4' },
+			],
+		},
+		{
+			w: 2,
+			h: 2,
+			fill: 'none',
+			extrusionOk: true,
+			commands: [
+				{ kind: 'moveTo', x: '0', y: '0' },
+				{ kind: 'lnTo', x: '2', y: '0' },
+				{ kind: 'lnTo', x: '1', y: '2' },
+				{ kind: 'close' },
+			],
+		},
+	],
+};
+
 // ---------------------------------------------------------------------------
 // Aggregate
 // ---------------------------------------------------------------------------
@@ -766,4 +875,6 @@ export const FLOWCHART_PRESET_DEFINITIONS: Record<string, PresetShapeGeometryDef
 	flowChartDisplay,
 	flowChartDelay,
 	flowChartStoredData,
+	flowChartInputOutput,
+	flowChartOfflineStorage,
 };

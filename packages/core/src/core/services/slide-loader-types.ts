@@ -7,6 +7,7 @@
 import type { XMLParser } from 'fast-xml-parser';
 import type JSZip from 'jszip';
 
+import type { AuthoredSlideBackground } from '../core/runtime/authored-slide-background';
 import type {
 	PptxActiveXControl,
 	PptxChartData,
@@ -132,8 +133,23 @@ export interface PptxSlideLoaderParams {
 	getLayoutBackgroundGradient: (slidePath: string) => Promise<string | undefined>;
 	/** Extract background image data URI from slide XML. */
 	extractBackgroundImage: (slideXml: XmlObject, slidePath: string) => Promise<string | undefined>;
+	/** Extract crop, tiling and image effects from a background blip fill. */
+	extractBackgroundImageProperties: (
+		slideXml: XmlObject,
+		rootElement?: string,
+	) => PptxSlide['backgroundImageProperties'];
 	/** Get background image from the slide's layout (fallback). */
 	getLayoutBackgroundImage: (slidePath: string) => Promise<string | undefined>;
+	/** Get background image properties from the slide's layout/master fallback chain. */
+	getLayoutBackgroundImageProperties: (
+		slidePath: string,
+	) => Promise<PptxSlide['backgroundImageProperties']>;
+	/**
+	 * Record whether this slide authored its own `<p:bg>` and what the
+	 * inheritance chain resolved to, so the save writer can tell a background
+	 * the user chose from one the loader flattened for painting.
+	 */
+	rememberSlideBackgroundOrigin: (slidePath: string, origin: AuthoredSlideBackground) => void;
 	/** Extract speaker notes text and rich segments from a slide. */
 	extractSlideNotes: (slidePath: string) => Promise<PptxSlideNotesResult>;
 	/** Extract legacy (pre-Office 2021) comments from a slide. */
@@ -149,6 +165,8 @@ export interface PptxSlideLoaderParams {
 	extractBackgroundShowAnimation: (slideXml: XmlObject) => boolean | undefined;
 	/** Check whether master slide shapes should be shown. */
 	extractShowMasterShapes: (slideXml: XmlObject) => boolean | undefined;
+	/** Check whether inherited master placeholder animations should replay. */
+	extractShowMasterPhAnim: (slideXml: XmlObject) => boolean | undefined;
 	/** Determine if a slide is marked as hidden. */
 	isSlideHidden: (slideXml: XmlObject, slideIdEntry: XmlObject | undefined) => boolean;
 	/** Parse the slide transition from slide XML. */
@@ -156,7 +174,10 @@ export interface PptxSlideLoaderParams {
 	/** Parse editor-level animation definitions from slide XML. */
 	parseEditorAnimations: (slideXml: XmlObject) => PptxElementAnimation[] | undefined;
 	/** Parse native OOXML animation timing trees from slide XML. */
-	parseNativeAnimations: (slideXml: XmlObject) => PptxNativeAnimation[] | undefined;
+	parseNativeAnimations: (
+		slideXml: XmlObject,
+		slidePath: string,
+	) => PptxNativeAnimation[] | undefined;
 	/** Resolve SmartArt data for a graphic frame element. */
 	getSmartArtDataForGraphicFrame: (
 		slidePath: string,

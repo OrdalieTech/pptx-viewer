@@ -128,5 +128,52 @@ export const INSTANT: SlideTransitionAnimations = {
  */
 export const DEFAULT_TRANSITION_DURATION_MS = 1000;
 
+/**
+ * Default Morph duration (ms) for a transition that declares NEITHER an
+ * explicit `p14:dur` (which lands in `durationMs` and always wins) NOR a legacy
+ * `spd` speed (see {@link TRANSITION_SPEED_DURATION_MS}).
+ *
+ * A Morph that declares nothing carries no duration hint at all, and desktop
+ * PowerPoint then plays it at its own 0.5s fallback (the Duration box shows
+ * 0.50 for such slides and the transition measures at half a second); the
+ * previous 1.0s/2.0s defaults made those decks play at double PowerPoint
+ * speed.
+ */
+export const DEFAULT_MORPH_DURATION_MS = 500;
+
+/**
+ * Duration (ms) for each legacy `p:transition/@spd` speed.
+ *
+ * Measured against PowerPoint itself: the issue #131 deck's morph slides carry
+ * `spd="slow"` and no `p14:dur`, and PowerPoint reports
+ * `SlideShowTransition.Duration = 1.0`. Re-authoring that attribute and
+ * re-reading it through COM gives fast=0.5s, med=0.75s, slow=1.0s - and the
+ * same values for Morph as for every other effect, contradicting the earlier
+ * assumption that Morph ignores `spd`.
+ */
+export const TRANSITION_SPEED_DURATION_MS: Readonly<Record<string, number>> = {
+	fast: 500,
+	med: 750,
+	slow: 1000,
+};
+
 /** Easing applied to every transition animation. */
 export const EASE = 'ease-in-out';
+
+/**
+ * `p:wheel/@spokes` (CT_WheelTransition): PowerPoint's Wheel dialog offers
+ * exactly these five spoke counts. Any other authored value (or absence, the
+ * schema default) snaps to the nearest one so the keyframe lookup always
+ * resolves to a real `pptx-tr-wheel-in-N` block.
+ */
+export const WHEEL_SPOKE_COUNTS: readonly number[] = [1, 2, 3, 4, 8];
+
+/** Resolve an authored `spokes` count to the nearest PowerPoint-offered value. */
+export function resolveWheelSpokeCount(spokes: number | undefined): number {
+	if (spokes === undefined || !Number.isFinite(spokes) || spokes <= 0) {
+		return 1;
+	}
+	return WHEEL_SPOKE_COUNTS.reduce((closest, candidate) =>
+		Math.abs(candidate - spokes) < Math.abs(closest - spokes) ? candidate : closest,
+	);
+}

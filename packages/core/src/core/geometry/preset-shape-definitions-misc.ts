@@ -31,6 +31,7 @@
  */
 
 import type {
+	PresetPath,
 	PresetPathCommand,
 	PresetShapeGeometryDefinition,
 } from './preset-shape-definitions-table';
@@ -45,6 +46,29 @@ function gd(name: string, formula: string): { name: string; formula: string; arg
 }
 
 const FULL_RECT = { l: 'l', t: 't', r: 'r', b: 'b' } as const;
+
+/**
+ * One detached triangular ray: the two base corners (straddling the ray axis)
+ * followed by the apex. Used by `sun`, whose rays are separate sub-paths rather
+ * than part of one connected outline.
+ */
+function ray(
+	baseX1: string,
+	baseY1: string,
+	baseX2: string,
+	baseY2: string,
+	apexX: string,
+	apexY: string,
+): PresetPath {
+	return {
+		commands: [
+			{ kind: 'moveTo', x: baseX1, y: baseY1 },
+			{ kind: 'lnTo', x: baseX2, y: baseY2 },
+			{ kind: 'lnTo', x: apexX, y: apexY },
+			{ kind: 'close' },
+		],
+	};
+}
 
 /**
  * Trigonometric lookup for a regular N-pointed star (N tips).
@@ -685,76 +709,117 @@ const lightningBolt: PresetShapeGeometryDefinition = {
 	],
 };
 
-// sun — 8 ray triangles + central circle. adj governs ray depth.
+// sun — a central ellipse plus EIGHT DETACHED triangular rays at 45deg steps.
+//
+// The previous port drew one connected star polygon over a disc, which is the
+// wrong topology (PowerPoint leaves a gap between the disc and every ray) and
+// mixed height guides into x coordinates, so it rendered as a spiky blob with a
+// stray wing. Measured against PowerPoint's own render it scored 46% IoU.
+//
+// Constants below were measured from PowerPoint renders of `<a:prstGeom
+// prst="sun">` at adj = 12500 / 20000 / 25000 / 30000 / 35000 / 40000, all in a
+// 200x100 box, and hold to within ~0.2% of the box at every one of them:
+//
+//   disc semi-axes  = wd2/hd2 * (100000 - 2a) / 100000
+//   ray base radius = wd2/hd2 * (95000 - 1.4a) / 100000   (along the ray axis)
+//   ray base half-width = 0.283 * disc radius             (across the axis)
+//   ray apex        = the box-inscribed ellipse (radius 1.0)
+//
+// The construction is anisotropic: everything is expressed as a fraction of
+// `wd2`/`hd2` rather than `ss`, which is what PowerPoint does - in a 2:1 box the
+// disc is an ellipse and the ray tips still reach all four edges.
 const sun: PresetShapeGeometryDefinition = {
 	name: 'sun',
 	avLst: { adj: 25000 },
 	gdLst: [
 		gd('a', 'pin 12500 adj 46875'),
-		gd('g0', '*/ ss a 50000'),
-		gd('g1', '+- wd2 0 g0'),
-		gd('g2', '+- hd2 0 g0'),
-		gd('g3', '*/ g0 30274 32768'),
-		gd('g4', '*/ g0 12540 32768'),
-		gd('g5', '+- wd2 0 g3'),
-		gd('g6', '+- wd2 0 g4'),
-		gd('g7', '+- hd2 0 g3'),
-		gd('g8', '+- hd2 0 g4'),
-		gd('g9', '+- wd2 g3 0'),
-		gd('g10', '+- wd2 g4 0'),
-		gd('g11', '+- hd2 g3 0'),
-		gd('g12', '+- hd2 g4 0'),
-		gd('g13', '*/ g0 23170 32768'),
-		gd('g14', '+- wd2 0 g13'),
-		gd('g15', '+- hd2 0 g13'),
-		gd('g16', '+- wd2 g13 0'),
-		gd('g17', '+- hd2 g13 0'),
-		gd('cx', 'val wd2'),
-		gd('cy', 'val hd2'),
+		// Radii as fractions (x100000) of the half-box, then in shape units.
+		gd('a2', '*/ a 2 1'),
+		gd('dr', '+- 100000 0 a2'),
+		gd('a14', '*/ a 7 5'),
+		gd('rb', '+- 95000 0 a14'),
+		gd('hw', '*/ dr 283 1000'),
+		gd('drx', '*/ wd2 dr 100000'),
+		gd('dry', '*/ hd2 dr 100000'),
+		gd('rbx', '*/ wd2 rb 100000'),
+		gd('rby', '*/ hd2 rb 100000'),
+		gd('hwx', '*/ wd2 hw 100000'),
+		gd('hwy', '*/ hd2 hw 100000'),
+		// Diagonal rays: the axis and its perpendicular both project by cos(45deg).
+		gd('rbm', '+- rb 0 hw'),
+		gd('rbp', '+- rb hw 0'),
+		gd('dm', '*/ rbm 70711 100000'),
+		gd('dp', '*/ rbp 70711 100000'),
+		gd('dmx', '*/ wd2 dm 100000'),
+		gd('dmy', '*/ hd2 dm 100000'),
+		gd('dpx', '*/ wd2 dp 100000'),
+		gd('dpy', '*/ hd2 dp 100000'),
+		gd('apx', '*/ wd2 70711 100000'),
+		gd('apy', '*/ hd2 70711 100000'),
+		// Named edges of each construction, so the paths below read positionally.
+		gd('discL', '+- hc 0 drx'),
+		gd('discR', '+- hc drx 0'),
+		gd('discT', '+- vc 0 dry'),
+		gd('discB', '+- vc dry 0'),
+		gd('bR', '+- hc rbx 0'),
+		gd('bL', '+- hc 0 rbx'),
+		gd('bB', '+- vc rby 0'),
+		gd('bT', '+- vc 0 rby'),
+		gd('wR', '+- hc hwx 0'),
+		gd('wL', '+- hc 0 hwx'),
+		gd('wB', '+- vc hwy 0'),
+		gd('wT', '+- vc 0 hwy'),
+		gd('mR', '+- hc dmx 0'),
+		gd('mL', '+- hc 0 dmx'),
+		gd('mB', '+- vc dmy 0'),
+		gd('mT', '+- vc 0 dmy'),
+		gd('pR', '+- hc dpx 0'),
+		gd('pL', '+- hc 0 dpx'),
+		gd('pB', '+- vc dpy 0'),
+		gd('pT', '+- vc 0 dpy'),
+		gd('aR', '+- hc apx 0'),
+		gd('aL', '+- hc 0 apx'),
+		gd('aB', '+- vc apy 0'),
+		gd('aT', '+- vc 0 apy'),
+		// Text rect: COM-measured at 200x100pt (l=64.65, t=32.32, r=135.27,
+		// b=67.68) and confirmed at a second aspect ratio, 160x120pt
+		// (l=51.72, t=38.79, r=108.22, b=81.21). Both match the disc's OWN
+		// inscribed axis-aligned rectangle (touching the disc ellipse at
+		// 45deg, same construction `ellipse`'s own text rect uses against the
+		// full bounding ellipse) to within 0.1% of the box - NOT the disc's
+		// full bounds (`discL`/`discT`/`discR`/`discB`, off by ~35% of the
+		// box at the default adjustment, since the disc is a lot bigger than
+		// the square PowerPoint actually reserves for text inside it).
+		gd('trdx', 'cos drx 2700000'),
+		gd('trdy', 'sin dry 2700000'),
+		gd('trl', '+- hc 0 trdx'),
+		gd('trr', '+- hc trdx 0'),
+		gd('trt', '+- vc 0 trdy'),
+		gd('trb', '+- vc trdy 0'),
 	],
-	rect: { l: 'g14', t: 'g15', r: 'g16', b: 'g17' },
+	rect: { l: 'trl', t: 'trt', r: 'trr', b: 'trb' },
 	pathLst: [
+		// Central ellipse.
 		{
 			commands: [
-				// 8 outer rays (alternating long tip / shoulder pairs).
-				{ kind: 'moveTo', x: 'r', y: 'vc' },
-				{ kind: 'lnTo', x: 'g10', y: 'g12' },
-				{ kind: 'lnTo', x: 'g9', y: 'g11' },
-				{ kind: 'lnTo', x: 'g16', y: 'g17' },
-				{ kind: 'lnTo', x: 'g11', y: 'g11' },
-				{ kind: 'lnTo', x: 'g11', y: 'g9' },
-				{ kind: 'lnTo', x: 'hc', y: 'b' },
-				{ kind: 'lnTo', x: 'g7', y: 'g11' },
-				{ kind: 'lnTo', x: 'g8', y: 'g9' },
-				{ kind: 'lnTo', x: 'g14', y: 'g17' },
-				{ kind: 'lnTo', x: 'g8', y: 'hd2' },
-				{ kind: 'lnTo', x: 'g7', y: 'hd2' },
-				{ kind: 'lnTo', x: 'l', y: 'vc' },
-				{ kind: 'lnTo', x: 'g7', y: 'g8' },
-				{ kind: 'lnTo', x: 'g8', y: 'g7' },
-				{ kind: 'lnTo', x: 'g14', y: 'g15' },
-				{ kind: 'lnTo', x: 'hd2', y: 'g7' },
-				{ kind: 'lnTo', x: 'hd2', y: 'g8' },
-				{ kind: 'lnTo', x: 'hc', y: 't' },
-				{ kind: 'lnTo', x: 'g11', y: 'g7' },
-				{ kind: 'lnTo', x: 'g12', y: 'g8' },
-				{ kind: 'lnTo', x: 'g16', y: 'g15' },
-				{ kind: 'lnTo', x: 'g11', y: 'hd2' },
-				{ kind: 'lnTo', x: 'g12', y: 'hd2' },
+				{ kind: 'moveTo', x: 'discL', y: 'vc' },
+				{ kind: 'arcTo', wR: 'drx', hR: 'dry', stAng: 'cd2', swAng: 'cd4' },
+				{ kind: 'arcTo', wR: 'drx', hR: 'dry', stAng: '3cd4', swAng: 'cd4' },
+				{ kind: 'arcTo', wR: 'drx', hR: 'dry', stAng: '0', swAng: 'cd4' },
+				{ kind: 'arcTo', wR: 'drx', hR: 'dry', stAng: 'cd4', swAng: 'cd4' },
 				{ kind: 'close' },
 			],
 		},
-		// central disc
-		{
-			commands: [
-				{ kind: 'moveTo', x: 'g14', y: 'vc' },
-				{ kind: 'arcTo', wR: 'g0', hR: 'g0', stAng: 'cd2', swAng: 'cd4' },
-				{ kind: 'arcTo', wR: 'g0', hR: 'g0', stAng: '3cd4', swAng: 'cd4' },
-				{ kind: 'arcTo', wR: 'g0', hR: 'g0', stAng: '0', swAng: 'cd4' },
-				{ kind: 'arcTo', wR: 'g0', hR: 'g0', stAng: 'cd4', swAng: 'cd4' },
-				{ kind: 'close' },
-			],
-		},
+		// Right / left / bottom / top rays.
+		ray('bR', 'wT', 'bR', 'wB', 'r', 'vc'),
+		ray('bL', 'wT', 'bL', 'wB', 'l', 'vc'),
+		ray('wL', 'bB', 'wR', 'bB', 'hc', 'b'),
+		ray('wL', 'bT', 'wR', 'bT', 'hc', 't'),
+		// Diagonal rays: base corners straddle the axis, apex on the box ellipse.
+		ray('mR', 'pB', 'pR', 'mB', 'aR', 'aB'),
+		ray('mL', 'pB', 'pL', 'mB', 'aL', 'aB'),
+		ray('mR', 'pT', 'pR', 'mT', 'aR', 'aT'),
+		ray('mL', 'pT', 'pL', 'mT', 'aL', 'aT'),
 	],
 };
 
@@ -767,8 +832,16 @@ const moon: PresetShapeGeometryDefinition = {
 		gd('g0', '*/ ss a 100000'),
 		gd('g1', '+- wd2 0 g0'),
 		gd('g2', '*/ g1 1 2'),
+		// `3hd4` is not a real guide (see the `heart` comment above for the same
+		// bug): it silently resolved to 0, making `b` the box's own top edge.
+		// COM-measured at 200x100pt instead: the LEFT edge touches the outer
+		// circle at 45deg (the same `(1 - cos45deg)` inset as `ellipse`); `r`
+		// stays `wd2` (already within tolerance); `t`/`b` sit `g2` above/below
+		// center (a COM-measured approximation, not a closed form: within the
+		// 0.02 tolerance but not an exact match).
+		gd('idx', 'cos wd2 2700000'),
 	],
-	rect: { l: 'g0', t: 'hd4', r: 'wd2', b: '3hd4' },
+	rect: { l: '+- hc 0 idx', t: '+- vc 0 g2', r: 'wd2', b: '+- vc g2 0' },
 	pathLst: [
 		{
 			commands: [
@@ -832,8 +905,17 @@ const mathPlusClean: PresetShapeGeometryDefinition = {
 		gd('y2', '+- vc dy1 0'),
 		gd('x1', '+- hc 0 dx1'),
 		gd('x2', '+- hc dx1 0'),
+		// COM-measured at 200x100pt: `l`/`r` are NOT the live glyph's own arm
+		// span (`x1`/`x2`, which shrinks/grows with `adj1`) - they use a FIXED
+		// fraction based on the spec's max `adj1` (73490), independent of the
+		// live adjustment (matching `mathMinus`/`mathDivide`/`mathEqual`/
+		// `mathNotEqual`, which all measured the identical l/r at this default).
+		// `t`/`b` (`y1`/`y2`) were already correct.
+		gd('dxf', '*/ w 73490 200000'),
+		gd('x1f', '+- hc 0 dxf'),
+		gd('x2f', '+- hc dxf 0'),
 	],
-	rect: { l: 'x1', t: 'y1', r: 'x2', b: 'y2' },
+	rect: { l: 'x1f', t: 'y1', r: 'x2f', b: 'y2' },
 	pathLst: [
 		{
 			commands: [
@@ -866,8 +948,16 @@ const mathMinus: PresetShapeGeometryDefinition = {
 		gd('dy1', '*/ h a1 200000'),
 		gd('y1', '+- vc 0 dy1'),
 		gd('y2', '+- vc dy1 0'),
+		// COM-measured at 200x100pt: `l`/`r` are the FULL width in this shape's
+		// own live-adjustment formula, but PowerPoint's actual text rect insets
+		// by the same fixed `73490`-max fraction as `mathPlus` (measured
+		// identical l/r at this default). `t`/`b` (`y1`/`y2`) were already
+		// correct.
+		gd('dxf', '*/ w 73490 200000'),
+		gd('x1f', '+- hc 0 dxf'),
+		gd('x2f', '+- hc dxf 0'),
 	],
-	rect: { l: 'l', t: 'y1', r: 'r', b: 'y2' },
+	rect: { l: 'x1f', t: 'y1', r: 'x2f', b: 'y2' },
 	pathLst: [
 		{
 			commands: [
@@ -945,8 +1035,14 @@ const mathDivide: PresetShapeGeometryDefinition = {
 		gd('dy2', '*/ h a3 100000'),
 		gd('y3', '+- t dy2 0'),
 		gd('y4', '+- b 0 dy2'),
+		// COM-measured at 200x100pt: same fixed `73490`-max l/r inset as
+		// `mathPlus`/`mathMinus` (measured identical). `t`/`b` (`y1`/`y2`) were
+		// already correct.
+		gd('dxf', '*/ w 73490 200000'),
+		gd('x1f', '+- hc 0 dxf'),
+		gd('x2f', '+- hc dxf 0'),
 	],
-	rect: { l: 'l', t: 'y1', r: 'r', b: 'y2' },
+	rect: { l: 'x1f', t: 'y1', r: 'x2f', b: 'y2' },
 	pathLst: [
 		// horizontal bar
 		{
@@ -995,8 +1091,21 @@ const mathEqual: PresetShapeGeometryDefinition = {
 		gd('y2', '+- y1 0 dy1'),
 		gd('y3', '+- vc dy2 0'),
 		gd('y4', '+- y3 dy1 0'),
+		// COM-measured at 200x100pt: `l`/`r` use the same fixed `73490`-max
+		// inset as the other math symbols (measured identical). `t`/`b`
+		// (`y2`/`y4`) put the rect around the outer edges of both bars PLUS
+		// their own gap width again, which over-extends past the bars; the
+		// measured vertical inset from center is instead `2.5 * dy2` (COM
+		// measurement, not a closed form derived from the spec text - within
+		// tolerance at this default but not provably exact for other adj2).
+		gd('dxf', '*/ w 73490 200000'),
+		gd('x1f', '+- hc 0 dxf'),
+		gd('x2f', '+- hc dxf 0'),
+		gd('ge', '*/ dy2 5 2'),
+		gd('te', '+- vc 0 ge'),
+		gd('be', '+- vc ge 0'),
 	],
-	rect: { l: 'l', t: 'y2', r: 'r', b: 'y4' },
+	rect: { l: 'x1f', t: 'te', r: 'x2f', b: 'be' },
 	pathLst: [
 		// upper bar
 		{
@@ -1041,8 +1150,16 @@ const mathNotEqual: PresetShapeGeometryDefinition = {
 		gd('x6', '+- hc dx5 0'),
 		gd('y5', '+- vc dy5 0'),
 		gd('y6', '+- vc 0 dy5'),
+		// Same fix as `mathEqual` (see its comment): fixed `73490`-max l/r inset,
+		// `2.5 * dy2` vertical offset from center.
+		gd('dxf', '*/ w 73490 200000'),
+		gd('x1f', '+- hc 0 dxf'),
+		gd('x2f', '+- hc dxf 0'),
+		gd('ge', '*/ dy2 5 2'),
+		gd('te', '+- vc 0 ge'),
+		gd('be', '+- vc ge 0'),
 	],
-	rect: { l: 'l', t: 'y2', r: 'r', b: 'y4' },
+	rect: { l: 'x1f', t: 'te', r: 'x2f', b: 'be' },
 	pathLst: [
 		// upper bar
 		{
@@ -1090,7 +1207,13 @@ const mathNotEqual: PresetShapeGeometryDefinition = {
 // point into element space via guides so the humps line up with the anchors.
 const heart: PresetShapeGeometryDefinition = {
 	name: 'heart',
-	rect: { l: 'wd4', t: 'hd4', r: '3wd4', b: '3hd4' },
+	// `3wd4`/`3hd4` are not real guides: the built-in `wd`/`hd` family only goes
+	// `wd2..wd12`/`hd2..hd12` (division, no multiples), so both silently
+	// resolved to 0 via `resolveOperand`'s "unknown variable -> 0" fallback -
+	// collapsing the rect to a single point at (wd4, hd4). COM-measured at
+	// 200x100pt: l=w/6, t=h/4 (unchanged, `hd4` was already right), r=5w/6,
+	// b=2h/3 - all expressible with the existing `wd6`/`hd3` builtins.
+	rect: { l: 'wd6', t: 'hd4', r: '+- r 0 wd6', b: '+- b 0 hd3' },
 	gdLst: [
 		gd('c1x1', '*/ w 12471 21600'),
 		gd('c1y1', '*/ h -1305 21600'),
@@ -1125,8 +1248,12 @@ const heart: PresetShapeGeometryDefinition = {
 				},
 				{ kind: 'close' },
 			],
-			w: 21600,
-			h: 21600,
+			// No `w`/`h`: unlike `lightningBolt` and the `irregularSeal`s, this
+			// path's control points are already shape-space guides (`hc`, `hd4`,
+			// `b`, and a `gdLst` that pre-divides the ECMA 21600 constants by
+			// `w`/`h`). Declaring the 21600 space those constants came from would
+			// make the evaluator scale coordinates that were converted once
+			// already, collapsing the heart to a ~1px smear.
 		},
 	],
 };
@@ -1157,7 +1284,16 @@ function buildIrregularSeal(
 	commands.push({ kind: 'close' });
 	return {
 		name,
-		rect: { l: '4290', t: '4570', r: '17260', b: '17000' },
+		// `<a:rect>` is a sibling of `<a:pathLst>`, so it is read in SHAPE units
+		// even though the path below declares its own 21600 space. Left as bare
+		// 21600-unit literals the text rect landed thousands of pixels off the
+		// shape; expressed as formulas it tracks the box at any size.
+		rect: {
+			l: '*/ w 4290 21600',
+			t: '*/ h 4570 21600',
+			r: '*/ w 17260 21600',
+			b: '*/ h 17000 21600',
+		},
 		pathLst: [{ w: 21600, h: 21600, commands }],
 	};
 }

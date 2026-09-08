@@ -46,17 +46,22 @@ describe('getEffectKeyframes', () => {
 		expect(kf).toContain('100%');
 	});
 
-	it('should return clip-path keyframes for "wipeIn"', () => {
+	it('should return mask-reveal keyframes for "wipeIn" (never clip-path)', () => {
 		const kf = getEffectKeyframes('wipeIn');
 		expect(kf).toContain('@keyframes pptx-wipeIn');
-		expect(kf).toContain('clip-path');
-		expect(kf).toContain('inset(0 100% 0 0)');
+		// A clip-path keyframe would clobber the element's own geometry clip.
+		expect(kf).not.toContain('clip-path');
+		expect(kf).toContain('mask-image: linear-gradient(to right, #000 50%, transparent 50%)');
+		expect(kf).toContain('mask-position: 100% 0%');
+		expect(kf).toContain('mask-position: 0% 0%');
 	});
 
-	it('should return clip-path keyframes for "splitIn"', () => {
+	it('should return mask-reveal keyframes for "splitIn"', () => {
 		const kf = getEffectKeyframes('splitIn');
 		expect(kf).toContain('@keyframes pptx-splitIn');
-		expect(kf).toContain('inset(50% 0 50% 0)');
+		expect(kf).not.toContain('clip-path');
+		expect(kf).toContain('mask-size: 100% 0%');
+		expect(kf).toContain('mask-size: 100% 101%');
 	});
 
 	it('should return exit keyframes for "fadeOut"', () => {
@@ -176,7 +181,9 @@ describe('getEffectKeyframes', () => {
 	it('should return keyframes for "wipeOut"', () => {
 		const kf = getEffectKeyframes('wipeOut');
 		expect(kf).toContain('@keyframes pptx-wipeOut');
-		expect(kf).toContain('clip-path');
+		expect(kf).not.toContain('clip-path');
+		expect(kf).toContain('mask-image');
+		expect(kf).toContain('opacity: 0');
 	});
 
 	it('should return keyframes for "dissolveOut"', () => {
@@ -209,11 +216,149 @@ describe('getEffectKeyframes', () => {
 		expect(kf).toContain('translateY(-20px)');
 	});
 
+	it('should return mask-reveal keyframes for "diamondIn"', () => {
+		const kf = getEffectKeyframes('diamondIn');
+		expect(kf).toContain('@keyframes pptx-diamondIn');
+		expect(kf).not.toContain('clip-path');
+		expect(kf).toContain('mask-image');
+		expect(kf).toContain('mask-size: 0% 0%');
+		expect(kf).toContain('mask-size: 150% 150%');
+	});
+
+	it('should return a two-layer union mask for "plusIn"', () => {
+		const kf = getEffectKeyframes('plusIn');
+		expect(kf).toContain('@keyframes pptx-plusIn');
+		expect(kf).not.toContain('clip-path');
+		expect(kf).toContain('mask-size: 100% 0%, 0% 100%');
+		expect(kf).toContain('mask-size: 100% 101%, 101% 100%');
+	});
+
+	it('should return mask-reveal keyframes for "wedgeIn"', () => {
+		const kf = getEffectKeyframes('wedgeIn');
+		expect(kf).toContain('@keyframes pptx-wedgeIn');
+		expect(kf).not.toContain('clip-path');
+		expect(kf).toContain('mask-size: 0% 0%');
+		expect(kf).toContain('mask-size: 220% 220%');
+	});
+
+	it('should return a near-instant opacity swap for "cutIn" (not a gradual fade)', () => {
+		const kf = getEffectKeyframes('cutIn');
+		expect(kf).toContain('@keyframes pptx-cutIn');
+		expect(kf).toContain('0% { opacity: 0; }');
+		expect(kf).toContain('1% { opacity: 1; }');
+		expect(kf).toContain('100% { opacity: 1; }');
+	});
+
+	it('should return a near-instant opacity swap for "cutOut" (not a gradual fade)', () => {
+		const kf = getEffectKeyframes('cutOut');
+		expect(kf).toContain('@keyframes pptx-cutOut');
+		expect(kf).toContain('0% { opacity: 1; }');
+		expect(kf).toContain('99% { opacity: 1; }');
+		expect(kf).toContain('100% { opacity: 0; }');
+	});
+
+	it('should return a mask-reveal keyframe for "boxOut" that closes (shown -> hidden)', () => {
+		const kf = getEffectKeyframes('boxOut');
+		expect(kf).toContain('@keyframes pptx-boxOut');
+		expect(kf).not.toContain('clip-path');
+		expect(kf).toContain('mask-size: 101% 101%');
+		expect(kf).toContain('mask-size: 0% 0%');
+		expect(kf).toContain('opacity: 0');
+	});
+
+	it('should return a reverse fade for "checkerboardOut" (mirrors checkerboardIn)', () => {
+		const kf = getEffectKeyframes('checkerboardOut');
+		expect(kf).toContain('@keyframes pptx-checkerboardOut');
+		expect(kf).toContain('0% { opacity: 1; }');
+		expect(kf).toContain('100% { opacity: 0; }');
+	});
+
+	it('should return an edge-mask reveal for "blindsOut" that closes from the top', () => {
+		const kf = getEffectKeyframes('blindsOut');
+		expect(kf).toContain('@keyframes pptx-blindsOut');
+		expect(kf).toContain('mask-image');
+		expect(kf).toContain('opacity: 0');
+	});
+
+	it('should return a reverse rotate/scale for "wheelOut" (mirrors wheelIn)', () => {
+		const kf = getEffectKeyframes('wheelOut');
+		expect(kf).toContain('@keyframes pptx-wheelOut');
+		expect(kf).toContain('rotate(0deg)');
+		expect(kf).toContain('rotate(360deg)');
+		expect(kf).toContain('opacity: 0');
+	});
+
+	it('should return a closing bar-sweep mask for "randomBarsOut"', () => {
+		const kf = getEffectKeyframes('randomBarsOut');
+		expect(kf).toContain('@keyframes pptx-randomBarsOut');
+		expect(kf).toContain('mask-image');
+		expect(kf).toContain('opacity: 0');
+	});
+
+	it('should return a mask-reveal keyframe for "diamondOut" that closes (shown -> hidden)', () => {
+		const kf = getEffectKeyframes('diamondOut');
+		expect(kf).toContain('@keyframes pptx-diamondOut');
+		expect(kf).not.toContain('clip-path');
+		expect(kf).toContain('mask-size: 150% 150%');
+		expect(kf).toContain('mask-size: 0% 0%');
+	});
+
+	it('should return a two-layer union mask for "plusOut" that closes (shown -> hidden)', () => {
+		const kf = getEffectKeyframes('plusOut');
+		expect(kf).toContain('@keyframes pptx-plusOut');
+		expect(kf).toContain('mask-size: 100% 101%, 101% 100%');
+		expect(kf).toContain('mask-size: 100% 0%, 0% 100%');
+	});
+
+	it('should return a mask-reveal keyframe for "wedgeOut" that closes (shown -> hidden)', () => {
+		const kf = getEffectKeyframes('wedgeOut');
+		expect(kf).toContain('@keyframes pptx-wedgeOut');
+		expect(kf).toContain('mask-size: 220% 220%');
+		expect(kf).toContain('mask-size: 0% 0%');
+	});
+
 	it('should return keyframes for "flash"', () => {
 		const kf = getEffectKeyframes('flash');
 		expect(kf).toContain('@keyframes pptx-flash');
 		expect(kf).toContain('opacity: 0');
 		expect(kf).toContain('opacity: 1');
+	});
+
+	it('should return a directional scaleX keyframe pinned to the left edge for "stretchInLeft"', () => {
+		const kf = getEffectKeyframes('stretchInLeft');
+		expect(kf).toContain('@keyframes pptx-stretchInLeft');
+		expect(kf).toContain('scaleX(0.02)');
+		expect(kf).toContain('scaleX(1)');
+		expect(kf).toContain('transform-origin: left center');
+	});
+
+	it('should return a directional scaleY keyframe pinned to the top edge for "stretchInTop"', () => {
+		const kf = getEffectKeyframes('stretchInTop');
+		expect(kf).toContain('@keyframes pptx-stretchInTop');
+		expect(kf).toContain('scaleY(0.02)');
+		expect(kf).toContain('transform-origin: center top');
+	});
+
+	it('should return the mirrored squeeze-out keyframe for "stretchOutRight"', () => {
+		const kf = getEffectKeyframes('stretchOutRight');
+		expect(kf).toContain('@keyframes pptx-stretchOutRight');
+		expect(kf).toContain('scaleX(1)');
+		expect(kf).toContain('scaleX(0.02)');
+		expect(kf).toContain('transform-origin: right center');
+	});
+
+	it('should return a spin-and-zoom-in keyframe for "newsflashIn"', () => {
+		const kf = getEffectKeyframes('newsflashIn');
+		expect(kf).toContain('@keyframes pptx-newsflashIn');
+		expect(kf).toContain('rotate(-180deg) scale(0.05)');
+		expect(kf).toContain('rotate(0deg) scale(1)');
+	});
+
+	it('should return a spin-and-zoom-out keyframe for "newsflashOut"', () => {
+		const kf = getEffectKeyframes('newsflashOut');
+		expect(kf).toContain('@keyframes pptx-newsflashOut');
+		expect(kf).toContain('rotate(0deg) scale(1)');
+		expect(kf).toContain('rotate(180deg) scale(0.05)');
 	});
 
 	it('should return keyframes with from/to structure for entrance effects', () => {

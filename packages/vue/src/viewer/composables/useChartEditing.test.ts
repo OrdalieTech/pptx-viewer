@@ -49,6 +49,19 @@ describe('useChartEditing', () => {
 		expect(emitted[0].grouping).toBeUndefined();
 	});
 
+	it("patchChartData({ chartType: 'pareto' }) converts to histogram plus a cumulative-percent series (docs/guide/limitations.md ChartEx row)", () => {
+		const { emitted, editing } = setup(makeChartData());
+		// 'pareto' has no `PptxChartType` of its own (see docs/guide/limitations.md's
+		// ChartEx row); it only ever arrives here the way a `<select>`'s raw string
+		// value does in the real chart-type selector, hence the cast.
+		editing.patchChartData({ chartType: 'pareto' as PptxChartData['chartType'] });
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0].chartType).toBe('histogram');
+		expect(emitted[0].grouping).toBeUndefined();
+		expect(emitted[0].series).toHaveLength(2);
+		expect(emitted[0].series[1].histogramOptions?.layout).toBe('pareto');
+	});
+
 	it('updateStyle merges into the existing style object', () => {
 		const { emitted, editing } = setup(makeChartData({ style: { hasLegend: true } }));
 		editing.updateStyle({ hasDataLabels: true });
@@ -125,6 +138,51 @@ describe('useChartEditing', () => {
 		editing.setPointExplosion(0, 2, 25);
 		const point = emitted[0].series[0].dataPoints?.find((p) => p.idx === 2);
 		expect(point?.explosion).toBe(25);
+	});
+
+	it("addSeries names the new series in PowerPoint's own English convention, not the UI locale", () => {
+		// The name becomes literal chart data written into the deck, not chrome
+		// text, so it must match what PowerPoint itself writes regardless of the
+		// viewer's UI language.
+		const { emitted, editing } = setup(makeChartData());
+		editing.addSeries();
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0].series.at(-1)?.name).toBe('Series 2');
+		expect(emitted[0].series.at(-1)?.values).toStrictEqual([0, 0, 0]);
+	});
+
+	it('addCategory names the new category "Cat N" and pads every series with a zero', () => {
+		const { emitted, editing } = setup(makeChartData());
+		editing.addCategory();
+		expect(emitted[0].categories.at(-1)).toBe('Cat 4');
+		expect(emitted[0].series[0].values).toStrictEqual([10, 20, 30, 0]);
+	});
+
+	it('removeSeries refuses to remove the last series', () => {
+		const { emitted, editing } = setup(makeChartData());
+		editing.removeSeries(0);
+		expect(emitted).toHaveLength(0);
+	});
+
+	it('removeCategory refuses to remove the last category', () => {
+		const { emitted, editing } = setup(makeChartData({ categories: ['Only'] }));
+		editing.removeCategory(0);
+		expect(emitted).toHaveLength(0);
+	});
+
+	it('updateValue rejects non-numeric input instead of coercing it to zero', () => {
+		const { emitted, editing } = setup(makeChartData());
+		editing.updateValue(0, 0, 'not-a-number');
+		expect(emitted).toHaveLength(0);
+		editing.updateValue(0, 0, '42');
+		expect(emitted).toHaveLength(1);
+		expect(emitted[0].series[0].values[0]).toBe(42);
+	});
+
+	it('updateCategoryLabel renames only the targeted category', () => {
+		const { emitted, editing } = setup(makeChartData());
+		editing.updateCategoryLabel(1, 'February');
+		expect(emitted[0].categories).toStrictEqual(['Jan', 'February', 'Mar']);
 	});
 
 	it('does not emit when there is no chart data', () => {

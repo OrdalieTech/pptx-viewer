@@ -1,20 +1,25 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file:
+   independent handler-local `const`s, not one statement */
 import type { ChartPptxElement, PptxChartData, PptxElement } from 'pptx-viewer-core';
 import {
-	dragAnchorViewY,
-	dragValueForPart,
+	canDrillDown,
 	findChartPartTarget,
 	formatAxisValue,
-	withChartPointValue,
+	resolveChartKind,
 	withChartTitle,
 } from 'pptx-viewer-shared';
 import type { ChartPartRef, ChartViewModel } from 'pptx-viewer-shared';
 import type { ComputedRef, Ref } from 'vue';
 import { computed, onMounted, onUnmounted, onUpdated, ref, shallowRef, watch } from 'vue';
 
-import type { ActiveValueDrag } from './chart-canvas-interaction-support';
+import type { ActiveMarkDrag, ActiveValueDrag } from './chart-canvas-interaction-support';
 import {
+	advanceChartMarkDrag,
+	advanceChartValueDrag,
 	applyChartPartHighlight,
-	DRAG_THRESHOLD_PX,
+	beginChartMarkDrag,
+	beginChartValueDrag,
+	buildChartMarkDragGeometry,
 	ensureInteractionStyles,
 } from './chart-canvas-interaction-support';
 import { injectChartCanvasEdit } from './chart-part-selection';
@@ -85,9 +90,18 @@ export function useChartCanvasInteraction(
 	const dragValue = ref<number | null>(null);
 	const titleDraft = ref<string | null>(null);
 	let activeDrag: ActiveValueDrag | null = null;
+	// Pie/doughnut slice, radar vertex, and stacked/percentStacked segment drags
+	// have no single vertical value axis, so they run through a parallel state
+	// machine instead of `activeDrag`'s cartesian one.
+	let activeMarkDrag: ActiveMarkDrag | null = null;
 
+	// G8: `a:graphicFrameLocks/@noDrilldown` forbids entering this chart's
+	// individual parts (title, series, data points) for editing.
 	const canEdit = computed(
-		() => input.interactive() && Boolean(ctx?.canEditChart(input.element().id)),
+		() =>
+			input.interactive() &&
+			Boolean(ctx?.canEditChart(input.element().id)) &&
+			canDrillDown(input.element()),
 	);
 	/** Click-selectable whenever the editable canvas allows chart editing at all. */
 	const selectable = computed(() => input.interactive() && Boolean(ctx?.canSelectCharts()));
@@ -122,19 +136,27 @@ export function useChartCanvasInteraction(
 
 	function endDrag(commit: boolean): void {
 		const active = activeDrag;
+		const markActive = activeMarkDrag;
 		activeDrag = null;
+		activeMarkDrag = null;
 		window.removeEventListener('keydown', onWindowKeydown);
 		previewData.value = null;
 		dragValue.value = null;
-		if (commit && active?.moved && active.lastData && ctx) {
+		if (!commit || !ctx) {
+			return;
+		}
+		if (active?.moved && active.lastData) {
+			ctx.updateElement(input.element().id, { chartData: active.lastData } as Partial<PptxElement>);
+		} else if (markActive?.moved && markActive.lastData) {
 			ctx.updateElement(input.element().id, {
-				chartData: active.lastData,
+				chartData: markActive.lastData,
 			} as Partial<PptxElement>);
 		}
 	}
 
 	onUnmounted(() => {
 		activeDrag = null;
+		activeMarkDrag = null;
 		window.removeEventListener('keydown', onWindowKeydown);
 	});
 
@@ -151,11 +173,50 @@ export function useChartCanvasInteraction(
 		event.stopPropagation();
 		const element = input.element() as ChartPptxElement;
 		ctx?.setSelection({ elementId: element.id, part });
-		if (part.role !== 'dataPoint' || part.pointIndex === undefined || !element.chartData) {
+		if (!element.chartData) {
 			return;
 		}
 		const vm = input.buildViewModel(element);
-		if (!vm.valueDrag) {
+		let captured = false;
+		// Pie/doughnut/radar/stacked marks: try the angle/radial/segment drag first.
+		const chartKind = resolveChartKind(element.chartData.chartType ?? 'bar');
+		if (part.pointIndex !== undefined && chartKind !== 'unsupported') {
+			const markGeometry = buildChartMarkDragGeometry({
+				kind: chartKind,
+				element,
+				chartData: element.chartData,
+				categoryLabels: element.chartData.categories,
+				seriesIndex: part.seriesIndex,
+				pointIndex: part.pointIndex,
+			});
+			const startedMark = beginChartMarkDrag({
+				part,
+				geometry: markGeometry,
+				chartData: element.chartData,
+				svgWidth: vm.svgWidth,
+				svgHeight: vm.svgHeight,
+				clientX: event.clientX,
+				clientY: event.clientY,
+			});
+			if (startedMark) {
+				activeMarkDrag = startedMark;
+				captured = true;
+			}
+		}
+		// Clustered bar/line/scatter/bubble: the existing vertical value-axis drag.
+		if (!captured) {
+			const started = beginChartValueDrag({
+				part,
+				viewModel: vm,
+				chartData: element.chartData,
+				clientY: event.clientY,
+			});
+			if (started) {
+				activeDrag = started;
+				captured = true;
+			}
+		}
+		if (!captured) {
 			return;
 		}
 		event.preventDefault();
@@ -166,52 +227,39 @@ export function useChartCanvasInteraction(
 		} catch {
 			// Non-fatal: the drag still works while the pointer stays over the chart.
 		}
-		const startValue = element.chartData.series[part.seriesIndex]?.values[part.pointIndex] ?? 0;
-		activeDrag = {
-			part,
-			drag: vm.valueDrag,
-			svgHeight: vm.svgHeight,
-			startClientY: event.clientY,
-			anchorViewY: dragAnchorViewY(startValue, vm.valueDrag, part.seriesIndex),
-			baseChartData: element.chartData,
-			moved: false,
-			lastData: null,
-		};
 		window.addEventListener('keydown', onWindowKeydown);
 	}
 
 	function onPointermove(event: PointerEvent): void {
+		const markActive = activeMarkDrag;
+		if (markActive) {
+			const rect = input.rootEl.value?.querySelector('svg')?.getBoundingClientRect();
+			if (!rect) {
+				return;
+			}
+			const step = advanceChartMarkDrag(markActive, event.clientX, event.clientY, rect);
+			if (!step) {
+				return;
+			}
+			previewData.value = step.chartData;
+			dragValue.value = step.value;
+			return;
+		}
 		const active = activeDrag;
 		if (!active) {
 			return;
 		}
-		if (!active.moved && Math.abs(event.clientY - active.startClientY) < DRAG_THRESHOLD_PX) {
+		const height = input.rootEl.value?.querySelector('svg')?.getBoundingClientRect().height ?? 0;
+		const step = advanceChartValueDrag(active, event.clientY, height);
+		if (!step) {
 			return;
 		}
-		const svg = input.rootEl.value?.querySelector('svg');
-		if (!svg || active.part.pointIndex === undefined) {
-			return;
-		}
-		const rect = svg.getBoundingClientRect();
-		if (rect.height === 0) {
-			return;
-		}
-		active.moved = true;
-		const deltaViewY = ((event.clientY - active.startClientY) / rect.height) * active.svgHeight;
-		const viewY = active.anchorViewY + deltaViewY;
-		const value = dragValueForPart(viewY, active.drag, active.part.seriesIndex);
-		active.lastData = withChartPointValue(
-			active.baseChartData,
-			active.part.seriesIndex,
-			active.part.pointIndex,
-			value,
-		);
-		previewData.value = active.lastData;
-		dragValue.value = value;
+		previewData.value = step.chartData;
+		dragValue.value = step.value;
 	}
 
 	function onPointerup(): void {
-		if (activeDrag) {
+		if (activeDrag || activeMarkDrag) {
 			endDrag(true);
 		}
 	}

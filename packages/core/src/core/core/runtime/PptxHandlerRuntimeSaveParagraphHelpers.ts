@@ -1,5 +1,10 @@
-import { XmlObject, TextStyle, TextSegment } from '../../types';
+import { themeColorRefToSolidFillWithOpacity } from '../../color/theme-color-ref';
+import { XmlObject, TextStyle } from '../../types';
 import type { BulletInfo } from '../../types';
+import type { ParagraphChild } from './paragraph-child-assembly';
+import { classifyParagraphChild, writeParagraphChildren } from './paragraph-child-assembly';
+
+export { computeUniformSegmentOverrides } from './uniform-segment-overrides';
 
 /** EMU-per-pixel conversion constant (matches PptxHandlerRuntime.EMU_PER_PX). */
 export const EMU_PER_PX = 9525;
@@ -12,6 +17,42 @@ export interface ParagraphSpacingConfig {
 	lineSpacingExactPt: number | undefined;
 }
 
+/**
+ * Decide whether this paragraph may carry a given paragraph-scope property.
+ *
+ * `textStyle` reaching the builder is the SHAPE-level style merged with the
+ * paragraph's own `a:pPr`, and the shape-level half is a *resolved* value: the
+ * loader fills it, first-paragraph-wins, from the text body's `a:lstStyle`, the
+ * inherited layout/master placeholder `a:pPr` and only then the paragraph's own
+ * attributes. Writing all of it back onto every paragraph turned inherited
+ * values into explicitly authored ones, which (a) churns every file on save and
+ * (b) OVERRIDES the inheritance that would otherwise resolve per paragraph - so
+ * a level-3 bullet was silently re-indented to the level-1 `marL` its shape
+ * happened to resolve.
+ *
+ * Rule: emit a property the paragraph itself authored; otherwise emit the
+ * shape-level value only when the paragraph authored NO properties of its own
+ * AND sits at outline level 0, where the shape-level style is both the sole
+ * description of it and was resolved through its own inheritance chain
+ * (SDK-built decks, newly typed text, and any top-level `a:p` that carried no
+ * `a:pPr`). A paragraph that authored an `a:pPr` keeps exactly the keys it
+ * authored; everything else is left to inherit.
+ *
+ * The level test matters because the shape-level style is filled
+ * first-paragraph-wins, so it describes level 0. Broadcasting it to a nested
+ * bullet replaced that bullet's `a:lvl3pPr` indent with the level-1 one.
+ */
+function authoredPropertyGate(
+	authoredProperties: TextStyle | undefined,
+	level: number | undefined,
+): (key: keyof TextStyle) => boolean {
+	if (authoredProperties) {
+		return (key) => authoredProperties[key] !== undefined;
+	}
+	const isNested = typeof level === 'number' && Number.isFinite(level) && level > 0;
+	return () => !isNested;
+}
+
 /** Build the `a:pPr` (paragraph properties) XML object. */
 export function buildParagraphPropertiesXml(
 	textStyle: TextStyle | undefined,
@@ -19,8 +60,10 @@ export function buildParagraphPropertiesXml(
 	bulletInfo: BulletInfo | undefined,
 	spacing: ParagraphSpacingConfig,
 	level?: number,
+	authoredProperties?: TextStyle,
 ): XmlObject {
 	const paragraphProps: XmlObject = {};
+	const owns = authoredPropertyGate(authoredProperties, level);
 
 	// CT_TextParagraphProperties: `lvl` is an attribute on `a:pPr`. Only emit
 	// when non-zero — PowerPoint omits the attribute for top-level paragraphs.
@@ -28,21 +71,68 @@ export function buildParagraphPropertiesXml(
 		paragraphProps['@_lvl'] = String(Math.min(Math.max(Math.round(level), 0), 8));
 	}
 
-	if (paragraphAlign) {
+	if (paragraphAlign && owns('align')) {
 		paragraphProps['@_algn'] = paragraphAlign;
 	}
-	if (textStyle?.rtl !== undefined) {
+	if (textStyle?.rtl !== undefined && owns('rtl')) {
 		paragraphProps['@_rtl'] = textStyle.rtl ? '1' : '0';
 	}
 
-	// Spacing: CT_TextParagraphProperties child order is lnSpc, spcBef, spcAft.
+	// Paragraph indentation (marL, marR, indent: stored in px, written as EMU)
+	if (
+		typeof textStyle?.paragraphMarginLeft === 'number' &&
+		Number.isFinite(textStyle.paragraphMarginLeft) &&
+		owns('paragraphMarginLeft')
+	) {
+		paragraphProps['@_marL'] = String(Math.round(textStyle.paragraphMarginLeft * EMU_PER_PX));
+	}
+	if (
+		typeof textStyle?.paragraphMarginRight === 'number' &&
+		Number.isFinite(textStyle.paragraphMarginRight) &&
+		owns('paragraphMarginRight')
+	) {
+		paragraphProps['@_marR'] = String(Math.round(textStyle.paragraphMarginRight * EMU_PER_PX));
+	}
+	if (
+		typeof textStyle?.paragraphIndent === 'number' &&
+		Number.isFinite(textStyle.paragraphIndent) &&
+		owns('paragraphIndent')
+	) {
+		paragraphProps['@_indent'] = String(Math.round(textStyle.paragraphIndent * EMU_PER_PX));
+	}
+
+	// Additional paragraph properties
+	if (
+		typeof textStyle?.defaultTabSize === 'number' &&
+		Number.isFinite(textStyle.defaultTabSize) &&
+		owns('defaultTabSize')
+	) {
+		paragraphProps['@_defTabSz'] = String(Math.round(textStyle.defaultTabSize * EMU_PER_PX));
+	}
+	if (textStyle?.eaLineBreak !== undefined && owns('eaLineBreak')) {
+		paragraphProps['@_eaLnBrk'] = textStyle.eaLineBreak ? '1' : '0';
+	}
+	if (textStyle?.latinLineBreak !== undefined && owns('latinLineBreak')) {
+		paragraphProps['@_latinLnBrk'] = textStyle.latinLineBreak ? '1' : '0';
+	}
+	if (textStyle?.fontAlignment && owns('fontAlignment')) {
+		paragraphProps['@_fontAlgn'] = textStyle.fontAlignment;
+	}
+	if (textStyle?.hangingPunctuation !== undefined && owns('hangingPunctuation')) {
+		paragraphProps['@_hangingPunct'] = textStyle.hangingPunctuation ? '1' : '0';
+	}
+
+	// CT_TextParagraphProperties child order (ECMA-376 21.1.2.2.7):
+	//   lnSpc, spcBef, spcAft, <bullet group>, tabLst, defRPr, extLst.
+	// The bullet group is itself ordered: buClr*, buSz*, buFont*, bu<type>.
 	// fast-xml-parser serialises keys in insertion order, so assign in this
 	// exact sequence — otherwise PowerPoint flags the file as corrupted.
-	if (spacing.lineSpacing) {
+	if (spacing.lineSpacing && owns('lineSpacing')) {
 		paragraphProps['a:lnSpc'] = spacing.lineSpacing;
 	} else if (
 		typeof spacing.lineSpacingExactPt === 'number' &&
-		Number.isFinite(spacing.lineSpacingExactPt)
+		Number.isFinite(spacing.lineSpacingExactPt) &&
+		owns('lineSpacingExactPt')
 	) {
 		paragraphProps['a:lnSpc'] = {
 			'a:spcPts': {
@@ -50,35 +140,20 @@ export function buildParagraphPropertiesXml(
 			},
 		};
 	}
-	if (spacing.spacingBefore) {
+	if (spacing.spacingBefore && owns('paragraphSpacingBefore')) {
 		paragraphProps['a:spcBef'] = spacing.spacingBefore;
 	}
-	if (spacing.spacingAfter) {
+	if (spacing.spacingAfter && owns('paragraphSpacingAfter')) {
 		paragraphProps['a:spcAft'] = spacing.spacingAfter;
 	}
 
-	// Paragraph indentation (marL, marR, indent — stored in px, written as EMU)
-	if (
-		typeof textStyle?.paragraphMarginLeft === 'number' &&
-		Number.isFinite(textStyle.paragraphMarginLeft)
-	) {
-		paragraphProps['@_marL'] = String(Math.round(textStyle.paragraphMarginLeft * EMU_PER_PX));
-	}
-	if (
-		typeof textStyle?.paragraphMarginRight === 'number' &&
-		Number.isFinite(textStyle.paragraphMarginRight)
-	) {
-		paragraphProps['@_marR'] = String(Math.round(textStyle.paragraphMarginRight * EMU_PER_PX));
-	}
-	if (
-		typeof textStyle?.paragraphIndent === 'number' &&
-		Number.isFinite(textStyle.paragraphIndent)
-	) {
-		paragraphProps['@_indent'] = String(Math.round(textStyle.paragraphIndent * EMU_PER_PX));
+	// Bullet properties
+	if (bulletInfo) {
+		applyBulletProperties(paragraphProps, bulletInfo);
 	}
 
 	// Tab stops
-	if (textStyle?.tabStops && textStyle.tabStops.length > 0) {
+	if (textStyle?.tabStops && textStyle.tabStops.length > 0 && owns('tabStops')) {
 		paragraphProps['a:tabLst'] = {
 			'a:tab': textStyle.tabStops.map((tab) => {
 				const tabObj: XmlObject = {
@@ -95,39 +170,16 @@ export function buildParagraphPropertiesXml(
 		};
 	}
 
-	// Additional paragraph properties
-	if (typeof textStyle?.defaultTabSize === 'number' && Number.isFinite(textStyle.defaultTabSize)) {
-		paragraphProps['@_defTabSz'] = String(Math.round(textStyle.defaultTabSize * EMU_PER_PX));
-	}
-	if (textStyle?.eaLineBreak !== undefined) {
-		paragraphProps['@_eaLnBrk'] = textStyle.eaLineBreak ? '1' : '0';
-	}
-	if (textStyle?.latinLineBreak !== undefined) {
-		paragraphProps['@_latinLnBrk'] = textStyle.latinLineBreak ? '1' : '0';
-	}
-	if (textStyle?.fontAlignment) {
-		paragraphProps['@_fontAlgn'] = textStyle.fontAlignment;
-	}
-	if (textStyle?.hangingPunctuation !== undefined) {
-		paragraphProps['@_hangingPunct'] = textStyle.hangingPunctuation ? '1' : '0';
-	}
-
-	// `a:defRPr` — paragraph default run properties. CT_TextParagraphProperties
-	// places `defRPr` *before* the bullet group in document order. fast-xml-parser
-	// emits keys in insertion order, so assign here ahead of the bullet block.
-	if (textStyle?.paragraphDefaultRunPropertiesXml) {
+	// `a:defRPr` is the paragraph default run properties. It follows the bullet group
+	// and `a:tabLst`, and precedes `a:extLst`.
+	if (textStyle?.paragraphDefaultRunPropertiesXml && owns('paragraphDefaultRunPropertiesXml')) {
 		paragraphProps['a:defRPr'] = textStyle.paragraphDefaultRunPropertiesXml;
-	}
-
-	// Bullet properties
-	if (bulletInfo) {
-		applyBulletProperties(paragraphProps, bulletInfo);
 	}
 
 	// `a:extLst` is the very last child of CT_TextParagraphProperties. Re-emit
 	// the captured opaque subtree verbatim when present so authored extensions
 	// survive a round-trip.
-	if (textStyle?.paragraphPropertiesExtLstXml) {
+	if (textStyle?.paragraphPropertiesExtLstXml && owns('paragraphPropertiesExtLstXml')) {
 		paragraphProps['a:extLst'] = textStyle.paragraphPropertiesExtLstXml;
 	}
 
@@ -151,6 +203,10 @@ export function applyBulletProperties(paragraphProps: XmlObject, bulletInfo: Bul
 	// parsed model captured the marker.
 	if (bulletInfo.colorInherit) {
 		paragraphProps['a:buClrTx'] = {};
+	} else if (bulletInfo.colorRef) {
+		// A typed theme ref wins: keeps the bullet following the theme palette
+		// after a later theme change instead of freezing today's sRGB/schemeClr.
+		paragraphProps['a:buClr'] = themeColorRefToSolidFillWithOpacity(bulletInfo.colorRef);
 	} else if (bulletInfo.colorXml) {
 		// Re-emit the original colour-choice node (a:schemeClr / a:sysClr /
 		// a:prstClr / a:srgbClr plus any colour transforms) verbatim so themed
@@ -192,7 +248,13 @@ export function applyBulletProperties(paragraphProps: XmlObject, bulletInfo: Bul
 		}
 		paragraphProps['a:buAutoNum'] = buAutoNum;
 	}
-	if (bulletInfo.imageRelId) {
+	if (bulletInfo.imageBlipFillXml) {
+		// Re-emit the captured `a:buBlip` subtree verbatim (a:blip + a:extLst,
+		// a:tile, a:stretch, a:srcRect) so picture-bullet modifiers such as a
+		// crop or tile setting survive a round-trip, rather than reconstructing
+		// a bare `a:blip[@r:embed]` that drops every modifier.
+		paragraphProps['a:buBlip'] = bulletInfo.imageBlipFillXml;
+	} else if (bulletInfo.imageRelId) {
 		paragraphProps['a:buBlip'] = {
 			'a:blip': { '@_r:embed': bulletInfo.imageRelId },
 		};
@@ -207,80 +269,22 @@ export function assembleParagraphXml(
 ): XmlObject {
 	// OOXML CT_TextParagraph requires child order: pPr?, (r|br|fld)*, endParaRPr?.
 	// Since fast-xml-parser serialises keys in insertion order, build the
-	// object in that exact sequence. Soft line breaks (`a:br`), equation
-	// nodes (`m:oMath` / `m:oMathPara` / `mc:AlternateContent`), and runs
-	// are routed under their respective keys.
+	// object in that exact sequence.
 	const paragraph: XmlObject = {
 		'a:pPr': paragraphProps,
 	};
 
-	const stripMarker = (run: XmlObject, marker: string): XmlObject => {
-		const { [marker]: _drop, ...rest } = run as Record<string, unknown>;
-		return rest as XmlObject;
-	};
+	// `runs` already arrives in segment order, so the authored sequence of
+	// runs / fields / breaks / inline math is simply its order.
+	const children = runs
+		.map((run) => classifyParagraphChild(run))
+		.filter((child): child is ParagraphChild => child !== undefined);
 
-	// Partition runs by type, preserving insertion order.
-	const regularRuns: XmlObject[] = [];
-	const fieldRuns: XmlObject[] = [];
-	const breakRuns: XmlObject[] = [];
-	const mathOMathPara: XmlObject[] = [];
-	const mathOMath: XmlObject[] = [];
-	const mathAlternate: XmlObject[] = [];
-	for (const run of runs) {
-		if ((run as Record<string, unknown>).__isField) {
-			fieldRuns.push(stripMarker(run, '__isField'));
-		} else if ((run as Record<string, unknown>).__isLineBreak) {
-			breakRuns.push(stripMarker(run, '__isLineBreak'));
-		} else if ((run as Record<string, unknown>).__isEquation) {
-			const eqXml = (run as Record<string, unknown>).__equationXml as
-				| Record<string, unknown>
-				| undefined;
-			if (eqXml) {
-				if (eqXml['m:oMathPara']) {
-					mathOMathPara.push(eqXml['m:oMathPara'] as XmlObject);
-				} else if (eqXml['m:oMath']) {
-					mathOMath.push(eqXml['m:oMath'] as XmlObject);
-				} else if (eqXml['mc:AlternateContent']) {
-					mathAlternate.push(eqXml['mc:AlternateContent'] as XmlObject);
-				} else if (eqXml['a14:m']) {
-					// a14:m wraps an inline math element; re-emit verbatim.
-					mathAlternate.push({ ...(eqXml as XmlObject) });
-				} else {
-					// Fallback: assume the captured object is itself the math node.
-					mathOMath.push(eqXml as XmlObject);
-				}
-			}
-		} else {
-			regularRuns.push(stripMarker(run, '__isField'));
-		}
-	}
-
-	if (regularRuns.length > 0) {
-		paragraph['a:r'] = regularRuns.length > 1 ? regularRuns : regularRuns[0];
-	}
-	if (breakRuns.length > 0) {
-		paragraph['a:br'] = breakRuns.length > 1 ? breakRuns : breakRuns[0];
-	}
-	if (fieldRuns.length > 0) {
-		paragraph['a:fld'] = fieldRuns.length > 1 ? fieldRuns : fieldRuns[0];
-	}
-	if (mathOMathPara.length > 0) {
-		paragraph['m:oMathPara'] = mathOMathPara.length > 1 ? mathOMathPara : mathOMathPara[0];
-	}
-	if (mathOMath.length > 0) {
-		paragraph['m:oMath'] = mathOMath.length > 1 ? mathOMath : mathOMath[0];
-	}
-	if (mathAlternate.length > 0) {
-		paragraph['mc:AlternateContent'] = mathAlternate.length > 1 ? mathAlternate : mathAlternate[0];
-	}
-	if (
-		regularRuns.length === 0 &&
-		fieldRuns.length === 0 &&
-		breakRuns.length === 0 &&
-		mathOMathPara.length === 0 &&
-		mathOMath.length === 0 &&
-		mathAlternate.length === 0
-	) {
+	if (children.length > 0) {
+		writeParagraphChildren(paragraph, children);
+	} else {
+		// Every run was an equation marker with no captured XML (or there were
+		// no runs at all): fall back to emitting whatever was handed in.
 		paragraph['a:r'] = runs.length > 1 ? runs : runs[0];
 	}
 
@@ -294,63 +298,4 @@ export function assembleParagraphXml(
 	}
 
 	return paragraph;
-}
-
-/** Determine which style keys are uniform across all segments and apply parent overrides. */
-export function computeUniformSegmentOverrides(
-	textStyle: TextStyle | undefined,
-	textSegments: TextSegment[],
-): Partial<TextStyle> {
-	const uniformSegmentOverrides: Partial<TextStyle> = {};
-	const styleKeys: Array<keyof TextStyle> = [
-		'fontFamily',
-		'fontSize',
-		'bold',
-		'italic',
-		'underline',
-		'strikethrough',
-		'rtl',
-		'hyperlink',
-		'color',
-		'align',
-	];
-	styleKeys.forEach((styleKey) => {
-		const nextValue = textStyle?.[styleKey];
-		if (nextValue === undefined) {
-			return;
-		}
-		const firstValue = textSegments[0]?.style?.[styleKey];
-		const isUniform = textSegments.every((segment) => segment.style?.[styleKey] === firstValue);
-		if (isUniform) {
-			if (styleKey === 'fontFamily' && typeof nextValue === 'string') {
-				uniformSegmentOverrides.fontFamily = nextValue;
-			} else if (styleKey === 'fontSize' && typeof nextValue === 'number') {
-				uniformSegmentOverrides.fontSize = nextValue;
-			} else if (styleKey === 'bold' && typeof nextValue === 'boolean') {
-				uniformSegmentOverrides.bold = nextValue;
-			} else if (styleKey === 'italic' && typeof nextValue === 'boolean') {
-				uniformSegmentOverrides.italic = nextValue;
-			} else if (styleKey === 'underline' && typeof nextValue === 'boolean') {
-				uniformSegmentOverrides.underline = nextValue;
-			} else if (styleKey === 'strikethrough' && typeof nextValue === 'boolean') {
-				uniformSegmentOverrides.strikethrough = nextValue;
-			} else if (styleKey === 'rtl' && typeof nextValue === 'boolean') {
-				uniformSegmentOverrides.rtl = nextValue;
-			} else if (styleKey === 'hyperlink' && typeof nextValue === 'string') {
-				uniformSegmentOverrides.hyperlink = nextValue;
-			} else if (styleKey === 'color' && typeof nextValue === 'string') {
-				uniformSegmentOverrides.color = nextValue;
-			} else if (
-				styleKey === 'align' &&
-				(nextValue === 'left' ||
-					nextValue === 'center' ||
-					nextValue === 'right' ||
-					nextValue === 'justify')
-			) {
-				uniformSegmentOverrides.align = nextValue;
-			}
-		}
-	});
-
-	return uniformSegmentOverrides;
 }
