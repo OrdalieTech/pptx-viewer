@@ -143,10 +143,10 @@ export class CollaborationController {
 	}
 
 	/** Register the parsed source before adopting authoritative room slides. */
-	adoptDocAfterLoad(): void {
+	adoptDocAfterLoad(origin: CollabLoadOrigin = 'user'): void {
 		if (this.#active && this.#ydoc) {
 			registerCollaborationSource(this.#ydoc, this.#deps.getSlides());
-			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps());
+			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps(), origin);
 		}
 	}
 

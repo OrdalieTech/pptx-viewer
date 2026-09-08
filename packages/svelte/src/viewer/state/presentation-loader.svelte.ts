@@ -29,7 +29,6 @@ import { DEFAULT_CANVAS_HEIGHT, DEFAULT_CANVAS_WIDTH } from 'pptx-viewer-shared'
 
 import {
 	resolveLazyImages,
-	resolveLazyTableCellImages,
 	resolveLazyTableStyleImages,
 	resolveMediaUrls,
 	revokeBlobUrls,
@@ -187,6 +186,7 @@ export class PresentationLoader {
 			const media = await resolveMediaUrls(newHandler, parsed.slides);
 			loadBlobUrls.push(...media.blobUrls);
 			const nextSlides = await resolveLazyImages(newHandler, parsed.slides, media.urls);
+			const nextTableStyleMap = await resolveLazyTableStyleImages(newHandler, parsed.tableStyleMap);
 
 			// Commit reactive state.
 			revokeBlobUrls(this.#activeBlobUrls);

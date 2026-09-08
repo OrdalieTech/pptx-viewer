@@ -7,6 +7,7 @@ import type {
 	MediaPptxElement,
 	Model3DPptxElement,
 	OlePptxElement,
+	GroupPptxElement,
 	PptxImageLikeElement,
 	SmartArtPptxElement,
 	TablePptxElement,
@@ -537,18 +538,6 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				original,
 			);
 			this.applyShapeIdToCnvPr(grpXml, el);
-			if (templateTree) {
-				if (original && original !== grpXml) {
-					for (const key of Object.keys(original)) {
-						delete original[key];
-					}
-					Object.assign(original, grpXml);
-				} else if (!original) {
-					this.ensureTemplateShapeAttached(templateTree, 'group', grpXml);
-				}
-			} else {
-				collectors.groups.push(grpXml);
-			}
 			// Locks are the one part of a group's non-visual properties the model
 			// owns; everything else on `p:nvGrpSpPr` is carried over verbatim by
 			// `buildGroupNonVisualXml`.

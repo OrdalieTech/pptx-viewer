@@ -35,53 +35,14 @@
 	import { styleToString } from './style';
 	import type { PowerPointViewerProps } from './types';
 
-	const {
-		source,
-		fonts = [],
-		theme,
-		locale = 'en',
-		defaultThemeKey,
-		availableThemes,
-		onThemeChange,
-		defaultLocale,
-		availableLocales,
-		onLocaleChange,
-		accountAuth,
-		initialSlide = 0,
-		showThumbnails = true,
-		showToolbar = true,
-		showInspector = true,
-		showNotes = true,
-		hiddenActions,
-		smartArt3D = false,
-		editable: editableProp = false,
-		class: className = '',
-		autosave = false,
-		onautosavetoggle,
-		fileName,
-		filePath,
-		autosaveIntervalMs = 2000,
-		collaboration,
-		shareDefaults,
-		ai,
-		onload,
-		onerror,
-		onslidechange,
-		onnotesupdate,
-		onchange,
-		ondirtychange,
-		oncontentchange,
-		onmodechange,
-		onzoomchange,
-		onselectionchange,
-		onslidecountchange,
-		onopenfile,
-		onautosave,
-		onstartcollaboration,
-		onstopcollaboration,
-	}: PowerPointViewerProps = $props();
-	let editable = $state(false);
-	$effect(() => { editable = editableProp; });
+	const props: PowerPointViewerProps = $props();
+	// Only the defaulted props get an alias; the rest are read as `props.x`, which
+	// is what keeps them reactive (a destructured top-level read would snapshot).
+	const className = $derived(props.class ?? '');
+	const showThumbnails = $derived(props.showThumbnails ?? true);
+	const showToolbar = $derived(props.showToolbar ?? true);
+	const showNotes = $derived(props.showNotes ?? true);
+
 	$effect(() => {
 		const css = buildUserFontFaceStyles(props.fonts ?? []);
 		if (!css || typeof document === 'undefined') {
@@ -249,19 +210,14 @@
 		statusMessage={exportUi.status}
 		oncancel={() => exportUi.cancel()}
 	/>
-	{#if versionHistoryOpen}<VersionHistoryPanel {filePath} onclose={() => (versionHistoryOpen = false)} onrestore={(bytes) => loader.load(bytes)} />{/if}
-	{#if signatureWarningOpen}<SignatureStrippedDialog signatureCount={loader.digitalSignatureCount} onclose={closeSignatureWarning} />{/if}
-	<ViewerParityOverlays ui={parityUi} {editor} {exportUi} slides={displaySlides} canvasSize={loader.canvasSize} mediaDataUrls={loader.mediaDataUrls} current={viewer.current} fullscreen={viewer.isFullscreen} locale={effectiveLocale} {themeKey} {themeCatalog} onsetthemekey={setThemeKey} {availableLocales} onsetlocale={setLocale} onselectslide={(index) => viewer.goTo(index)} onmoveslide={moveSlide} {optionsState} aiEnabled={Boolean(ai)} />
-	{#if editor.masterViewTarget}
-		<MasterViewBody
-			{editor}
-			{controller}
-			{showInspector}
-			canvasSize={loader.canvasSize}
-			notesCanvasSize={loader.notesCanvasSize}
-			mediaDataUrls={loader.mediaDataUrls}
-			onstageholder={(el) => { stageHolderEl = el ?? undefined; }}
-			onscalechange={(next) => { masterScale = next; }}
+	<!-- Compatibility-warning toasts: load diagnostics, hidden during a running
+	     show like the rest of the editor chrome. -->
+	{#if !viewer.isFullscreen}
+		<CompatibilityToasts
+			toasts={compatToasts.visibleToasts}
+			overflowCount={compatToasts.overflowCount}
+			ondismiss={(id) => compatToasts.dismiss(id)}
+			ondismissall={() => compatToasts.dismissAll()}
 		/>
 	{/if}
 	{#if vm.versionHistoryOpen}<VersionHistoryPanel filePath={props.filePath} onclose={() => (vm.versionHistoryOpen = false)} onrestore={(bytes) => loader.load(bytes)} />{/if}
@@ -271,7 +227,6 @@
 		{vm}
 		{t}
 		{showThumbnails}
-		{showInspector}
 		{showNotes}
 		ai={props.ai}
 		onnotesupdate={props.onnotesupdate}
@@ -289,9 +244,8 @@
 	<PresentationOverlays {vm} />
 	{#if vm.editingActive && vm.displaySlides.length > 0}
 		<MobileActionSheets
-			{showInspector}
-			active={activeMobileSheet}
-			onactivechange={setActiveMobileSheet}
+			active={vm.activeMobileSheet}
+			onactivechange={vm.setActiveMobileSheet}
 			{editor}
 			handler={loader.handler}
 			presentationTheme={loader.presentationTheme}

@@ -12,8 +12,12 @@
  * client is the seeder and its loaded deck stands.
  */
 import type { PptxSlide } from 'pptx-viewer-core';
-import type { YDocLike } from 'pptx-viewer-shared';
-import { readSlidesFromYDoc, registerCollaborationSource } from 'pptx-viewer-shared';
+import type { CollabLoadOrigin, YDocLike } from 'pptx-viewer-shared';
+import {
+	readSlidesFromYDoc,
+	registerCollaborationSource,
+	shouldRoomSlidesReplaceLoad,
+} from 'pptx-viewer-shared';
 import { watch } from 'vue';
 import type { Ref, WatchStopHandle } from 'vue';
 
@@ -64,7 +68,7 @@ export function watchLoadAdoption(ctx: LoadAdoptionContext): WatchStopHandle {
 				ctx.onError(error);
 				return;
 			}
-			if (docSlides.length === 0) {
+			if (!shouldRoomSlidesReplaceLoad(ctx.getLoadOrigin?.(), docSlides.length)) {
 				return;
 			}
 			ctx.adoptDocSlides(docSlides);

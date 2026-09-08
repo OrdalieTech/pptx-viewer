@@ -173,7 +173,7 @@ export class SlideSyncEngine {
 			return false;
 		}
 		const docSlides = this.#readSlides(b);
-		if (docSlides.length === 0) {
+		if (!shouldRoomSlidesReplaceLoad(origin, docSlides.length)) {
 			return false;
 		}
 		this.#lastSynced = JSON.stringify(docSlides);

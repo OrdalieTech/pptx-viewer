@@ -9,7 +9,7 @@ import type { YDocLike } from 'pptx-viewer-shared/collaboration';
 import { Doc, applyUpdate, encodeStateAsUpdate, encodeStateVector } from 'yjs';
 
 import { PptxCodec, yjsFactories } from './codec/pptx-codec.js';
-import type { ExecutionContext, ToolContext, ToolResult } from './types.js';
+import type { ExecutionContext, TableStyleSaveOptions, ToolContext, ToolResult } from './types.js';
 
 const PPTX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 const loadedRooms = new WeakMap<
@@ -111,6 +111,8 @@ export async function savePresentation(
 	await handler.load(rawBytes.slice().buffer as ArrayBuffer);
 	const outputBytes = await handler.save(pptxData.slides, {
 		headerFooter: pptxData.headerFooter,
+		tableStyles: pptxData.tableStyleMap,
+		...tableStyleSaveOptions,
 	});
 
 	// Non-collaboration: write to disk

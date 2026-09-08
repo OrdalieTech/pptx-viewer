@@ -56,9 +56,13 @@ function readRemoteSlides(ydoc: YDocLike, deps: AdoptDocSlidesDeps): PptxSlide[]
  * win; an empty room means this client is the seeder and its loaded deck
  * stands (written into the doc by the normal gated publish path).
  */
-export function adoptDocSlidesAfterLoad(ydoc: YDocLike, deps: AdoptDocSlidesDeps): void {
+export function adoptDocSlidesAfterLoad(
+	ydoc: YDocLike,
+	deps: AdoptDocSlidesDeps,
+	origin: CollabLoadOrigin = 'user',
+): void {
 	const docSlides = readRemoteSlides(ydoc, deps);
-	if (docSlides.length === 0) {
+	if (!shouldRoomSlidesReplaceLoad(origin, docSlides.length)) {
 		return;
 	}
 	// Bypass the JSON dedupe: point it at the doc content so the publish flush

@@ -15,14 +15,13 @@
 	import NotesMasterCanvas from './NotesMasterCanvas.svelte';
 	import SlideStage from './SlideStage.svelte';
 
-	const { editor, controller, canvasSize, notesCanvasSize, mediaDataUrls, showInspector = true, onstageholder, onscalechange } =
+	const { editor, controller, canvasSize, notesCanvasSize, mediaDataUrls, onstageholder, onscalechange } =
 		$props<{
 			editor: EditorState;
 			controller: EditorController;
 			canvasSize: CanvasSize;
 			notesCanvasSize?: CanvasSize;
 			mediaDataUrls: Map<string, string>;
-			showInspector?: boolean;
 			onstageholder: (element: HTMLDivElement | null) => void;
 			onscalechange: (scale: number) => void;
 		}>();
@@ -125,7 +124,7 @@
 			<HandoutMasterCanvas handoutMaster={undefined} canvasSize={activeCanvasSize} slidesPerPage={6} />
 		{/if}
 	</main>
-	{#if showInspector}<InspectorPanel {editor} />{/if}
+	<InspectorPanel {editor} />
 </div>
 
 <style>

@@ -149,7 +149,11 @@ export function readElementFromYMap(ymap: YMapLike, assets: YMapLike): PptxEleme
 	});
 	readAssetFields(ymap, assets, element);
 	if (Array.isArray(element.textSegments)) {
-		element.text = element.textSegments.map((segment: { text: string }) => segment.text).join('');
+		element.text = element.textSegments
+			.map((segment: { text: string; isParagraphBreak?: boolean; isLineBreak?: boolean }) =>
+				segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text,
+			)
+			.join('');
 	}
 	return element as unknown as PptxElement;
 }

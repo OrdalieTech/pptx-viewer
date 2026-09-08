@@ -291,11 +291,11 @@ export class CollaborationService {
 	 * a parsed deck to viewer state (see {@link SlideSyncEngine.adoptDocAfterLoad}).
 	 * Returns true when the room's slides were adopted over the loaded deck.
 	 */
-	adoptDocSlidesAfterLoad(): boolean {
+	adoptDocSlidesAfterLoad(origin: CollabLoadOrigin = 'user'): boolean {
 		if (this.session) {
 			registerCollaborationSource(this.session.ydoc, this.lastOptions?.getSourceSlides?.() ?? []);
 		}
-		return this.connected() ? this.slideSync.adoptDocAfterLoad() : false;
+		return this.connected() ? this.slideSync.adoptDocAfterLoad(origin) : false;
 	}
 
 	/**

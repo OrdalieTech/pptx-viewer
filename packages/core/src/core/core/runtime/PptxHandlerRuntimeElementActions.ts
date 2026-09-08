@@ -65,15 +65,14 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 * group does not have.
 	 */
 	protected getTreeBucketKeyForElementType(type: PptxElement['type']): string {
-		if (type === 'group') return 'p:grpSp';
+		if (type === 'group') {
+			return 'p:grpSp';
+		}
 		if (type === 'picture' || type === 'image') {
 			return 'p:pic';
 		}
 		if (type === 'connector') {
 			return 'p:cxnSp';
-		}
-		if (type === 'group') {
-			return 'p:grpSp';
 		}
 		if (
 			type === 'table' ||
@@ -101,7 +100,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 * lock-container bug, and it shares the fix rather than restating it.
 	 */
 	protected getCnvPrNode(shape: XmlObject, key: string): XmlObject | undefined {
-		if (key === 'p:grpSp') return xmlPath(shape, 'p:nvGrpSpPr', 'p:cNvPr');
+		if (key === 'p:grpSp') {
+			return xmlPath(shape, 'p:nvGrpSpPr', 'p:cNvPr');
+		}
 		if (key === 'p:pic') {
 			return xmlPath(shape, 'p:nvPicPr', 'p:cNvPr');
 		}

@@ -207,15 +207,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const sourceTransition = this.slideTransitionService.parseSlideTransition(xmlObj);
 		// A dirty element does not imply an edited transition. Keep native
 		// timing-only transitions and extension envelopes byte-semantically intact.
-		if (
+		const transitionChanged =
 			slide.transition !== undefined &&
 			JSON.stringify(slide.transition, (key, value) =>
 				['soundRId', 'soundPath', 'soundFileName'].includes(key) ? undefined : value,
 			) !==
 				JSON.stringify(sourceTransition, (key, value) =>
 					['soundRId', 'soundPath', 'soundFileName'].includes(key) ? undefined : value,
-				)
-		) {
+				);
+		if (transitionChanged && slide.transition) {
 			const transitionNode = this.buildSlideTransitionXml(slide.transition);
 			if (transitionNode) {
 				slideNode['p:transition'] = transitionNode;
@@ -223,42 +223,6 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				delete slideNode['p:transition'];
 			}
 		}
-		// Editor animations key their target by the positional `element.id`. On
-		// save, rewrite those references to the target shape's native OOXML
-		// `p:cNvPr/@id` (minting one for SDK-created shapes) so `p:spTgt/@spid`
-		// and the `pptx:editorMeta` extension reference a shape id real
-		// PowerPoint can bind, and so `reconcileAnimationTargets` can map them
-		// back on the next load. Shapes are stamped with the same id below.
-		const shapeIdAnimations =
-			slide.animations !== undefined
-				? remapEditorAnimationsToShapeIds(
-						slide.elements,
-						slide.animations,
-						this.maxCnvPrId(this.ensureSlideTree(xmlObj)),
-					)
-				: undefined;
-		if (shapeIdAnimations !== undefined) {
-			this.applyEditorAnimations(slideNode, shapeIdAnimations);
-		}
-		if (shapeIdAnimations && shapeIdAnimations.length > 0) {
-			// When rawTiming exists, surgical update preserves complex structures
-			const generatedTiming = this.animationWriteService.buildTimingXml(
-				shapeIdAnimations,
-				slide.rawTiming,
-			);
-			if (generatedTiming) {
-				this.applyMediaTimingToRawTiming(generatedTiming, slide.elements);
-				slideNode['p:timing'] = generatedTiming;
-			} else if (slide.rawTiming) {
-				this.applyMediaTimingToRawTiming(slide.rawTiming, slide.elements);
-				slideNode['p:timing'] = slide.rawTiming;
-			}
-		} else if (slide.rawTiming) {
-			this.applyMediaTimingToRawTiming(slide.rawTiming, slide.elements);
-			slideNode['p:timing'] = slide.rawTiming;
-		}
-		xmlObj['p:sld'] = slideNode;
-
 		const spTree = this.ensureSlideTree(xmlObj);
 		// `p:cSld/@name`: set or cleared from the model the same way the layout
 		// writer handles a layout's name; `ensureSlideTree` guarantees `p:cSld`.
@@ -295,7 +259,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			constants.slideCommentRelationshipType,
 		);
 
-		if (slide.transition !== undefined) {
+		if (transitionChanged && slide.transition !== undefined) {
 			this.embedTransitionSound(slide.transition, {
 				saveSession,
 				slideRelationshipRegistry,

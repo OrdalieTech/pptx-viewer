@@ -261,7 +261,7 @@ export function createCollaborationController(
 		loadApplying = true;
 	}
 
-	function notifyContentLoaded(): void {
+	function notifyContentLoaded(origin: CollabLoadOrigin): void {
 		if (currentYDoc) {
 			registerCollaborationSource(currentYDoc, store.get().slides);
 		}

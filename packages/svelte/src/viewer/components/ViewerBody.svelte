@@ -28,7 +28,6 @@
 		onthemechange,
 		chromeVisible,
 		showThumbnails,
-		showInspector,
 		showNotes,
 		displaySlides,
 		canvasSize,
@@ -77,69 +76,7 @@
 		onaipickelement,
 		onaskai,
 		onfixai,
-	}: {
-		t: Translator;
-		editor: EditorState;
-		handler?: PptxHandler | null;
-		presentationTheme?: PptxTheme;
-		onthemechange?: (theme: PptxTheme) => void;
-		chromeVisible: boolean;
-		showThumbnails: boolean;
-		showInspector: boolean;
-		showNotes: boolean;
-		displaySlides: PptxSlide[];
-		canvasSize: CanvasSize;
-		mediaDataUrls: Map<string, string>;
-		current: number;
-		onselect: (index: number) => void;
-		loading: boolean;
-		isEncrypted: boolean;
-		error: string | null;
-		activeSlide: PptxSlide | undefined;
-		scale: number;
-		presenting: boolean;
-		/** Active slide-transition overlay state (presentation mode), or null. */
-		presentationTransition: TransitionState | null;
-		/** Called when the transition overlay finishes (host drops the overlay). */
-		onTransitionDone: () => void;
-		/** Advance the presentation (step animation build, else next slide). */
-		onAdvance: () => void;
-		editingActive: boolean;
-		controller: EditorController;
-		onstageresize: (width: number, height: number) => void;
-		onstageholder: (el: HTMLDivElement | null) => void;
-		notesExpanded: boolean;
-		onNotesCommit?: (notes: string, segments?: TextSegment[]) => void;
-		onNotesToggle: () => void;
-		/** Remote collaborators' cursors on the active slide (unscaled slide px). */
-		collabCursors?: RemoteCursor[];
-		/** Remote collaborators' presence (drives the remote-selection overlay). */
-		collabPresences?: SanitizedPresence[];
-		/** Open element menu position, supplied by the editing controller. */
-		contextMenu: { x: number; y: number } | null;
-		onContextMenuClose: () => void;
-		onmoveSlide?: (fromIndex: number, toIndex: number) => void;
-		annotations: PresentationAnnotations;
-		guides?: readonly { axis: 'h' | 'v'; position: number }[];
-		onchangeguide?: (index: number, position: number) => void;
-		spellCheck?: boolean;
-		/** Side-panel open/collapsed state shared with the ribbon's toggles. */
-		chromeUi?: ChromeUiState;
-		/** True while the AI panel is picking a slide element (see SlideCanvas). */
-		aiPickMode?: boolean;
-		/** True while a running AI tool is active (enables the canvas colour tween). */
-		aiActive?: boolean;
-		/** Rings the AI focus overlay should draw on the active slide. */
-		aiHighlights?: readonly AiCanvasHighlight[];
-		/** Just-applied AI change batch the canvas should animate (glide/fade/glow). */
-		aiChangeBatch?: AiChangeBatch | null;
-		/** Route a picked canvas element to the AI focus (pick mode). */
-		onaipickelement?: (elementId: string) => void;
-		/** "Ask AI about this" from the element context menu (gated on the `ai` prop). */
-		onaskai?: () => void;
-		/** "Fix with AI" from the element context menu (gated on the `ai` prop). */
-		onfixai?: () => void;
-	} = $props();
+	}: ViewerBodyProps = $props();
 
 	// The template's bind:clientWidth/Height write these (invisible to the linter).
 	// eslint-disable-next-line prefer-const
@@ -239,7 +176,7 @@
 			/>
 		{/if}
 	</div>
-	{#if showInspector && editingActive && chromeVisible && displaySlides.length > 0 && chromeUi?.inspectorOpen !== false}
+	{#if editingActive && chromeVisible && displaySlides.length > 0 && chromeUi?.inspectorOpen !== false}
 		<InspectorPanel {editor} {handler} {presentationTheme} {onthemechange} {mediaDataUrls} ui={chromeUi} {canvasSize} />
 	{/if}
 </div>
