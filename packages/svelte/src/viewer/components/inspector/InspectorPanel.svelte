@@ -218,7 +218,7 @@
 		border-left: 1px solid var(--pptx-border, #33334d);
 		background: var(--pptx-card, #1e1e2e);
 		color: var(--pptx-card-foreground, #e2e8f0);
-		font-family: system-ui, sans-serif;
+		font-family: inherit;
 		font-size: 12px;
 		overflow: hidden;
 		min-height: 0;
