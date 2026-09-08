@@ -410,7 +410,8 @@
       "name": "pptx-viewer-shared",
       "version": "0.1.0",
       "dependencies": {
-        "dompurify": "^3.4.14",
+        "dompurify": "^3.4.12",
+        "lib0": "^0.2.117",
         "zod": "^4.4.3",
       },
       "devDependencies": {
@@ -474,17 +475,18 @@
       "optionalDependencies": {
         "three": "^0.185.1",
         "y-webrtc": "^10.3.0",
-        "y-websocket": "^3.1.0",
-        "yjs": "^13.6.32",
+        "y-websocket": "^3.0.0",
       },
       "peerDependencies": {
         "@ai-sdk/svelte": "^5.0.31",
         "ai": ">=6 <8",
         "svelte": "^5.0.0",
+        "yjs": "^13.6.31",
       },
       "optionalPeers": [
         "@ai-sdk/svelte",
         "ai",
+        "yjs",
       ],
     },
     "packages/tools": {
@@ -501,6 +503,7 @@
         "zod": "^4.4.3",
       },
       "devDependencies": {
+        "pptx-viewer-shared": "workspace:*",
         "tsdown": "^0.22.14",
         "tsup": "^8.5.1",
         "typescript": "^7.0.2",

@@ -74,21 +74,21 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 				if (media.loop) {
 					cTn['@_repeatCount'] = 'indefinite';
-				} else {
+				} else if (media.loop === false) {
 					delete cTn['@_repeatCount'];
 				}
 
 				// Auto-play: nodeType=1 means "with previous" (auto-start on slide entry)
 				if (media.autoPlay) {
 					cTn['@_nodeType'] = '1';
-				} else {
+				} else if (media.autoPlay === false) {
 					delete cTn['@_nodeType'];
 				}
 
 				// Play across slides: dur=indefinite means audio timeline spans slides
 				if (media.playAcrossSlides && mediaTag === 'p:audio') {
 					cTn['@_dur'] = 'indefinite';
-				} else if (!media.playAcrossSlides) {
+				} else if (media.playAcrossSlides === false) {
 					// Only remove if we're sure it was previously set for play-across
 					// Leave dur alone if it was set for other reasons
 					if (String(cTn['@_dur']) === 'indefinite') {
@@ -98,7 +98,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 				if (media.fullScreen) {
 					cMediaNode['@_fullScrn'] = '1';
-				} else {
+				} else if (media.fullScreen === false) {
 					delete cMediaNode['@_fullScrn'];
 				}
 
@@ -110,7 +110,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				// Hide when not playing → showWhenStopped="0"
 				if (media.hideWhenNotPlaying) {
 					cMediaNode['@_showWhenStopped'] = '0';
-				} else {
+				} else if (media.hideWhenNotPlaying === false) {
 					delete cMediaNode['@_showWhenStopped'];
 				}
 

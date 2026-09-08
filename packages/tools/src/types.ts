@@ -63,7 +63,7 @@ export interface CollaborationProvider {
 	/** Get the format codec for a file path, or null. */
 	getCodec(filePath: string): {
 		hydrate(ydoc: YDoc, bytes: Uint8Array, origin?: string): Promise<void>;
-		dehydrate(ydoc: YDoc): Promise<Uint8Array>;
+		dehydrate(ydoc: YDoc, baseSourcePptx: Uint8Array): Promise<Uint8Array>;
 	} | null;
 	/** Create an agent origin tag for undo isolation. */
 	agentOrigin(name: string): string;

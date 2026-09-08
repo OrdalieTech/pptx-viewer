@@ -90,7 +90,7 @@ function buildSegmentAttrs(seg: Record<string, unknown>): Record<string, string>
 /** Resolve the literal text a segment contributes to the Y.Text document. */
 function segmentInsertText(seg: Record<string, unknown>): string {
 	if (seg.isParagraphBreak === true || seg.isLineBreak === true) {
-		return '\n';
+		return typeof seg.text === 'string' && /^\n+$/u.test(seg.text) ? seg.text : '\n';
 	}
 	if (typeof seg.text === 'string' && seg.text.length > 0) {
 		return seg.text;

@@ -5,6 +5,7 @@
  * `reconcileSlidesInYDoc` (tagged `LOCAL_SYNC_ORIGIN`; the observer skips its
  * own writes). Role 'owner' debounces write-back.
  */
+import type { PptxSlide } from 'pptx-viewer-core';
 import type {
 	CollaborationConfig,
 	CollaborationRole,
@@ -25,6 +26,7 @@ import {
 	PRESENCE_HEARTBEAT_MS,
 	reconcileSlidesInYDoc,
 	readSlidesFromYDoc,
+	registerCollaborationSource,
 	registerCollaborationTeardown,
 	resolveTransportForServerUrl,
 	validateRoomId,
@@ -99,7 +101,7 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 
 	/** Write the current local slides into the doc (granular, echo-deduped). */
 	function flushLocalSlides(): void {
-		if (!currentYDoc || !yFactories || applyingRemote) {
+		if (!currentYDoc || !yFactories || applyingRemote || lastConfig?.role === 'viewer') {
 			return;
 		}
 		const s = JSON.stringify(options.slides.value);
@@ -117,7 +119,34 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 	// grace period elapses for a lone webrtc peer), local slides must not seed
 	// the doc, or a late joiner's bootstrap deck would merge into the room's
 	// real content. Opening the gate performs the deferred first write.
-	const syncGate = createSyncGate(flushLocalSlides);
+	let didSync = false;
+	const syncGate = createSyncGate(() => {
+		const firstSync = !didSync;
+		didSync = true;
+		if (currentYDoc && firstSync) {
+			const remote = readRemoteSlides(currentYDoc);
+			if (remote.length) {
+				lastSynced = JSON.stringify(remote);
+				options.onRemoteSlides(remote);
+				return;
+			}
+		}
+		flushLocalSlides();
+	});
+
+	function failRemote(error: unknown): void {
+		stop();
+		status.value = 'error';
+		lastConfig?.onstatus?.('error', error instanceof Error ? error : new Error(String(error)));
+	}
+	function readRemoteSlides(doc: YDocLike): PptxSlide[] {
+		try {
+			return readSlidesFromYDoc(doc);
+		} catch (error) {
+			failRemote(error);
+			return [];
+		}
+	}
 
 	function clearTimers(): void {
 		if (connectTimer !== null) {
@@ -170,25 +199,32 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 		}
 	}
 
+	let connectionGeneration = 0;
 	async function start(config: CollaborationConfig): Promise<void> {
 		stop();
+		const generation = connectionGeneration;
 		lastConfig = config;
 		activeRole.value = config.role;
 		try {
 			validateRoomId(config.roomId);
 		} catch {
 			status.value = 'error';
+			config.onstatus?.('error', new Error('Invalid collaboration room'));
 			return;
 		}
 		const transport = config.transport ?? resolveTransportForServerUrl(config.serverUrl);
 		// Mixed-content only affects a ws:// socket from an https page.
 		if (transport === 'websocket' && isMixedContentBlocked(config.serverUrl)) {
 			status.value = 'error';
+			config.onstatus?.('error', new Error('Insecure collaboration connection'));
 			return;
 		}
 		status.value = 'connecting';
 		try {
 			const Y = await import('yjs');
+			if (generation !== connectionGeneration) {
+				return;
+			}
 			const doc = new Y.Doc();
 			ydoc = doc;
 			yFactories = {
@@ -197,9 +233,16 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 				createText: () => new Y.Text(),
 			};
 			currentYDoc = doc as unknown as YDocLike;
+			registerCollaborationSource(currentYDoc, options.slides.value);
 			livePatcher.configure(currentYDoc, yFactories);
 
-			provider = await createCollabProvider(transport, config, doc);
+			const nextProvider = await createCollabProvider(transport, config, doc);
+			if (generation !== connectionGeneration) {
+				nextProvider.destroy();
+				doc.destroy();
+				return;
+			}
+			provider = nextProvider;
 			awareness = provider.awareness;
 			selfId = awareness.clientID ?? -1;
 
@@ -209,7 +252,7 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 			provider.onSynced(() => syncGate.open());
 			if (provider.syncedNow) {
 				syncGate.open();
-			} else {
+			} else if (transport === 'webrtc') {
 				syncGate.arm();
 			}
 
@@ -256,7 +299,6 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 						// rejoins keeps the gate permanently open from the first
 						// connection and can clobber the room with a stale local doc.
 						syncGate.reset();
-						syncGate.arm();
 					}
 				});
 				if (provider.connectedNow) {
@@ -265,8 +307,8 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 					connectTimer = setTimeout(() => {
 						connectTimer = null;
 						if (status.value !== 'connected') {
-							stop();
 							status.value = 'error';
+							config.onstatus?.('error', new Error('Collaboration unavailable'));
 						}
 					}, CONNECTION_TIMEOUT_MS);
 				}
@@ -277,7 +319,7 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 				if (transaction?.origin === LOCAL_SYNC_ORIGIN || applyingRemote || !currentYDoc) {
 					return;
 				}
-				const remote = readSlidesFromYDoc(currentYDoc);
+				const remote = readRemoteSlides(currentYDoc);
 				if (remote.length === 0) {
 					return;
 				}
@@ -293,7 +335,7 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 			// attached never fires the observer, so a late joiner would render an
 			// empty deck until the next remote edit. React reads the array on its
 			// first observe for the same reason; mirror it here.
-			const initialSlides = readSlidesFromYDoc(currentYDoc);
+			const initialSlides = readRemoteSlides(currentYDoc);
 			if (initialSlides.length > 0) {
 				applyingRemote = true;
 				options.onRemoteSlides(initialSlides);
@@ -310,6 +352,8 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 				stopLoadAdoption = watchLoadAdoption({
 					loadVersion: options.loadVersion,
 					getYDoc: () => currentYDoc,
+					getSourceSlides: () => options.slides.value,
+					onError: failRemote,
 					isConnected: () => status.value === 'connected',
 					getLoadOrigin: options.getLoadOrigin,
 					adoptDocSlides: (docSlides) => {
@@ -337,13 +381,22 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 			heartbeat = setInterval(() => publisher?.flush(), PRESENCE_HEARTBEAT_MS);
 			active.value = true;
 			refreshPresence();
-		} catch {
+		} catch (error) {
+			if (generation !== connectionGeneration) {
+				return;
+			}
 			stop();
 			status.value = 'error';
+			config.onstatus?.(
+				'error',
+				error instanceof Error ? error : new Error('Collaboration unavailable'),
+			);
 		}
 	}
 
 	function stop(): void {
+		didSync = false;
+		connectionGeneration++;
 		clearTimers();
 		syncGate.reset();
 		unobserveSlides?.();

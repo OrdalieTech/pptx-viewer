@@ -95,7 +95,8 @@
 	"peerDependencies": {
 		"@ai-sdk/svelte": "^5.0.31",
 		"ai": ">=6 <8",
-		"svelte": "^5.0.0"
+		"svelte": "^5.0.0",
+		"yjs": "^13.6.31"
 	},
 	"peerDependenciesMeta": {
 		"@ai-sdk/svelte": {
@@ -103,12 +104,14 @@
 		},
 		"ai": {
 			"optional": true
+		},
+		"yjs": {
+			"optional": true
 		}
 	},
 	"optionalDependencies": {
 		"three": "^0.185.1",
 		"y-webrtc": "^10.3.0",
-		"y-websocket": "^3.1.0",
-		"yjs": "^13.6.32"
+		"y-websocket": "^3.0.0"
 	}
 }

@@ -281,6 +281,8 @@ export interface PptxTableCellTextRun {
  * ```
  */
 export interface PptxTableCell {
+	/** Stable collaboration identity; retained by editor copies, stored in the codec's native extension. */
+	collaborationId?: string;
 	text: string;
 	style?: PptxTableCellStyle;
 	/**
@@ -326,6 +328,8 @@ export interface PptxTableCell {
  * ```
  */
 export interface PptxTableRow {
+	/** Stable collaboration identity, independent of the row's current position. */
+	collaborationId?: string;
 	/** Row height in px. */
 	height?: number;
 	cells: PptxTableCell[];

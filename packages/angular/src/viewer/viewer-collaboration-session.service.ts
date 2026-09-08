@@ -153,6 +153,7 @@ export class ViewerCollaborationSessionService {
 			canvasWidth: size.width,
 			canvasHeight: size.height,
 			getSourceBytes: () => host.getSourceBytes(),
+			getSourceSlides: () => host.currentSlides(),
 			getTemplateElements: () => host.getTemplateElements(),
 			getSaveOptions: () => host.getSaveOptions(),
 		};

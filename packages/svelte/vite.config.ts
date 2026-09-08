@@ -76,6 +76,9 @@ export default defineConfig({
 			external: [
 				'svelte',
 				/^svelte\//u,
+				// Yjs relies on constructor identity across the host and collaboration
+				// provider. Bundling a private copy breaks Y.Map/Y.Text checks.
+				'yjs',
 				'jszip',
 				'fast-xml-parser',
 				// PNG/PDF export libraries: both are dynamically `import()`-ed only

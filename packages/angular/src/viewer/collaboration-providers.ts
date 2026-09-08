@@ -19,8 +19,13 @@ import type {
 	YMapLike,
 	YArrayLike,
 	YTextLike,
+	AuthenticatedWebsocketProvider,
 } from '../internal/shared';
-import { createDepartureChannel } from '../internal/shared';
+import {
+	createDepartureChannel,
+	collaborationWebsocketOptions,
+	startCollaborationWebsocket,
+} from '../internal/shared';
 
 /** Minimal awareness surface used by the service. */
 export interface AwarenessLike {
@@ -77,7 +82,7 @@ interface WebsocketProviderModule {
 		serverUrl: string,
 		roomId: string,
 		doc: unknown,
-		opts?: { params?: Record<string, string> },
+		opts?: ReturnType<typeof collaborationWebsocketOptions>,
 	) => unknown;
 }
 
@@ -89,7 +94,11 @@ interface WebrtcProviderModule {
 	) => unknown;
 }
 
-async function createDoc(): Promise<{ doc: DestroyableYDoc; factories: YjsFactories; Y: YModule }> {
+async function createDoc(): Promise<{
+	doc: DestroyableYDoc;
+	factories: YjsFactories;
+	Y: YModule;
+}> {
 	const Y = (await import('yjs')) as unknown as YModule;
 	const doc = new Y.Doc();
 	const factories: YjsFactories = {
@@ -110,8 +119,9 @@ export async function createWebsocketBundle(config: CollaborationConfig): Promis
 		config.serverUrl,
 		config.roomId,
 		doc,
-		config.authToken ? { params: { token: config.authToken } } : undefined,
+		collaborationWebsocketOptions(config),
 	) as unknown as ProviderLike;
+	startCollaborationWebsocket(provider as unknown as AuthenticatedWebsocketProvider, config);
 	return {
 		doc,
 		provider,
@@ -136,6 +146,15 @@ export async function createWebrtcBundle(config: CollaborationConfig): Promise<P
 		signaling: config.signaling?.length ? config.signaling : undefined,
 		password: config.authToken || undefined,
 	}) as unknown as ProviderLike;
+	config.onstatus?.('connected');
+	provider.on('status', (event) =>
+		config.onstatus?.(event.connected ? 'connected' : 'disconnected'),
+	);
+	provider.on('synced', (event) => {
+		if (event.synced !== false) {
+			config.onstatus?.('synced');
+		}
+	});
 	return {
 		doc,
 		provider,

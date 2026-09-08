@@ -31,6 +31,7 @@ import {
 	isMixedContentBlocked,
 	presenceToCursors,
 	registerCollaborationTeardown,
+	registerCollaborationSource,
 	resolveTransportForServerUrl,
 	validateRoomId,
 } from '../internal/shared';
@@ -162,6 +163,7 @@ export class CollaborationService {
 			validateRoomId(config.roomId);
 		} catch {
 			this.status.set('error');
+			config.onstatus?.('error', new Error('Invalid collaboration room'));
 			return;
 		}
 
@@ -175,6 +177,7 @@ export class CollaborationService {
 		// ws:// socket, so surface the error rather than hanging until the timeout.
 		if (transport !== 'webrtc' && isMixedContentBlocked(config.serverUrl)) {
 			this.status.set('error');
+			config.onstatus?.('error', new Error('Insecure collaboration connection'));
 			return;
 		}
 
@@ -203,7 +206,15 @@ export class CollaborationService {
 				bundle.doc.destroy();
 				return;
 			}
+			registerCollaborationSource(bundle.doc, options.getSourceSlides?.() ?? []);
 			this.session = activateSession(bundle, config, transport, {
+				onError: (error) => {
+					bundle.provider.destroy();
+					bundle.doc.destroy();
+					this.disconnect();
+					this.status.set('error');
+					config.onstatus?.('error', error instanceof Error ? error : new Error(String(error)));
+				},
 				slideSync: this.slideSync,
 				livePatcher: this.livePatcher,
 				onRemoteSlides: this.onRemoteSlides,
@@ -213,20 +224,29 @@ export class CollaborationService {
 				getStatus: () => this.status(),
 				isActive: () => this.active(),
 				failConnection: () => {
-					this.disconnect();
 					this.status.set('error');
+					config.onstatus?.('error', new Error('Collaboration unavailable'));
 				},
 			});
 
+			if (token !== this.connectToken) {
+				teardownSession(this.session, this.refreshPresence);
+				this.session = null;
+				return;
+			}
 			this.active.set(true);
 			this.refreshPresence();
-		} catch {
+		} catch (error) {
 			if (token !== this.connectToken) {
 				// A newer connect() owns the service state; do not tear it down.
 				return;
 			}
 			this.disconnect();
 			this.status.set('error');
+			config.onstatus?.(
+				'error',
+				error instanceof Error ? error : new Error('Collaboration unavailable'),
+			);
 		}
 	}
 
@@ -271,8 +291,11 @@ export class CollaborationService {
 	 * a parsed deck to viewer state (see {@link SlideSyncEngine.adoptDocAfterLoad}).
 	 * Returns true when the room's slides were adopted over the loaded deck.
 	 */
-	adoptDocSlidesAfterLoad(origin: CollabLoadOrigin = 'user'): boolean {
-		return this.connected() ? this.slideSync.adoptDocAfterLoad(origin) : false;
+	adoptDocSlidesAfterLoad(): boolean {
+		if (this.session) {
+			registerCollaborationSource(this.session.ydoc, this.lastOptions?.getSourceSlides?.() ?? []);
+		}
+		return this.connected() ? this.slideSync.adoptDocAfterLoad() : false;
 	}
 
 	/**
@@ -281,6 +304,9 @@ export class CollaborationService {
 	 * is shut the deck is held pending until the initial sync confirms.
 	 */
 	broadcastSlides(slides: readonly PptxSlide[]): void {
+		if (this.currentConfig?.role === 'viewer') {
+			return;
+		}
 		this.slideSync.broadcast(slides);
 	}
 

@@ -37,6 +37,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		textStyle: TextStyle | undefined,
 		textSegments: TextSegment[] | undefined,
 		resolveHyperlinkRelationshipId?: (target: string) => string | undefined,
+		originalSegments?: TextSegment[],
 	): XmlObject[] {
 		// `a:pPr` wants the element style whole; every `a:rPr` must not inherit
 		// its paragraph-only members. See `toRunScopedTextStyle`.
@@ -196,12 +197,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		};
 
 		if (textSegments && textSegments.length > 0) {
-			// This pushes element-level edits back down onto previously uniform
-			// runs, so it is a run destination too: passing the WHOLE element style
-			// re-added the paragraph `rtl` the spread below had already dropped.
 			const uniformSegmentOverrides = computeUniformSegmentOverrides(
-				runScopedTextStyle,
+				textStyle,
 				textSegments,
+				originalSegments,
 			);
 
 			textSegments.forEach((segment) => {

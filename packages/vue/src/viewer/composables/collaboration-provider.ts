@@ -14,7 +14,12 @@
  * Both expose `.awareness` and `.destroy()`; no `any` leaks out.
  */
 import type { CollaborationConfig, CollaborationTransport } from 'pptx-viewer-shared';
-import { clearLocalAwareness, createDepartureChannel } from 'pptx-viewer-shared';
+import {
+	clearLocalAwareness,
+	createDepartureChannel,
+	collaborationWebsocketOptions,
+	startCollaborationWebsocket,
+} from 'pptx-viewer-shared';
 
 import type { AwarenessLike } from './collaboration-types';
 
@@ -62,6 +67,15 @@ export async function createCollabProvider(
 			signaling: config.signaling?.length ? config.signaling : undefined,
 			password: config.authToken || undefined,
 		});
+		config.onstatus?.('connected');
+		provider.on('status', (event) =>
+			config.onstatus?.(event.connected ? 'connected' : 'disconnected'),
+		);
+		provider.on('synced', (event: { synced?: boolean }) => {
+			if (event.synced !== false) {
+				config.onstatus?.('synced');
+			}
+		});
 		const departure = createDepartureChannel(config.roomId, provider.awareness);
 		return {
 			awareness: provider.awareness as unknown as AwarenessLike,
@@ -89,9 +103,13 @@ export async function createCollabProvider(
 	}
 
 	const { WebsocketProvider } = await import('y-websocket');
-	const provider = new WebsocketProvider(config.serverUrl, config.roomId, doc, {
-		params: config.authToken ? { token: config.authToken } : undefined,
-	});
+	const provider = new WebsocketProvider(
+		config.serverUrl,
+		config.roomId,
+		doc,
+		collaborationWebsocketOptions(config),
+	);
+	startCollaborationWebsocket(provider, config);
 	const departure = createDepartureChannel(config.roomId, provider.awareness);
 	return {
 		awareness: provider.awareness as unknown as AwarenessLike,

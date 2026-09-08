@@ -17,6 +17,7 @@ vi.mock(import('y-websocket'), () => ({
 			calls.ws.push(args);
 		}
 		on() {}
+		connect() {}
 		disconnect() {}
 		destroy() {}
 	},
@@ -41,15 +42,24 @@ describe('createCollabProvider', () => {
 		calls.ws.length = 0;
 		const handle = await createCollabProvider(
 			'websocket',
-			{ roomId: 'room', serverUrl: 'wss://x', userName: 'Ada', authToken: 'tok' },
+			{
+				roomId: 'room',
+				serverUrl: 'wss://x',
+				userName: 'Ada',
+				websocketProtocols: ['app.v1', 'token.test'],
+			},
 			doc,
 		);
 		expect(calls.ws).toHaveLength(1);
-		// (serverUrl, roomId, doc, { params: { token } })
 		expect(calls.ws[0][0]).toBe('wss://x');
 		expect(calls.ws[0][1]).toBe('room');
-		expect(calls.ws[0][3]).toStrictEqual({ params: { token: 'tok' } });
+		expect(calls.ws[0][3]).toStrictEqual({
+			connect: false,
+			disableBc: true,
+			protocols: ['app.v1', 'token.test'],
+		});
 		expect(handle.connectedNow).toBeTruthy();
+		handle.destroy();
 	});
 
 	it('creates a serverless y-webrtc provider with signaling + password options', async () => {
@@ -79,6 +89,9 @@ describe('createCollabProvider', () => {
 	it('omits signaling when none is supplied (y-webrtc uses its defaults)', async () => {
 		calls.webrtc.length = 0;
 		await createCollabProvider('webrtc', { roomId: 'p2p', serverUrl: '', userName: 'Ada' }, doc);
-		expect(calls.webrtc[0][2]).toStrictEqual({ signaling: undefined, password: undefined });
+		expect(calls.webrtc[0][2]).toStrictEqual({
+			signaling: undefined,
+			password: undefined,
+		});
 	});
 });

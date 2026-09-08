@@ -142,6 +142,9 @@ export class PptxRuntimeDependencyFactory implements IPptxRuntimeDependencyFacto
 			// regressions). v5.5.5 currently defaults to safe behaviour but
 			// pinning this makes the guarantee explicit and forward-stable.
 			processEntities: false,
+			// Attribute values (bullet characters, names, links) need the same
+			// safe predefined/numeric entity decoding as text before rebuilding XML.
+			attributeValueProcessor: (_name: string, value: string) => decodeXmlEntities(value),
 			// With entity processing disabled, the five predefined XML entities
 			// and numeric character references would survive ENCODED in element
 			// text (e.g. `Tom &amp; Jerry` renders the literal `&amp;` and

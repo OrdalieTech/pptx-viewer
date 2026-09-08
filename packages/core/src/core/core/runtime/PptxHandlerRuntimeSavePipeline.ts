@@ -89,8 +89,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		// Comment authors
-		const hasCommentAuthors = saveSession.hasUsedCommentAuthors();
-		if (hasCommentAuthors) {
+		const usedCommentAuthors = saveSession.hasUsedCommentAuthors();
+		// ponytail: post-save truth — an orphan part present in the source zip is
+		// removed below, so it must not keep its content-type Override alive.
+		const hasCommentAuthors = usedCommentAuthors;
+		if (usedCommentAuthors) {
 			this.zip.file(
 				'ppt/commentAuthors.xml',
 				this.builder.build(
@@ -101,6 +104,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				),
 			);
 		} else {
+			// ponytail: restore orphan removal dropped by the collaboration edit.
 			this.zip.remove('ppt/commentAuthors.xml');
 			// Strip the matching Relationship from presentation.xml.rels; otherwise
 			// the dangling reference causes PowerPoint to flag the file as corrupted
@@ -163,12 +167,18 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// the passthrough and the rebuilt-from-elements route reach the ZIP
 		// tag-bucketed otherwise.
 		for (const [layoutPath, layoutXmlObj] of this.layoutXmlMap.entries()) {
-			const ordered = await this.withTemplateSpTreeOrder(layoutPath, layoutXmlObj, 'p:sldLayout');
-			this.zip.file(layoutPath, this.builder.build(ordered));
+			const source = await this.zip.file(layoutPath)?.async('string');
+			const rebuilt = this.builder.build(layoutXmlObj);
+			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
+				this.zip.file(layoutPath, rebuilt);
+			}
 		}
 		for (const [masterPath, masterXmlObj] of this.masterXmlMap.entries()) {
-			const ordered = await this.withTemplateSpTreeOrder(masterPath, masterXmlObj, 'p:sldMaster');
-			this.zip.file(masterPath, this.builder.build(ordered));
+			const source = await this.zip.file(masterPath)?.async('string');
+			const rebuilt = this.builder.build(masterXmlObj);
+			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
+				this.zip.file(masterPath, rebuilt);
+			}
 		}
 
 		// Theme parts. Re-emit dirty themes from in-memory state; clean themes

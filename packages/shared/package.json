@@ -32,6 +32,11 @@
 	"module": "dist/index.mjs",
 	"types": "dist/index.d.ts",
 	"exports": {
+		"./collaboration": {
+			"types": "./dist/collaboration/index.d.ts",
+			"import": "./dist/collaboration/index.mjs",
+			"require": "./dist/collaboration/index.js"
+		},
 		".": {
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.mjs",
@@ -72,7 +77,8 @@
 		"pack": "bun run build && bun pm pack"
 	},
 	"dependencies": {
-		"dompurify": "^3.4.14",
+		"dompurify": "^3.4.12",
+		"lib0": "^0.2.117",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {

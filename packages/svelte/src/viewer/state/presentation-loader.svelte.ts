@@ -186,9 +186,7 @@ export class PresentationLoader {
 			revokeBlobUrls(this.mediaDataUrls.values());
 			const media = await resolveMediaUrls(newHandler, parsed.slides);
 			loadBlobUrls.push(...media.blobUrls);
-			const imageResolvedSlides = await resolveLazyImages(newHandler, parsed.slides);
-			const nextSlides = await resolveLazyTableCellImages(newHandler, imageResolvedSlides);
-			const nextTableStyleMap = await resolveLazyTableStyleImages(newHandler, parsed.tableStyleMap);
+			const nextSlides = await resolveLazyImages(newHandler, parsed.slides, media.urls);
 
 			// Commit reactive state.
 			revokeBlobUrls(this.#activeBlobUrls);

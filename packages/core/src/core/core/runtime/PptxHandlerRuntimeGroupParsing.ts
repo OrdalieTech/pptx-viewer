@@ -1,17 +1,7 @@
 import { getElementOrientationMatrix } from '../../geometry/transform-utils';
 import { XmlObject, PptxElement } from '../../types';
 import type { GroupPptxElement } from '../../types';
-import { xmlPath } from '../../utils/xml-access';
-import {
-	applyAncestorGroupTextTransform,
-	applyGroupFillInheritance,
-	applyRawChildGeometry,
-	resolveGroupFillImagePure,
-	resolveGroupXmlSlice,
-} from './group-parsing-helpers';
-import type { GroupFillImageHost } from './group-parsing-helpers';
-import type { GroupTransform } from './group-shape-geometry';
-import { MAX_GROUP_DEPTH, readGroupTransform, transformGroupChild } from './group-shape-geometry';
+import { rememberLoadedGroup } from './group-shape-writer';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSpTreeParsing';
 import { parseShapeLockNode, SHAPE_LOCK_CONTAINERS } from './shape-lock-containers';
 
@@ -287,6 +277,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			locks: grpLocks,
 		};
 
+		rememberLoadedGroup(groupElement);
 		return groupElement;
 	}
 

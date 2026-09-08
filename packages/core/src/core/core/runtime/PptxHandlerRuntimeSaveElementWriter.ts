@@ -3,7 +3,6 @@ import type {
 	XmlObject,
 	PptxElement,
 	ChartPptxElement,
-	GroupPptxElement,
 	InkPptxElement,
 	MediaPptxElement,
 	Model3DPptxElement,
@@ -18,6 +17,7 @@ import { buildChartExSpaceXml, canGenerateChartEx } from '../../utils/chart-cx-g
 import { buildChartSpaceXml } from '../../utils/chart-xml-generator';
 import { ensureXmlChild } from '../../utils/xml-access';
 import { BLIP_FILL_ORDER, SP_PR_ORDER, reorderObjectKeys } from '../../utils/xml-reorder';
+import { findOriginalGroup, isUnchangedTemplate, writeGroupShape } from './group-shape-writer';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveContentPartInk';
 import type { SaveSlideContext } from './PptxHandlerRuntimeSaveElementEmbedding';
 import { CHART_CONTENT_TYPE, CHART_RELATIONSHIP_TYPE } from './PptxHandlerRuntimeSaveShapeXml';
@@ -454,8 +454,36 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		el: PptxElement,
 		collectors: SlideShapeCollectors,
 		ctx: SaveSlideContext,
+		insideGroup = false,
 	): void {
+		if (!insideGroup && this.isTemplateElementId(el.id) && isUnchangedTemplate(this, el)) {
+			return;
+		}
 		let shape = el.rawXml as XmlObject | undefined;
+		// Rebuilding an untouched sibling can flatten rich text or unsupported
+		// image properties. Preserve its native shape on an otherwise dirty slide.
+		if (!insideGroup && shape && el.type !== 'group' && isUnchangedTemplate(this, el)) {
+			this.applyShapeIdToCnvPr(shape, el);
+			if (
+				el.type === 'picture' ||
+				el.type === 'image' ||
+				(el.type === 'media' && this.isPictureShape(shape))
+			) {
+				collectors.pics.push(shape);
+			} else if (el.type === 'connector') {
+				collectors.connectors.push(shape);
+			} else if (this.isGraphicFrameShape(shape)) {
+				collectors.graphicFrames.push(shape);
+			} else if (el.type === 'text' || el.type === 'shape') {
+				collectors.shapes.push(shape);
+			} else {
+				shape = undefined;
+			}
+			if (shape) {
+				return;
+			}
+			shape = el.rawXml;
+		}
 
 		// Image embedding
 		if ((el.type === 'picture' || el.type === 'image') && typeof el.imageData === 'string') {
@@ -469,9 +497,57 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 		// Group elements
 		if (el.type === 'group') {
-			const grpXml = this.buildGroupShapeXml(el as GroupPptxElement, ctx);
-			if (!grpXml) {
-				return;
+			const templateTree =
+				!insideGroup && this.isTemplateElementId(el.id)
+					? this.getTemplateSpTree(ctx.slide.id, el.id)
+					: undefined;
+			const sourceTree =
+				templateTree ?? this.ensureSlideTree(this.slideMap.get(ctx.slide.id) ?? {});
+			const original = findOriginalGroup(sourceTree, el.rawXml);
+			const grpXml = writeGroupShape(
+				el,
+				PptxHandlerRuntime.EMU_PER_PX,
+				(children) => {
+					const childCollectors: SlideShapeCollectors = {
+						shapes: [],
+						pics: [],
+						connectors: [],
+						graphicFrames: [],
+						groups: [],
+						model3ds: [],
+						contentParts: [],
+						zooms: [],
+					};
+					for (const child of children) {
+						this.processSlideElement(structuredClone(child), childCollectors, ctx, true);
+					}
+					return {
+						'p:sp': childCollectors.shapes,
+						'p:pic': childCollectors.pics,
+						'p:cxnSp': childCollectors.connectors,
+						'p:graphicFrame': childCollectors.graphicFrames,
+						'p:grpSp': childCollectors.groups,
+						'p16:model3D': childCollectors.model3ds,
+						'p:contentPart': childCollectors.contentParts,
+						'pslz:sldZm': childCollectors.zooms.filter((zoom) => zoom['pslz:sldZmObj']),
+						'psezm:sectionZm': childCollectors.zooms.filter((zoom) => zoom['psezm:sectionZmObj']),
+						'psuz:summaryZm': childCollectors.zooms.filter((zoom) => zoom['psuz:summaryZmObj']),
+					};
+				},
+				original,
+			);
+			this.applyShapeIdToCnvPr(grpXml, el);
+			if (templateTree) {
+				if (original && original !== grpXml) {
+					for (const key of Object.keys(original)) {
+						delete original[key];
+					}
+					Object.assign(original, grpXml);
+				} else if (!original) {
+					this.ensureTemplateShapeAttached(templateTree, 'group', grpXml);
+				}
+			} else {
+				collectors.groups.push(grpXml);
 			}
 			// Locks are the one part of a group's non-visual properties the model
 			// owns; everything else on `p:nvGrpSpPr` is carried over verbatim by
@@ -707,7 +783,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		this.applyGraphicFrameAltTextToCnvPr(shape, el);
 
 		// Template elements
-		if (this.isOwnTemplateElement(el, ctx)) {
+		if (!insideGroup && this.isTemplateElementId(el.id)) {
 			const templateSpTree = this.getTemplateSpTree(ctx.slide.id, el.id);
 			if (templateSpTree) {
 				el.rawXml = this.ensureTemplateShapeAttached(templateSpTree, el.type, shape);

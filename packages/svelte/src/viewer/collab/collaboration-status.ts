@@ -11,6 +11,21 @@ import { CONNECTION_TIMEOUT_MS } from 'pptx-viewer-shared';
 
 import type { CollabProviderHandle } from './collaboration-provider';
 
+/** WebSocket readiness requires authoritative sync; a lone WebRTC peer may seed. */
+export function wireInitialSync(
+	provider: CollabProviderHandle,
+	transport: string,
+	gate: SyncGate,
+): void {
+	gate.reset();
+	provider.onSynced(() => gate.open());
+	if (provider.syncedNow) {
+		gate.open();
+	} else if (transport === 'webrtc') {
+		gate.arm();
+	}
+}
+
 export interface WireStatusDeps {
 	setStatus: (status: ConnectionStatus) => void;
 	getStatus: () => ConnectionStatus;
@@ -58,7 +73,6 @@ export function wireProviderStatus(
 			// keeps the gate permanently open from the first connection and can
 			// clobber the room with a stale local doc.
 			deps.gate.reset();
-			deps.gate.arm();
 		}
 	});
 	if (provider.connectedNow) {
@@ -68,7 +82,6 @@ export function wireProviderStatus(
 			setTimeout(() => {
 				deps.setConnectTimer(null);
 				if (deps.getStatus() !== 'connected') {
-					deps.stop();
 					deps.setStatus('error');
 				}
 			}, CONNECTION_TIMEOUT_MS),

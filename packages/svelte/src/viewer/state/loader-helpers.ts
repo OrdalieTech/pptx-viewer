@@ -98,6 +98,7 @@ export async function resolveMediaUrls(
 export async function resolveLazyImages(
 	handler: PptxHandler,
 	slides: PptxSlide[],
+	resolvedUrls?: Map<string, string>,
 ): Promise<PptxSlide[]> {
 	const { paths, refs } = collectImagePaths(slides);
 	if (paths.size === 0) {
@@ -117,6 +118,9 @@ export async function resolveLazyImages(
 			}
 		}),
 	);
+	for (const [path, url] of resolvedMap) {
+		resolvedUrls?.set(path, url);
+	}
 
 	return slides.map((slide) => {
 		const newElements = applyImagePathPatches(slide.elements, resolvedMap, refs);

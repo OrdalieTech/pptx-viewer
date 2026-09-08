@@ -79,7 +79,10 @@ vi.mock(import('yjs'), () => {
 	class YText {
 		private _delta: { insert: string; attributes?: Record<string, string> }[] = [];
 		insert(_index: number, text: string, attrs?: Record<string, string>) {
-			this._delta.push({ insert: text, ...(attrs ? { attributes: attrs } : {}) });
+			this._delta.push({
+				insert: text,
+				...(attrs ? { attributes: attrs } : {}),
+			});
 		}
 		toDelta() {
 			return this._delta;
@@ -136,6 +139,7 @@ const awarenessSurface = {
 
 vi.mock(import('y-websocket'), () => ({
 	WebsocketProvider: class {
+		connect() {}
 		awareness = awarenessSurface;
 		wsconnected = false;
 		synced = false;
@@ -203,10 +207,19 @@ describe('useCollaboration', () => {
 		expect(collab.connected.value).toBeTruthy();
 
 		// A remote peer appears with a cursor on the same slide (index 0).
-		remotePresence(2, { userName: 'Bob', userColor: '#ff0000', cursorX: 10, cursorY: 20 });
+		remotePresence(2, {
+			userName: 'Bob',
+			userColor: '#ff0000',
+			cursorX: 10,
+			cursorY: 20,
+		});
 		state.awarenessChange?.();
 		expect(collab.cursors.value).toHaveLength(1);
-		expect(collab.cursors.value[0]).toMatchObject({ userName: 'Bob', x: 10, y: 20 });
+		expect(collab.cursors.value[0]).toMatchObject({
+			userName: 'Bob',
+			x: 10,
+			y: 20,
+		});
 
 		scope.stop();
 	});
@@ -276,7 +289,11 @@ describe('useCollaboration', () => {
 		await collab.start(config);
 
 		// A remote peer publishes selection + active slide (no cursor movement).
-		remotePresence(2, { userName: 'Bob', selectedElementId: 'el-9', activeSlideIndex: 2 });
+		remotePresence(2, {
+			userName: 'Bob',
+			selectedElementId: 'el-9',
+			activeSlideIndex: 2,
+		});
 		state.awarenessChange?.();
 
 		expect(collab.remotePresences.value).toHaveLength(1);
@@ -385,7 +402,11 @@ describe('useCollaboration', () => {
 		const scope = effectScope();
 		const collab = scope.run(() => useCollaboration({ slides, onRemoteSlides: vi.fn() }))!;
 
-		await collab.start({ roomId: 'bad room id', serverUrl: 'wss://x', userName: 'Ada' });
+		await collab.start({
+			roomId: 'bad room id',
+			serverUrl: 'wss://x',
+			userName: 'Ada',
+		});
 		expect(collab.status.value).toBe('error');
 		expect(collab.active.value).toBeFalsy();
 		scope.stop();
@@ -434,7 +455,12 @@ describe('useCollaboration', () => {
 		const slides = ref<PptxSlide[]>([slide('1')]);
 		const scope = effectScope();
 		const collab = scope.run(() =>
-			useCollaboration({ slides, onRemoteSlides: vi.fn(), canvasWidth: 100, canvasHeight: 100 }),
+			useCollaboration({
+				slides,
+				onRemoteSlides: vi.fn(),
+				canvasWidth: 100,
+				canvasHeight: 100,
+			}),
 		)!;
 		await collab.start(config);
 
