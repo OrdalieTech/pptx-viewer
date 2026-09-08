@@ -1,9 +1,10 @@
 import type { Component } from 'svelte';
 
-import type { SlideCanvasProps, ViewerToolbarProps } from './props';
+import type { SlideCanvasProps, ThumbnailRailProps, ViewerToolbarProps } from './props';
 import type { RibbonProps } from './ribbon/ribbon-types';
 import RibbonComponent from './ribbon/Ribbon.svelte';
 import SlideCanvasComponent from './SlideCanvas.svelte';
+import ThumbnailRailComponent from './ThumbnailRail.svelte';
 import ViewerToolbarComponent from './ViewerToolbar.svelte';
 
 /**
@@ -25,3 +26,6 @@ export const ViewerToolbar: Component<ViewerToolbarProps> =
 
 export const SlideCanvas: Component<SlideCanvasProps> =
 	SlideCanvasComponent as unknown as Component<SlideCanvasProps>;
+
+export const ThumbnailRail: Component<ThumbnailRailProps> =
+	ThumbnailRailComponent as unknown as Component<ThumbnailRailProps>;

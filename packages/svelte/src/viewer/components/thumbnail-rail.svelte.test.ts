@@ -31,6 +31,7 @@ function manySlides(count: number): PptxSlide[] {
 
 describe('thumbnailRail', () => {
 	it('exposes the canonical Slides navigation name', () => {
+		const onselect = vi.fn();
 		const target = document.createElement('div');
 		document.body.appendChild(target);
 		const instance = mount(ThumbnailRail, {
@@ -40,7 +41,7 @@ describe('thumbnailRail', () => {
 				canvasSize: { width: 960, height: 540 },
 				mediaDataUrls: new Map(),
 				current: 0,
-				onselect: vi.fn(),
+				onselect,
 			},
 		});
 		flushSync();
@@ -49,6 +50,10 @@ describe('thumbnailRail', () => {
 			target.remove();
 		};
 		expect(target.querySelector('nav')?.getAttribute('aria-label')).toBe('Slides');
+		const thumbnails = target.querySelectorAll<HTMLButtonElement>('.pptx-svelte-thumb');
+		expect(thumbnails).toHaveLength(3);
+		thumbnails[2].click();
+		expect(onselect).toHaveBeenCalledWith(2);
 	});
 
 	it('only marks thumbnails draggable when editing is enabled', () => {
