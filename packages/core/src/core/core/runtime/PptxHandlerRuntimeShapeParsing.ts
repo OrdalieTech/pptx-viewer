@@ -12,6 +12,42 @@ import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRunti
 import type { ShapeTextParsingContext } from './PptxHandlerRuntimeTypes';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
+	protected parseTableCellSegments(
+		txBody: XmlObject | undefined,
+		slidePath?: string,
+		slideRelationshipMap: Map<string, string> | undefined = slidePath
+			? this.slideRelsMap.get(slidePath)
+			: undefined,
+	): TextSegment[] {
+		const paragraphs = this.ensureArray(txBody?.['a:p']) as XmlObject[];
+		const textStyle: TextStyle = {};
+		const ctx: ShapeTextParsingContext = {
+			txBody,
+			inheritedTxBody: undefined,
+			bodyDefaultRunStyle: {},
+			slideRelationshipMap,
+			placeholderInfo: undefined,
+			phDefaults: undefined,
+			slidePath,
+			effectiveLevelStyles: undefined,
+			styleFontRefColor: undefined,
+			styleFontRefTypeface: undefined,
+			autoNumbering: createAutoNumberSequence(),
+		};
+
+		return paragraphs.flatMap((paragraph, index) => {
+			const style = this.resolveShapeParagraphStyle(paragraph, textStyle, ctx);
+			return this.collectShapeParagraphContent(
+				paragraph,
+				index,
+				paragraphs.length,
+				style.paraAlign,
+				style.mergedDefaultRunStyle,
+				ctx,
+			).segments;
+		});
+	}
+
 	protected parseShape(shape: XmlObject, id: string, slidePath?: string): PptxElement | null {
 		try {
 			const spPr = shape['p:spPr'] as XmlObject | undefined;

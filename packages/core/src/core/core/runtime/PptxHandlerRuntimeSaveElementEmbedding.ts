@@ -80,9 +80,19 @@ function getMediaReferenceContainer(shape: XmlObject | undefined): XmlObject | u
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	/** Serialize table, chart, and SmartArt data when applicable. */
-	protected applyDataSerialization(shape: XmlObject, el: PptxElement, slideId: string): void {
+	protected applyDataSerialization(
+		shape: XmlObject,
+		el: PptxElement,
+		slideId: string,
+		textContext?: SaveSlideContext,
+	): void {
 		if (el.type === 'table' && 'tableData' in el && (el as TablePptxElement).tableData) {
-			this.serializeTableDataToXml(shape, (el as TablePptxElement).tableData!);
+			this.serializeTableDataToXml(
+				shape,
+				(el as TablePptxElement).tableData!,
+				el.width,
+				textContext,
+			);
 		}
 		if (el.type === 'chart' && 'chartData' in el && el.chartData) {
 			this.serializeChartDataToXml(el.chartData, slideId);

@@ -646,7 +646,7 @@ export const translationsEn: Record<string, string> = {
 	// Comments (additions)
 	'pptx.comments.unknownAuthor': 'Unknown',
 	'pptx.comments.reopen': 'Reopen',
-	'pptx.comments.remove': 'Remove',
+	'pptx.comments.remove': 'Delete',
 	'pptx.comments.removeComment': 'Remove comment',
 	'pptx.comments.noneOnSlide': 'No comments on this slide yet.',
 	'pptx.comments.commentingAs': 'Commenting as {{name}}',

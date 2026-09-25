@@ -40,9 +40,9 @@ function describe(
 	});
 }
 
-export function previewElementAnimation(animation: PptxElementAnimation): boolean {
-	const target = document.querySelector<HTMLElement>(
-		`[data-element-id="${CSS.escape(animation.elementId)}"]`,
+export function previewElementAnimation(animation: PptxElementAnimation, root: ParentNode = document): boolean {
+	const target = root.querySelector<HTMLElement>(
+		`.pptx-svelte-stage [data-element-id="${CSS.escape(animation.elementId)}"]`,
 	);
 	if (!target) {
 		return false;

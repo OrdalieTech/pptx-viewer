@@ -122,6 +122,7 @@ export function useViewerEffects(deps: ViewerEffectsDeps): void {
 			deps.getOnload()?.({
 				slideCount: deps.loader.slides.length,
 				canvasSize: deps.loader.canvasSize,
+				compatibilityWarnings: deps.loader.compatibilityWarnings,
 			});
 		}
 	});

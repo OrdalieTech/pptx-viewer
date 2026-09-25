@@ -35,6 +35,7 @@ import type { PptxTableCell, TablePptxElement } from 'pptx-viewer-core';
 export function withCellText(cell: PptxTableCell, text: string): PptxTableCell {
 	const next: PptxTableCell = { ...cell, text };
 	delete next.textRuns;
+	delete next.textSegments;
 	return next;
 }
 

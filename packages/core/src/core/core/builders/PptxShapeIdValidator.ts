@@ -85,33 +85,66 @@ export class PptxShapeIdValidator implements IPptxShapeIdValidator {
 			return 0;
 		}
 
-		// Collect all used IDs and find duplicates
-		const usedIds = new Set<number>();
-		const duplicates: XmlObject[] = [];
-		let maxId = 0;
+		const shapeLists = ['p:sp', 'p:pic', 'p:cxnSp', 'p:graphicFrame', 'p:grpSp', 'p:contentPart'];
+		const maxId = cNvPrNodes.reduce(
+			(max, node) => Math.max(max, Number.parseInt(String(node['@_id']), 10) || 0),
+			0,
+		);
+		let reassigned = 0;
+		let nextId = maxId;
 
-		for (const cNvPr of cNvPrNodes) {
-			const idRaw = Number.parseInt(String(cNvPr['@_id'] ?? '0'), 10);
-			const id = Number.isFinite(idRaw) ? idRaw : 0;
-			if (id > maxId) {
-				maxId = id;
+		const directCnvPrNodes = (node: XmlObject): XmlObject[] => {
+			const result: XmlObject[] = [];
+			for (const key of [
+				'p:nvSpPr',
+				'p:nvPicPr',
+				'p:nvCxnSpPr',
+				'p:nvGrpSpPr',
+				'p:nvGraphicFramePr',
+				'p:nvContentPartPr',
+			]) {
+				const cNvPr = (node[key] as XmlObject | undefined)?.['p:cNvPr'];
+				if (cNvPr) result.push(cNvPr as XmlObject);
 			}
+			const p14CnvPr = (node['p14:nvContentPartPr'] as XmlObject | undefined)?.['p14:cNvPr'];
+			if (p14CnvPr) result.push(p14CnvPr as XmlObject);
+			return result;
+		};
 
-			if (id === 0 || usedIds.has(id)) {
-				duplicates.push(cNvPr);
-			} else {
+		const visit = (node: XmlObject, usedIds: Set<number>): void => {
+			for (const cNvPr of directCnvPrNodes(node)) {
+				let id = Number.parseInt(String(cNvPr['@_id'] ?? '0'), 10) || 0;
+				if (id <= 0 || usedIds.has(id)) {
+					id = ++nextId;
+					cNvPr['@_id'] = String(id);
+					reassigned++;
+				}
 				usedIds.add(id);
 			}
-		}
 
-		// Reassign duplicate IDs
-		let reassigned = 0;
-		for (const cNvPr of duplicates) {
-			maxId += 1;
-			cNvPr['@_id'] = String(maxId);
-			usedIds.add(maxId);
-			reassigned += 1;
-		}
+			for (const key of shapeLists) {
+				for (const child of ensureArray(node[key]) as XmlObject[]) visit(child, usedIds);
+			}
+
+			// Choice and Fallback are alternatives in OOXML. Their shapes may
+			// legitimately carry matching IDs, while collisions with the base
+			// slide or within one branch must still be repaired.
+			for (const alternate of ensureArray(node['mc:AlternateContent']) as XmlObject[]) {
+				const branchIds: Set<number>[] = [];
+				for (const key of ['mc:Choice', 'mc:Fallback']) {
+					for (const branch of ensureArray(alternate[key]) as XmlObject[]) {
+						const branchUsedIds = new Set(usedIds);
+						visit(branch, branchUsedIds);
+						branchIds.push(branchUsedIds);
+					}
+				}
+				for (const ids of branchIds) {
+					for (const id of ids) usedIds.add(id);
+				}
+			}
+		};
+
+		visit(spTree, new Set());
 
 		return reassigned;
 	}

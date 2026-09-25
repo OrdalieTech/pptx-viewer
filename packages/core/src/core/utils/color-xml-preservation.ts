@@ -86,7 +86,22 @@ export function colorsEqual(left: string | undefined, right: string | undefined)
  * an optional `<a:alpha>` transform.
  */
 export function buildSrgbColorChoice(hex: string, opacity?: number): XmlObject {
-	const normalized = String(hex || '').replace(/^#/, '');
+	let normalized = String(hex || '').replace(/^#/, '');
+	const css = normalized.match(
+		/^rgba?\(\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)\s*,\s*(\d+(?:\.\d+)?)(?:\s*,\s*(\d*\.?\d+))?\s*\)$/i,
+	);
+	if (css) {
+		normalized = css
+			.slice(1, 4)
+			.map((channel) =>
+				Math.round(Math.min(255, Number(channel)))
+					.toString(16)
+					.padStart(2, '0'),
+			)
+			.join('')
+			.toUpperCase();
+		if (css[4] !== undefined) opacity = Math.max(0, Math.min(1, Number(css[4]))) * (opacity ?? 1);
+	}
 	const srgb: XmlObject = { '@_val': normalized };
 	if (typeof opacity === 'number' && Number.isFinite(opacity) && opacity >= 0 && opacity < 1) {
 		const alphaPct = Math.round(Math.max(0, Math.min(1, opacity)) * 100000);
@@ -127,7 +142,9 @@ export function serializeColorChoice(
 	opacity?: number,
 	options: SerializeColorOptions = {},
 ): XmlObject {
-	if (originalColorXml && colorsEqual(currentResolvedHex, fallbackHex)) {
+	const originalRgb = (originalColorXml?.['a:srgbClr'] as XmlObject | undefined)?.['@_val'];
+	const validOriginalRgb = originalRgb === undefined || /^[a-f\d]{6}$/i.test(String(originalRgb));
+	if (originalColorXml && validOriginalRgb && colorsEqual(currentResolvedHex, fallbackHex)) {
 		// Re-emit verbatim. preserveAlphaFromOriginal trusts inner transforms.
 		if (options.preserveAlphaFromOriginal !== false) {
 			return originalColorXml;

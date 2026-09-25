@@ -1,4 +1,4 @@
-import type { PptxSaveFormat } from 'pptx-viewer-core';
+import type { PptxCompatibilityWarning, PptxSaveFormat } from 'pptx-viewer-core';
 import type {
 	AccountAuthConfig,
 	CanvasSize,
@@ -13,6 +13,7 @@ import type {
 } from 'pptx-viewer-shared';
 import type { PptxAiConfig } from 'pptx-viewer-shared/ai';
 import type { LocaleCatalogEntry } from 'pptx-viewer-shared/i18n';
+import type { Snippet } from 'svelte';
 
 import type {
 	ExportGifOptions,
@@ -47,10 +48,14 @@ export interface ViewerLoadDetail {
 	slideCount: number;
 	/** Slide canvas size in pixels. */
 	canvasSize: CanvasSize;
+	/** Compatibility warnings for the loaded presentation and its slides. */
+	compatibilityWarnings: PptxCompatibilityWarning[];
 }
 
 /** Props for `<PowerPointViewer>`. */
 export interface PowerPointViewerProps {
+	/** Optional host avatar for comment authors. */
+	commentAvatar?: Snippet<[author: string]>;
 	/** PowerPoint content as `Uint8Array` (or `ArrayBuffer`). */
 	source: Uint8Array | ArrayBuffer | null | undefined;
 	/** Licensed font sources supplied by the host application. */
@@ -112,6 +117,8 @@ export interface PowerPointViewerProps {
 	showThumbnails?: boolean;
 	/** Show the navigation/zoom toolbar. Default true. */
 	showToolbar?: boolean;
+	/** Hide the Properties inspector tab in simplified host interfaces. */
+	hideInspectorProperties?: boolean;
 	/**
 	 * Toolbar buttons and/or ribbon tabs to hide, e.g. `['share', 'broadcast']`
 	 * to remove the collaboration entry points from a read-only embed, or
@@ -312,6 +319,11 @@ export interface PowerPointViewerProps {
  * surface subset the host drives directly.
  */
 export interface PowerPointViewerApi extends PowerPointViewerAPI {
+	/** Return the live collaboration document, or null when collaboration is stopped. */
+	getCollaborationDoc(): import('yjs').Doc | null;
+	executeRibbonCommand(command: import('./editor/host-ribbon-api').HostRibbonCommand): void;
+	/** Insert an element on the active slide and select it. Returns its generated ID. */
+	insertElement(element: import('pptx-viewer-core').PptxElement): string | null;
 	/** Undo the last committed edit. */
 	undo(): void;
 	/** Redo the last undone edit. */

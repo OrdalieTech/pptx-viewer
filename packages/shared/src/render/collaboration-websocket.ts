@@ -18,7 +18,7 @@ export interface AuthenticatedWebsocketProvider {
 	destroy(): void;
 	on(event: 'status', callback: (event: { status: string }) => void): void;
 	on(event: 'sync', callback: (synced: boolean) => void): void;
-	on(event: 'connection-close' | 'connection-error', callback: () => void): void;
+	on(event: 'connection-close' | 'connection-error', callback: (event?: { code?: number }) => void): void;
 }
 
 /** Start only after listeners and fresh credentials are installed. Server rooms never sync via BroadcastChannel. */
@@ -133,7 +133,15 @@ export function startCollaborationWebsocket(
 	provider.on('connection-error', () =>
 		report('error', new Error('Collaboration connection failed')),
 	);
-	provider.on('connection-close', () => {
+	provider.on('connection-close', (event) => {
+		if (event?.code === 4409 || event?.code === 4413) {
+			clearTimeout(syncTimer);
+			provider.disconnect();
+			config.onstatus?.('error', new Error(event.code === 4409
+				? 'Un conflit avec le fichier externe empêche la sauvegarde. Les modifications ne sont pas sauvegardées.'
+				: 'La présentation dépasse la limite de sauvegarde externe. Les modifications ne sont pas sauvegardées.'));
+			return;
+		}
 		clearTimeout(syncTimer);
 		report('disconnected');
 		schedule();

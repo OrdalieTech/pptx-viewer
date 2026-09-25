@@ -42,7 +42,7 @@ describe('reviewCommentsPanel', () => {
 		actionButton('Resolve').click();
 		flushSync();
 		expect(editor.slides[0]?.comments?.[0]?.resolved).toBeTruthy();
-		actionButton('Remove').click();
+		actionButton('Delete').click();
 		flushSync();
 		expect(editor.slides[0]?.comments).toStrictEqual([]);
 	});
@@ -60,10 +60,6 @@ describe('reviewCommentsPanel', () => {
 		const instance = mount(ReviewCommentsPanel, { target, props: { editor } });
 		cleanup = () => unmount(instance);
 
-		Array.from(target.querySelectorAll<HTMLButtonElement>('.pptx-svelte-comment-actions button'))
-			.find((button) => button.textContent === 'Reply')!
-			.click();
-		flushSync();
 		const replyBox = target.querySelector(
 			'.pptx-svelte-comment-reply-compose textarea',
 		) as HTMLTextAreaElement;
@@ -84,6 +80,46 @@ describe('reviewCommentsPanel', () => {
 		expect(target.querySelector('.pptx-svelte-comment-replies')?.textContent).toContain(
 			'A threaded reply',
 		);
+	});
+
+	it('uses the current collaborator name for new comments, not the translated default', () => {
+		const target = document.createElement('div');
+		const editor = createEditor();
+		editor.setSlides([
+			{
+				id: 'slide-1',
+				elements: [],
+				comments: [{ id: 'c1', text: 'From Alice', author: 'Alice' }],
+			} as PptxSlide,
+		]);
+		const instance = mount(ReviewCommentsPanel, {
+			target,
+			props: { editor },
+			context: new Map([['pptx-comment-author', () => 'Bob']]),
+		});
+		cleanup = () => unmount(instance);
+
+		const textarea = target.querySelector(
+			'.pptx-svelte-comments-compose textarea',
+		) as HTMLTextAreaElement;
+		textarea.value = 'From Bob';
+		textarea.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		(target.querySelector('.pptx-svelte-comments-compose button') as HTMLButtonElement).click();
+		flushSync();
+
+		expect(editor.slides[0]?.comments?.map((comment) => comment.author)).toEqual(['Alice', 'Bob']);
+		expect(Array.from(target.querySelectorAll('.pptx-svelte-comment-meta strong')).map((element) => element.textContent)).toEqual(['Alice', 'Bob']);
+		const replyBox = target.querySelector(
+			'.pptx-svelte-comment-reply-compose textarea',
+		) as HTMLTextAreaElement;
+		replyBox.value = 'Bob replies';
+		replyBox.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		(target.querySelector('.pptx-svelte-comment-reply-submit') as HTMLButtonElement).click();
+		flushSync();
+		expect(editor.slides[0]?.comments?.[0]?.replies?.[0]?.author).toBe('Bob');
+		expect(target.querySelector('.pptx-svelte-comment-reply strong')?.textContent).toBe('Bob');
 	});
 
 	/**

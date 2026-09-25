@@ -110,7 +110,11 @@ export class PptxCodec implements FormatCodec {
 					JSON.stringify({ ...slide, isDirty: undefined }) !==
 					JSON.stringify({ ...prior, isDirty: undefined });
 			}
-			const identities = preparePptxIdentities(slides, source.slides);
+			const identities = preparePptxIdentities(
+				slides,
+				source.slides,
+				doc.getMap('pptx:assets') as unknown as import('pptx-viewer-shared/collaboration').YMapLike,
+			);
 			const output = await handler.save(slides);
 			const warnings = handler
 				.getCompatibilityWarnings()

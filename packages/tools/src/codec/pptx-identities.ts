@@ -2,11 +2,18 @@ import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import JSZip from 'jszip';
 import { PptxHandler } from 'pptx-viewer-core';
 import type { PptxElement, PptxSlide, XmlObject } from 'pptx-viewer-core';
+import { sourceAssetReference } from 'pptx-viewer-shared/collaboration';
+import type { YMapLike } from 'pptx-viewer-shared/collaboration';
 
 const URI = 'urn:pptx-viewer:collaboration:identities:1';
 const NODE = 'cv:identities';
 type TableIds = { id: string; cells: string[] }[];
-type Identity = { slideId: string; elements: Map<string, string>; tables: Map<string, TableIds> };
+type Identity = {
+	slideId: string;
+	backgroundRef?: string;
+	elements: Map<string, string>;
+	tables: Map<string, TableIds>;
+};
 const array = (value: unknown): XmlObject[] =>
 	value === undefined ? [] : ((Array.isArray(value) ? value : [value]) as XmlObject[]);
 const template = (element: PptxElement): boolean => /^(layout-|master-)/.test(element.id);
@@ -38,6 +45,13 @@ function identity(slide: PptxSlide): Identity | undefined {
 		!metadata['@_slideId']
 	) {
 		throw new Error('Unsupported PPTX native collaboration identity version');
+	}
+	const backgroundRef = metadata['@_backgroundRef'];
+	if (
+		backgroundRef !== undefined &&
+		(typeof backgroundRef !== 'string' || !/^pptx-source:[a-f0-9]{64}$/.test(backgroundRef))
+	) {
+		throw new Error('Invalid PPTX background asset identity');
 	}
 	const mapped = new Map<string, string>();
 	const ids = new Set<string>();
@@ -77,7 +91,12 @@ function identity(slide: PptxSlide): Identity | undefined {
 			throw new Error('Invalid PPTX native table identities');
 		tables.set(shapeId, rows);
 	}
-	return { slideId: metadata['@_slideId'], elements: mapped, tables };
+	return {
+		slideId: metadata['@_slideId'],
+		backgroundRef: backgroundRef as string | undefined,
+		elements: mapped,
+		tables,
+	};
 }
 
 /** Restore stable IDs on parsed models before constructing their collaborative Yjs state. */
@@ -124,6 +143,7 @@ export function restorePptxIdentities(slides: PptxSlide[]): void {
 export function preparePptxIdentities(
 	slides: PptxSlide[],
 	nativeSourceSlides: PptxSlide[],
+	assets?: YMapLike,
 ): { finish: (bytes: Uint8Array) => Promise<Uint8Array> } {
 	const sources = new Map<string, PptxSlide>();
 	for (const source of nativeSourceSlides) {
@@ -133,6 +153,10 @@ export function preparePptxIdentities(
 	}
 	const plans = slides.map((slide) => {
 		const slideId = slide.id;
+		const backgroundRef =
+			slide.backgroundImage && assets
+				? sourceAssetReference(assets, slide.backgroundImage)
+				: undefined;
 		const source = sources.get(slideId);
 		if (source) {
 			slide.id = source.id;
@@ -159,7 +183,31 @@ export function preparePptxIdentities(
 			if (stableIds.has(element.id)) throw new Error('Duplicate PPTX collaborative element ID');
 			stableIds.add(element.id);
 			const prior = nativeById.get(element.id);
+			// Reuse XML from the current native base, not the snapshot's older seed.
+			if (prior?.rawXml) element.rawXml = structuredClone(prior.rawXml);
 			if (prior?.shapeId !== undefined) element.shapeId = prior.shapeId;
+			if (element.type === 'connector') {
+				const connections = (element.rawXml as XmlObject | undefined)?.[
+					'p:nvCxnSpPr'
+				] as XmlObject | undefined;
+				const endpoints = connections?.['p:cNvCxnSpPr'] as XmlObject | undefined;
+				if (endpoints) {
+					for (const [field, tag] of [
+						['connectorStartConnection', 'a:stCxn'],
+						['connectorEndConnection', 'a:endCxn'],
+					] as const) {
+						const endpoint = element.shapeStyle?.[field];
+						if (endpoint) {
+							endpoints[tag] = {
+								'@_id': endpoint.shapeId,
+								'@_idx': String(endpoint.connectionSiteIndex ?? 0),
+							};
+						} else {
+							delete endpoints[tag];
+						}
+					}
+				}
+			}
 			if (element.shapeId === undefined || allocated.has(String(element.shapeId))) {
 				while (used.has(String(next))) next++;
 				element.shapeId = String(next++);
@@ -168,7 +216,7 @@ export function preparePptxIdentities(
 			allocated.add(String(element.shapeId));
 			return { element, id: element.id };
 		});
-		return { slide, slideId, records };
+		return { slide, slideId, backgroundRef, records };
 	});
 
 	return {
@@ -218,9 +266,17 @@ export function preparePptxIdentities(
 					}
 				}
 				const previous = identity(parsed);
-				if (!entries.length && !tables.size && parsed.id === plan.slideId && !previous) continue;
+				if (
+					!entries.length &&
+					!tables.size &&
+					!plan.backgroundRef &&
+					parsed.id === plan.slideId &&
+					!previous
+				)
+					continue;
 				if (
 					previous?.slideId === plan.slideId &&
+					previous.backgroundRef === plan.backgroundRef &&
 					previous.elements.size === entries.length &&
 					JSON.stringify([...previous.tables]) === JSON.stringify([...tables]) &&
 					entries.every(
@@ -254,7 +310,12 @@ export function preparePptxIdentities(
 									':@': { '@_shapeId': shapeId, '@_rows': JSON.stringify(rows) },
 								})),
 							],
-							':@': { '@_xmlns:cv': URI, '@_version': '1', '@_slideId': plan.slideId },
+							':@': {
+								'@_xmlns:cv': URI,
+								'@_version': '1',
+								'@_slideId': plan.slideId,
+								...(plan.backgroundRef ? { '@_backgroundRef': plan.backgroundRef } : {}),
+							},
 						},
 					],
 				});

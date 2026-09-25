@@ -96,6 +96,18 @@ export async function saveEditorDocument(
 	viewProperties?: PptxViewProperties,
 	tableStyleOptions?: TableStyleSaveOptions,
 ): Promise<Uint8Array> {
+	const checkFidelity = () => {
+		const warnings = handler
+			.getCompatibilityWarnings()
+			.filter((warning) => warning.scope === 'save');
+		if (warnings.length) {
+			throw new Error(
+				`PPTX export would lose fidelity: ${warnings.map((warning) => `${warning.code}: ${warning.message}`).join('; ')}`,
+			);
+		}
+	};
+	// ponytail: a failed save has already mutated the handler; keep its warning visible on retry.
+	checkFidelity();
 	const metadata = {
 		...buildDeckSaveOptions({
 			headerFooter: snapshot.headerFooter,
@@ -135,7 +147,7 @@ export async function saveEditorDocument(
 		snapshot.slideMasters.length > 0 ||
 		snapshot.notesMaster !== undefined ||
 		snapshot.handoutMaster !== undefined;
-	return hasMasters
+	const bytes = await (hasMasters
 		? saveDeckWithPassword(
 				handler,
 				snapshot.slides,
@@ -159,5 +171,7 @@ export async function saveEditorDocument(
 					outputFormat: format,
 				},
 				saveIntent,
-			);
+			));
+	checkFidelity();
+	return bytes;
 }

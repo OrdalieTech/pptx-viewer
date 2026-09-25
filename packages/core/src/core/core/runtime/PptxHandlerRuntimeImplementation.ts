@@ -95,6 +95,8 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			extractFillOverlayStyle: (shapeProps) => this.extractFillOverlayStyle(shapeProps),
 		});
 		this.tableDataParser = new PptxTableDataParser({
+			extractCellTextSegments: (txBody, slidePath) =>
+				this.parseTableCellSegments(txBody, slidePath),
 			emuPerPx: PptxHandlerRuntime.EMU_PER_PX,
 			ensureArray: (value) => this.ensureArray(value),
 			parseColor: (colorNode, placeholderColor) => this.parseColor(colorNode, placeholderColor),

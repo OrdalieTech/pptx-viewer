@@ -11,6 +11,7 @@
 
 import type { PptxThemeColorRef } from './color-ref';
 import type { ParsedTableStyleEffect } from './table-style-edit';
+import type { TextSegment } from './text';
 
 /**
  * Per-cell visual style for a table cell.
@@ -294,6 +295,8 @@ export interface PptxTableCell {
 	 * string), so an edit path must clear them alongside setting `text`.
 	 */
 	textRuns?: PptxTableCellTextRun[];
+	/** Rich text used by collaborative edits and lossless PPTX serialization. */
+	textSegments?: TextSegment[];
 	/** Column span (defaults to 1). */
 	gridSpan?: number;
 	/** Row span (defaults to 1). */

@@ -1,6 +1,15 @@
 export function parseDataUrlToBytes(
 	dataUrl: string,
 ): { bytes: Uint8Array; extension: string } | null {
+	// Existing editor documents contain percent-encoded SVG icons.
+	const svg = dataUrl.match(/^data:image\/svg\+xml(?:;charset=utf-8)?,([\s\S]+)$/i);
+	if (svg) {
+		try {
+			return { bytes: new TextEncoder().encode(decodeURIComponent(svg[1])), extension: 'svg' };
+		} catch {
+			return null;
+		}
+	}
 	const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
 	if (!match) {
 		return null;

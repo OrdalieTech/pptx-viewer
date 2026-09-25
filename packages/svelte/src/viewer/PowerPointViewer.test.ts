@@ -57,6 +57,7 @@ describe('powerPointViewer', () => {
 		const detail = onload.mock.calls[0][0] as { slideCount: number };
 		expect(detail.slideCount).toBeGreaterThan(1);
 		expect(target.querySelector('.pptx-svelte-stage')).not.toBeNull();
+		expect(target.querySelector('[data-testid="pptx-compat-toasts"]')).toBeNull();
 		// Read-only decks now render the full ribbon (React parity), not the
 		// lean fallback toolbar.
 		expect(target.querySelector('.pptx-svelte-ribbon')).not.toBeNull();

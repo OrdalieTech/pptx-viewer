@@ -101,6 +101,10 @@ export class CollaborationController {
 	get active(): boolean {
 		return this.#active;
 	}
+	/** Return this session's live Y.Doc, or null when collaboration is stopped. */
+	getDocument(): YDocLike | null {
+		return this.#ydoc;
+	}
 	/** Read-only participant (session live with the `viewer` role) - cannot select/drag/mutate. */
 	get readOnly(): boolean {
 		return this.#active && this.#config?.role === 'viewer';

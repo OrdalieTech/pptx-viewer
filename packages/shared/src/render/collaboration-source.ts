@@ -1,5 +1,5 @@
 import { digest } from 'lib0/hash/sha256';
-import type { PptxSlide } from 'pptx-viewer-core';
+import type { PptxSlide, XmlObject } from 'pptx-viewer-core';
 
 import type { YDocLike, YMapLike } from './collaboration-sync';
 
@@ -31,6 +31,27 @@ export function registerCollaborationSource(doc: YDocLike, slides: readonly Pptx
 		slidePath = '',
 	): void => {
 		if (typeof value === 'string' && binaryFields.has(field) && value.length > 0) {
+			const root = (parent.rawXml as XmlObject | undefined)?.['p:sld'] as XmlObject | undefined;
+			const extensions = (root?.['p:extLst'] as XmlObject | undefined)?.['p:ext'];
+			const metadata = (Array.isArray(extensions) ? extensions : [extensions]).find(
+				(ext) =>
+					(ext as XmlObject | undefined)?.['@_uri'] ===
+					'urn:pptx-viewer:collaboration:identities:1',
+			) as XmlObject | undefined;
+			const backgroundRef =
+				field === 'backgroundImage'
+					? (metadata?.['cv:identities'] as XmlObject | undefined)?.['@_backgroundRef']
+					: undefined;
+			if (backgroundRef !== undefined) {
+				if (
+					typeof backgroundRef !== 'string' ||
+					!/^pptx-source:[a-f0-9]{64}$/.test(backgroundRef)
+				) {
+					throw new Error('Invalid PPTX background asset identity');
+				}
+				// Register every persisted identity, even when slides share the same payload.
+				values.set(backgroundRef, value);
+			}
 			if (refs.has(value)) {
 				return;
 			}
@@ -50,13 +71,17 @@ export function registerCollaborationSource(doc: YDocLike, slides: readonly Pptx
 					? path
 					: new URL(path, `https://pptx.invalid/${slidePath}`).pathname.slice(1);
 				identity = `package:${resolved}`;
+			} else if (field === 'backgroundImage' && slidePath && value.startsWith('blob:')) {
+				// Backgrounds have no imagePath in the loaded model. Their source slide
+				// identifies the resource across processes with different blob URLs.
+				identity = `package:${slidePath}#backgroundImage`;
 			} else if (value.startsWith('blob:')) {
 				throw new Error(`PPTX source asset ${field} has no stable package path`);
 			}
 			const hash = Array.from(digest(new TextEncoder().encode(identity)), (b) =>
 				b.toString(16).padStart(2, '0'),
 			).join('');
-			const ref = SOURCE_ASSET_PREFIX + hash;
+			const ref = backgroundRef ?? SOURCE_ASSET_PREFIX + hash;
 			values.set(ref, value);
 			refs.set(value, ref);
 		} else if (Array.isArray(value)) {

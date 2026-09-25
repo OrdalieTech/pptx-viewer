@@ -46,11 +46,13 @@
 		handler,
 		theme,
 		onthemechange,
+		expanded = false,
 	}: {
 		editor: EditorState;
 		handler: PptxHandler;
 		theme: PptxTheme | undefined;
 		onthemechange: (theme: PptxTheme) => void;
+		expanded?: boolean;
 	} = $props();
 	const t = useTranslator();
 	let busy = $state(false);
@@ -185,7 +187,7 @@
 	{/if}
 {/if}
 
-<details class="edit-theme">
+<details class="edit-theme" open={expanded}>
 	<summary>{t('pptx.themeEditor.title')}</summary>
 	<ThemeEditorPanel
 		theme={current}

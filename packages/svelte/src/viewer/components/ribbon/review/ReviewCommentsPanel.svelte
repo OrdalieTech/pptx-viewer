@@ -15,7 +15,8 @@
 	 * afterwards: both helpers append at a known position (the list's last
 	 * item, and the parent's last reply respectively).
 	 */
-	import type { PptxComment, PptxModernCommentAuthor, PptxSlide } from 'pptx-viewer-core';
+	import { getContext } from 'svelte';
+	import type { PptxComment, PptxCommentMention, PptxModernCommentAuthor, PptxSlide } from 'pptx-viewer-core';
 	import {
 		addCommentToList,
 		removeCommentFromList,
@@ -25,11 +26,10 @@
 
 	import { useTranslator } from '../../../../i18n/context';
 	import { useViewerOptions } from '../../../state/viewer-options-context';
-	import CommentBody from '../../CommentBody.svelte';
 	import type { EditorState } from '../../../editor/editor-state.svelte';
 	import { CommentComposeState } from './comment-compose.svelte';
+	import CommentCard from './CommentCard.svelte';
 	import CommentMentionSuggestions from './CommentMentionSuggestions.svelte';
-	import CommentReplyThread from './CommentReplyThread.svelte';
 
 	const {
 		editor,
@@ -45,12 +45,13 @@
 	} = $props();
 	const t = useTranslator();
 	const optionsState = useViewerOptions();
-	/** Options > General > "User name" wins over the generic default author label. */
-	const authorName = $derived(optionsState.options.general.userName || t('pptx.comments.defaultAuthorName'));
+	const collaboratorName = getContext<(() => string | undefined) | undefined>('pptx-comment-author');
+	const authorName = $derived(
+		collaboratorName?.()?.trim() ||
+		optionsState.options.general.userName ||
+		t('pptx.comments.defaultAuthorName'),
+	);
 	const compose = new CommentComposeState();
-	// Which comment has its reply composer open (one at a time).
-	let replyingTo = $state<string | null>(null);
-	const reply = new CommentComposeState();
 	const slide = $derived(editor.slides[editor.currentSlideIndex]);
 	const comments = $derived(slide?.comments ?? []);
 	const selectedLabel = $derived(editor.selectedElement?.type ?? null);
@@ -106,36 +107,26 @@
 		}
 	}
 
-	function startReply(id: string): void {
-		replyingTo = id;
-		reply.reset();
-	}
-
-	function cancelReply(): void {
-		replyingTo = null;
-		reply.reset();
-	}
-
-	function submitReply(id: string): void {
-		const next = replyToCommentInList(comments, id, reply.text, authorName);
+	function submitReply(id: string, text: string, mentions: PptxCommentMention[]): boolean {
+		const next = replyToCommentInList(comments, id, text, authorName);
 		if (!next) {
-			return;
+			return false;
 		}
 		replaceComments(
-			reply.mentions.length > 0
+			mentions.length > 0
 				? next.map((c) => {
 						const parentReplies = c.replies;
 						if (c.id !== id || !parentReplies || parentReplies.length === 0) {
 							return c;
 						}
 						const replies = parentReplies.map((r, i) =>
-							i === parentReplies.length - 1 ? { ...r, mentions: reply.mentions } : r,
+							i === parentReplies.length - 1 ? { ...r, mentions } : r,
 						);
 						return { ...c, replies };
 					})
 				: next,
 		);
-		cancelReply();
+		return true;
 	}
 
 	// Wire a composer's `<textarea>` to its `CommentComposeState` for the
@@ -209,44 +200,7 @@
 	{:else}
 		<div class="pptx-svelte-comments-list" aria-label={t('pptx.comments.slideComments')}>
 			{#each comments as comment (comment.id)}
-				<article class:resolved={comment.resolved} class="pptx-svelte-comment-card">
-					<div class="pptx-svelte-comment-meta">
-						<strong>{comment.author ?? t('pptx.comments.unknownAuthor')}</strong>
-						{#if comment.resolved}<span>{t('pptx.comments.resolved')}</span>{/if}
-					</div>
-					<p><CommentBody text={comment.text} mentions={comment.mentions} /></p>
-					<CommentReplyThread replies={comment.replies ?? []} />
-					<div class="pptx-svelte-comment-actions">
-						<button type="button" onclick={() => toggleResolved(comment.id)}>{comment.resolved ? t('pptx.comments.reopen') : t('pptx.comments.resolve')}</button>
-						<button type="button" onclick={() => startReply(comment.id)}>{t('pptx.comments.reply')}</button>
-						<button type="button" onclick={() => removeComment(comment.id)}>{t('pptx.comments.remove')}</button>
-					</div>
-					{#if replyingTo === comment.id}
-						<div class="pptx-svelte-comment-reply-compose">
-							<div class="pptx-svelte-comment-composer">
-								<textarea
-									value={reply.text}
-									rows="2"
-									placeholder={t('pptx.comments.replyPlaceholder', { author: comment.author ?? t('pptx.comments.unknownAuthor') })}
-									aria-label={t('pptx.comments.reply')}
-									oninput={onComposeChange(reply)}
-								onkeyup={onComposeChange(reply)}
-								onclick={onComposeChange(reply)}
-								onkeydown={onComposeKeydown(reply)}
-								></textarea>
-								<CommentMentionSuggestions
-									authors={reply.suggestions(mentionAuthors)}
-									highlightIndex={reply.highlightIndex}
-									onselect={(author) => reply.accept(author)}
-								/>
-							</div>
-							<div class="pptx-svelte-comment-reply-buttons">
-								<button type="button" class="pptx-svelte-comment-reply-cancel" onclick={cancelReply}>{t('pptx.comments.cancel')}</button>
-								<button type="button" class="pptx-svelte-comment-reply-submit" disabled={!reply.text.trim()} onclick={() => submitReply(comment.id)}>{t('pptx.comments.reply')}</button>
-							</div>
-						</div>
-					{/if}
-				</article>
+				<CommentCard {comment} {mentionAuthors} onResolve={toggleResolved} onRemove={removeComment} onReply={submitReply} />
 			{/each}
 		</div>
 	{/if}
@@ -261,21 +215,8 @@
 	.pptx-svelte-comments-target, .pptx-svelte-comments-empty { margin: 0; color: var(--pptx-muted-foreground, #94a3b8); font-size: 11px; }
 	.pptx-svelte-comments-compose { display: grid; gap: 5px; }
 	.pptx-svelte-comment-composer { position: relative; }
-	.pptx-svelte-comments textarea { box-sizing: border-box; width: 100%; resize: vertical; padding: 6px 7px; border: 1px solid var(--pptx-border, #33334d); border-radius: var(--pptx-radius, 6px); background: var(--pptx-muted, #2a2a3d); color: inherit; font: inherit; font-size: 12px; }
+	.pptx-svelte-comments-compose textarea { box-sizing: border-box; width: 100%; resize: vertical; padding: 8px; border: 1px solid var(--pptx-border, #33334d); border-radius: 8px; background: var(--pptx-card, #1e1e2e); color: inherit; font: inherit; font-size: 12px; }
 	.pptx-svelte-comments-compose button { justify-self: end; padding: 4px 8px; border: 0; border-radius: var(--pptx-radius, 6px); background: var(--pptx-primary, #6366f1); color: var(--pptx-primary-foreground, white); cursor: pointer; font: inherit; font-size: 11px; font-weight: 600; }
 	.pptx-svelte-comments-compose button:disabled { cursor: default; opacity: .45; }
-	.pptx-svelte-comments-list { display: grid; gap: 5px; max-height: 230px; overflow-y: auto; }
-	.pptx-svelte-comment-card { display: grid; gap: 5px; padding: 7px; border: 1px solid var(--pptx-border, #33334d); border-radius: var(--pptx-radius, 6px); background: var(--pptx-muted, #2a2a3d); }
-	.pptx-svelte-comment-card.resolved { opacity: .67; }
-	.pptx-svelte-comment-meta, .pptx-svelte-comment-actions { display: flex; align-items: center; gap: 6px; }
-	.pptx-svelte-comment-meta { justify-content: space-between; font-size: 11px; }
-	.pptx-svelte-comment-meta span { color: #9be9a8; font-size: 10px; font-weight: 600; }
-	.pptx-svelte-comment-card p { margin: 0; font-size: 11.5px; line-height: 1.35; white-space: pre-wrap; }
-	.pptx-svelte-comment-actions button { padding: 0; border: 0; background: transparent; color: var(--pptx-primary, #818cf8); cursor: pointer; font: inherit; font-size: 10.5px; }
-	.pptx-svelte-comment-actions button:last-child { color: #fb7185; }
-	.pptx-svelte-comment-reply-compose { display: grid; gap: 5px; }
-	.pptx-svelte-comment-reply-buttons { display: flex; justify-content: flex-end; gap: 6px; }
-	.pptx-svelte-comment-reply-cancel { padding: 3px 7px; border: 1px solid var(--pptx-border, #33334d); border-radius: var(--pptx-radius, 6px); background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: 10.5px; }
-	.pptx-svelte-comment-reply-submit { padding: 3px 8px; border: 0; border-radius: var(--pptx-radius, 6px); background: var(--pptx-primary, #6366f1); color: var(--pptx-primary-foreground, white); cursor: pointer; font: inherit; font-size: 10.5px; font-weight: 600; }
-	.pptx-svelte-comment-reply-submit:disabled { cursor: default; opacity: .45; }
+	.pptx-svelte-comments-list { display: grid; gap: 8px; max-height: 300px; overflow-y: auto; }
 </style>

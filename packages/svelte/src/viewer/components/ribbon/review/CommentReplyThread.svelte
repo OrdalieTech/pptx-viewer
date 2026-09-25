@@ -13,6 +13,7 @@
 
 	import { useTranslator } from '../../../../i18n/context';
 	import CommentBody from '../../CommentBody.svelte';
+	import CommentAuthor from './CommentAuthor.svelte';
 	// Self-import: a reply's own replies recurse into this same component.
 	// eslint-disable-next-line import/no-self-import
 	import CommentReplyThread from './CommentReplyThread.svelte';
@@ -25,7 +26,7 @@
 	<div class="pptx-svelte-comment-replies">
 		{#each replies as reply (reply.id)}
 			<div class="pptx-svelte-comment-reply">
-				<strong>{reply.author ?? t('pptx.comments.unknownAuthor')}</strong>
+				<CommentAuthor author={reply.author ?? t('pptx.comments.unknownAuthor')} createdAt={reply.createdAt} />
 				<p><CommentBody text={reply.text} mentions={reply.mentions} /></p>
 				{#if reply.replies && reply.replies.length > 0}
 					<CommentReplyThread replies={reply.replies} />
@@ -38,17 +39,18 @@
 <style>
 	.pptx-svelte-comment-replies {
 		display: grid;
-		gap: 4px;
-		padding-left: 8px;
-		border-left: 2px solid var(--pptx-border, #33334d);
+		gap: 10px;
+		margin-left: 20px;
+		padding-left: 12px;
+		border-left: 1px solid var(--pptx-border, #33334d);
 	}
-	.pptx-svelte-comment-reply strong {
-		font-size: 10.5px;
-	}
+	.pptx-svelte-comment-reply { display: grid; gap: 5px; }
 	.pptx-svelte-comment-reply p {
 		margin: 0;
-		font-size: 11px;
-		line-height: 1.35;
+		padding-left: 32px;
+		font-size: 12px;
+		line-height: 1.45;
 		white-space: pre-wrap;
+		overflow-wrap: anywhere;
 	}
 </style>

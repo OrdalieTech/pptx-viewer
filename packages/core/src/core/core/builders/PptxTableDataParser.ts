@@ -3,6 +3,7 @@ import type {
 	PptxTableCellStyle,
 	PptxTableData,
 	PptxTableRow,
+	TextSegment,
 	XmlObject,
 } from '../../types';
 import { parseTableEffectChain } from '../runtime/table-style-effect-parse';
@@ -14,6 +15,7 @@ import {
 	applyCellMarginStyle,
 } from './table-cell-fill-border-helpers';
 import { extractTableCellTextRuns } from './table-cell-runs';
+import { xmlText } from '../../utils/xml-access';
 import { applyCellAlignmentStyle, applyCellTextFormat } from './table-cell-text-style-helpers';
 
 export interface PptxTableDataParserContext {
@@ -37,6 +39,10 @@ export interface PptxTableDataParserContext {
 		rLink: string | undefined,
 		slidePath: string | undefined,
 	) => string | undefined;
+	extractCellTextSegments?: (
+		txBody: XmlObject | undefined,
+		slidePath: string | undefined,
+	) => TextSegment[];
 }
 
 export interface IPptxTableDataParser {
@@ -88,8 +94,20 @@ export class PptxTableDataParser implements IPptxTableDataParser {
 							cellNode['a:tcPr'] as XmlObject | undefined,
 						);
 						const textRuns = extractTableCellTextRuns(cellNode, this.context);
+						const textSegments = this.context.extractCellTextSegments?.(
+							cellNode['a:txBody'] as XmlObject | undefined,
+							slidePath,
+						);
+						const text = textSegments
+							? textSegments
+									.map((segment) =>
+										segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text,
+									)
+									.join('')
+							: this.extractTableCellText(cellNode);
 						return {
-							text: this.extractTableCellText(cellNode),
+							text,
+							...(textSegments ? { textSegments } : {}),
 							...(textRuns ? { textRuns } : {}),
 							style: this.extractTableCellStyleFromXml(cellNode, slidePath),
 							gridSpan: cellNode['@_gridSpan']
@@ -251,10 +269,10 @@ export class PptxTableDataParser implements IPptxTableDataParser {
 			let lineText = '';
 
 			for (const run of runs) {
-				lineText += String(run?.['a:t'] ?? '');
+				lineText += xmlText(run?.['a:t']) ?? '';
 			}
 			for (const field of fields) {
-				lineText += String(field?.['a:t'] ?? '');
+				lineText += xmlText(field?.['a:t']) ?? '';
 			}
 			lines.push(lineText);
 		}

@@ -75,6 +75,23 @@ describe('colorsEqual', () => {
 });
 
 describe('buildSrgbColorChoice', () => {
+	it('writes CSS translucent fills as valid RGB and alpha', () => {
+		expect(buildSrgbColorChoice('rgba(252, 228, 214, 0.5)')).toEqual({
+			'a:srgbClr': { '@_val': 'FCE4D6', 'a:alpha': { '@_val': '50000' } },
+		});
+		expect(buildSrgbColorChoice('rgb(252, 228, 214)')).toEqual({
+			'a:srgbClr': { '@_val': 'FCE4D6' },
+		});
+		expect(
+			serializeColorChoice(
+				{ 'a:srgbClr': { '@_val': 'rgba(252, 228, 214, 0.5)' } },
+				'rgba(252, 228, 214, 0.5)',
+				'rgba(252, 228, 214, 0.5)',
+			),
+		).toEqual({
+			'a:srgbClr': { '@_val': 'FCE4D6', 'a:alpha': { '@_val': '50000' } },
+		});
+	});
 	it('strips leading # from hex', () => {
 		expect(buildSrgbColorChoice('#A1B2C3')).toStrictEqual({
 			'a:srgbClr': { '@_val': 'A1B2C3' },

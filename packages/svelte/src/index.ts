@@ -43,6 +43,20 @@ export type {
 	PptxAiWritePolicy,
 } from 'pptx-viewer-shared/ai';
 export type { AutosaveStatus } from './viewer/state/autosave.svelte';
+export {
+	newImageElement,
+	newPresetShapeElement,
+	newShapeElement,
+	newTableElement,
+	newTextElement,
+} from './viewer/editor';
+export { toggleElementBullets } from 'pptx-viewer-shared';
+export { SHAPE_PRESET_DEFS } from 'pptx-viewer-shared';
+export {
+	glyphClassToTransform,
+	isStrokeGlyph,
+	shapeGlyphPath,
+} from './viewer/components/ribbon/insert/shape-glyphs';
 // Autosave recovery helpers (shared IndexedDB store). The viewer now OFFERS a
 // pre-crash snapshot back itself on load ("Recover unsaved changes?", see the
 // `autosave` prop docs); these stay exported for hosts that want to inspect,

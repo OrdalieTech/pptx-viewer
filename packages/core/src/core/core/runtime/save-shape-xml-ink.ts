@@ -63,7 +63,7 @@ export function buildInkShapeXml(el: InkPptxElement, emuPerPx: number): XmlObjec
 	const shape: XmlObject = {
 		'p:nvSpPr': {
 			'p:cNvPr': {
-				'@_id': '0',
+				'@_id': el.shapeId ?? '0',
 				'@_name': el.id,
 			},
 			'p:cNvSpPr': {},

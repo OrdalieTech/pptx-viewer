@@ -18,6 +18,7 @@
 	 * (so the toolbar's comments/inspector toggles stay in sync); standalone
 	 * mounts fall back to local state.
 	 */
+	import { getContext } from 'svelte';
 	import { hasShapeProperties, hasTextProperties, isImageLikeElement } from 'pptx-viewer-core';
 	import type { PptxHandler, PptxTheme } from 'pptx-viewer-core';
 	import { shouldShowAccessibilitySection } from 'pptx-viewer-shared';
@@ -53,7 +54,9 @@
 
 	// Standalone fallbacks when no ChromeUiState is provided (tests, hosts).
 	let localTab = $state<InspectorTabId>('properties');
-	const activeTab = $derived(ui ? ui.inspectorTab : localTab);
+	const hideProperties = getContext<(() => boolean) | undefined>('pptx-hide-inspector-properties');
+	const requestedTab = $derived(ui ? ui.inspectorTab : localTab);
+	const activeTab = $derived(hideProperties?.() && requestedTab === 'properties' ? 'elements' : requestedTab);
 	function setTab(tab: InspectorTabId): void {
 		if (ui) {
 			ui.setInspectorTab(tab);
@@ -65,7 +68,7 @@
 	// Same dictionary key the vanilla inspector uses for its Elements tab.
 	const tabs = $derived<Array<{ id: InspectorTabId; label: string }>>([
 		{ id: 'elements', label: t('pptx.documentProperties.statistics.elements') },
-		{ id: 'properties', label: t('pptx.inspector.properties') },
+		...(hideProperties?.() ? [] : [{ id: 'properties' as const, label: t('pptx.inspector.properties') }]),
 		{ id: 'comments', label: t('pptx.toolbar.comments') },
 	]);
 

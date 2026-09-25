@@ -6,6 +6,7 @@ import type {
 	PptxChartSeries,
 	PptxChartView3D,
 	PptxTableData,
+	TextSegment,
 } from '../../types';
 import { applyChartAxisDisplayUnitsToXml } from '../../utils/chart-axis-dispunits-serializer';
 import { applyChartAxisGridlinesToXml } from '../../utils/chart-axis-gridlines-serializer';
@@ -94,6 +95,7 @@ import {
 } from './save-table-merge-helpers';
 import { rebuildTableXmlFromData } from './table-structural-ops';
 import { writeTablePropertiesOwnFillAndEffects } from './table-tblpr-save';
+import type { SaveSlideContext } from './PptxHandlerRuntimeSaveElementEmbedding';
 
 /**
  * `c:ext/@uri` for the Office 2017 (`c16r3:`) "show #N/A as an empty cell"
@@ -112,7 +114,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 * `<a:tr>` elements are rebuilt from scratch. Otherwise, the method
 	 * updates cells in place, preserving the original XML structure.
 	 */
-	protected serializeTableDataToXml(shape: XmlObject, tableData: PptxTableData): void {
+	protected serializeTableDataToXml(
+		shape: XmlObject,
+		tableData: PptxTableData,
+		width: number,
+		textContext?: SaveSlideContext,
+	): void {
 		try {
 			const graphicData = xmlPath(shape, 'a:graphic', 'a:graphicData');
 			const tbl = xmlChild(graphicData, 'a:tbl');
@@ -135,6 +142,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const dataColCount = tableData.columnWidths.length;
 
 			const structureChanged = dataRowCount !== xmlRows.length || dataColCount !== xmlColCount;
+			// PowerPoint sizes tables from the column grid, not only the frame.
+			const grid = (tbl['a:tblGrid'] ??= {}) as XmlObject;
+			const columns = this.ensureArray(grid['a:gridCol']);
+			const total = tableData.columnWidths.reduce((sum, value) => sum + value, 0);
+			if (Number.isFinite(width) && width > 0 && total > 0) {
+				grid['a:gridCol'] = tableData.columnWidths.map((value, index) => ({
+					...(columns[index] as XmlObject | undefined),
+					'@_w': String(Math.round((value / total) * width * PptxHandlerRuntime.EMU_PER_PX)),
+				}));
+			}
 
 			if (structureChanged) {
 				// Rebuild the entire table grid and rows from PptxTableData
@@ -163,7 +180,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 						}
 
 						if (cell.text !== undefined) {
-							this.writeTableCellText(xmlCell, cell.text);
+							this.writeTableCellSegments(xmlCell, cell.text, cell.textSegments, textContext);
 						}
 						if (cell.style) {
 							this.writeTableCellStyle(xmlCell, cell.style);
@@ -194,7 +211,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 					// Update text
 					if (cell.text !== undefined) {
-						this.writeTableCellText(xmlCell, cell.text);
+						this.writeTableCellSegments(xmlCell, cell.text, cell.textSegments, textContext);
 					}
 
 					// Update cell style
@@ -212,6 +229,33 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		} catch (e) {
 			console.warn('Failed to serialize table data:', e);
 		}
+	}
+
+	protected writeTableCellSegments(
+		xmlCell: XmlObject,
+		text: string,
+		segments: TextSegment[] | undefined,
+		textContext?: SaveSlideContext,
+	): void {
+		if (!Array.isArray(segments)) {
+			this.writeTableCellText(xmlCell, text);
+			return;
+		}
+		const body = (xmlCell['a:txBody'] ?? { 'a:bodyPr': {}, 'a:lstStyle': {} }) as XmlObject;
+		const original = this.parseTableCellSegments(
+			body,
+			textContext?.slide.id,
+			textContext?.getSlideRelationshipMap(),
+		);
+		if (JSON.stringify(original) === JSON.stringify(segments)) return;
+		body['a:p'] = this.createParagraphsFromTextContent(
+			text,
+			undefined,
+			segments,
+			textContext?.resolveHyperlinkRelationshipId,
+			original,
+		);
+		xmlCell['a:txBody'] = body;
 	}
 
 	/** Pending chart data updates to process in the async save method. */

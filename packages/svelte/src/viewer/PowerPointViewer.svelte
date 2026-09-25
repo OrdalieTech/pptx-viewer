@@ -10,14 +10,15 @@
 	 * measured viewport), and the imperative instance API, which Svelte
 	 * requires the component itself to `export`.
 	 */
-	import { onDestroy } from 'svelte';
+	import { onDestroy, setContext } from 'svelte';
+	import HostRibbonPanel from './components/HostRibbonPanel.svelte';
+	import { createHostRibbonApi } from './editor/host-ribbon-api';
 	import { buildUserFontFaceStyles, themeToCssVars } from 'pptx-viewer-shared';
 	import type { ViewerMode } from 'pptx-viewer-shared';
 
 	import { createTranslator } from '../i18n/translator';
 	import AiDock from './components/ai/AiDock.svelte';
 	import CollaborationChrome from './collab/components/CollaborationChrome.svelte';
-	import CompatibilityToasts from './components/CompatibilityToasts.svelte';
 	import ExportProgressModal from './components/ExportProgressModal.svelte';
 	import MobileActionSheets from './components/MobileActionSheets.svelte';
 	import PresentationOverlays from './components/PresentationOverlays.svelte';
@@ -41,6 +42,9 @@
 	const className = $derived(props.class ?? '');
 	const showThumbnails = $derived(props.showThumbnails ?? true);
 	const showToolbar = $derived(props.showToolbar ?? true);
+	setContext('pptx-hide-inspector-properties', () => props.hideInspectorProperties ?? false);
+	setContext('pptx-comment-author', () => props.collaboration?.userName);
+	setContext('pptx-comment-avatar', () => props.commentAvatar);
 	const showNotes = $derived(props.showNotes ?? true);
 
 	$effect(() => {
@@ -94,7 +98,7 @@
 
 	// Stable controller references (the bag is built once and never reassigned).
 	// svelte-ignore state_referenced_locally
-	const { loader, viewer, editor, parityUi, compatToasts, collab, dialogs, exportUi } = vm;
+	const { loader, viewer, editor, parityUi, collab, dialogs, exportUi } = vm;
 
 	// Emit CSS custom properties ONLY for an explicitly chosen theme, matching
 	// React's `useThemeStyle` (returns nothing when no theme is set). Emitting a
@@ -108,6 +112,10 @@
 	// Svelte requires these `export`s to live on the component, but every body
 	// is built in `editor/`, `export/` and `state/` modules.
 	export const undo = vm.editingApi.undo;
+	export const getCollaborationDoc = (): import('yjs').Doc | null =>
+		collab.getDocument() as unknown as import('yjs').Doc | null;
+	let hostPanel = $state<string | null>(null);
+	export const executeRibbonCommand = createHostRibbonApi(vm, (panel) => { hostPanel = panel; }, () => rootEl);
 	export const redo = vm.editingApi.redo;
 	export const canUndo = vm.editingApi.canUndo;
 	export const canRedo = vm.editingApi.canRedo;
@@ -142,6 +150,7 @@
 	export const getActiveSlide = vm.deck.getActiveSlide;
 	export const getElements = vm.deck.getElements;
 	export const getElementById = vm.deck.getElementById;
+	export const insertElement = vm.deck.insertElement;
 	export const updateElement = vm.deck.updateElement;
 	export const deleteElements = vm.deck.deleteElements;
 	export const duplicateElement = vm.deck.duplicateElement;
@@ -210,16 +219,7 @@
 		statusMessage={exportUi.status}
 		oncancel={() => exportUi.cancel()}
 	/>
-	<!-- Compatibility-warning toasts: load diagnostics, hidden during a running
-	     show like the rest of the editor chrome. -->
-	{#if !viewer.isFullscreen}
-		<CompatibilityToasts
-			toasts={compatToasts.visibleToasts}
-			overflowCount={compatToasts.overflowCount}
-			ondismiss={(id) => compatToasts.dismiss(id)}
-			ondismissall={() => compatToasts.dismissAll()}
-		/>
-	{/if}
+	<!-- ponytail: the host displays compatibility warnings from the load result. -->
 	{#if vm.versionHistoryOpen}<VersionHistoryPanel filePath={props.filePath} onclose={() => (vm.versionHistoryOpen = false)} onrestore={(bytes) => loader.load(bytes)} />{/if}
 	{#if vm.signatureWarningOpen}<SignatureStrippedDialog signatureCount={loader.digitalSignatureCount} onclose={vm.closeSignatureWarning} />{/if}
 	<ViewerParityOverlays ui={parityUi} {editor} {exportUi} slides={vm.displaySlides} canvasSize={loader.canvasSize} mediaDataUrls={loader.mediaDataUrls} current={viewer.current} fullscreen={viewer.isFullscreen} locale={themeLocale.effectiveLocale} themeKey={themeLocale.themeKey} themeCatalog={themeLocale.catalog} onsetthemekey={(key) => themeLocale.setThemeKey(key)} availableLocales={props.availableLocales} onsetlocale={(code) => themeLocale.setLocale(code)} onselectslide={(index) => viewer.goTo(index)} onmoveslide={vm.deck.moveSlide} optionsState={vm.optionsState} autosaveRecovery={vm.autosaveRecovery} aiEnabled={Boolean(props.ai)} collabActive={vm.collab.active} />
@@ -274,6 +274,9 @@
 			onclose={() => (vm.ai.panelOpen = false)}
 		/>
 	{/if}
+  {#if hostPanel}
+    {#key hostPanel}<HostRibbonPanel {vm} panel={hostPanel} onclose={() => { hostPanel = null; }} />{/key}
+  {/if}
 </div>
 
 <style>

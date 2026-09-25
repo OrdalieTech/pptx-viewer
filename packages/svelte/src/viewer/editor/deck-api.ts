@@ -14,7 +14,9 @@ import type { EditorState } from './editor-state.svelte';
 export type DeckApi = Omit<
 	PowerPointViewerAPI,
 	'getContent' | 'undo' | 'redo' | 'canUndo' | 'canRedo'
->;
+> & {
+	insertElement(element: PptxElement): string | null;
+};
 
 /** Live viewer accessors the deck API closes over (all read from viewer runes). */
 export interface DeckApiDeps {
@@ -143,6 +145,7 @@ export function createDeckApi(deps: DeckApiDeps): DeckApi {
 		getElementById: (id, slideIndex = viewer.current) =>
 			getElements(slideIndex).find((element) => element.id === id),
 
+		insertElement: (element) => editor.insertElement(element),
 		updateElement: (id, updates) => editor.applyElementPatch(id, updates),
 		deleteElements: (ids) => {
 			editor.selection.setAll(ids);

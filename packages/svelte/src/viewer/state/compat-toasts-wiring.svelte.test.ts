@@ -12,6 +12,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ViewerStateBag } from './create-viewer-state-types';
+import type { ViewerLoadDetail } from '../types';
 import CreateViewerStateHarness from './CreateViewerStateHarness.svelte';
 
 let cleanup: (() => void) | undefined;
@@ -29,7 +30,7 @@ async function buildDeck(): Promise<Uint8Array> {
 	}
 }
 
-async function loadHarness(source: Uint8Array): Promise<ViewerStateBag> {
+async function loadHarness(source: Uint8Array, onload?: (detail: ViewerLoadDetail) => void): Promise<ViewerStateBag> {
 	let captured: ViewerStateBag | undefined;
 	const target = document.createElement('div');
 	const instance = mount(CreateViewerStateHarness, {
@@ -37,6 +38,7 @@ async function loadHarness(source: Uint8Array): Promise<ViewerStateBag> {
 		props: {
 			source,
 			editable: true,
+			onload,
 			onready: (state: ViewerStateBag) => {
 				captured = state;
 			},
@@ -60,9 +62,11 @@ async function loadHarness(source: Uint8Array): Promise<ViewerStateBag> {
 
 describe('svelte compat toasts wiring', () => {
 	it('populates loader.compatibilityWarnings from the handler after load', async () => {
-		const state = await loadHarness(await buildDeck());
+		const onload = vi.fn<(detail: ViewerLoadDetail) => void>();
+		const state = await loadHarness(await buildDeck(), onload);
 
 		expect(Array.isArray(state.loader.compatibilityWarnings)).toBeTruthy();
+		expect(onload).toHaveBeenCalledWith(expect.objectContaining({ compatibilityWarnings: state.loader.compatibilityWarnings }));
 		expect(state.compatToasts.visibleToasts).toStrictEqual([]);
 		expect(state.compatToasts.overflowCount).toBe(0);
 	}, 60_000);

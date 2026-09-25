@@ -13,6 +13,7 @@
 
 	import { createViewerState } from './create-viewer-state.svelte';
 	import type { ViewerStateBag } from './create-viewer-state-types';
+	import type { ViewerLoadDetail } from '../types';
 
 	const {
 		onready,
@@ -21,6 +22,7 @@
 		filePath,
 		editable = false,
 		onautosavetoggle,
+		onload,
 	}: {
 		onready: (state: ViewerStateBag) => void;
 		/** Optional deck bytes, so a test can exercise the real load pipeline. */
@@ -33,6 +35,7 @@
 		filePath?: string;
 		editable?: boolean;
 		onautosavetoggle?: (enabled: boolean) => void;
+		onload?: (detail: ViewerLoadDetail) => void;
 	} = $props();
 
 	const state = createViewerState({
@@ -49,6 +52,7 @@
 		getPieChart3D: () => false,
 		getEditable: () => editable,
 		onautosavetoggle: (enabled) => onautosavetoggle?.(enabled),
+		onload: (detail) => onload?.(detail),
 		getStageHolderEl: () => undefined,
 		getRootEl: () => undefined,
 		getViewportWidth: () => 0,

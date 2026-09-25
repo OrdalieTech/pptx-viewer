@@ -51,6 +51,9 @@ function buildSegmentAttrs(seg: Record<string, unknown>): Record<string, string>
 	if (seg.endParaRunProperties) {
 		a.pr = JSON.stringify(seg.endParaRunProperties);
 	}
+	if (seg.paragraphProperties !== undefined) {
+		a.pp = JSON.stringify(seg.paragraphProperties);
+	}
 	if (typeof seg.fieldType === 'string') {
 		a.ft = seg.fieldType;
 	}
@@ -143,6 +146,14 @@ export function encodeSegmentsToDelta(segments: unknown[]): DeltaOp[] {
 export function decodeDelta(delta: DeltaOp[]): Record<string, unknown>[] {
 	const segments: Record<string, unknown>[] = [];
 	for (const op of delta) {
+		if (
+			(op.attributes?.pb === '1' || op.attributes?.lb === '1') &&
+		typeof op.insert === 'string' &&
+		/^\n{2,}$/u.test(op.insert)
+		) {
+			segments.push(...decodeDelta([...op.insert].map((insert) => ({ ...op, insert }))));
+			continue;
+		}
 		if (typeof op.insert !== 'string' || op.insert === '') {
 			continue;
 		}
@@ -170,6 +181,9 @@ export function decodeDelta(delta: DeltaOp[]): Record<string, unknown>[] {
 		}
 		if (a.pl !== undefined) {
 			seg.paragraphLevel = Number(a.pl);
+		}
+		if (a.pp !== undefined) {
+			seg.paragraphProperties = JSON.parse(a.pp);
 		}
 		if (a.pr) {
 			try {
@@ -227,12 +241,9 @@ export function decodeDelta(delta: DeltaOp[]): Record<string, unknown>[] {
 				/* skip */
 			}
 		}
-		// '\n' is only the synthetic break marker when the op carries a break
-		// attribute; a literal newline TEXT run (no pb/lb) must keep its text or
-		// runs like "Project\nAtlas" collapse to "ProjectAtlas" on decode. The
-		// zero-width space is always the empty-run attribute holder.
-		const isBreakMarker = op.insert === '\n' && (a.pb === '1' || a.lb === '1');
-		if (!isBreakMarker && op.insert !== '​') {
+		// The zero-width space is the empty-run attribute holder. Break marker
+		// text stays on its segment so consecutive breaks can round-trip exactly.
+		if (op.insert !== '​') {
 			seg.text = op.insert;
 		}
 		segments.push(seg);
