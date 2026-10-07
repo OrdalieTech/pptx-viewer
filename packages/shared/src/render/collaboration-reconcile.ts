@@ -1,22 +1,6 @@
-/**
- * collaboration-reconcile.ts: Granular Y.Doc reconciliation for collaborative
- * editing.
- *
- * `writeSlidesToYDoc` replaces the entire pptx:slides array on every write,
- * which makes concurrent edits collide at document granularity (last writer
- * wins for the whole deck). `reconcileSlidesInYDoc` instead diffs the desired
- * slide state against the live Y.Doc and only mutates what changed:
- *
- *  - slides and elements are matched by `id`; unchanged ones keep their Y.Map
- *    instance so concurrent field edits merge via Yjs
- *  - scalar / complex fields are compared and only set when different
- *  - textBody is edited in place (minimal char-level diff via
- *    collaboration-text-merge.ts) when its canonical decoded form differs;
- *    wholesale replacement is only a fallback
- *  - removed items are deleted; moves change order ranks while retaining maps
- *
- * All mutations run in a single transaction tagged with LOCAL_SYNC_ORIGIN (or
- * a caller-supplied origin) so observers can ignore their own writes.
+/** Reconcile slides and elements by identity, preserving Yjs maps and merging text deltas.
+ * Apply local changes and remove unreferenced media in one transaction so observers
+ * can ignore their own writes via LOCAL_SYNC_ORIGIN.
  */
 
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
@@ -256,6 +240,27 @@ export function reconcileSlideYMap(
 	});
 }
 
+function collectAssetRefs(value: unknown, assets: YMapLike, refs = new Set<string>()): Set<string> {
+	if (typeof value === 'string') {
+		if (assets.get(value) !== undefined) {
+			refs.add(value);
+		}
+	} else if (isYArrayLike(value)) {
+		value.toArray().forEach((child) => collectAssetRefs(child, assets, refs));
+	} else if (
+		value &&
+		typeof value === 'object' &&
+		'forEach' in value &&
+		typeof value.forEach === 'function' &&
+		'get' in value &&
+		typeof value.get === 'function' &&
+		!isYTextLike(value)
+	) {
+		(value as YMapLike).forEach((child: unknown) => collectAssetRefs(child, assets, refs));
+	}
+	return refs;
+}
+
 /**
  * Granular local -> Y.Doc sync: mutate only what changed, inside one
  * transaction tagged with `origin` (default LOCAL_SYNC_ORIGIN) so the
@@ -269,6 +274,7 @@ export function reconcileSlidesInYDoc(
 ): void {
 	const assets = getAssetsMap(ydoc);
 	ydoc.transact(() => {
+		const before = collectAssetRefs(ydoc.getArray(YDOC_SLIDES_KEY), assets);
 		assertCollaborationSchema(ydoc);
 		if (ydoc.getMap(YDOC_META_KEY).get('schemaVersion') === undefined) {
 			ydoc.getMap(YDOC_META_KEY).set('schemaVersion', YDOC_SCHEMA_VERSION);
@@ -283,5 +289,11 @@ export function reconcileSlidesInYDoc(
 			},
 			update: (map, slide) => reconcileSlideYMap(map, slide, factories, assets),
 		});
+		const after = collectAssetRefs(arr, assets);
+		for (const ref of before) {
+			if (!after.has(ref)) {
+				assets.delete(ref);
+			}
+		}
 	}, origin);
 }

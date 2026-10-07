@@ -1,5 +1,5 @@
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
-import { cloneSlide } from 'pptx-viewer-core';
+import { cloneElement, cloneSlide } from 'pptx-viewer-core';
 import { clampZoomScale, createBlankSlide, makeSlideId } from 'pptx-viewer-shared';
 import type { PowerPointViewerAPI, ViewerMode } from 'pptx-viewer-shared';
 
@@ -99,8 +99,16 @@ export function createDeckApi(deps: DeckApiDeps): DeckApi {
 		addSlide: (afterIndex = editor.slides.length - 1) => {
 			const next = [...editor.slides];
 			const index = Math.min(Math.max(afterIndex + 1, 0), next.length);
-			next.splice(index, 0, createBlankSlide(index + 1, makeSlideId));
+			const reference = next[afterIndex] ?? next[0];
+			const added = createBlankSlide(index + 1, makeSlideId, reference);
+			next.splice(index, 0, added);
 			editor.commitSlides(renumbered(next));
+			if (reference) {
+				editor.templateElementsBySlideId = {
+					...editor.templateElementsBySlideId,
+					[added.id]: (editor.templateElementsBySlideId[reference.id] ?? []).map(cloneElement),
+				};
+			}
 			viewer.goTo(index);
 		},
 		deleteSlides: (indexes) => {

@@ -88,7 +88,7 @@ export const translations = {
 	'pptx.ribbon.rect': 'Rectifier',
 	'pptx.ribbon.rectangle': 'Rectangle',
 	'pptx.ribbon.ellipse': 'Ellipse',
-	'pptx.ribbon.line': 'Doubler',
+	'pptx.ribbon.line': 'Ligne',
 	'pptx.ribbon.image': 'Image',
 	'pptx.ribbon.insertImage': 'Insérer une image',
 	'pptx.ribbon.media': 'Médias',

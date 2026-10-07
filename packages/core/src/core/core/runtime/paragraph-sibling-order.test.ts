@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import type { XmlObject } from '../../types';
 import { PptxRuntimeDependencyFactory } from '../factories/PptxRuntimeDependencyFactory';
-import { paragraphContentEntries } from './paragraph-sibling-order';
+import {
+	cloneXmlWithParagraphOrder,
+	withAuthoredParagraphOrder,
+	paragraphContentEntries,
+} from './paragraph-sibling-order';
 
 /**
  * Order restoration for parsed `a:p` content: an inline `a:fld` (or `a:br`)
@@ -102,4 +106,19 @@ describe('paragraph sibling order', () => {
 		expect(authored).toBeFalsy();
 		expect(entries).toHaveLength(3);
 	});
+});
+
+test('preserves interleaved fields and breaks through identity cloning and serialization', () => {
+	const original = parseParagraph(
+		'<a:p><a:r><a:t>Before</a:t></a:r><a:fld type="slidenum"><a:t>7</a:t></a:fld><a:br/><a:r><a:t>After</a:t></a:r></a:p>',
+	);
+	const cloned = cloneXmlWithParagraphOrder(original);
+	const xml = factory.createBuilder().build({ 'p:txBody': withAuthoredParagraphOrder(cloned) });
+	const reparsed = (factory.createParser().parse(xml) as XmlObject)['p:txBody'] as XmlObject;
+	expect(contentSequence(reparsed)).toStrictEqual([
+		['a:r', 'Before'],
+		['a:fld', '7'],
+		['a:br', ''],
+		['a:r', 'After'],
+	]);
 });

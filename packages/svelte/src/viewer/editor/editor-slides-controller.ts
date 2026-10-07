@@ -39,7 +39,14 @@ export class EditorSlidesController {
 			this.#editor.slides,
 			this.#editor.currentSlideIndex,
 		);
+		const reference = this.#editor.slides[this.#editor.currentSlideIndex] ?? this.#editor.slides[0];
 		this.#editor.commitSlides(slides);
+		if (reference) {
+			this.#editor.templateElementsBySlideId = {
+				...this.#editor.templateElementsBySlideId,
+				[slides[newIndex].id]: (this.#editor.templateElementsBySlideId[reference.id] ?? []).map(cloneElement),
+			};
+		}
 		return newIndex;
 	}
 

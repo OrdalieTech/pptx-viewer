@@ -305,7 +305,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				});
 			});
 
-			if (currentRuns.length > 0 || paragraphs.length === 0) {
+			if (currentRuns.length > 0 || paragraphs.length === 0 || capturedParagraphMeta) {
 				pushParagraph();
 			}
 

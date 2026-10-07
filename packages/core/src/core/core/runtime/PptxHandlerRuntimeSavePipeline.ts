@@ -5,6 +5,7 @@ import { persistModernCommentPackage } from '../../utils/modern-comment-package'
 import { PptxSaveStateBuilder } from '../builders';
 import { createPptxSaveConstants } from '../factories';
 import type { PptxHandlerSaveOptions } from '../types';
+import { forkChartPartsSharedBetweenSlides } from './chart-part-ownership';
 import { applyHeaderFooterToMaster } from './header-footer-parts';
 import { slidesPerPageToPrintOutput } from './pptx-print-properties';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveHandoutInfrastructure';
@@ -55,6 +56,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		});
 		await this.ensureNotesMasterForAuthoredNotes(slides, saveConstants);
 		await this.ensureHandoutMasterInfrastructure(options?.handoutMaster, saveConstants);
+		await this.isolateNotesMasterThemes();
 
 		// Process each slide (this may embed new media files that register
 		// extensions in usedMediaPaths, so content-types must be updated after).
@@ -277,6 +279,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			saveConstants,
 		);
 		await this.processPendingChartUpdates();
+		await forkChartPartsSharedBetweenSlides({
+			zip: this.zip,
+			parser: this.parser,
+			builder: this.builder,
+			getLocalName: (key) => key.split(':').pop() ?? key,
+		});
 		await this.ensureChartPartContentTypes();
 		await this.ensureOleEmbeddingContentTypes();
 		await this.ensureDiagramPartContentTypes();

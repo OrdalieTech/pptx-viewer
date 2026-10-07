@@ -57,6 +57,7 @@ export interface CreateViewerStateOptions {
 	autosaveIntervalMs?: number;
 	getFilePath: () => string | undefined;
 	getInitialSlide: () => number;
+	getRemoteFonts: () => boolean;
 	/** Already locale-bound translator; propagated to descendants via context. */
 	t: Translator;
 	getSmartArt3D: () => boolean;

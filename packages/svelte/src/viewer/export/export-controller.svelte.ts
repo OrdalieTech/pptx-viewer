@@ -82,6 +82,20 @@ export class ExportController {
 		this.#deps = deps;
 	}
 
+	/** Render a slide without saving the document or changing the active slide. */
+	async renderSlidePng(index: number): Promise<string> {
+		if (this.exporting) throw new Error('An export is already running.');
+		if (!Number.isInteger(index) || index < 0 || index >= this.#deps.getSlideCount()) {
+			throw new Error('Invalid slide index.');
+		}
+		this.exporting = true;
+		try {
+			return (await this.#deps.rasterizeSlide(index)).toDataURL('image/png');
+		} finally {
+			this.exporting = false;
+		}
+	}
+
 	/** Export a single slide as a PNG download. Defaults to the current slide. */
 	async exportSlidePng(index?: number): Promise<void> {
 		const targetIndex = index ?? this.#deps.getCurrent();

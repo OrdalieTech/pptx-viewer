@@ -11,15 +11,17 @@ export function isFullscreenSupported(): boolean {
 
 /** Whether any element is currently fullscreen. */
 export function isFullscreenActive(): boolean {
-	return typeof document !== 'undefined' && document.fullscreenElement !== null;
+	return typeof document !== 'undefined' && Boolean(document.fullscreenElement);
 }
 
 /** Enter fullscreen on `el`, swallowing rejection (user gesture policies). */
-export async function enterFullscreen(el: HTMLElement): Promise<void> {
+export async function enterFullscreen(el: HTMLElement): Promise<boolean> {
 	try {
 		await el.requestFullscreen();
+		return true;
 	} catch {
-		// Denied (not a user gesture, iframe policy, ...): stay windowed.
+		// Denied or unavailable: the caller can present in its window.
+		return false;
 	}
 }
 
@@ -36,10 +38,10 @@ export async function exitFullscreen(): Promise<void> {
 }
 
 /** Toggle fullscreen for `el`. */
-export async function toggleFullscreen(el: HTMLElement): Promise<void> {
+export async function toggleFullscreen(el: HTMLElement): Promise<boolean> {
 	if (isFullscreenActive()) {
 		await exitFullscreen();
-	} else {
-		await enterFullscreen(el);
+		return true;
 	}
+	return enterFullscreen(el);
 }

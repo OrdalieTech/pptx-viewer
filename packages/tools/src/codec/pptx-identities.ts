@@ -1,6 +1,6 @@
 import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import JSZip from 'jszip';
-import { PptxHandler } from 'pptx-viewer-core';
+import { PptxHandler, cloneXmlWithParagraphOrder } from 'pptx-viewer-core';
 import type { PptxElement, PptxSlide, XmlObject } from 'pptx-viewer-core';
 import { sourceAssetReference } from 'pptx-viewer-shared/collaboration';
 import type { YMapLike } from 'pptx-viewer-shared/collaboration';
@@ -164,9 +164,15 @@ export function preparePptxIdentities(
 		}
 		if (slide.sourceSlideId)
 			slide.sourceSlideId = sources.get(slide.sourceSlideId)?.id ?? slide.sourceSlideId;
-		const mapping = source ? identity(source) : undefined;
+		const copied =
+			source || slide.sourceSlideId || !slide.rId
+				? undefined
+				: nativeSourceSlides.find((native) => native.rId === slide.rId);
+		if (copied) slide.sourceSlideId = copied.id;
+		const origin = source ?? copied;
+		const mapping = origin ? identity(origin) : undefined;
 		const nativeById = new Map(
-			(source ? elements(source) : []).map((element) => [
+			(origin ? elements(origin) : []).map((element) => [
 				mapping?.elements.get(String(element.shapeId)) ?? element.id,
 				element,
 			]),
@@ -184,12 +190,12 @@ export function preparePptxIdentities(
 			stableIds.add(element.id);
 			const prior = nativeById.get(element.id);
 			// Reuse XML from the current native base, not the snapshot's older seed.
-			if (prior?.rawXml) element.rawXml = structuredClone(prior.rawXml);
+			if (prior?.rawXml) element.rawXml = cloneXmlWithParagraphOrder(prior.rawXml);
 			if (prior?.shapeId !== undefined) element.shapeId = prior.shapeId;
 			if (element.type === 'connector') {
-				const connections = (element.rawXml as XmlObject | undefined)?.[
-					'p:nvCxnSpPr'
-				] as XmlObject | undefined;
+				const connections = (element.rawXml as XmlObject | undefined)?.['p:nvCxnSpPr'] as
+					| XmlObject
+					| undefined;
 				const endpoints = connections?.['p:cNvCxnSpPr'] as XmlObject | undefined;
 				if (endpoints) {
 					for (const [field, tag] of [

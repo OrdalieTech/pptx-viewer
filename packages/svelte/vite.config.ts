@@ -59,6 +59,7 @@ export default defineConfig({
 				index: resolve(__dirname, 'src/index.ts'),
 				'viewer/index': resolve(__dirname, 'src/viewer/index.ts'),
 				i18n: resolve(__dirname, 'src/i18n.ts'),
+				'i18n/fr': resolve(__dirname, 'src/i18n/fr.ts'),
 			},
 			formats: ['es'],
 			fileName: (_format, entryName) => `${entryName}.js`,

@@ -53,6 +53,10 @@
 			"types": "./dist/i18n.d.ts",
 			"import": "./dist/i18n.js"
 		},
+		"./i18n/fr": {
+			"types": "./dist/i18n/fr.d.ts",
+			"import": "./dist/i18n/fr.js"
+		},
 		"./styles": "./dist/pptx-svelte-viewer.css",
 		"./styles.css": "./dist/pptx-svelte-viewer.css"
 	},

@@ -287,6 +287,12 @@ export class PptxPresentationSlidesReconciler implements IPptxPresentationSlides
 			newSlideRelsPath,
 		});
 		if (!relationshipsCopied) {
+			const layoutTarget =
+				init.slide.layoutPath &&
+				/^ppt\/slideLayouts\/[^/]+\.xml$/u.test(init.slide.layoutPath) &&
+				init.input.zip.file(init.slide.layoutPath)
+					? `../slideLayouts/${init.slide.layoutPath.split('/').pop()}`
+					: '../slideLayouts/slideLayout1.xml';
 			const fallbackRels = {
 				Relationships: {
 					'@_xmlns': init.input.relationshipsNamespace,
@@ -294,16 +300,13 @@ export class PptxPresentationSlidesReconciler implements IPptxPresentationSlides
 						{
 							'@_Id': 'rId1',
 							'@_Type': init.input.slideLayoutRelationshipType,
-							'@_Target': '../slideLayouts/slideLayout1.xml',
+							'@_Target': layoutTarget,
 						},
 					],
 				},
 			} as XmlObject;
 			init.input.zip.file(newSlideRelsPath, init.input.xmlBuilder.build(fallbackRels));
-			init.input.slideRelsMap.set(
-				newSlidePath,
-				new Map<string, string>([['rId1', '../slideLayouts/slideLayout1.xml']]),
-			);
+			init.input.slideRelsMap.set(newSlidePath, new Map<string, string>([['rId1', layoutTarget]]));
 		}
 
 		init.slideTargetByRid.set(newSlideRid, init.input.toPresentationTarget(newSlidePath));

@@ -4,7 +4,8 @@
 	 * `InspectorPane`'s layer-order list). Lists the active slide's elements
 	 * top-most first (reverse paint order) and selects one on click.
 	 */
-	import { hasTextProperties } from 'pptx-viewer-core';
+	import { elementTypeLabelKey } from 'pptx-viewer-shared';
+ import { hasTextProperties } from 'pptx-viewer-core';
 	import type { PptxElement } from 'pptx-viewer-core';
 
 	import { useTranslator } from '../../../i18n/context';
@@ -23,7 +24,7 @@
 				return text;
 			}
 		}
-		return element.type;
+		return t(elementTypeLabelKey(element.type));
 	}
 
 	function isSelected(element: PptxElement): boolean {

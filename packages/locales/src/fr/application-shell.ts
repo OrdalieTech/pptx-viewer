@@ -117,7 +117,7 @@ export const translations = {
 	'pptx.viewer.loadError': 'Échec du chargement de la présentation.',
 	'pptx.viewer.slide': 'Diapositive',
 	'pptx.viewer.background': 'Arrière-plan',
-	'pptx.viewer.speakerNotesPlaceholder': 'Cliquez pour ajouter des notes de conférencier',
+	'pptx.viewer.speakerNotesPlaceholder': 'Cliquez pour ajouter des notes',
 	'pptx.viewer.digitalSignatures': 'Signatures numériques',
 	'pptx.viewer.elementProperties': 'Propriétés des éléments',
 	'pptx.viewer.slideProperties': 'Propriétés de la diapositive',

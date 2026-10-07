@@ -13,6 +13,7 @@ import type {
 } from 'pptx-viewer-shared';
 import {
 	LOCAL_SYNC_ORIGIN,
+	isTemplateElement,
 	observeYDocSlides,
 	readSlidesFromYDoc,
 	reconcileSlidesInYDoc,
@@ -131,4 +132,47 @@ export function publishLocalSlides(input: PublishLocalSlidesInput): string | nul
 	}
 	reconcileSlidesInYDoc(slides, ydoc, factories);
 	return serialized;
+}
+
+/** Restore inherited layout content missing from a persisted collaboration snapshot. */
+export function restoreMissingSlideLayout(
+	ydoc: YDocLike,
+	sourceSlides: readonly PptxSlide[],
+	factories: YjsFactories,
+): boolean {
+	const sourceById = new Map(sourceSlides.map((slide) => [slide.id, slide]));
+	const sourceByLayout = new Map(sourceSlides.filter((slide) => slide.layoutPath).map((slide) => [slide.layoutPath, slide]));
+	let changed = false;
+	const repaired = readSlidesFromYDoc(ydoc).map((slide) => {
+		// Slides created before layout inheritance was fixed have no source ID;
+		// the old writer attached layout1 to them on export.
+		const source = sourceById.get(slide.id) ?? sourceByLayout.get(slide.layoutPath ?? 'ppt/slideLayouts/slideLayout1.xml');
+		if (!source) return slide;
+		const missingBackground =
+			!slide.backgroundColor &&
+			!slide.backgroundGradient &&
+			!slide.backgroundImage &&
+			!slide.backgroundPattern &&
+			!!(source.backgroundColor || source.backgroundGradient || source.backgroundImage || source.backgroundPattern);
+		const presentIds = new Set(slide.elements.map((element) => element.id));
+		const missingTemplateElements = source.elements.filter(
+			(element) => isTemplateElement(element) && !presentIds.has(element.id),
+		);
+		if (!missingBackground && missingTemplateElements.length === 0) return slide;
+		changed = true;
+		return {
+			...slide,
+			...(missingBackground && {
+				layoutPath: source.layoutPath,
+				backgroundColor: source.backgroundColor,
+				backgroundGradient: source.backgroundGradient,
+				backgroundImage: source.backgroundImage,
+				backgroundImageProperties: source.backgroundImageProperties,
+				backgroundPattern: source.backgroundPattern,
+			}),
+			elements: [...missingTemplateElements, ...slide.elements],
+		};
+	});
+	if (changed) reconcileSlidesInYDoc(repaired, ydoc, factories);
+	return changed;
 }

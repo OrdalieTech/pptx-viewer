@@ -205,6 +205,11 @@ export type CollaborationSessionIntent = 'create' | 'join';
  *
  * The same shape is accepted by every framework binding.
  */
+export interface CollaborationError extends Error {
+	code?: 'source_conflict' | 'too_large';
+	closeCode?: number;
+}
+
 export interface CollaborationConfig {
 	/** Unique identifier for the collaboration room (alphanumeric, hyphens, underscores). */
 	roomId: string;
@@ -236,7 +241,7 @@ export interface CollaborationConfig {
 	/** Transport lifecycle; only 'synced' confirms receipt of authoritative server state. */
 	onstatus?: (
 		status: 'connecting' | 'connected' | 'synced' | 'disconnected' | 'error',
-		error?: Error,
+		error?: CollaborationError,
 	) => void;
 	/** Role in the session; defaults to `'collaborator'`. */
 	role?: CollaborationRole;

@@ -3,6 +3,7 @@ import type {
 	AccountAuthConfig,
 	CanvasSize,
 	CollaborationConfig,
+	CollaborationError,
 	CollaborationRole,
 	CollaborationTransport,
 	PowerPointViewerAPI,
@@ -35,6 +36,7 @@ import type {
 export type {
 	CanvasSize,
 	CollaborationConfig,
+	CollaborationError,
 	CollaborationRole,
 	CollaborationTransport,
 	ToolbarActionId,
@@ -60,6 +62,8 @@ export interface PowerPointViewerProps {
 	source: Uint8Array | ArrayBuffer | null | undefined;
 	/** Licensed font sources supplied by the host application. */
 	fonts?: ViewerFontSource[];
+	/** Load missing deck fonts from Google Fonts. Defaults to true. */
+	remoteFonts?: boolean;
 	/**
 	 * Theme configuration for customising the viewer's appearance. Accepts
 	 * partial color overrides, a custom border-radius, and arbitrary CSS
@@ -346,6 +350,7 @@ export interface PowerPointViewerApi extends PowerPointViewerAPI {
 	 * the slide off-screen at scale 1 and rasterises it with `html2canvas-pro`
 	 * (dynamically imported), so the first call pays a one-time load cost.
 	 */
+	renderSlidePng(index: number): Promise<string>;
 	exportSlidePng(index?: number): Promise<void>;
 	/** Copy a slide to the system clipboard as a PNG image. */
 	copySlideAsImage(index?: number): Promise<void>;

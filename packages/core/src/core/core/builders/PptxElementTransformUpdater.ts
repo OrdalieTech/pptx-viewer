@@ -1,6 +1,5 @@
 import type { PptxElement, XmlObject } from '../../types';
-import { resolveRotatedResizeOffset } from '../../utils/rotated-resize-anchor';
-import { resolveXfrmEmu } from '../../utils/xfrm-emu-resolution';
+import { isXfrmEmuUnchanged, resolveXfrmEmu } from '../../utils/xfrm-emu-resolution';
 import { resolveGroupChildBoxEmu } from '../runtime/group-tight-rewrap';
 import type { GroupChildSpaceOwner } from '../runtime/group-xfrm-preservation';
 
@@ -20,10 +19,35 @@ export class PptxElementTransformUpdater implements IPptxElementTransformUpdater
 		emuPerPx: number,
 		enclosingGroupChildSpace?: GroupChildSpaceOwner,
 	): void {
-		const transform = ((shape['p:spPr'] as XmlObject | undefined)?.['a:xfrm'] ||
-			shape['p:xfrm']) as XmlObject | undefined;
+		let transform = ((shape['p:spPr'] as XmlObject | undefined)?.['a:xfrm'] || shape['p:xfrm']) as
+			| XmlObject
+			| undefined;
 		if (!transform) {
-			return;
+			const edited =
+				(
+					[
+						[element.x, element.xEmu],
+						[element.y, element.yEmu],
+						[element.width, element.widthEmu],
+						[element.height, element.heightEmu],
+					] as const
+				).some(([px, emu]) => !isXfrmEmuUnchanged(px, emu, emuPerPx)) ||
+				Boolean(element.rotation) ||
+				Boolean(element.flipHorizontal) ||
+				Boolean(element.flipVertical);
+			if (!edited || enclosingGroupChildSpace || !('p:spPr' in shape)) {
+				return;
+			}
+			const spPr =
+				shape['p:spPr'] && typeof shape['p:spPr'] === 'object'
+					? (shape['p:spPr'] as XmlObject)
+					: {};
+			transform = {};
+			shape['p:spPr'] = {
+				...Object.fromEntries(Object.entries(spPr).filter(([key]) => key.startsWith('@_'))),
+				'a:xfrm': transform,
+				...spPr,
+			};
 		}
 
 		if (!transform['a:off']) {
@@ -68,27 +92,9 @@ export class PptxElementTransformUpdater implements IPptxElementTransformUpdater
 			offX = inverted.xEmu;
 			offY = inverted.yEmu;
 		} else {
-			// A top-level (not-a-group-child) element: when it is rotated and
-			// this resize changed `a:ext`, a naive per-axis resolve visibly
-			// drifts the corner/edge the resize meant to hold in place - see
-			// `rotated-resize-anchor.ts`'s module doc for the COM-verified
-			// formula. At `rotation = 0`, or when nothing about the extent
-			// changed, this is a no-op and the naive result stands untouched.
-			const naiveOffX = resolveXfrmEmu(element.x, element.xEmu, emuPerPx);
-			const naiveOffY = resolveXfrmEmu(element.y, element.yEmu, emuPerPx);
-			const rotatedResize = resolveRotatedResizeOffset({
-				rotationDeg: element.rotation,
-				oldOffXEmu: element.xEmu,
-				oldOffYEmu: element.yEmu,
-				oldExtWidthEmu: element.widthEmu,
-				oldExtHeightEmu: element.heightEmu,
-				newExtWidthEmu: extCx,
-				newExtHeightEmu: extCy,
-				naiveOffXEmu: naiveOffX,
-				naiveOffYEmu: naiveOffY,
-			});
-			offX = rotatedResize ? rotatedResize.offXEmu : naiveOffX;
-			offY = rotatedResize ? rotatedResize.offYEmu : naiveOffY;
+			// Model coordinates already describe the unrotated frame used by a:off.
+			offX = resolveXfrmEmu(element.x, element.xEmu, emuPerPx);
+			offY = resolveXfrmEmu(element.y, element.yEmu, emuPerPx);
 		}
 
 		(transform['a:off'] as XmlObject)['@_x'] = String(offX);

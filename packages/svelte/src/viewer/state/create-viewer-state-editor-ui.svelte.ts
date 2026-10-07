@@ -154,6 +154,7 @@ export function useEditorUiCluster(deps: EditorUiClusterDeps): EditorUiCluster {
 		getSource: options.getSource,
 		getEditable: () => deps.getEditable() && !collab.readOnly && !readOnlyRec.locked,
 		getInitialSlide: options.getInitialSlide,
+		getRemoteFonts: options.getRemoteFonts,
 		getTranslator: () => options.t,
 		loader,
 		viewer,

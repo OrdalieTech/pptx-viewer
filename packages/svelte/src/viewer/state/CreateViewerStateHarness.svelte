@@ -40,6 +40,7 @@
 
 	const state = createViewerState({
 		getSource: () => source,
+		getRemoteFonts: () => true,
 		getAutosave: () => autosave,
 		getFilePath: () => filePath,
 		getInitialSlide: () => 0,

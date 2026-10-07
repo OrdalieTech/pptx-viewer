@@ -19,6 +19,7 @@ import { buildChartSpaceXml } from '../../utils/chart-xml-generator';
 import { ensureXmlChild } from '../../utils/xml-access';
 import { BLIP_FILL_ORDER, SP_PR_ORDER, reorderObjectKeys } from '../../utils/xml-reorder';
 import { findOriginalGroup, isUnchangedTemplate, writeGroupShape } from './group-shape-writer';
+import { withAuthoredParagraphOrder } from './paragraph-sibling-order';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveContentPartInk';
 import type { SaveSlideContext } from './PptxHandlerRuntimeSaveElementEmbedding';
 import { CHART_CONTENT_TYPE, CHART_RELATIONSHIP_TYPE } from './PptxHandlerRuntimeSaveShapeXml';
@@ -465,6 +466,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// image properties. Preserve its native shape on an otherwise dirty slide.
 		if (!insideGroup && shape && el.type !== 'group' && isUnchangedTemplate(this, el)) {
 			this.applyShapeIdToCnvPr(shape, el);
+			shape = withAuthoredParagraphOrder(shape);
 			if (
 				el.type === 'picture' ||
 				el.type === 'image' ||
@@ -505,38 +507,45 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const sourceTree =
 				templateTree ?? this.ensureSlideTree(this.slideMap.get(ctx.slide.id) ?? {});
 			const original = findOriginalGroup(sourceTree, el.rawXml);
-			const grpXml = writeGroupShape(
-				el,
-				PptxHandlerRuntime.EMU_PER_PX,
-				(children) => {
-					const childCollectors: SlideShapeCollectors = {
-						shapes: [],
-						pics: [],
-						connectors: [],
-						graphicFrames: [],
-						groups: [],
-						model3ds: [],
-						contentParts: [],
-						zooms: [],
-					};
-					for (const child of children) {
-						this.processSlideElement(structuredClone(child), childCollectors, ctx, true);
-					}
-					return {
-						'p:sp': childCollectors.shapes,
-						'p:pic': childCollectors.pics,
-						'p:cxnSp': childCollectors.connectors,
-						'p:graphicFrame': childCollectors.graphicFrames,
-						'p:grpSp': childCollectors.groups,
-						'p16:model3D': childCollectors.model3ds,
-						'p:contentPart': childCollectors.contentParts,
-						'pslz:sldZm': childCollectors.zooms.filter((zoom) => zoom['pslz:sldZmObj']),
-						'psezm:sectionZm': childCollectors.zooms.filter((zoom) => zoom['psezm:sectionZmObj']),
-						'psuz:summaryZm': childCollectors.zooms.filter((zoom) => zoom['psuz:summaryZmObj']),
-					};
-				},
-				original,
-			);
+			const grpXml =
+				!insideGroup && !templateTree && original && isUnchangedTemplate(this, el)
+					? withAuthoredParagraphOrder(original)
+					: writeGroupShape(
+							el,
+							PptxHandlerRuntime.EMU_PER_PX,
+							(children) => {
+								const childCollectors: SlideShapeCollectors = {
+									shapes: [],
+									pics: [],
+									connectors: [],
+									graphicFrames: [],
+									groups: [],
+									model3ds: [],
+									contentParts: [],
+									zooms: [],
+								};
+								for (const child of children) {
+									this.processSlideElement(structuredClone(child), childCollectors, ctx, true);
+								}
+								return {
+									'p:sp': childCollectors.shapes,
+									'p:pic': childCollectors.pics,
+									'p:cxnSp': childCollectors.connectors,
+									'p:graphicFrame': childCollectors.graphicFrames,
+									'p:grpSp': childCollectors.groups,
+									'p16:model3D': childCollectors.model3ds,
+									'p:contentPart': childCollectors.contentParts,
+									'pslz:sldZm': childCollectors.zooms.filter((zoom) => zoom['pslz:sldZmObj']),
+									'psezm:sectionZm': childCollectors.zooms.filter(
+										(zoom) => zoom['psezm:sectionZmObj'],
+									),
+									'psuz:summaryZm': childCollectors.zooms.filter(
+										(zoom) => zoom['psuz:summaryZmObj'],
+									),
+								};
+							},
+							original,
+						);
 			this.applyShapeIdToCnvPr(grpXml, el);
 			// Locks are the one part of a group's non-visual properties the model
 			// owns; everything else on `p:nvGrpSpPr` is carried over verbatim by

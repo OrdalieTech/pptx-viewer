@@ -35,6 +35,26 @@ const config: CollaborationConfig = {
 afterEach(() => vi.useRealTimers());
 
 describe('authenticated collaboration lifecycle', () => {
+	it.each([
+		[4409, 'source_conflict'],
+		[4413, 'too_large'],
+	] as const)('stops reconnecting on terminal close %s', async (closeCode, code) => {
+		vi.useFakeTimers();
+		const provider = new Provider();
+		const connect = provider.connect;
+		const onstatus = vi.fn();
+		startCollaborationWebsocket(provider, { ...config, onstatus });
+		provider.emit('connection-close', { code: closeCode });
+		expect(onstatus).toHaveBeenLastCalledWith(
+			'error',
+			expect.objectContaining({ code, closeCode }),
+		);
+		await vi.advanceTimersByTimeAsync(60000);
+		expect(connect).toHaveBeenCalledOnce();
+		expect(provider.shouldConnect).toBeFalsy();
+		provider.destroy();
+	});
+
 	it('never configures URL parameters', () => {
 		expect(
 			collaborationWebsocketOptions({

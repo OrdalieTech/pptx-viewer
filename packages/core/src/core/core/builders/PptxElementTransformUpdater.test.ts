@@ -207,14 +207,40 @@ describe('pptxElementTransformUpdater', () => {
 
 	// ── No-op when no transform node exists ──────────────────────────────
 
-	it('does nothing when shape has no transform node at all', () => {
+	it('keeps an untouched inherited transform implicit', () => {
 		const shape: XmlObject = { 'p:spPr': {} };
-		const element = makeElement({ x: 100, y: 100 });
+		const element = makeElement({
+			x: 100,
+			y: 100,
+			xEmu: 952500,
+			yEmu: 952500,
+			widthEmu: 952500,
+			heightEmu: 952500,
+		});
 		updater.applyTransform(shape, element, EMU_PER_PX);
 		// Should not throw and should not create a transform
 		expect((shape['p:spPr'] as XmlObject)['a:xfrm']).toBeUndefined();
 	});
 
+	it('writes a local transform when an inherited placeholder moves', () => {
+		const shape: XmlObject = { 'p:spPr': {} };
+		updater.applyTransform(
+			shape,
+			makeElement({
+				x: 120,
+				y: 100,
+				xEmu: 952500,
+				yEmu: 952500,
+				widthEmu: 952500,
+				heightEmu: 952500,
+			}),
+			EMU_PER_PX,
+		);
+		expect(((shape['p:spPr'] as XmlObject)['a:xfrm'] as XmlObject)['a:off']).toStrictEqual({
+			'@_x': '1143000',
+			'@_y': '952500',
+		});
+	});
 	// ── Creates a:off / a:ext if missing ─────────────────────────────────
 
 	it('creates a:off and a:ext nodes if they are missing from xfrm', () => {
@@ -246,13 +272,8 @@ describe('pptxElementTransformUpdater', () => {
 		expect((xfrm['a:off'] as XmlObject)['@_y']).toBe(String(Math.round(20.3 * EMU_PER_PX)));
 	});
 
-	// ── Rotated resize: `a:off` must move to keep the anchor edge on screen ─
-	// COM ground truth (a plain, non-group rectangle rotated 90 degrees,
-	// `Shape.Width *= 1.5` via real PowerPoint, unzipped and read back). See
-	// `rotated-resize-anchor.ts` for the derivation and the 25/180/-40 degree
-	// cases; this pins that a PLAIN (non-group) top-level shape takes the
-	// same corrected path as a group's own resize.
-	it('matches COM ground truth: a 90-degree plain shape resized via Width keeps the left edge on screen', () => {
+	// The model already contains the editor's chosen resize position. Saving must not re-anchor it.
+	it('preserves the model position when a rotated shape is resized', () => {
 		const shape = makeShapeXml();
 		const element = makeElement({
 			x: 400, // unchanged from xEmu (3810000 / 9525 = 400): the resize never touched x
@@ -270,8 +291,8 @@ describe('pptxElementTransformUpdater', () => {
 		const xfrm = (shape['p:spPr'] as XmlObject)['a:xfrm'] as XmlObject;
 		expect((xfrm['a:ext'] as XmlObject)['@_cx']).toBe('3810000');
 		expect((xfrm['a:ext'] as XmlObject)['@_cy']).toBe('1016000');
-		expect((xfrm['a:off'] as XmlObject)['@_x']).toBe('3175000');
-		expect((xfrm['a:off'] as XmlObject)['@_y']).toBe('1905000');
+		expect((xfrm['a:off'] as XmlObject)['@_x']).toBe('3810000');
+		expect((xfrm['a:off'] as XmlObject)['@_y']).toBe('1270000');
 	});
 
 	it('leaves an unrotated resize byte-identical to the pre-existing naive result', () => {

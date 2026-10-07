@@ -3,6 +3,8 @@ import type JSZip from 'jszip';
 
 import type { CompatibilityWarningInput } from '../../services';
 import type { PptxSlide, XmlObject } from '../../types';
+import { relativePartTarget, resolvePartTarget } from '../runtime/chart-part-registration';
+import { buildNotesSlide } from './notes-slide-xml';
 import type { IPptxSlideRelationshipRegistry } from './PptxSlideRelationshipRegistry';
 
 export interface PptxSlideNotesPartUpdaterInput {
@@ -29,19 +31,16 @@ export interface IPptxSlideNotesPartUpdater {
 
 export class PptxSlideNotesPartUpdater implements IPptxSlideNotesPartUpdater {
 	public async updateNotesPart(init: PptxSlideNotesPartUpdaterInput): Promise<void> {
-		if (
-			init.slide.notes === undefined &&
-			(!init.slide.notesSegments || init.slide.notesSegments.length === 0)
-		) {
-			return;
-		}
+		const hasNotes = init.slide.notes !== undefined || (init.slide.notesSegments?.length ?? 0) > 0;
 
 		const notesRelationship = init.relationshipRegistry.findFirstByTypeOrTargetIncludes(
 			init.slideNotesRelationshipType,
 			'notesslide',
 		);
 		if (!notesRelationship) {
-			await this.createNotesPart(init);
+			if (hasNotes) {
+				await this.createNotesPart(init);
+			}
 			return;
 		}
 
@@ -50,13 +49,19 @@ export class PptxSlideNotesPartUpdater implements IPptxSlideNotesPartUpdater {
 			return;
 		}
 
-		const notesPath = init.resolvePartPath(init.slide.id, notesTarget);
+		let notesPath = init.resolvePartPath(init.slide.id, notesTarget);
 		const notesXml = await init.zip.file(notesPath)?.async('string');
 		if (!notesXml) {
-			this.reportMissingNotesPart(init, notesPath);
+			if (hasNotes) {
+				this.reportMissingNotesPart(init, notesPath);
+			}
 			return;
 		}
 
+		notesPath = await this.claimNotesPart(init, notesRelationship, notesPath, notesXml);
+		if (!hasNotes) {
+			return;
+		}
 		const notesXmlObject = init.parser.parse(notesXml) as XmlObject;
 		const didUpdate = init.updateNotesXmlText(
 			notesXmlObject,
@@ -69,6 +74,81 @@ export class PptxSlideNotesPartUpdater implements IPptxSlideNotesPartUpdater {
 		}
 
 		init.zip.file(notesPath, init.xmlBuilder.build(notesXmlObject));
+	}
+
+	/**
+	 * A notes slide belongs to one slide. A slide copied from another one shares the source's
+	 * notes part: give it its own copy (or take the part over when its slide is gone), with a
+	 * back-relationship to it.
+	 */
+	private async claimNotesPart(
+		init: PptxSlideNotesPartUpdaterInput,
+		notesRelationship: XmlObject,
+		notesPath: string,
+		notesXml: string,
+	): Promise<string> {
+		const relsPathOf = (path: string) => path.replace(/([^/]+)$/, '_rels/$1.rels');
+		const relsXml = await init.zip.file(relsPathOf(notesPath))?.async('string');
+		const tree = relsXml
+			? (init.parser.parse(relsXml) as { Relationships: XmlObject })
+			: {
+					Relationships: {
+						'@_xmlns': 'http://schemas.openxmlformats.org/package/2006/relationships',
+					},
+				};
+		const raw = tree.Relationships.Relationship;
+		const relationships = (Array.isArray(raw) ? raw : raw ? [raw] : []) as XmlObject[];
+		let back = relationships.find((rel) => /\/slide$/u.test(String(rel['@_Type'] ?? '')));
+		const owner = back ? resolvePartTarget(notesPath, String(back['@_Target'] ?? '')) : void 0;
+		if (owner === init.slide.id) {
+			return notesPath;
+		}
+		let shared = owner !== void 0 && Boolean(init.zip.file(owner));
+		if (owner === void 0) {
+			for (const path of Object.keys(init.zip.files).filter((path2) =>
+				/^ppt\/slides\/_rels\/slide\d+\.xml\.rels$/u.test(path2),
+			)) {
+				const slide = path.replace('_rels/', '').replace(/\.rels$/u, '');
+				if (
+					slide !== init.slide.id &&
+					init.zip.file(slide) &&
+					(await init.zip.file(path)!.async('string')).includes(
+						`notesSlides/${notesPath.slice(notesPath.lastIndexOf('/') + 1)}"`,
+					)
+				) {
+					shared = true;
+				}
+			}
+		}
+		if (shared) {
+			const copy = this.nextNotesPartPath(init.zip);
+			init.zip.file(copy, notesXml);
+			init.relationshipRegistry.upsertRelationship(
+				String(notesRelationship['@_Id']),
+				String(notesRelationship['@_Type']),
+				`../notesSlides/${copy.slice(copy.lastIndexOf('/') + 1)}`,
+			);
+			await this.addNotesContentType(init, copy);
+			notesPath = copy;
+		} else if (owner === void 0) {
+			return notesPath;
+		}
+		if (!back) {
+			const used = new Set(relationships.map((rel) => String(rel['@_Id'])));
+			let index = 1;
+			while (used.has(`rId${index}`)) {
+				index += 1;
+			}
+			back = {
+				'@_Id': `rId${index}`,
+				'@_Type': String(notesRelationship['@_Type']).replace(/notesSlide$/u, 'slide'),
+			};
+			relationships.push(back);
+			tree.Relationships.Relationship = relationships;
+		}
+		back['@_Target'] = relativePartTarget(notesPath, init.slide.id);
+		init.zip.file(relsPathOf(notesPath), init.xmlBuilder.build(tree));
+		return notesPath;
 	}
 
 	private async createNotesPart(init: PptxSlideNotesPartUpdaterInput): Promise<void> {
@@ -91,7 +171,7 @@ export class PptxSlideNotesPartUpdater implements IPptxSlideNotesPartUpdater {
 			init.slideNotesRelationshipType,
 			`../notesSlides/${fileName}`,
 		);
-		init.zip.file(notesPath, init.xmlBuilder.build(this.buildNotesSlide(init.slide, strict)));
+		init.zip.file(notesPath, init.xmlBuilder.build(buildNotesSlide(init.slide, strict)));
 		init.zip.file(
 			`ppt/notesSlides/_rels/${fileName}.rels`,
 			init.xmlBuilder.build({
@@ -128,63 +208,6 @@ export class PptxSlideNotesPartUpdater implements IPptxSlideNotesPartUpdater {
 			index += 1;
 		}
 		return `ppt/notesSlides/notesSlide${index}.xml`;
-	}
-
-	private buildNotesSlide(slide: PptxSlide, strict: boolean): XmlObject {
-		const notesText =
-			slide.notes ??
-			slide.notesSegments?.map((segment) => String(segment.text ?? '')).join('') ??
-			'';
-		const p = strict
-			? 'http://purl.oclc.org/ooxml/presentationml/main'
-			: 'http://schemas.openxmlformats.org/presentationml/2006/main';
-		const a = strict
-			? 'http://purl.oclc.org/ooxml/drawingml/main'
-			: 'http://schemas.openxmlformats.org/drawingml/2006/main';
-		const r = strict
-			? 'http://purl.oclc.org/ooxml/officeDocument/relationships'
-			: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-		return {
-			'p:notes': {
-				'@_xmlns:a': a,
-				'@_xmlns:r': r,
-				'@_xmlns:p': p,
-				'p:cSld': {
-					'p:spTree': {
-						'p:nvGrpSpPr': {
-							'p:cNvPr': { '@_id': '1', '@_name': '' },
-							'p:cNvGrpSpPr': {},
-							'p:nvPr': {},
-						},
-						'p:grpSpPr': {
-							'a:xfrm': {
-								'a:off': { '@_x': '0', '@_y': '0' },
-								'a:ext': { '@_cx': '0', '@_cy': '0' },
-								'a:chOff': { '@_x': '0', '@_y': '0' },
-								'a:chExt': { '@_cx': '0', '@_cy': '0' },
-							},
-						},
-						'p:sp': {
-							'p:nvSpPr': {
-								'p:cNvPr': { '@_id': '2', '@_name': 'Notes Placeholder' },
-								'p:cNvSpPr': {},
-								'p:nvPr': { 'p:ph': { '@_type': 'body', '@_idx': '1' } },
-							},
-							'p:spPr': {},
-							'p:txBody': {
-								'a:bodyPr': {},
-								'a:lstStyle': {},
-								'a:p': {
-									'a:r': { 'a:rPr': { '@_lang': 'en-US' }, 'a:t': notesText },
-									'a:endParaRPr': { '@_lang': 'en-US' },
-								},
-							},
-						},
-					},
-				},
-				'p:clrMapOvr': { 'a:masterClrMapping': {} },
-			},
-		};
 	}
 
 	private async addNotesContentType(

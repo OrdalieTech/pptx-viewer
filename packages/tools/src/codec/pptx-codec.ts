@@ -1,4 +1,8 @@
-import { PptxHandler } from 'pptx-viewer-core';
+import {
+	PptxHandler,
+	createDefaultPptxHandlerRuntime,
+	rememberCollaborationBaseline,
+} from 'pptx-viewer-core';
 import {
 	assertCollaborationSchema,
 	assertSourceAssetsResolved,
@@ -84,7 +88,8 @@ export class PptxCodec implements FormatCodec {
 		if (!baseSourcePptx?.byteLength) {
 			throw new Error('PPTX source is required for export');
 		}
-		const handler = new PptxHandler();
+		const runtime = createDefaultPptxHandlerRuntime();
+		const handler = new PptxHandler({ runtime });
 		const source = await handler.load(baseSourcePptx.slice().buffer as ArrayBuffer);
 		const doc = ydoc as unknown as YDocLike;
 		registerCollaborationSource(doc, source.slides);
@@ -107,9 +112,13 @@ export class PptxCodec implements FormatCodec {
 			for (const slide of slides) {
 				const prior = original.get(slide.id);
 				slide.isDirty =
-					JSON.stringify({ ...slide, isDirty: undefined }) !==
-					JSON.stringify({ ...prior, isDirty: undefined });
+					JSON.stringify({ ...slide, isDirty: undefined, slideNumber: undefined }) !==
+					JSON.stringify({ ...prior, isDirty: undefined, slideNumber: undefined });
 			}
+			rememberCollaborationBaseline(
+				runtime,
+				[...original.values()].flatMap((slide) => slide.elements),
+			);
 			const identities = preparePptxIdentities(
 				slides,
 				source.slides,

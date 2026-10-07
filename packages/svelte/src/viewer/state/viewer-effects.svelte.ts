@@ -16,6 +16,7 @@ export interface ViewerEffectsDeps {
 	getSource(): Uint8Array | ArrayBuffer | null | undefined;
 	getEditable(): boolean;
 	getInitialSlide(): number;
+	getRemoteFonts(): boolean;
 	getTranslator(): Translator;
 	loader: PresentationLoader;
 	viewer: ViewerState;
@@ -151,6 +152,10 @@ export function useViewerEffects(deps: ViewerEffectsDeps): void {
 	// the probe is session-cached, so only unseen families hit the network.
 	if (typeof document !== 'undefined') {
 		$effect(() => {
+			if (!deps.getRemoteFonts()) {
+				removeGoogleWebfontsLink(document);
+				return;
+			}
 			let cancelled = false;
 			void resolveWebfontHref(deps.loader.slides, deps.loader.embeddedFonts).then((href) => {
 				if (cancelled) {

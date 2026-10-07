@@ -24,7 +24,11 @@ export function insertBlankSlideAfter(
 ): { slides: PptxSlide[]; newIndex: number } {
 	const insertAt = Math.min(Math.max(afterIndex + 1, 0), slides.length);
 	const next = [...slides];
-	next.splice(insertAt, 0, createBlankSlide(insertAt + 1, makeSlideId));
+	next.splice(
+		insertAt,
+		0,
+		createBlankSlide(insertAt + 1, makeSlideId, slides[afterIndex] ?? slides[0]),
+	);
 	return { slides: renumbered(next), newIndex: insertAt };
 }
 

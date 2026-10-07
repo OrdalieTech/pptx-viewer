@@ -42,6 +42,22 @@ function press(handlers: ReturnType<typeof createViewportHandlers>, key: string)
 }
 
 describe('slide-show chrome shortcuts', () => {
+	it('presents in the window when fullscreen is denied and exits on the next toggle', async () => {
+		const root = document.createElement('div');
+		root.requestFullscreen = vi.fn().mockRejectedValue(new Error('Denied'));
+		const viewer = { isFullscreen: false, current: 0 } as ViewportHandlersDeps['viewer'];
+		const { handlers } = harness({
+			viewer,
+			getRootEl: () => root,
+			presentation: { entryIndex: () => 0 } as ViewportHandlersDeps['presentation'],
+		});
+		handlers.onFullscreenToggle();
+		await vi.waitFor(() => expect(viewer.isFullscreen).toBeTruthy());
+		handlers.onFullscreenToggle();
+		expect(viewer.isFullscreen).toBeFalsy();
+		expect(root.requestFullscreen).toHaveBeenCalledOnce();
+	});
+
 	it('the Ctrl+H chord toggles the show chrome', () => {
 		const { handlers, toggleChrome } = harness();
 

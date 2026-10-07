@@ -67,3 +67,6 @@ export type {
 	PptxJsonConverterOptions,
 	PptxJsonSerializeOptions,
 } from './converter';
+
+export { cloneXmlWithParagraphOrder } from './core/core/runtime/paragraph-sibling-order';
+export { rememberCollaborationBaseline } from './core/core/runtime/group-shape-writer';

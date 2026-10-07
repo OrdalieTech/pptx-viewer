@@ -85,7 +85,9 @@ import {
 	switchChartPartFamily,
 	targetChartPartFamily,
 } from './chart-part-family-switch';
+import { forkSharedChartPart } from './chart-part-ownership';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeChartUserShapes';
+import type { SaveSlideContext } from './PptxHandlerRuntimeSaveElementEmbedding';
 import {
 	buildChartPoints,
 	replaceFirstTextValueInTree,
@@ -95,7 +97,6 @@ import {
 } from './save-table-merge-helpers';
 import { rebuildTableXmlFromData } from './table-structural-ops';
 import { writeTablePropertiesOwnFillAndEffects } from './table-tblpr-save';
-import type { SaveSlideContext } from './PptxHandlerRuntimeSaveElementEmbedding';
 
 /**
  * `c:ext/@uri` for the Office 2017 (`c16r3:`) "show #N/A as an empty cell"
@@ -286,6 +287,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		for (const { chartData, slidePath } of this.pendingChartUpdates) {
+			await forkSharedChartPart(
+				{
+					zip: this.zip,
+					parser: this.parser,
+					builder: this.builder,
+					getLocalName: (key) => key.split(':').pop() ?? key,
+				},
+				chartData,
+				slidePath,
+			);
 			if (chartData.colorPalette && chartData.colorStylePartPath) {
 				const paletteChanged =
 					JSON.stringify(chartData.colorPalette) !==

@@ -140,6 +140,7 @@ export function createViewerState(options: CreateViewerStateOptions): ViewerStat
 			void editor.save().then((bytes) => options.oncontentchange?.(bytes));
 		},
 	});
+	viewer.setSlideCountSource(() => editor.slides.length);
 	// Deck-level inspector actions (Properties tab, no selection), via context.
 	provideInspectorDeck(createInspectorDeckActions({ loader, editor }));
 	// The canvas table-cell range, so `TableView` can ring the selected block.

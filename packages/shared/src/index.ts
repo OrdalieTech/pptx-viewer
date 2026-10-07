@@ -21,3 +21,5 @@ export * from './types';
 export * from './constants';
 export * from './render';
 export * from './export';
+
+export { elementTypeLabelKey } from './render/element-type-label';

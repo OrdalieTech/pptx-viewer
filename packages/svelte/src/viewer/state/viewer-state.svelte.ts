@@ -9,10 +9,24 @@ import { viewerStoreSelection } from './viewer-store.svelte';
  * essentials, kept out of the SFC so it is unit-testable without a DOM.
  */
 export class ViewerState {
-	/** Number of slides in the loaded presentation. */
-	slideCount = $state(0);
+	#loadedSlideCount = $state(0);
+	#slideCountSource: (() => number) | null = null;
+	/** Number of slides in the editable presentation, including newly added slides. */
+	get slideCount(): number {
+		return this.#slideCountSource?.() ?? this.#loadedSlideCount;
+	}
+
+	setSlideCountSource(source: () => number): void {
+		this.#slideCountSource = source;
+	}
 	/** Active slide index (0-based). */
-	current = $state(0);
+	#current = $state(0);
+	get current(): number {
+		return clampSlideIndex(this.#current, this.slideCount);
+	}
+	set current(index: number) {
+		this.#current = index;
+	}
 	/**
 	 * The zoom itself lives in the shared `createViewerZoomStore`, so the model
 	 * is one definition across all five bindings rather than this binding's own
@@ -41,8 +55,8 @@ export class ViewerState {
 
 	/** Reset for a freshly-loaded presentation. */
 	reset(slideCount: number, initialSlide = 0): void {
-		this.slideCount = Math.max(0, slideCount);
-		this.current = clampSlideIndex(initialSlide, this.slideCount);
+		this.#loadedSlideCount = Math.max(0, slideCount);
+		this.current = clampSlideIndex(initialSlide, this.#loadedSlideCount);
 		this.zoomPercent = null;
 	}
 

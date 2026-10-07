@@ -1,4 +1,5 @@
 import type { GroupPptxElement, PptxElement, XmlObject } from '../../types';
+import { withAuthoredParagraphOrder } from './paragraph-sibling-order';
 
 const loadedGroups = new WeakMap<XmlObject, string>();
 const loadedTemplates = new WeakMap<object, Map<string, string>>();
@@ -77,7 +78,7 @@ export function writeGroupShape(
 ): XmlObject {
 	const source = original ?? group.rawXml;
 	if (source && loadedGroups.get(source) === groupState(group)) {
-		return source;
+		return withAuthoredParagraphOrder(source);
 	}
 	const xml: XmlObject = group.rawXml
 		? structuredClone(group.rawXml)
@@ -124,4 +125,31 @@ export function writeGroupShape(
 		}
 	}
 	return xml;
+}
+
+/**
+ * Replace the load-time state of these elements with the state a collaboration
+ * store reads back for them, so an element that went through that store
+ * unchanged still counts as unchanged (and keeps its original XML).
+ */
+export function rememberCollaborationBaseline(owner: object, elements2: PptxElement[]): void {
+	const templates = loadedTemplates.get(owner) ?? /* @__PURE__ */ new Map<string, string>();
+	const visit = (items: PptxElement[]): void => {
+		for (const element of items) {
+			templates.set(element.id, groupState(element));
+			if (element.type === 'group') {
+				visit(element.children);
+			}
+		}
+	};
+	visit(elements2);
+	loadedTemplates.set(owner, templates);
+}
+
+export function loadedTextSegments(
+	owner: object,
+	id: string,
+): import('../../types').TextSegment[] | undefined {
+	const state = loadedTemplates.get(owner)?.get(id);
+	return state ? JSON.parse(state).textSegments : undefined;
 }

@@ -218,7 +218,7 @@ export const translations = {
 	'pptx.documentProperties.statistics.elements': 'Éléments',
 	'pptx.documentProperties.statistics.hiddenSlides': 'Diapositives masquées',
 	'pptx.documentProperties.statistics.lastModifiedBy': 'Dernière modification par',
-	'pptx.documentProperties.statistics.notes': 'Remarques',
+	'pptx.documentProperties.statistics.notes': 'Notes',
 	'pptx.documentProperties.statistics.paragraphs': 'Paragraphes',
 	'pptx.documentProperties.statistics.presentationFormat': 'Format de présentation',
 	'pptx.documentProperties.statistics.revision': 'Révision',

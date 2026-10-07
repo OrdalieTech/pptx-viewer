@@ -66,7 +66,7 @@ export const translations = {
 	'pptx.smartart.preset.upwardArrow': 'Flèche vers le haut',
 	'pptx.smartart.preset.basicCycle': 'Cycle de base',
 	'pptx.smartart.preset.basicRadial': 'Radial de base',
-	'pptx.smartart.preset.basicPie': 'Tarte de base',
+	'pptx.smartart.preset.basicPie': 'Secteurs de base',
 	'pptx.smartart.preset.convergingRadial': 'Radial convergent',
 	'pptx.smartart.preset.hierarchy': 'Hiérarchie',
 	'pptx.smartart.preset.basicVenn': 'Venn de base',

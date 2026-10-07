@@ -8,6 +8,7 @@ import {
 	hasElementParagraphGeometry,
 	withoutElementParagraphGeometry,
 } from './element-paragraph-geometry';
+import { loadedTextSegments } from './group-shape-writer';
 import { preserveParagraphScopedState } from './paragraph-scoped-segment-state';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveEffectsWriter';
 import { buildParagraphPropertiesXml } from './PptxHandlerRuntimeSaveParagraphHelpers';
@@ -191,13 +192,75 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		txBody['a:bodyPr'] = bodyPr;
+		const authoredParagraphs = this.ensureArray(txBody['a:p']);
+		const paragraphGeometry = this.routeElementParagraphGeometry(txBody, el.textStyle);
 		txBody['a:p'] = this.createParagraphsFromTextContent(
 			textValueForSave,
-			this.routeElementParagraphGeometry(txBody, el.textStyle),
+			paragraphGeometry,
 			textSegmentsForSave,
 			resolveHyperlinkRelationshipId,
 			existingTextSegments,
 		);
+		// A bullet the source paragraph inherited (layout or list style) stays inherited unless it was edited.
+		const loadedSegments = loadedTextSegments(this, el.id);
+		const rebuiltSource =
+			Array.isArray(loadedSegments) && loadedSegments.length
+				? this.createParagraphsFromTextContent(
+						void 0,
+						paragraphGeometry,
+						loadedSegments,
+						resolveHyperlinkRelationshipId,
+						existingTextSegments,
+					)
+				: [];
+		const paragraphs = this.ensureArray(txBody['a:p']);
+		if (
+			rebuiltSource.length === paragraphs.length &&
+			authoredParagraphs.length === paragraphs.length
+		) {
+			const bulletKeys = [
+				'a:buClrTx',
+				'a:buClr',
+				'a:buSzTx',
+				'a:buSzPct',
+				'a:buSzPts',
+				'a:buFontTx',
+				'a:buFont',
+				'a:buNone',
+				'a:buAutoNum',
+				'a:buChar',
+				'a:buBlip',
+			];
+			const bullets = (paragraph: XmlObject) =>
+				JSON.stringify(
+					bulletKeys.map((key2) => (paragraph?.['a:pPr'] as XmlObject | undefined)?.[key2]),
+					(_key, value) =>
+						value && typeof value === 'object' && !Array.isArray(value)
+							? Object.fromEntries(
+									Object.keys(value)
+										.sort()
+										.map((key2) => [key2, value[key2]]),
+								)
+							: value,
+				);
+			paragraphs.forEach((paragraph, index) => {
+				const authored = authoredParagraphs[index]?.['a:pPr'] as XmlObject | undefined;
+				const pPr = paragraph['a:pPr'] as XmlObject | undefined;
+				if (
+					!pPr ||
+					bulletKeys.some((key2) => authored?.[key2] !== void 0) ||
+					bullets(paragraph) !== bullets(rebuiltSource[index])
+				) {
+					return;
+				}
+				for (const key2 of bulletKeys) {
+					delete pPr[key2];
+				}
+				if (!Object.keys(pPr).length && authored === void 0) {
+					delete paragraph['a:pPr'];
+				}
+			});
+		}
 	}
 
 	/**

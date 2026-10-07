@@ -36,6 +36,7 @@
  * @module paragraph-sibling-order
  */
 
+import { orderedXmlKey } from '../../geometry/custom-geometry-command-order';
 import type { XmlObject } from '../../types';
 import {
 	ensureItems,
@@ -209,4 +210,56 @@ export function paragraphContentEntries(
 		}
 	}
 	return { entries, authored: true };
+}
+
+function pairedParagraphs(from: unknown, to: unknown): Array<[XmlObject, XmlObject]> {
+	const source = collectParsedParagraphs(from);
+	const target = collectParsedParagraphs(to);
+	return source.length === target.length
+		? source.map((paragraph, index) => [paragraph, target[index]])
+		: [];
+}
+export function cloneXmlWithParagraphOrder<T>(value: T): T {
+	const copy = structuredClone(value);
+	for (const [source, target] of pairedParagraphs(value, copy)) {
+		const order = childOrder.get(source);
+		if (order) {
+			childOrder.set(target, order);
+		}
+	}
+	return copy;
+}
+export function withAuthoredParagraphOrder(node: XmlObject): XmlObject {
+	const copy = structuredClone(node);
+	for (const [source, target] of pairedParagraphs(node, copy)) {
+		const order = childOrder.get(source);
+		if (!order) {
+			continue;
+		}
+		const counts = /* @__PURE__ */ new Map<string, number>();
+		for (const tag of order) {
+			counts.set(tag, (counts.get(tag) ?? 0) + 1);
+		}
+		if ([...counts].some(([tag, count]) => ensureItems(target[tag]).length !== count)) {
+			continue;
+		}
+		const consumed = /* @__PURE__ */ new Map<string, number>();
+		const children11 = order.map((tag) => {
+			const index = consumed.get(tag) ?? 0;
+			consumed.set(tag, index + 1);
+			return [tag, ensureItems(target[tag])[index]] as const;
+		});
+		const preserved = Object.entries(target).filter(([key2]) => !counts.has(key2));
+		for (const key2 of Object.keys(target)) {
+			Reflect.deleteProperty(target, key2);
+		}
+		for (const [key2, value] of preserved) {
+			target[key2] = value;
+		}
+		children11.forEach(([tag, value], position2) => {
+			target[(counts.get(tag) ?? 0) > 1 ? orderedXmlKey(tag, position2) : tag] =
+				value as XmlObject[string];
+		});
+	}
+	return copy;
 }

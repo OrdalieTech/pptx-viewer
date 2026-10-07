@@ -125,6 +125,7 @@
 	export const downloadAs = vm.editingApi.downloadAs;
 	export const downloadPptx = vm.editingApi.downloadPptx;
 	export const getContent = vm.editingApi.save;
+	export const renderSlidePng = vm.exportingApi.renderSlidePng;
 	export const exportSlidePng = vm.exportingApi.exportSlidePng;
 	export const copySlideAsImage = vm.exportingApi.copySlideAsImage;
 	export const exportPdf = vm.exportingApi.exportPdf;

@@ -24,6 +24,7 @@ export {
 export type {
 	CanvasSize,
 	CollaborationConfig,
+	CollaborationError,
 	CollaborationRole,
 	CollaborationTransport,
 	PowerPointViewerApi,

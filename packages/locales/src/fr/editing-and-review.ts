@@ -252,11 +252,11 @@ export const translations = {
 	'pptx.compatibility.groupDepthExceeded':
 		'Un groupe de formes est imbriqué plus profondément que ce que prend en charge cette visionneuse et a été aplati.',
 	'pptx.compatibility.saveNotesRelationshipMissing':
-		"Les notes du présentateur n'ont pas pu être liées à cette diapositive lors de l'enregistrement.",
+		"Les notes n'ont pas pu être liées à cette diapositive lors de l'enregistrement.",
 	'pptx.compatibility.saveNotesPartMissing':
-		"Les notes du présentateur n'ont pas pu être enregistrées pour cette diapositive.",
+		"Les notes n'ont pas pu être enregistrées pour cette diapositive.",
 	'pptx.compatibility.saveNotesUpdateSkipped':
-		"Les modifications des notes du présentateur n'ont pas été enregistrées pour cette diapositive.",
+		"Les modifications des notes n'ont pas été enregistrées pour cette diapositive.",
 	'pptx.compatibility.chartExternalDataWritebackUnsupported':
 		'Ce graphique utilise des données externes que cette visionneuse ne peut pas mettre à jour.',
 	'pptx.compatibility.chartEmbeddedWorkbookMissing':

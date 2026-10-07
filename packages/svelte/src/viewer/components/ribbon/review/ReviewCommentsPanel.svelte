@@ -1,4 +1,5 @@
 <script lang="ts">
+ import { elementTypeLabelKey } from "pptx-viewer-shared";
 	/**
 	 * ReviewCommentsPanel: history-aware comment review for the active slide.
 	 * Comment list transforms are shared with the other framework bindings; this
@@ -54,7 +55,7 @@
 	const compose = new CommentComposeState();
 	const slide = $derived(editor.slides[editor.currentSlideIndex]);
 	const comments = $derived(slide?.comments ?? []);
-	const selectedLabel = $derived(editor.selectedElement?.type ?? null);
+	const selectedLabel = $derived(editor.selectedElement ? t(elementTypeLabelKey(editor.selectedElement.type)) : null);
 	/**
 	 * The `@`-mention author catalogue: modern authors plus legacy
 	 * (`ppt/commentAuthors.xml`) ones mapped into the same shape (their `id`

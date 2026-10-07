@@ -181,7 +181,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	}
 
 	protected ensureArray(val: unknown): XmlObject[] {
-		if (!val) {
+		if (val === undefined || val === null) {
 			return [];
 		}
 		const arr = Array.isArray(val) ? val : [val];

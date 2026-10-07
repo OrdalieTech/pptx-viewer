@@ -1,5 +1,6 @@
 import type { PptxSlide, XmlObject } from '../../types';
 import type { PptxSaveConstants } from '../factories';
+import { relativePartTarget, resolvePartTarget } from './chart-part-registration';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveViewProperties';
 
 const NOTES_MASTER_CONTENT_TYPE =
@@ -109,6 +110,71 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 		Object.assign(presentation, reordered);
 		await this.addContentTypeOverride(`/${masterPath}`, NOTES_MASTER_CONTENT_TYPE);
+	}
+
+	// PowerPoint repairs notes masters that share a theme with slide/presentation parts.
+	// ponytail: copy only shared notes themes, keeping their bytes and relative asset links.
+	protected async isolateNotesMasterThemes(): Promise<void> {
+		// OPC part names are ASCII case-insensitive; keep the ZIP spelling for reads.
+		const parts = new Map(
+			Object.keys(this.zip.files)
+				.filter((path) => !this.zip.files[path].dir)
+				.map((path) => [path.toLowerCase(), path]),
+		);
+		const themes: {
+			owner: string;
+			relsPath: string;
+			tree: XmlObject;
+			rel: XmlObject;
+			target: string;
+		}[] = [];
+		for (const relsPath of Object.keys(this.zip.files).filter((path) => path.endsWith('.rels'))) {
+			const owner = relsPath.replace(/(^|\/)_rels\//u, '$1').slice(0, -5);
+			const tree = this.parser.parse(await this.zip.file(relsPath)!.async('string')) as XmlObject;
+			for (const rel of asArray(
+				(tree['Relationships'] as XmlObject | undefined)?.['Relationship'],
+			)) {
+				if (String(rel['@_Type'] ?? '').endsWith('/theme') && rel['@_TargetMode'] !== 'External') {
+					themes.push({
+						owner,
+						relsPath,
+						tree,
+						rel,
+						target: resolvePartTarget(owner, String(rel['@_Target'] ?? '')).toLowerCase(),
+					});
+				}
+			}
+		}
+		const isNotes = (entry: { owner: string }) =>
+			entry.owner.toLowerCase().startsWith('ppt/notesmasters/');
+		const used = new Set(themes.filter((entry) => !isNotes(entry)).map((entry) => entry.target));
+		for (const entry of themes.filter(isNotes)) {
+			const source = parts.get(entry.target);
+			if (used.has(entry.target) && source) {
+				const folder = source.slice(0, source.lastIndexOf('/') + 1);
+				let index = 1;
+				while (parts.has(`${folder}theme${index}.xml`.toLowerCase())) {
+					index += 1;
+				}
+				const copy = `${folder}theme${index}.xml`;
+				this.zip.file(copy, await this.zip.file(source)!.async('uint8array'));
+				parts.set(copy.toLowerCase(), copy);
+				const relsOf = (path: string) => path.replace(/([^/]+)$/u, '_rels/$1.rels');
+				const assetsPath = parts.get(relsOf(source).toLowerCase());
+				const assets = assetsPath ? this.zip.file(assetsPath) : null;
+				if (assets) {
+					this.zip.file(relsOf(copy), await assets.async('uint8array'));
+				}
+				await this.addContentTypeOverride(
+					`/${copy}`,
+					'application/vnd.openxmlformats-officedocument.theme+xml',
+				);
+				entry.rel['@_Target'] = relativePartTarget(entry.owner, copy);
+				this.zip.file(entry.relsPath, this.builder.build(entry.tree));
+				entry.target = copy.toLowerCase();
+			}
+			used.add(entry.target);
+		}
 	}
 
 	private buildDefaultNotesMaster(strict: boolean): XmlObject {

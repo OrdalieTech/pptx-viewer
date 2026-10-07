@@ -170,6 +170,10 @@ export function createViewportHandlers(deps: ViewportHandlersDeps): ViewportHand
 			if (deps.viewer.isFullscreen && !mayLeaveSlideShow()) {
 				return;
 			}
+			if (deps.viewer.isFullscreen && !isFullscreenActive()) {
+				deps.viewer.isFullscreen = false;
+				return;
+			}
 			// Entering the show (every path funnels through here: the status-bar
 			// button, ribbon "From Current Slide", `setMode('present')`, the mobile
 			// toolbar): open on a slide the show actually includes rather than the
@@ -184,7 +188,13 @@ export function createViewportHandlers(deps: ViewportHandlersDeps): ViewportHand
 			}
 			const root = deps.getRootEl();
 			if (root) {
-				void toggleFullscreen(root);
+				void toggleFullscreen(root).then((entered) => {
+					if (!entered && !deps.viewer.isFullscreen) {
+						deps.viewer.isFullscreen = true;
+						root.focus();
+					}
+					return entered;
+				});
 			}
 		},
 		onFullscreenChange(): void {

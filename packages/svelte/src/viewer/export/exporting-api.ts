@@ -5,6 +5,7 @@ import type { ExportVideoOptions } from './export-video';
 
 /** The imperative export API exposed on the `PowerPointViewer` instance. */
 export interface ExportingApi {
+	renderSlidePng(index: number): Promise<string>;
 	exportSlidePng(index?: number): Promise<void>;
 	copySlideAsImage(index?: number): Promise<void>;
 	exportPdf(options?: ExportPdfOptions): Promise<void>;
@@ -20,6 +21,7 @@ export interface ExportingApi {
  */
 export function createExportingApi(exporter: ExportController): ExportingApi {
 	return {
+		renderSlidePng: (index) => exporter.renderSlidePng(index),
 		exportSlidePng: (index) => exporter.exportSlidePng(index),
 		copySlideAsImage: (index) => exporter.copySlideAsImage(index),
 		exportPdf: (options) => exporter.exportPdf(options),

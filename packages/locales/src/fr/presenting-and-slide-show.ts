@@ -1,5 +1,5 @@
 export const translations = {
-	'pptx.presenter.speakerNotes': 'Notes du présentateur',
+	'pptx.presenter.speakerNotes': 'Notes',
 	'pptx.presenter.nextSlidePreview': 'Diapositive suivante',
 	'pptx.presenter.noNotes': 'Aucune note pour cette diapositive',
 	'pptx.presenter.endPresentation': 'Terminer la présentation',
@@ -206,7 +206,7 @@ export const translations = {
 	'pptx.transitionPresets.crush': 'Écrasement',
 	'pptx.transitionPresets.cube': 'Cube',
 	'pptx.transitionPresets.curtains': 'Rideaux',
-	'pptx.transitionPresets.diamond': 'Diamant',
+	'pptx.transitionPresets.diamond': 'Losange',
 	'pptx.transitionPresets.dissolve': 'Dissoudre',
 	'pptx.transitionPresets.doors': 'Portes',
 	'pptx.transitionPresets.drape': 'Drapé',

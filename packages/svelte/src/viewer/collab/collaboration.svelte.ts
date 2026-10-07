@@ -30,6 +30,7 @@ import {
 	adoptDocSlidesAfterLoad,
 	observeRemoteSlides,
 	publishLocalSlides,
+	restoreMissingSlideLayout,
 } from './collaboration-remote-sync';
 import type { CollabSession, CollabSessionFactory } from './collaboration-session';
 import { createDefaultSession } from './collaboration-session';
@@ -56,10 +57,12 @@ export class CollaborationController {
 	#applyingRemote = false;
 	#lastSynced = '';
 	#didSync = false;
+	#loadedSourceSlides: PptxSlide[] | null = null;
 	#unobserve: (() => void) | null = null;
 	#connectTimer: ReturnType<typeof setTimeout> | null = null;
 
 	readonly #gate = createSyncGate(() => {
+		this.#restoreMissingLayout();
 		if (this.#ydoc && !this.#didSync) {
 			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps());
 		}
@@ -149,9 +152,26 @@ export class CollaborationController {
 	/** Register the parsed source before adopting authoritative room slides. */
 	adoptDocAfterLoad(origin: CollabLoadOrigin = 'user'): void {
 		if (this.#active && this.#ydoc) {
-			registerCollaborationSource(this.#ydoc, this.#deps.getSlides());
+			this.#loadedSourceSlides = this.#deps.getSlides();
+			registerCollaborationSource(this.#ydoc, this.#loadedSourceSlides);
+			if (this.#gate.isOpen()) this.#restoreMissingLayout();
 			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps(), origin);
 		}
+	}
+
+	#restoreMissingLayout(): void {
+		if (
+			!this.#ydoc ||
+			!this.#factories ||
+			!this.#loadedSourceSlides ||
+			this.#config?.role === 'viewer'
+		)
+			return;
+		if (
+			restoreMissingSlideLayout(this.#ydoc, this.#loadedSourceSlides, this.#factories) &&
+			this.#config
+		)
+			this.#writeBack.schedule(this.#config);
 	}
 
 	#syncConfig(config: CollaborationConfig | undefined): void {
@@ -226,7 +246,8 @@ export class CollaborationController {
 			}
 			this.#session = session;
 			this.#ydoc = session.ydoc;
-			registerCollaborationSource(session.ydoc, this.#deps.getSlides());
+			this.#loadedSourceSlides = this.#deps.getSlides();
+			registerCollaborationSource(session.ydoc, this.#loadedSourceSlides);
 			this.#factories = session.factories;
 			this.livePatcher.configure(session.ydoc, session.factories);
 			this.#provider = session.provider;
@@ -310,6 +331,7 @@ export class CollaborationController {
 		this.#applyingRemote = false;
 		this.#lastSynced = '';
 		this.#didSync = false;
+		this.#loadedSourceSlides = null;
 		if (this.#active) {
 			this.#deps.onStop?.();
 		}
