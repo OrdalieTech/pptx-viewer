@@ -39,6 +39,12 @@ describe('createExportWiring', () => {
 			getCurrent: () => 0,
 			getTranslator: () => createTranslator(() => 'en'),
 			getSmartArt3D: () => false,
+			getSurfaceChart3D: () => false,
+			getBarChart3D: () => false,
+			getLineChart3D: () => false,
+			getAreaChart3D: () => false,
+			getPieChart3D: () => false,
+			getImageResolutionScale: () => 1,
 		});
 
 		await wiring.controller.exportSlidePng(0);
@@ -58,6 +64,12 @@ describe('createExportWiring', () => {
 			getCurrent: () => 0,
 			getTranslator: () => createTranslator(() => 'en'),
 			getSmartArt3D: () => false,
+			getSurfaceChart3D: () => false,
+			getBarChart3D: () => false,
+			getLineChart3D: () => false,
+			getAreaChart3D: () => false,
+			getPieChart3D: () => false,
+			getImageResolutionScale: () => 1,
 		});
 		const api = createExportingApi(wiring.controller);
 

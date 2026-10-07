@@ -21,6 +21,7 @@
  */
 
 import type {
+	PptxSmartArtData,
 	PptxSmartArtLayoutDefinition,
 	PptxSmartArtNode,
 	PptxSmartArtPresLayoutVars,
@@ -44,6 +45,11 @@ import {
 	computeTargetLayout,
 	computeVennLayout,
 } from './smartart-layout-families-extra';
+import {
+	computeBendingLayout,
+	computeGearLayout,
+	computeTimelineLayout,
+} from './smartart-layout-families-flow';
 import { flattenNodes, resolveLayoutFamily } from './smartart-layout-helpers';
 import { interpretSmartArtLayout } from './smartart-layout-interpreter';
 import type { BoundingBox, SmartArtLayoutResult } from './smartart-layout-types';
@@ -52,6 +58,7 @@ export * from './smartart-layout-types';
 export * from './smartart-layout-helpers';
 export * from './smartart-layout-families';
 export * from './smartart-layout-families-extra';
+export * from './smartart-layout-families-flow';
 export * from './smartart-layout-interpreter';
 export * from './smartart-layout-interpreter-model';
 
@@ -171,5 +178,65 @@ export function computeSmartArtLayout(
 			return computeFunnelLayout(flat, box, pal, style, elementId);
 		case 'target':
 			return computeTargetLayout(flat, box, pal, style, elementId);
+		case 'gear':
+			return computeGearLayout(flat, box, pal, style, elementId);
+		case 'timeline':
+			return computeTimelineLayout(flat, box, pal, style, elementId);
+		case 'bending':
+			return computeBendingLayout(flat, box, pal, style, elementId);
 	}
+}
+
+/** The subset of `PptxSmartArtData` {@link computeSmartArtElementLayout} needs. */
+export type SmartArtElementLayoutSource = Pick<
+	PptxSmartArtData,
+	'resolvedLayoutType' | 'layout' | 'layoutDefinition' | 'presLayoutVars' | 'colorTransform'
+>;
+
+/**
+ * Compute the SVG-fallback layout for a SmartArt element, deriving every
+ * per-diagram control (`@meth` colour interpolation, the parsed `dgm:layoutDef`,
+ * `dgm:presLayoutVars`) from `smartArtData` itself rather than requiring the
+ * caller to thread five separate optional arguments through by hand.
+ *
+ * This is the entry point every binding (and the reflow-after-edit path) should
+ * call in place of the lower-level {@link computeSmartArtLayout}: the low-level
+ * function's `interpolation` parameter was wired to `undefined` at all five
+ * binding call sites plus the shared reflow helper, so `colorsDef @meth="span"`
+ * ("Colorful Range" quick styles) never gradiented anywhere. Deriving the
+ * interpolation controls here, from data the caller already has in hand, makes
+ * that omission structurally impossible rather than relying on five call sites
+ * each remembering to pass `smartArtData.colorTransform?.fillInterpolation`.
+ *
+ * @param smartArtData - Source of resolvedLayoutType/layout/layoutDefinition/
+ *                        presLayoutVars/colorTransform. Callers with a staged
+ *                        diagram build pass the full element's `smartArtData`
+ *                        here even though `nodes` below may be a revealed prefix.
+ * @param nodes         - Node list to lay out (may be a prefix of
+ *                        `smartArtData.nodes` during a staged reveal).
+ * @param box           - Pixel bounding box of the element.
+ * @param palette       - Resolved colour palette (pre-interpolation).
+ * @param style         - Resolved SmartArt style intensity.
+ * @param elementId     - Element ID (used for stable SVG key generation).
+ */
+export function computeSmartArtElementLayout(
+	smartArtData: SmartArtElementLayoutSource,
+	nodes: PptxSmartArtNode[],
+	box: BoundingBox,
+	palette: string[],
+	style: SmartArtStyle,
+	elementId: string,
+): SmartArtLayoutResult {
+	return computeSmartArtLayout(
+		nodes,
+		box,
+		palette,
+		style,
+		elementId,
+		smartArtData.resolvedLayoutType,
+		smartArtData.layout,
+		smartArtData.colorTransform?.fillInterpolation,
+		smartArtData.layoutDefinition,
+		smartArtData.presLayoutVars,
+	);
 }

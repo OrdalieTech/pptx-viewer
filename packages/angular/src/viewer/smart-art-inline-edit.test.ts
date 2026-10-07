@@ -17,6 +17,7 @@ import type { RenderedNode } from '../internal/shared';
 import { DEFAULT_PALETTE } from './smart-art-drawing';
 import {
 	beginNodeEdit,
+	canEditSmartArtNodes,
 	commitNodeText,
 	findOwningSlideIndex,
 	findSlideIndexByElementId,
@@ -270,5 +271,76 @@ describe('findOwningSlideIndex', () => {
 		expect(findOwningSlideIndex(slides, 'layout-shape-1', null)).toBe(-1);
 		expect(findOwningSlideIndex(slides, 'layout-shape-1', undefined)).toBe(-1);
 		expect(findOwningSlideIndex(slides, 'layout-shape-1', 'nope')).toBe(-1);
+	});
+});
+
+/**
+ * The gear family keys its legend rows `<elementId>-gear-extra-<nodeId>-<i>`,
+ * one segment longer than every other family. Parsing the id back out of the
+ * key therefore yielded `extra-<nodeId>`, which matches no model node: the
+ * `data-smartart-node-id` differed from every other binding's and an inline
+ * edit on a legend row committed nowhere. Callers now pass the index-aligned
+ * id, the mapping the other four bindings use.
+ */
+describe('beginNodeEdit with a caller-resolved node id', () => {
+	it('prefers the resolved id over the key parse', () => {
+		const gearLegend = {
+			kind: 'circle' as const,
+			key: `${ELEMENT_ID}-gear-extra-{GUID-9}-4`,
+			cx: 10,
+			cy: 20,
+			r: 3,
+			fill: '#000',
+			stroke: 'none',
+			strokeWidth: 0,
+			opacity: 1,
+			text: 'Legend',
+			fontSize: 10,
+		};
+		// The key parse alone produces the unusable `extra-` prefixed id.
+		expect(nodeIdFromKey(gearLegend.key, ELEMENT_ID)).toBe('extra-{GUID-9}');
+		expect(beginNodeEdit(gearLegend, ELEMENT_ID, undefined, '{GUID-9}')?.nodeId).toBe('{GUID-9}');
+	});
+
+	it('still falls back to the key parse when no id is supplied', () => {
+		const [rect] = layoutNodes([node('1', 'Alpha')], 'list');
+		expect(beginNodeEdit(rect, ELEMENT_ID, undefined, null)?.nodeId).toBe('1');
+	});
+});
+
+// G8 (OpenXML parity audit, D3): a:graphicFrameLocks/@noDrilldown was
+// computed but nothing consulted it before entering SmartArt node edit mode.
+describe('canEditSmartArtNodes', () => {
+	function smartArtElement(overrides: Partial<PptxElement> = {}): PptxElement {
+		return {
+			id: ELEMENT_ID,
+			type: 'smartArt',
+			x: 0,
+			y: 0,
+			width: 400,
+			height: 300,
+			smartArtData: smartArtData([node('1', 'Alpha')]),
+			...overrides,
+		} as PptxElement;
+	}
+
+	it('is false when noDrilldown is set, even editable with a commit channel', () => {
+		expect(
+			canEditSmartArtNodes(
+				true,
+				true,
+				smartArtElement({ locks: { noDrilldown: true } } as Partial<PptxElement>),
+			),
+		).toBeFalsy();
+	});
+
+	it('is true for an editable, unlocked diagram with a commit channel', () => {
+		expect(canEditSmartArtNodes(true, true, smartArtElement())).toBeTruthy();
+	});
+
+	it('still requires editable + an editor, unlocked or not', () => {
+		const el = smartArtElement();
+		expect(canEditSmartArtNodes(false, true, el)).toBeFalsy();
+		expect(canEditSmartArtNodes(true, false, el)).toBeFalsy();
 	});
 });

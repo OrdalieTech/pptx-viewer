@@ -23,17 +23,27 @@
  */
 import { AccessibilityService } from './accessibility.service';
 import { AiPanelStore } from './ai/ai-panel-store';
+import { AreaChart3DService } from './area-chart-3d.service';
+import { AutosaveRecoveryService } from './autosave-recovery.service';
 import { AutosaveService } from './autosave.service';
+import { BarChart3DService } from './bar-chart-3d.service';
 import { ChartPartSelectionService } from './chart-part-selection.service';
 import { CollaborationService } from './collaboration.service';
+import { CustomFontsService } from './custom-fonts.service';
 import { EditorStateService } from './editor-state.service';
 import { EmbeddedFontsService } from './embedded-fonts.service';
 import { ExportService } from './export.service';
 import { FieldContextService } from './field-context.service';
+import { GoogleWebfontsService } from './google-webfonts.service';
 import { IsMobileService } from './is-mobile';
+import { LineChart3DService } from './line-chart-3d.service';
 import { LoadContentService } from './load-content.service';
+import { LoadNoticesService } from './load-notices.service';
+import { PieChart3DService } from './pie-chart-3d.service';
 import { PrintService } from './print.service';
+import { RecentColorsService } from './recent-colors.service';
 import { SmartArt3DService } from './smart-art-3d.service';
+import { SurfaceChart3DService } from './surface-chart-3d.service';
 import { TableSelectionService } from './table-selection.service';
 import { ViewerCanvasEditingService } from './viewer-canvas-editing.service';
 import { ViewerCollabCursorService } from './viewer-collab-cursor.service';
@@ -65,18 +75,28 @@ import { ZoomTargetService } from './zoom-target.service';
  */
 export const POWER_POINT_VIEWER_PROVIDERS = [
 	LoadContentService,
+	LoadNoticesService,
 	ExportService,
 	EditorStateService,
 	ChartPartSelectionService,
 	TableSelectionService,
 	EmbeddedFontsService,
+	GoogleWebfontsService,
 	CollaborationService,
+	CustomFontsService,
 	AccessibilityService,
 	AutosaveService,
+	AutosaveRecoveryService,
 	PrintService,
 	IsMobileService,
 	SmartArt3DService,
+	SurfaceChart3DService,
+	BarChart3DService,
+	LineChart3DService,
+	AreaChart3DService,
+	PieChart3DService,
 	FieldContextService,
+	RecentColorsService,
 	ZoomTargetService,
 	AiPanelStore,
 	ViewerDialogsService,

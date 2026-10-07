@@ -1,3 +1,6 @@
+/* oxlint-disable eslint/one-var -- many independent it() blocks and extracted
+   helper functions, each with unrelated locals; merging across them would
+   hurt readability. */
 import { describe, it, expect } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -17,7 +20,7 @@ interface PlaceholderInfo {
 }
 
 /**
- * Extracted from extractPlaceholderInfo — parses the placeholder
+ * Extracted from extractPlaceholderInfo - parses the placeholder
  * identification from a p:nvPr node.
  */
 function extractPlaceholderInfo(node: XmlObject | undefined): PlaceholderInfo | null {
@@ -41,7 +44,7 @@ function extractPlaceholderInfo(node: XmlObject | undefined): PlaceholderInfo | 
 }
 
 /**
- * Extracted from placeholderMatches — determines if two placeholder
+ * Extracted from placeholderMatches - determines if two placeholder
  * identifications match according to OOXML spec rules.
  */
 function placeholderMatches(
@@ -75,6 +78,16 @@ function placeholderMatches(
 		return false;
 	}
 
+	// A special placeholder (date/footer/header/slide-number) must never bind
+	// to an untyped generic placeholder just because idx agrees.
+	const specialTypes = new Set(['dt', 'ftr', 'hdr', 'sldnum']);
+	if (
+		(source.type && specialTypes.has(source.type) && !target.type) ||
+		(target.type && specialTypes.has(target.type) && !source.type)
+	) {
+		return false;
+	}
+
 	// When only one side has an explicit idx, keep the stricter rule that a
 	// typed source must not bind to an untyped generic placeholder.
 	const bothHaveExplicitIdx = source.idx !== undefined && target.idx !== undefined;
@@ -86,7 +99,7 @@ function placeholderMatches(
 }
 
 /**
- * Extracted from parseContentPart — parses the transform from a
+ * Extracted from parseContentPart - parses the transform from a
  * content part's p:xfrm node.
  */
 function parseContentPartTransform(contentPart: XmlObject): {
@@ -227,7 +240,7 @@ describe('placeholderMatches', () => {
 		expect(placeholderMatches({ idx: '1' }, { idx: '1', type: 'body' })).toBeTruthy();
 	});
 
-	// Source has idx, target does not — singleton type matching
+	// Source has idx, target does not - singleton type matching
 	it("should match singleton type 'title' when source has idx but target does not", () => {
 		expect(placeholderMatches({ idx: '0', type: 'title' }, { type: 'title' })).toBeTruthy();
 	});
@@ -264,7 +277,7 @@ describe('placeholderMatches', () => {
 		expect(placeholderMatches({ idx: '0', type: 'title' }, { type: 'subtitle' })).toBeFalsy();
 	});
 
-	// Neither has idx — type-based matching
+	// Neither has idx - type-based matching
 	it('should match when both have same type and no idx', () => {
 		expect(placeholderMatches({ type: 'title' }, { type: 'title' })).toBeTruthy();
 	});
@@ -302,6 +315,175 @@ describe('placeholderMatches', () => {
 
 	it('should match no-idx-vs-idx=0 for a plain untyped placeholder', () => {
 		expect(placeholderMatches({}, { idx: '0' })).toBeTruthy();
+	});
+
+	// Special (date/footer/header/slide-number) placeholders must not bind to
+	// an untyped generic placeholder that happens to reuse the same idx.
+	it('should NOT match an untyped source against a footer target with the same idx', () => {
+		expect(placeholderMatches({ idx: '1' }, { idx: '1', type: 'ftr' })).toBeFalsy();
+	});
+
+	it('should NOT match a date-typed source against an untyped target with the same idx', () => {
+		expect(placeholderMatches({ idx: '1', type: 'dt' }, { idx: '1' })).toBeFalsy();
+	});
+
+	it('should NOT match an untyped source against a slide-number target with the same idx', () => {
+		expect(placeholderMatches({ idx: '2' }, { idx: '2', type: 'sldnum' })).toBeFalsy();
+	});
+
+	it('should still match two footer placeholders with the same idx and type', () => {
+		expect(placeholderMatches({ idx: '1', type: 'ftr' }, { idx: '1', type: 'ftr' })).toBeTruthy();
+	});
+});
+
+/**
+ * Extracted from resolveTableCellImagePath - resolves a table cell image
+ * fill's blip relationship (`r:embed` / `r:link`) to a displayable path,
+ * mirroring the slide-background image resolution's external-URL gating.
+ */
+function resolveTableCellImagePath(
+	slideRelsMap: Map<string, Map<string, string>>,
+	allowExternalImages: boolean,
+	resolveImagePath: (slidePath: string, target: string) => string,
+	rEmbed: string | undefined,
+	rLink: string | undefined,
+	slidePath: string | undefined,
+): string | undefined {
+	if (!slidePath) {
+		return undefined;
+	}
+	const relId = rEmbed || rLink;
+	if (!relId) {
+		return undefined;
+	}
+	const slideRels = slideRelsMap.get(slidePath);
+	const target = slideRels?.get(relId);
+	if (!target) {
+		return undefined;
+	}
+	if (target.startsWith('http://') || target.startsWith('https://')) {
+		return allowExternalImages === true ? target : undefined;
+	}
+	if (target.startsWith('data:')) {
+		return target;
+	}
+	return resolveImagePath(slidePath, target);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: resolveTableCellImagePath
+// ---------------------------------------------------------------------------
+describe('resolveTableCellImagePath', () => {
+	const identityResolve = (slidePath: string, target: string): string =>
+		`${slidePath.replace(/\/[^/]*$/u, '')}/${target}`;
+
+	it('returns undefined when slidePath is missing', () => {
+		const rels = new Map([['ppt/slides/slide1.xml', new Map([['rId1', 'media/image1.png']])]]);
+		expect(
+			resolveTableCellImagePath(rels, false, identityResolve, 'rId1', undefined, undefined),
+		).toBeUndefined();
+	});
+
+	it('returns undefined when neither r:embed nor r:link is present', () => {
+		const rels = new Map<string, Map<string, string>>();
+		expect(
+			resolveTableCellImagePath(
+				rels,
+				false,
+				identityResolve,
+				undefined,
+				undefined,
+				'ppt/slides/slide1.xml',
+			),
+		).toBeUndefined();
+	});
+
+	it('resolves r:embed to an archive-relative path', () => {
+		const rels = new Map([['ppt/slides/slide1.xml', new Map([['rId1', '../media/image1.png']])]]);
+		const result = resolveTableCellImagePath(
+			rels,
+			false,
+			identityResolve,
+			'rId1',
+			undefined,
+			'ppt/slides/slide1.xml',
+		);
+		expect(result).toBe('ppt/slides/../media/image1.png');
+	});
+
+	it('falls back to r:link when r:embed is absent', () => {
+		const rels = new Map([['ppt/slides/slide1.xml', new Map([['rId2', '../media/linked.png']])]]);
+		const result = resolveTableCellImagePath(
+			rels,
+			false,
+			identityResolve,
+			undefined,
+			'rId2',
+			'ppt/slides/slide1.xml',
+		);
+		expect(result).toBeDefined();
+	});
+
+	it('returns undefined for an unresolvable relationship id', () => {
+		const rels = new Map([['ppt/slides/slide1.xml', new Map<string, string>()]]);
+		expect(
+			resolveTableCellImagePath(
+				rels,
+				false,
+				identityResolve,
+				'rId404',
+				undefined,
+				'ppt/slides/slide1.xml',
+			),
+		).toBeUndefined();
+	});
+
+	it('blocks an external http(s) URL when allowExternalImages is false', () => {
+		const rels = new Map([
+			['ppt/slides/slide1.xml', new Map([['rId1', 'https://example.test/image.png']])],
+		]);
+		expect(
+			resolveTableCellImagePath(
+				rels,
+				false,
+				identityResolve,
+				'rId1',
+				undefined,
+				'ppt/slides/slide1.xml',
+			),
+		).toBeUndefined();
+	});
+
+	it('passes through an external http(s) URL when allowExternalImages is true', () => {
+		const rels = new Map([
+			['ppt/slides/slide1.xml', new Map([['rId1', 'https://example.test/image.png']])],
+		]);
+		expect(
+			resolveTableCellImagePath(
+				rels,
+				true,
+				identityResolve,
+				'rId1',
+				undefined,
+				'ppt/slides/slide1.xml',
+			),
+		).toBe('https://example.test/image.png');
+	});
+
+	it('passes through an already-resolved data: URL unconditionally', () => {
+		const rels = new Map([
+			['ppt/slides/slide1.xml', new Map([['rId1', 'data:image/png;base64,AAAA']])],
+		]);
+		expect(
+			resolveTableCellImagePath(
+				rels,
+				false,
+				identityResolve,
+				'rId1',
+				undefined,
+				'ppt/slides/slide1.xml',
+			),
+		).toBe('data:image/png;base64,AAAA');
 	});
 });
 

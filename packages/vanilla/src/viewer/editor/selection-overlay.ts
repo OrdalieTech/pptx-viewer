@@ -1,5 +1,5 @@
-import type { ResizeHandleId, SnapLine } from 'pptx-viewer-shared';
-import { RESIZE_HANDLES } from 'pptx-viewer-shared';
+import type { ResizeHandleId, ShapeAdjustmentHandleDescriptor, SnapLine } from 'pptx-viewer-shared';
+import { RESIZE_HANDLE_GEOMETRY, RESIZE_HANDLES, ROTATE_STEM_PX } from 'pptx-viewer-shared';
 
 import type { Translator } from '../i18n';
 import { createEl } from '../render';
@@ -28,6 +28,18 @@ export interface OverlayBox {
 export interface SelectionOverlayHooks {
 	onHandlePointerDown(handle: ResizeHandleId, event: PointerEvent): void;
 	onRotatePointerDown(event: PointerEvent): void;
+	/** Pointerdown on ONE of the amber `a:avLst` adjustment diamonds. */
+	onAdjustPointerDown(event: PointerEvent, descriptor: ShapeAdjustmentHandleDescriptor): void;
+}
+
+/**
+ * Which selection chrome the current selection's `a:spLocks` still allow. A
+ * pinned (`noMove`) shape keeps its handles; a `noResize` one must not show the
+ * eight it cannot use, or the affordance lies about what will happen.
+ */
+export interface SelectionHandleVisibility {
+	resizable: boolean;
+	rotatable: boolean;
 }
 
 export interface SelectionOverlay {
@@ -37,38 +49,20 @@ export interface SelectionOverlay {
 	mount(host: HTMLElement): void;
 	/** Position the selection box (element px + stage scale), or hide it. */
 	setBox(box: OverlayBox | null, scale: number): void;
+	/** Show/hide the resize handles and rotate knob per the selection's locks. */
+	setHandleVisibility(visibility: SelectionHandleVisibility): void;
+	/**
+	 * Place the amber shape-adjustment diamonds, in element px: ONE per
+	 * `a:avLst` guide, because PowerPoint offers one per adjustable parameter
+	 * and most presets have several. An empty list draws none.
+	 */
+	setAdjustHandles(descriptors: ShapeAdjustmentHandleDescriptor[], scale: number): void;
 	/** Render transient snap-alignment lines (element px + stage scale). */
 	setSnapLines(lines: readonly SnapLine[], scale: number): void;
 	/** Hide the selection chrome while the inline text editor is open. */
 	setEditing(editing: boolean): void;
 	destroy(): void;
 }
-
-/** Rotate-handle stem length in screen px (constant at any zoom). */
-const ROTATE_STEM_PX = 24;
-
-const HANDLE_CURSORS: Record<ResizeHandleId, string> = {
-	nw: 'nwse-resize',
-	n: 'ns-resize',
-	ne: 'nesw-resize',
-	e: 'ew-resize',
-	se: 'nwse-resize',
-	s: 'ns-resize',
-	sw: 'nesw-resize',
-	w: 'ew-resize',
-};
-
-/** Fractional handle position within the box: 0 = left/top, 1 = right/bottom. */
-const HANDLE_POSITIONS: Record<ResizeHandleId, { fx: number; fy: number }> = {
-	nw: { fx: 0, fy: 0 },
-	n: { fx: 0.5, fy: 0 },
-	ne: { fx: 1, fy: 0 },
-	e: { fx: 1, fy: 0.5 },
-	se: { fx: 1, fy: 1 },
-	s: { fx: 0.5, fy: 1 },
-	sw: { fx: 0, fy: 1 },
-	w: { fx: 0, fy: 0.5 },
-};
 
 export function createSelectionOverlay(
 	doc: Document,
@@ -100,12 +94,13 @@ export function createSelectionOverlay(
 	knob.addEventListener('pointerdown', (event) => hooks.onRotatePointerDown(event));
 	box.appendChild(knob);
 
+	const resizeHandles: HTMLElement[] = [];
 	for (const handle of RESIZE_HANDLES) {
-		const { fx, fy } = HANDLE_POSITIONS[handle];
+		const { fx, fy } = RESIZE_HANDLE_GEOMETRY[handle];
 		const btn = createEl(doc, 'button', 'pptxv-sel-handle', {
 			left: `${fx * 100}%`,
 			top: `${fy * 100}%`,
-			cursor: HANDLE_CURSORS[handle],
+			cursor: RESIZE_HANDLE_GEOMETRY[handle].cursor,
 		});
 		btn.type = 'button';
 		btn.setAttribute('data-pptx-compact', '');
@@ -113,7 +108,39 @@ export function createSelectionOverlay(
 		btn.setAttribute('aria-label', t('pptx.selectionOverlay.resize', { handle }));
 		btn.addEventListener('pointerdown', (event) => hooks.onHandlePointerDown(handle, event));
 		box.appendChild(btn);
+		resizeHandles.push(btn);
 	}
+
+	// PowerPoint's amber adjustment diamonds (`a:avLst`), created on demand: the
+	// count is per-preset (a `callout3` has four), so a single pre-built button
+	// could only ever offer the first. Shared decides how many and where.
+	const adjustHandles: HTMLButtonElement[] = [];
+
+	/**
+	 * Mint one diamond for pool slot `index`.
+	 *
+	 * Declared outside the growth loop so its listener closes over the SLOT, not
+	 * over a loop variable, and reads the descriptor list live: the pool outlives
+	 * any one selection, so a button minted for a `roundRect` must act on
+	 * whatever guide occupies its slot when a `quadArrow` is selected next.
+	 */
+	function addAdjustHandleButton(index: number): HTMLButtonElement {
+		const button = createEl(doc, 'button', 'pptxv-adjust-handle');
+		button.type = 'button';
+		button.setAttribute('data-pptx-compact', '');
+		button.setAttribute('aria-label', t('pptx.selectionOverlay.adjust'));
+		button.addEventListener('pointerdown', (event) => {
+			const descriptor = currentAdjustDescriptors[index];
+			if (descriptor) {
+				hooks.onAdjustPointerDown(event, descriptor);
+			}
+		});
+		box.appendChild(button);
+		return button;
+	}
+	// The descriptors the pool is currently showing, so a button's handler picks
+	// the diamond it is CURRENTLY painting rather than one captured at creation.
+	let currentAdjustDescriptors: ShapeAdjustmentHandleDescriptor[] = [];
 
 	const linesLayer = createEl(doc, 'div', 'pptxv-snap-layer');
 	root.appendChild(linesLayer);
@@ -145,6 +172,36 @@ export function createSelectionOverlay(
 			// on mobile, where React's has shrunk below 1px.
 			box.style.borderWidth = `${scale}px`;
 			box.style.transform = nextBox.rotation ? `rotate(${nextBox.rotation}deg)` : 'none';
+		},
+		setHandleVisibility({ resizable, rotatable }) {
+			for (const handle of resizeHandles) {
+				handle.hidden = !resizable;
+			}
+			stem.hidden = !rotatable;
+			knob.hidden = !rotatable;
+		},
+		setAdjustHandles(descriptors, scale) {
+			// Grow the pool to match; buttons past the count are hidden rather than
+			// destroyed so a drag that changes the shape does not tear out the node
+			// the pointer is captured on.
+			while (adjustHandles.length < descriptors.length) {
+				adjustHandles.push(addAdjustHandleButton(adjustHandles.length));
+			}
+			currentAdjustDescriptors = descriptors;
+			adjustHandles.forEach((button, index) => {
+				const descriptor = descriptors[index];
+				button.hidden = descriptor === undefined;
+				if (!descriptor) {
+					return;
+				}
+				// `left`/`top` are element-local px from the element top-left, and the
+				// diamond is a child of the box (already placed at `x * scale`), so the
+				// offsets only need the same scale applied.
+				button.style.left = `${descriptor.left * scale}px`;
+				button.style.top = `${descriptor.top * scale}px`;
+				button.style.cursor = descriptor.cursor;
+				button.dataset.pptxAdjustKey = descriptor.key;
+			});
 		},
 		setSnapLines(lines, scale) {
 			linesLayer.replaceChildren();

@@ -12,8 +12,13 @@ import {
 import { TranslatePipe } from '@ngx-translate/core';
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 
-import { presenterPaneAdvancesOnClick } from '../internal/shared';
-import type { CanvasSize } from '../internal/shared';
+import {
+	presenterNextDisabled,
+	presenterPaneAdvancesOnClick,
+	presenterPrevDisabled,
+	visibleTemplateElements as filterVisibleTemplateElements,
+} from '../internal/shared';
+import type { AuthoredSlideRange, CanvasSize, ShowOrderCustomShow } from '../internal/shared';
 import type { StyleMap } from './element-style';
 import { PresenterControlsComponent } from './presenter-controls.component';
 import {
@@ -22,12 +27,12 @@ import {
 	NOTES_FONT_SIZE_MIN,
 	NOTES_FONT_SIZE_STEP,
 	clampNotesFontSize,
-	computeTimerProgress,
 	currentSlideAt,
 	elapsedSince,
 	formatElapsed,
 	formatTime,
 	nextSlideAfter,
+	presenterTimerProgress,
 	resolvePresenterNotes,
 	slideCounter,
 	slideLabel,
@@ -71,428 +76,8 @@ const CLOCK_TICK_MS = 1000;
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
 	imports: [NgStyle, SlideCanvasComponent, PresenterControlsComponent, TranslatePipe],
-	styles: `
-		:host {
-			position: absolute;
-			inset: 0;
-			z-index: 50;
-			display: flex;
-			flex-direction: column;
-			background: var(--pptx-card, #0b0b0c);
-			color: var(--pptx-foreground, #f5f5f5);
-			font-family: system-ui, sans-serif;
-		}
-
-		.pptx-ng-presenter-body {
-			display: flex;
-			flex: 1 1 auto;
-			min-height: 0;
-		}
-
-		.pptx-ng-presenter-current--advances {
-			cursor: pointer;
-		}
-
-		.pptx-ng-presenter-current {
-			flex: 7 1 0;
-			display: flex;
-			flex-direction: column;
-			align-items: center;
-			justify-content: center;
-			background: #000;
-			padding: 1rem;
-			min-width: 0;
-		}
-
-		.pptx-ng-presenter-preview-stage {
-			width: 100%;
-			max-width: 100%;
-			min-height: 0;
-		}
-
-		.pptx-ng-presenter-slide-badge {
-			margin-top: 0.5rem;
-			font-family: ui-monospace, monospace;
-			font-variant-numeric: tabular-nums;
-			font-size: 0.75rem;
-			color: rgba(255, 255, 255, 0.5);
-			user-select: none;
-		}
-
-		.pptx-ng-presenter-side {
-			flex: 3 1 0;
-			display: flex;
-			flex-direction: column;
-			background: var(--pptx-background, #18181b);
-			border-left: 1px solid var(--pptx-border, rgba(255, 255, 255, 0.12));
-			min-width: 260px;
-			max-width: 440px;
-		}
-
-		.pptx-ng-presenter-header,
-		.pptx-ng-presenter-nav,
-		.pptx-ng-presenter-next {
-			padding: 0.5rem 1rem;
-			border-bottom: 1px solid var(--pptx-border, rgba(255, 255, 255, 0.12));
-		}
-
-		.pptx-ng-presenter-header {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 0.5rem;
-		}
-
-		.pptx-ng-presenter-label {
-			font-size: 0.625rem;
-			text-transform: uppercase;
-			letter-spacing: 0.06em;
-			color: var(--pptx-muted-foreground, rgba(255, 255, 255, 0.55));
-		}
-
-		.pptx-ng-presenter-clock {
-			font-family: ui-monospace, monospace;
-			font-variant-numeric: tabular-nums;
-			font-size: 1.125rem;
-		}
-
-		.pptx-ng-presenter-elapsed {
-			color: var(--pptx-primary, #6ea8fe);
-		}
-
-		.pptx-ng-presenter-iconbtn {
-			display: inline-flex;
-			align-items: center;
-			justify-content: center;
-			width: 32px;
-			height: 32px;
-			border: none;
-			border-radius: 6px;
-			background: transparent;
-			color: var(--pptx-foreground, rgba(255, 255, 255, 0.7));
-			cursor: pointer;
-			font-size: 1rem;
-			line-height: 1;
-		}
-
-		.pptx-ng-presenter-iconbtn:hover {
-			background: var(--pptx-secondary, rgba(255, 255, 255, 0.1));
-			color: #fff;
-		}
-
-		.pptx-ng-presenter-iconbtn:disabled {
-			opacity: 0.3;
-			cursor: not-allowed;
-		}
-
-		.pptx-ng-presenter-nav {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-		}
-
-		.pptx-ng-presenter-navbtn {
-			display: inline-flex;
-			align-items: center;
-			gap: 0.375rem;
-			padding: 0.375rem 0.75rem;
-			border: none;
-			border-radius: 6px;
-			background: var(--pptx-secondary, rgba(255, 255, 255, 0.08));
-			color: var(--pptx-foreground, #f5f5f5);
-			cursor: pointer;
-			font-size: 0.75rem;
-		}
-
-		.pptx-ng-presenter-navbtn:hover:not(:disabled) {
-			background: rgba(255, 255, 255, 0.16);
-		}
-
-		.pptx-ng-presenter-navbtn:disabled {
-			opacity: 0.4;
-			cursor: not-allowed;
-		}
-
-		.pptx-ng-presenter-counter {
-			font-family: ui-monospace, monospace;
-			font-variant-numeric: tabular-nums;
-			font-size: 0.875rem;
-		}
-
-		.pptx-ng-presenter-next-empty {
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			height: 4rem;
-			border: 1px solid var(--pptx-border, rgba(255, 255, 255, 0.12));
-			border-radius: 6px;
-			background: var(--pptx-muted, rgba(255, 255, 255, 0.04));
-			font-size: 0.75rem;
-			font-style: italic;
-			color: rgba(255, 255, 255, 0.5);
-		}
-
-		.pptx-ng-presenter-notes {
-			flex: 1 1 auto;
-			display: flex;
-			flex-direction: column;
-			min-height: 0;
-			padding: 0.75rem 1rem;
-		}
-
-		.pptx-ng-presenter-notes-head {
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			margin-bottom: 0.5rem;
-		}
-
-		.pptx-ng-presenter-notes-size {
-			display: flex;
-			align-items: center;
-			gap: 0.25rem;
-		}
-
-		.pptx-ng-presenter-notes-size-value {
-			min-width: 28px;
-			text-align: center;
-			font-family: ui-monospace, monospace;
-			font-variant-numeric: tabular-nums;
-			font-size: 0.625rem;
-			color: var(--pptx-muted-foreground, rgba(255, 255, 255, 0.55));
-			user-select: none;
-		}
-
-		.pptx-ng-presenter-notes-body {
-			flex: 1 1 auto;
-			overflow-y: auto;
-			border: 1px solid var(--pptx-border, rgba(255, 255, 255, 0.12));
-			border-radius: 6px;
-			background: var(--pptx-muted, rgba(255, 255, 255, 0.04));
-			padding: 0.5rem 0.75rem;
-			white-space: pre-wrap;
-			line-height: 1.5;
-		}
-
-		.pptx-ng-presenter-notes-empty {
-			font-style: italic;
-			color: rgba(255, 255, 255, 0.5);
-		}
-
-		.pptx-ng-presenter-progress {
-			height: 6px;
-			width: 100%;
-			background: rgba(255, 255, 255, 0.12);
-			flex: 0 0 auto;
-		}
-
-		.pptx-ng-presenter-progress-fill {
-			height: 100%;
-			background: #6ea8fe;
-			transition: width 1s linear;
-		}
-
-		.pptx-ng-presenter-empty {
-			position: absolute;
-			inset: 0;
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			color: rgba(255, 255, 255, 0.6);
-		}
-	`,
-	template: `
-		@if (currentSlide(); as current) {
-			<pptx-presenter-controls
-				[snapshot]="presenterWindow.snapshot()"
-				[audienceOpen]="isAudienceWindowOpen()"
-				[slides]="slides()"
-				[current]="currentSlideIndex()"
-				[canvasSize]="canvasSize()"
-				[mediaDataUrls]="mediaDataUrls()"
-				(patch)="presenterWindow.updateSnapshot($event)"
-				(navigate)="navigateToSlide.emit($event)"
-				(audience)="onToggleAudienceWindow()"
-				(end)="exit.emit()"
-			/>
-			<div class="pptx-ng-presenter-body">
-				<!-- Current slide (≈70%) -->
-				<div
-					class="pptx-ng-presenter-current"
-					[class.pptx-ng-presenter-current--advances]="paneAdvancesOnClick()"
-					role="presentation"
-					data-pptx-presenter-slide
-					(click)="onSlidePaneClick()"
-				>
-					<div class="pptx-ng-presenter-preview-stage">
-						<pptx-slide-canvas
-							[slide]="currentPreviewSlide()"
-							[canvasSize]="canvasSize()"
-							[mediaDataUrls]="mediaDataUrls()"
-							[zoom]="1"
-							[interactive]="false"
-						/>
-					</div>
-					<div class="pptx-ng-presenter-slide-badge">{{ slideBadge() }}</div>
-				</div>
-
-				<!-- Controls (≈30%) -->
-				<div class="pptx-ng-presenter-side">
-					<!-- Header: clock + elapsed + window/exit -->
-					<div class="pptx-ng-presenter-header">
-						<div>
-							<div class="pptx-ng-presenter-label">
-								{{ 'pptx.presenter.currentTime' | translate }}
-							</div>
-							<div class="pptx-ng-presenter-clock">{{ clockLabel() }}</div>
-						</div>
-						<div>
-							<div class="pptx-ng-presenter-label">{{ 'pptx.presenter.elapsed' | translate }}</div>
-							<div class="pptx-ng-presenter-clock pptx-ng-presenter-elapsed">
-								{{ elapsedLabel() }}
-							</div>
-						</div>
-						<div style="display:flex;align-items:center;gap:0.25rem;">
-							<button
-								type="button"
-								class="pptx-ng-presenter-iconbtn"
-								(click)="onToggleAudienceWindow()"
-								[attr.aria-label]="
-									(isAudienceWindowOpen()
-										? 'pptx.presenter.closeAudienceWindow'
-										: 'pptx.presenter.openAudienceWindow'
-									) | translate
-								"
-								[title]="
-									(isAudienceWindowOpen()
-										? 'pptx.presenter.closeAudienceWindow'
-										: 'pptx.presenter.openAudienceWindow'
-									) | translate
-								"
-							>
-								{{ isAudienceWindowOpen() ? '▣' : '□' }}
-							</button>
-							<button
-								type="button"
-								class="pptx-ng-presenter-iconbtn"
-								(click)="exit.emit()"
-								[attr.aria-label]="'pptx.presenter.endPresentation' | translate"
-								[title]="'pptx.presenter.endPresentation' | translate"
-							>
-								&#x2715;
-							</button>
-						</div>
-					</div>
-
-					<!-- Navigation -->
-					<div class="pptx-ng-presenter-nav">
-						<button
-							type="button"
-							class="pptx-ng-presenter-navbtn"
-							(click)="movePresentationSlide.emit(-1)"
-							[disabled]="currentSlideIndex() === 0"
-							[title]="'pptx.presenter.previousSlide' | translate"
-						>
-							&#x2039; {{ 'pptx.presenter.prev' | translate }}
-						</button>
-						<span class="pptx-ng-presenter-counter">{{ counterLabel() }}</span>
-						<button
-							type="button"
-							class="pptx-ng-presenter-navbtn"
-							(click)="movePresentationSlide.emit(1)"
-							[disabled]="currentSlideIndex() >= slides().length - 1"
-							[title]="'pptx.presenter.nextSlide' | translate"
-						>
-							{{ 'pptx.presenter.next' | translate }} &#x203A;
-						</button>
-					</div>
-
-					<!-- Next slide preview -->
-					<div class="pptx-ng-presenter-next">
-						<div class="pptx-ng-presenter-label" style="margin-bottom:0.5rem;">
-							{{ 'pptx.presenter.nextSlidePreview' | translate }}
-						</div>
-						@if (nextPreviewSlide(); as next) {
-							<pptx-slide-canvas
-								[slide]="next"
-								[canvasSize]="canvasSize()"
-								[mediaDataUrls]="mediaDataUrls()"
-								[zoom]="1"
-								[interactive]="false"
-							/>
-						} @else {
-							<div class="pptx-ng-presenter-next-empty">
-								{{ 'pptx.presenter.endOfPresentation' | translate }}
-							</div>
-						}
-					</div>
-
-					<!-- Speaker notes -->
-					<div class="pptx-ng-presenter-notes">
-						<div class="pptx-ng-presenter-notes-head">
-							<div class="pptx-ng-presenter-label">
-								{{ 'pptx.presenter.speakerNotes' | translate }}
-							</div>
-							<div class="pptx-ng-presenter-notes-size">
-								<button
-									type="button"
-									class="pptx-ng-presenter-iconbtn"
-									(click)="decreaseNotesFontSize()"
-									[disabled]="notesFontSize() <= NOTES_FONT_SIZE_MIN"
-									[attr.aria-label]="'pptx.presenter.decreaseFontSize' | translate"
-									[title]="'pptx.presenter.decreaseFontSize' | translate"
-								>
-									&#x2212;
-								</button>
-								<span class="pptx-ng-presenter-notes-size-value">{{ notesFontSize() }}px</span>
-								<button
-									type="button"
-									class="pptx-ng-presenter-iconbtn"
-									(click)="increaseNotesFontSize()"
-									[disabled]="notesFontSize() >= NOTES_FONT_SIZE_MAX"
-									[attr.aria-label]="'pptx.presenter.increaseFontSize' | translate"
-									[title]="'pptx.presenter.increaseFontSize' | translate"
-								>
-									&#x2b;
-								</button>
-							</div>
-						</div>
-						<div class="pptx-ng-presenter-notes-body" [ngStyle]="notesBodyStyle()">
-							@if (notes().hasRichNotes) {
-								@for (seg of notes().segments; track seg.key) {
-									@if (seg.isBreak) {
-										<br />
-									} @else {
-										<span [ngStyle]="seg.style">{{ seg.text }}</span>
-									}
-								}
-							} @else if (notes().hasAnyNotes) {
-								{{ notes().plainText }}
-							} @else {
-								<span class="pptx-ng-presenter-notes-empty">
-									{{ 'pptx.presenter.noNotes' | translate }}
-								</span>
-							}
-						</div>
-					</div>
-				</div>
-			</div>
-
-			<!-- Timer progress bar -->
-			<div
-				class="pptx-ng-presenter-progress"
-				role="progressbar"
-				[attr.aria-valuenow]="progressValue()"
-				aria-valuemin="0"
-				aria-valuemax="100"
-				[attr.aria-label]="'pptx.presenter.timerProgress' | translate"
-			>
-				<div class="pptx-ng-presenter-progress-fill" [style.width.%]="timerPercent()"></div>
-			</div>
-		} @else {
-			<div class="pptx-ng-presenter-empty">{{ 'pptx.presenter.noSlides' | translate }}</div>
-		}
-	`,
+	styleUrl: './presenter-view.component.css',
+	templateUrl: './presenter-view.component.html',
 })
 export class PresenterViewComponent {
 	protected readonly presenterWindow = inject(PresenterWindowService);
@@ -506,6 +91,18 @@ export class PresenterViewComponent {
 
 	readonly slides = input.required<PptxSlide[]>();
 	readonly currentSlideIndex = input.required<number>();
+	/**
+	 * The running custom show, or null for the whole deck. The "next slide"
+	 * preview MUST honour it: while a show is playing, the slide the next
+	 * forward press lands on is the show's next member, not `index + 1`.
+	 */
+	readonly activeCustomShow = input<ShowOrderCustomShow | null>(null);
+	/**
+	 * The deck's authored `p:showPr/p:sldRg` slide-range restriction, or null
+	 * for the whole deck. The next-slide preview must honour it the same way it
+	 * honours {@link activeCustomShow}.
+	 */
+	readonly authoredRange = input<AuthoredSlideRange | null>(null);
 	readonly canvasSize = input.required<CanvasSize>();
 	readonly templateElements = input<readonly PptxElement[]>([]);
 	readonly mediaDataUrls = input<Map<string, string>>(new Map());
@@ -549,7 +146,12 @@ export class PresenterViewComponent {
 	);
 
 	protected readonly nextSlide = computed<PptxSlide | undefined>(() =>
-		nextSlideAfter(this.slides(), this.currentSlideIndex()),
+		nextSlideAfter(
+			this.slides(),
+			this.currentSlideIndex(),
+			this.activeCustomShow(),
+			this.authoredRange(),
+		),
 	);
 
 	/** Current slide with master/layout elements prepended for preview. */
@@ -572,7 +174,42 @@ export class PresenterViewComponent {
 
 	protected readonly elapsedLabel = computed<string>(() => formatElapsed(this.elapsedMs()));
 
-	private readonly timerProgress = computed(() => computeTimerProgress(this.elapsedMs()));
+	private readonly timerProgress = computed(() => presenterTimerProgress(this.elapsedMs()));
+
+	/**
+	 * Whether Previous / Next are unusable, straight from the shared rule.
+	 *
+	 * Next is NEVER disabled: PowerPoint's console advances from the last slide
+	 * to the end-of-show screen and then out of the show, so gating it on
+	 * `index >= slides.length - 1` (as this component used to) strands the
+	 * presenter on the final slide with no way to finish, and the audience
+	 * display never closes either.
+	 */
+	protected readonly prevDisabled = computed<boolean>(() =>
+		presenterPrevDisabled(this.currentSlideIndex()),
+	);
+
+	protected readonly nextDisabled = computed<boolean>(() => presenterNextDisabled());
+
+	/**
+	 * The console zoom, applied to the current-slide pane.
+	 *
+	 * The pane used to hard-code `[zoom]="1"`, so the strip's zoom buttons
+	 * mutated the snapshot (and the audience display honoured it) while the
+	 * presenter's own pane never moved a pixel. Scaling the STAGE wrapper rather
+	 * than the canvas mirrors React's `PresenterSlideFrame`: the canvas keeps
+	 * auto-fitting its (layout-measured, transform-immune) viewport, and the
+	 * zoom rides on top of that fit about the snapshot's focal point.
+	 */
+	protected readonly previewStageStyle = computed<StyleMap>(() => {
+		const zoom = this.presenterWindow.snapshot().zoom;
+		const originX = (zoom?.originX ?? 0.5) * 100;
+		const originY = (zoom?.originY ?? 0.5) * 100;
+		return {
+			transform: `scale(${zoom?.scale ?? 1})`,
+			'transform-origin': `${originX}% ${originY}%`,
+		};
+	});
 
 	protected readonly timerPercent = computed<number>(() => this.timerProgress().percent);
 
@@ -629,6 +266,16 @@ export class PresenterViewComponent {
 		}
 	}
 
+	/**
+	 * Move the console onto the audience's screen and vice versa (PowerPoint's
+	 * "Swap Displays"). Best-effort: the underlying Window Management API is not
+	 * universally available, so a `false` result is not an error, it is a browser
+	 * that will not move windows for us.
+	 */
+	protected onSwapDisplays(): void {
+		void this.presenterWindow.swapDisplays();
+	}
+
 	// ------------------------------------------------------------------
 	// Helpers
 	// ------------------------------------------------------------------
@@ -637,7 +284,7 @@ export class PresenterViewComponent {
 		if (!slide) {
 			return undefined;
 		}
-		const template = this.templateElements();
+		const template = filterVisibleTemplateElements(slide, this.templateElements());
 		if (template.length === 0) {
 			return slide;
 		}

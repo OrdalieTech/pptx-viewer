@@ -1,11 +1,21 @@
-import type { PptxElement, PptxTableCellStyle, TablePptxElement } from 'pptx-viewer-core';
-import React from 'react';
+/* oxlint-disable eslint/one-var -- independent, unrelated locals; merging them
+   into one statement would hurt readability. */
+import type { ParsedTableStyleMap, PptxElement, TablePptxElement } from 'pptx-viewer-core';
+import {
+	applyTableStylePreset,
+	evenColumnWidths,
+	evenRowHeights,
+	redistributeColumnWidth,
+	tableStyleAssignmentUpdate,
+} from 'pptx-viewer-shared';
+import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { TABLE_STYLE_PRESETS } from '../../constants';
 import type { TableCellEditorState } from '../../types';
 import { HEADING, CARD, INPUT, BTN } from './inspector-pane-constants';
 import { TableCellFormattingPanel } from './TableCellFormattingPanel';
+import { TableStyleEditor } from './TableStyleEditor';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -16,6 +26,15 @@ interface TablePropertiesPanelProps {
 	canEdit: boolean;
 	onUpdateElement: (updates: Partial<PptxElement>) => void;
 	tableEditorState?: TableCellEditorState | null;
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, needed by "Edit style...".
+	 * Optional/absent means the host has not yet wired the table-style-editor
+	 * feature through (see `TableStyleEditor`'s docblock); the button then
+	 * simply does not render.
+	 */
+	tableStyleMap?: ParsedTableStyleMap;
+	onTableStyleMapChange?: (nextMap: ParsedTableStyleMap) => void;
+	onDeleteTableStyle?: (styleId: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -27,8 +46,12 @@ export function TablePropertiesPanel({
 	canEdit,
 	onUpdateElement,
 	tableEditorState,
+	tableStyleMap,
+	onTableStyleMapChange,
+	onDeleteTableStyle,
 }: TablePropertiesPanelProps): React.ReactElement | null {
 	const { t } = useTranslation();
+	const [showStyleEditor, setShowStyleEditor] = useState(false);
 	const td = tableElement.tableData;
 	if (!td) {
 		return null;
@@ -129,25 +152,7 @@ export function TablePropertiesPanel({
 							aria-label={preset.label}
 							className='rounded border border-border hover:border-primary overflow-hidden h-10 transition-colors'
 							onClick={() => {
-								const newRows = td.rows.map((row, ri) => ({
-									...row,
-									cells: row.cells.map((cell) => ({
-										...cell,
-										style: {
-											...cell.style,
-											backgroundColor:
-												ri === 0 && td.firstRowHeader
-													? preset.headerBg
-													: td.bandedRows && (ri - (td.firstRowHeader ? 1 : 0)) % 2 === 0
-														? preset.bandBg
-														: undefined,
-											color: ri === 0 && td.firstRowHeader ? preset.headerFg : cell.style?.color,
-											bold: ri === 0 && td.firstRowHeader ? true : cell.style?.bold,
-											borderColor: preset.borderColor,
-										} satisfies PptxTableCellStyle,
-									})),
-								}));
-								updateTableData({ rows: newRows });
+								updateTableData({ rows: applyTableStylePreset(td, preset) });
 							}}
 						>
 							<div className='flex flex-col h-full'>
@@ -158,7 +163,29 @@ export function TablePropertiesPanel({
 						</button>
 					))}
 				</div>
+				{onTableStyleMapChange && (
+					<button
+						type='button'
+						className={`${BTN} mt-1.5`}
+						disabled={!canEdit}
+						onClick={() => setShowStyleEditor((v) => !v)}
+					>
+						{t('pptx.tableStyleEditor.editButton')}
+					</button>
+				)}
 			</div>
+
+			{showStyleEditor && onTableStyleMapChange && (
+				<TableStyleEditor
+					styleMap={tableStyleMap}
+					styleId={td.tableStyleId}
+					canEdit={canEdit}
+					onStyleMapChange={onTableStyleMapChange}
+					onDeleteStyle={(styleId) => onDeleteTableStyle?.(styleId)}
+					onAssignStyle={(styleId) => updateTableData(tableStyleAssignmentUpdate(styleId))}
+					onClose={() => setShowStyleEditor(false)}
+				/>
+			)}
 
 			{/* Column Widths */}
 			<div className={CARD}>
@@ -169,10 +196,7 @@ export function TablePropertiesPanel({
 						className={BTN}
 						disabled={!canEdit}
 						onClick={() => {
-							const even = 1 / colCount;
-							updateTableData({
-								columnWidths: Array(colCount).fill(even) as number[],
-							});
+							updateTableData({ columnWidths: evenColumnWidths(colCount) });
 						}}
 					>
 						{t('pptx.table.even')}
@@ -191,24 +215,9 @@ export function TablePropertiesPanel({
 								className='flex-1 accent-primary'
 								onChange={(e) => {
 									const newPct = Number(e.target.value) / 100;
-									const oldPct = td.columnWidths[ci];
-									const diff = newPct - oldPct;
-									const newWidths = [...td.columnWidths];
-									newWidths[ci] = newPct;
-									const othersTotal = 1 - oldPct;
-									if (othersTotal > 0) {
-										for (let j = 0; j < newWidths.length; j++) {
-											if (j !== ci) {
-												newWidths[j] = Math.max(
-													0.05,
-													td.columnWidths[j] - diff * (td.columnWidths[j] / othersTotal),
-												);
-											}
-										}
-									}
-									const sum = newWidths.reduce((a, b) => a + b, 0);
-									const normed = newWidths.map((v) => v / sum);
-									updateTableData({ columnWidths: normed });
+									updateTableData({
+										columnWidths: redistributeColumnWidth(td.columnWidths, ci, newPct),
+									});
 								}}
 							/>
 							<span className='w-10 text-right text-muted-foreground'>{Math.round(w * 100)}%</span>
@@ -226,10 +235,7 @@ export function TablePropertiesPanel({
 						className={BTN}
 						disabled={!canEdit}
 						onClick={() => {
-							const avg = Math.round(td.rows.reduce((s, r) => s + (r.height ?? 32), 0) / rowCount);
-							updateTableData({
-								rows: td.rows.map((r) => ({ ...r, height: avg })),
-							});
+							updateTableData({ rows: evenRowHeights(td.rows) });
 						}}
 					>
 						{t('pptx.table.even')}

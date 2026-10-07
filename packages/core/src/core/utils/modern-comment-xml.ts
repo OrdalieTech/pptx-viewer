@@ -5,8 +5,16 @@ import type {
 	XmlObject,
 } from '../types';
 import { MODERN_COMMENT_NAMESPACE } from './modern-comment-constants';
+import { modernCommentCreated, modernCommentStatus } from './modern-comment-fields';
+import {
+	applyCommentMentions,
+	readCommentMentions,
+	rebaseCommentMentions,
+} from './modern-comment-mentions';
+import { applyModernCommentText, flattenBodyText } from './modern-comment-text-body';
 
 export * from './modern-comment-constants';
+export * from './modern-comment-mentions';
 
 const localName = (key: string): string => key.split(':').pop() || key;
 
@@ -112,6 +120,7 @@ const parseComment = (
 		complete: optionalNumber(node['@_complete']),
 		priority: optionalNumber(node['@_priority']),
 		title: String(node['@_title'] || '').trim() || undefined,
+		mentions: readCommentMentions(node, authorName),
 		replies: replies.length > 0 ? replies : undefined,
 		rawXml: node,
 	};
@@ -168,19 +177,6 @@ const rawChildrenExcept = (raw: XmlObject | undefined, excluded: Set<string>): X
 	return result;
 };
 
-const isoDate = (value: string | undefined): string => {
-	const parsed = Date.parse(String(value || ''));
-	return Number.isNaN(parsed) ? new Date().toISOString() : new Date(parsed).toISOString();
-};
-
-const textBody = (text: string): XmlObject => ({
-	'a:bodyPr': {},
-	'a:lstStyle': {},
-	'a:p': String(text)
-		.split('\n')
-		.map((line) => ({ 'a:r': { 'a:rPr': {}, 'a:t': line } })),
-});
-
 const buildComment = (
 	comment: PptxComment,
 	resolveAuthorId: (comment: PptxComment) => string,
@@ -188,13 +184,12 @@ const buildComment = (
 	isReply = false,
 ): XmlObject => {
 	const raw = comment.rawXml;
-	const status = comment.status || (comment.resolved ? 'resolved' : 'active');
 	const node: XmlObject = {
 		...copyAttributes(raw),
 		'@_id': comment.id,
 		'@_authorId': resolveAuthorId(comment),
-		'@_status': status,
-		'@_created': isoDate(comment.createdAt),
+		'@_status': modernCommentStatus(comment),
+		'@_created': modernCommentCreated(comment.createdAt, raw?.['@_created']),
 	};
 	for (const [attribute, value] of [
 		['tags', comment.tags?.join(' ')],
@@ -212,7 +207,13 @@ const buildComment = (
 			node[`@_${attribute}`] = String(value);
 		}
 	}
+	// A mention list the reader did not understand is copied through verbatim;
+	// one the model owns is rewritten from the (re-based) model instead.
+	const ownsMentions = (comment.mentions?.length ?? 0) > 0;
 	const excluded = new Set(['pos', 'replyLst', 'txBody', 'extLst']);
+	if (ownsMentions) {
+		excluded.add('mentionLst');
+	}
 	Object.assign(node, rawChildrenExcept(raw, excluded));
 	const hasAnchor = Object.keys(node).some((key) =>
 		[
@@ -244,12 +245,16 @@ const buildComment = (
 			),
 		};
 	}
+	// Splice the (possibly edited) text into the original body rather than
+	// swapping the whole `txBody`: a whole-body swap destroyed run properties
+	// and the run boundaries an `@`-mention is indexed against on every edit.
 	const originalBody = child(raw, 'txBody');
-	node['p188:txBody'] =
-		originalBody && extractModernCommentText(raw!) === comment.text
-			? originalBody
-			: textBody(comment.text);
-	const extension = child(raw, 'extLst');
+	node['p188:txBody'] = applyModernCommentText(originalBody, comment.text);
+	// `startIndex`/`length` index the flattened body text, so an edit that
+	// shifted characters must move every mention that survived it.
+	const originalText = originalBody ? flattenBodyText(originalBody).join('\n') : comment.text;
+	const mentions = rebaseCommentMentions(comment.mentions, originalText, comment.text);
+	const extension = applyCommentMentions(node, mentions, child(raw, 'extLst'), ownsMentions);
 	if (extension) {
 		node['p188:extLst'] = extension;
 	}

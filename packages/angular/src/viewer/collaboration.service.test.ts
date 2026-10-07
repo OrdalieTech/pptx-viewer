@@ -53,7 +53,8 @@ interface FakeBundle {
 
 function makeBundle(): FakeBundle {
 	const slidesArray = { observeDeep: vi.fn(), unobserveDeep: vi.fn(), length: 0 };
-	const doc = { getArray: () => slidesArray, destroy: vi.fn() };
+	const assets = new Map();
+	const doc = { getArray: () => slidesArray, getMap: () => assets, destroy: vi.fn() };
 	const awareness: AwarenessLike = {
 		clientID: 1,
 		setLocalStateField: vi.fn(),

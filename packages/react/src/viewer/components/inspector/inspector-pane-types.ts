@@ -1,10 +1,12 @@
 import type {
 	PptxAppProperties,
 	PptxComment,
+	PptxCommentMention,
 	PptxCoreProperties,
 	PptxCustomProperty,
 	PptxElement,
 	PptxHandoutMaster,
+	PptxModernCommentAuthor,
 	PptxNotesMaster,
 	PptxPresentationProperties,
 	PptxSlide,
@@ -14,7 +16,9 @@ import type {
 	PptxThemeOption,
 	ShapeStyle,
 	TextStyle,
+	ParsedTableStyleMap,
 } from 'pptx-viewer-core';
+import type { SlideSizeEmu, SlideSizeRescaleMode } from 'pptx-viewer-shared';
 
 import type { CanvasSize, TableCellEditorState, ViewerMode } from '../../types';
 
@@ -34,6 +38,8 @@ export interface InspectorPaneProps {
 	mode: ViewerMode;
 	activeSlide: PptxSlide | undefined;
 	slides: PptxSlide[];
+	/** `data.customShows`, for the Action Settings `customShow` target picker. */
+	customShows: Array<{ id: string; name: string }>;
 	canvasSize: CanvasSize;
 	selectedElement: PptxElement | null;
 	selectedElementIds: string[];
@@ -66,9 +72,13 @@ export interface InspectorPaneProps {
 	onApplyTheme: (themePath: string, applyToAllMasters: boolean) => void;
 	comments: PptxComment[];
 	commentDraft: string;
+	/** `@`-mentions accumulated on the in-progress new-comment draft. */
+	commentDraftMentions?: PptxCommentMention[];
+	/** Modern comment authors, for the `@`-mention typeahead. */
+	commentAuthors?: PptxModernCommentAuthor[];
 	editingCommentId: string | null;
 	commentEditDraft: string;
-	onSetCommentDraft: (draft: string) => void;
+	onSetCommentDraft: (draft: string, mentions?: PptxCommentMention[]) => void;
 	onAddComment: () => void;
 	onDeleteComment: (id: string) => void;
 	onStartEditComment: (id: string) => void;
@@ -78,17 +88,36 @@ export interface InspectorPaneProps {
 	onToggleCommentResolved?: (id: string) => void;
 	onStartReply?: (id: string) => void;
 	onCancelReply?: () => void;
-	onReplyDraftChange?: (commentId: string, draft: string) => void;
+	onReplyDraftChange?: (commentId: string, draft: string, mentions?: PptxCommentMention[]) => void;
 	onSubmitReply?: (commentId: string) => void;
 	replyingToCommentId?: string | null;
 	replyDraftByCommentId?: Record<string, string>;
+	/** `@`-mentions accumulated on each in-progress reply draft. */
+	replyDraftMentionsByCommentId?: Record<string, PptxCommentMention[]>;
 	onUpdateCanvasSize: (size: CanvasSize) => void;
+	/** The deck's `p:sldSz` in EMU, forwarded to the Slide Size card. */
+	slideSizeEmu?: SlideSizeEmu | undefined;
+	/**
+	 * Applies a Slide Size preset / orientation pick. `rescaleMode` is set only
+	 * when the user confirmed a Maximize/Ensure Fit prompt for a size change
+	 * that affects existing content (see `SlideSizeCard`'s rescale prompt);
+	 * omitted, the size changes without touching any element.
+	 */
+	onUpdateSlideSize?: (size: SlideSizeEmu, rescaleMode?: SlideSizeRescaleMode) => void;
 	editTemplateMode?: boolean;
 	slideMasters?: PptxSlideMaster[];
 	onSetTemplateBackground?: (path: string, backgroundColor: string) => void;
 	onGetTemplateBackgroundColor?: (path: string) => string | undefined;
 	mediaDataUrls?: Map<string, string>;
 	theme?: PptxTheme;
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, needed by the table
+	 * properties panel's "Edit style...". See `TablePropertiesPanel`'s
+	 * docblock for why this is optional.
+	 */
+	tableStyleMap?: ParsedTableStyleMap;
+	onTableStyleMapChange?: (nextMap: ParsedTableStyleMap) => void;
+	onDeleteTableStyle?: (styleId: string) => void;
 	/** Width of the panel in pixels (for resizable panels). */
 	panelWidth?: number;
 }

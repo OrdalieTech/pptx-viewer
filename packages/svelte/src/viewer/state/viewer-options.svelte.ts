@@ -16,10 +16,13 @@ import {
 	playFeedbackSound,
 	resolveAutosaveIntervalSeconds,
 	resolveDefaultPrintSettings,
+	resolveExpiredAutosaveSnapshots,
 	resolveHistoryDepth,
 	resolveOptionRootClasses,
 	resolveScreenTip,
+	shouldClearAutosaveCacheOnClose,
 	shouldConfirmExternalHyperlink,
+	shouldDiscardAutosaveOnSuccessfulSave,
 	viewerOptionsToPreferences,
 } from 'pptx-viewer-shared';
 
@@ -68,7 +71,7 @@ export class ViewerOptionsState {
 
 	/** Viewer-root CSS classes reflecting display-affecting options. */
 	get rootClasses(): string[] {
-		return resolveOptionRootClasses(this.options, 'pptx');
+		return resolveOptionRootClasses(this.options, 'pptx-svelte');
 	}
 
 	setValue(group: ViewerOptionsGroupId, key: string, value: ViewerOptionPrimitive): void {
@@ -132,19 +135,41 @@ export class ViewerOptionsState {
 	}
 
 	/**
-	 * Autosave debounce in ms: the host prop until the user picks a custom
-	 * AutoRecover cadence in Options > Save, which then takes over.
+	 * Options > Save > "Save AutoRecover information every N minutes", in
+	 * seconds. The autosave cadence whenever the host passed no explicit
+	 * `autosaveIntervalMs`; the host-vs-user precedence itself is decided by
+	 * `resolveAutosaveIntervalMs` in shared, not re-invented here.
 	 */
-	autosaveDebounceMs(hostIntervalMs: number, defaultMinutes: number): number {
-		return this.options.save.autoRecoverIntervalMinutes === defaultMinutes
-			? hostIntervalMs
-			: resolveAutosaveIntervalSeconds(this.options) * 1000;
+	get autosaveIntervalSeconds(): number {
+		return resolveAutosaveIntervalSeconds(this.options);
 	}
 
 	/** Options > Save > "Delete cached files": drop all recovery snapshots. */
 	async clearCache(): Promise<void> {
 		const snapshots = await listAutosaveSnapshots();
 		await Promise.all(snapshots.map((entry) => deleteAutosaveSnapshot(entry.key)));
+	}
+
+	/**
+	 * Options > Save > "keep the last AutoRecover version": whether a
+	 * successful `.pptx` save should discard the AutoRecover snapshot for the
+	 * deck just saved (the real file on disk already has the work, so the
+	 * snapshot is stale unless the user asked to keep it).
+	 */
+	get shouldDiscardAutosaveOnSave(): boolean {
+		return shouldDiscardAutosaveOnSuccessfulSave(this.options);
+	}
+
+	/** Options > Save > "clear cache on close": whether to wipe snapshots now. */
+	get shouldClearCacheOnClose(): boolean {
+		return shouldClearAutosaveCacheOnClose(this.options);
+	}
+
+	/** Options > Save > "cache retention": prune snapshots older than N days. */
+	async pruneExpiredCache(): Promise<void> {
+		const snapshots = await listAutosaveSnapshots();
+		const expired = resolveExpiredAutosaveSnapshots(snapshots, this.options);
+		await Promise.all(expired.map((key) => deleteAutosaveSnapshot(key)));
 	}
 
 	dispose(): void {

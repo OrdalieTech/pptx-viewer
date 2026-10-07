@@ -12,17 +12,22 @@ import { GRID_SIZE } from '../constants';
 export {
 	getImageMaskStyle,
 	getImageRenderStyle,
+	getImageSurfaceMaskStyle,
+	getImageSurfaceStyle,
 	getCropShapeClipPath,
 	isImageTiled,
 	getImageTilingStyle,
 } from './image-style';
 
 export {
+	beginShapeAdjustment,
 	clampShapeAdjustmentValue,
 	getRoundRectAdjustmentValue,
 	getRoundRectRadiusPx,
 	getShapeAdjustmentHandleDescriptor,
+	getShapeAdjustmentHandleDescriptors,
 	getDraggedShapeAdjustmentValue,
+	getDraggedShapeAdjustments,
 } from './shape-adjustment';
 
 // ---------------------------------------------------------------------------

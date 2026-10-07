@@ -4,8 +4,9 @@
  * stays within the repo's 300 LOC ceiling. Types only, no runtime code.
  */
 
-import type { PptxHandler } from 'pptx-viewer-core';
+import type { PptxHandler, PptxHandlerSaveOptions } from 'pptx-viewer-core';
 import type {
+	CollabLoadOrigin,
 	CollaborationConfig,
 	CollaborationLivePatcher,
 	ConnectionStatus,
@@ -17,6 +18,13 @@ export interface CollaborationControllerDeps {
 	store: Store<ViewerState>;
 	/** Live core handler (owner-role write-back re-serializes through it). */
 	getHandler: () => PptxHandler | null;
+	/**
+	 * Session-level save options (view properties, table styles, tags, deck
+	 * properties, ...), built the same way as the Save/Export path
+	 * (`buildDeckSaveOptions`). Without this the elected-writer write-back
+	 * dropped every session-level edit outside `slides`.
+	 */
+	getSaveOptions?: () => PptxHandlerSaveOptions;
 	/** Enforce the read-only `viewer` role by disabling editing. */
 	setEditable: (editable: boolean) => void;
 	/** Notified on every connection-status transition. */
@@ -48,14 +56,17 @@ export interface CollaborationController {
 	 * late joiner's bootstrap deck is never written into the room's doc before
 	 * the adoption check.
 	 */
-	beginContentLoad(): void;
+	beginContentLoad(origin: CollabLoadOrigin): void;
 	/**
-	 * A content load finished applying to viewer state. When the shared doc
-	 * already holds slides (the room content arrived while the load was still
-	 * parsing), adopt them over the just-loaded deck; when the doc is empty this
-	 * client is the seeder and the deferred publish of the loaded deck runs.
+	 * A content load finished applying to viewer state.
+	 *
+	 * A BOOTSTRAP deck (the one the host mounted with) yields to a room that
+	 * already holds slides: the room content arrived while it was still parsing
+	 * and must not be clobbered. A deck the USER opened during the session is
+	 * the opposite case - it is what they asked for, so the deferred publish
+	 * runs and the room adopts it (see `shouldRoomSlidesReplaceLoad`).
 	 */
-	notifyContentLoaded(): void;
+	notifyContentLoaded(origin: CollabLoadOrigin): void;
 	/**
 	 * Interim ("live preview") Y.Doc write channel: publishes in-flight inline
 	 * editor text that has not reached the store yet, so peers see typing as it

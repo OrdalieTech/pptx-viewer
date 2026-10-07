@@ -19,7 +19,7 @@
  */
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 
-import { isTemplateElement } from '../internal/shared';
+import { canInteractWithElement, isTemplateElement } from '../internal/shared';
 
 /** Map of slide id -> the inherited template (master/layout) elements for it. */
 export type TemplateElementsBySlideId = Record<string, PptxElement[]>;
@@ -54,6 +54,44 @@ export function partitionSlides(slides: readonly PptxSlide[]): PartitionedSlides
 }
 
 /**
+ * Fold a slide that core has re-mapped onto a new layout back into the editor's
+ * two stores.
+ *
+ * `applyLayoutToSlide` returns the slide with the TARGET layout's inherited
+ * artwork merged in, because that is how core delivers every slide. This editor
+ * keeps that artwork in its own store, so the result has to be partitioned again
+ * on the way in: the deck takes the slide's own elements, and the store's entry
+ * for that slide is REPLACED (not merged) so the previous layout's decoration
+ * stops being painted.
+ *
+ * @param slides - The current template-free deck.
+ * @param index - Index of the slide that was re-mapped.
+ * @param remapped - The slide as core returned it.
+ * @param templateElementsBySlideId - The current template store.
+ * @returns The updated deck and store, or `null` when `index` is out of range.
+ */
+export function slidesWithReappliedLayout(
+	slides: readonly PptxSlide[],
+	index: number,
+	remapped: PptxSlide,
+	templateElementsBySlideId: TemplateElementsBySlideId,
+): PartitionedSlides | null {
+	if (index < 0 || index >= slides.length) {
+		return null;
+	}
+	const partitioned = partitionSlides([remapped]);
+	const nextSlides = [...slides];
+	nextSlides[index] = partitioned.slides[0]!;
+	return {
+		slides: nextSlides,
+		templateElementsBySlideId: {
+			...templateElementsBySlideId,
+			[remapped.id]: partitioned.templateElementsBySlideId[remapped.id] ?? [],
+		},
+	};
+}
+
+/**
  * Re-merge the separated template store back into the deck for serialization.
  *
  * Each slide's `elements` become `[...template, ...own]` so template elements sit
@@ -82,6 +120,11 @@ export function buildSaveSlides(
  * - Normal slide elements: follow `baseInteractive` unchanged.
  * - Template (master/layout) elements: interactive only when `baseInteractive`
  *   is set AND `editTemplateMode` is on.
+ * - An element whose authored `a:spLocks/@noSelect` is set is NEVER interactive:
+ *   PowerPoint treats a no-select shape as part of the backdrop, so it must not
+ *   answer a click hit-test nor be swept up by a marquee. Routing that through
+ *   the shared {@link canInteractWithElement} keeps the composition rule
+ *   (`noSelect` subsumes every other lock) in one place for all five bindings.
  */
 export function isElementInteractive(
 	element: PptxElement,
@@ -89,6 +132,9 @@ export function isElementInteractive(
 	editTemplateMode: boolean,
 ): boolean {
 	if (!baseInteractive) {
+		return false;
+	}
+	if (!canInteractWithElement(element, 'select')) {
 		return false;
 	}
 	return isTemplateElement(element) ? editTemplateMode : true;

@@ -92,8 +92,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			extractReflectionStyle: (shapeProps) => this.extractReflectionStyle(shapeProps),
 			extractBlurStyle: (shapeProps) => this.extractBlurStyle(shapeProps),
 			extractEffectDagStyle: (shapeProps) => this.extractEffectDagStyle(shapeProps),
+			extractFillOverlayStyle: (shapeProps) => this.extractFillOverlayStyle(shapeProps),
 		});
 		this.tableDataParser = new PptxTableDataParser({
+			extractCellTextSegments: (txBody, slidePath) =>
+				this.parseTableCellSegments(txBody, slidePath),
 			emuPerPx: PptxHandlerRuntime.EMU_PER_PX,
 			ensureArray: (value) => this.ensureArray(value),
 			parseColor: (colorNode, placeholderColor) => this.parseColor(colorNode, placeholderColor),
@@ -106,12 +109,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				this.colorStyleCodec.extractGradientFocalPoint(gradFill),
 			extractGradientFillToRect: (gradFill) =>
 				this.colorStyleCodec.extractGradientFillToRect(gradFill),
+			resolveCellImagePath: (rEmbed, rLink, slidePath) =>
+				this.resolveTableCellImagePath(rEmbed, rLink, slidePath),
 		});
 		this.mediaDataParser = new PptxMediaDataParser({
 			slideRelsMap: this.slideRelsMap,
 			externalRelsMap: this.externalRelsMap,
 			resolvePath: (base, relative) => this.resolvePath(base, relative),
 			getPathExtension: (pathValue) => this.getPathExtension(pathValue),
+			// Linked (r:link) media shares the picture gate: closed by default.
+			allowExternalMedia: () => this.allowExternalImages === true,
 		});
 		this.graphicFrameParser = new PptxGraphicFrameParser({
 			emuPerPx: PptxHandlerRuntime.EMU_PER_PX,
@@ -119,12 +126,21 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			slideRelsMap: this.slideRelsMap,
 			externalRelsMap: this.externalRelsMap,
 			readFlipState: (xfrm) => this.readFlipState(xfrm),
-			parseTableData: (graphicData) => this.parseTableData(graphicData),
+			parseTableData: (graphicData, slidePath) => this.parseTableData(graphicData, slidePath),
 			parseMediaData: (graphicData, slidePath) => this.parseMediaData(graphicData, slidePath),
 			parseElementActions: (cNvPr, slideRelationships, orderedSlidePaths) =>
 				this.parseElementActions(cNvPr, slideRelationships, orderedSlidePaths),
 			inspectGraphicFrameCompatibility: (type, slidePath, elementId) =>
 				this.compatibilityService.inspectGraphicFrameCompatibility(type, slidePath, elementId),
+			// A frame sitting in a layout content placeholder inherits its
+			// position/size from the layout (then master) `p:ph` counterpart.
+			findPlaceholderNode: (slidePath, placeholder) =>
+				this.findPlaceholderNode(slidePath, {
+					idx: placeholder.idx,
+					type: placeholder.type,
+					sz: placeholder.sz,
+					orient: placeholder.orient,
+				}),
 		});
 		const commentXmlFactoryProvider = new PptxCommentXmlFactoryProvider();
 		this.slideCommentsXmlFactory = commentXmlFactoryProvider.createSlideCommentsFactory();

@@ -3,6 +3,18 @@ import { describe, expect, it } from 'vitest';
 import { ViewerState } from './viewer-state.svelte';
 
 describe('viewerState', () => {
+	it('navigates added slides and clamps the selection when an addition is undone', () => {
+		const state = new ViewerState();
+		let slideCount = 3;
+		state.setSlideCountSource(() => slideCount);
+		state.reset(slideCount);
+		slideCount = 4;
+		state.goTo(3);
+		expect(state.current).toBe(3);
+		slideCount = 3;
+		expect(state.current).toBe(2);
+	});
+
 	it('resets for a loaded deck with a clamped initial slide', () => {
 		const state = new ViewerState();
 		state.reset(5, 99);
@@ -47,11 +59,11 @@ describe('viewerState', () => {
 		const state = new ViewerState();
 		expect(state.zoomPercent).toBeNull();
 		state.zoomIn(80);
-		expect(state.zoomPercent).toBe(100);
+		expect(state.zoomPercent).toBe(90);
 		state.zoomIn(100);
-		expect(state.zoomPercent).toBe(125);
-		state.zoomOut(999);
 		expect(state.zoomPercent).toBe(100);
+		state.zoomOut(999);
+		expect(state.zoomPercent).toBe(90);
 		state.zoomToFit();
 		expect(state.zoomPercent).toBeNull();
 	});

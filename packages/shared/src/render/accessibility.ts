@@ -12,6 +12,11 @@
 import type { PptxElement } from 'pptx-viewer-core';
 import { hasTextProperties } from 'pptx-viewer-core';
 
+import { isElementMarkedDecorative } from './element-decorative';
+import { isElementRendered } from './element-visibility';
+
+export { isElementMarkedDecorative } from './element-decorative';
+
 // ---------------------------------------------------------------------------
 // Reading order
 // ---------------------------------------------------------------------------
@@ -36,15 +41,15 @@ export function computeReadingOrder(
 		return new Map();
 	}
 
-	const sorted = [...elements]
-		.filter((el) => !el.hidden)
-		.sort((a, b) => {
-			const dy = a.y - b.y;
-			if (Math.abs(dy) > tolerancePx) {
-				return dy;
-			}
-			return a.x - b.x;
-		});
+	// A Selection-Pane-hidden element is not drawn, so it must not occupy a tab
+	// stop either. Shares the renderers' rule so the two can never disagree.
+	const sorted = [...elements].filter(isElementRendered).sort((a, b) => {
+		const dy = a.y - b.y;
+		if (Math.abs(dy) > tolerancePx) {
+			return dy;
+		}
+		return a.x - b.x;
+	});
 
 	const result = new Map<string, number>();
 	sorted.forEach((el, idx) => {
@@ -56,6 +61,16 @@ export function computeReadingOrder(
 // ---------------------------------------------------------------------------
 // ARIA roles
 // ---------------------------------------------------------------------------
+
+/** Facts about an element that outrank its type when choosing an ARIA role. */
+export interface AriaRoleOptions {
+	/**
+	 * The element carries a click / hover action, a text hyperlink, or is a zoom
+	 * tile. Derive it with `isElementActionable` rather than by hand, so every
+	 * binding classifies the same deck the same way.
+	 */
+	actionable?: boolean;
+}
 
 /**
  * Maps a PptxElement to its appropriate ARIA role.
@@ -70,9 +85,21 @@ export function computeReadingOrder(
  * - media => "application"
  *
  * @param element - The element to determine a role for.
+ * @param options - Overrides that outrank the element's type.
  * @returns The ARIA role string, or undefined when none is needed.
  */
-export function getAriaRole(element: PptxElement): string | undefined {
+export function getAriaRole(element: PptxElement, options?: AriaRoleOptions): string | undefined {
+	// An actionable element is a control before it is a graphic: announcing an
+	// action button as "image" hides the only thing a user can do with it.
+	if (options?.actionable) {
+		return 'button';
+	}
+	// Decorative (issue G16): no semantic role at all. The DOM applier pairs
+	// this with `aria-hidden="true"`, so assistive tech skips the element
+	// entirely, matching PowerPoint's own "Mark as decorative" behaviour.
+	if (isElementMarkedDecorative(element)) {
+		return undefined;
+	}
 	switch (element.type) {
 		case 'image':
 		case 'picture':
@@ -114,15 +141,23 @@ export function getAriaRole(element: PptxElement): string | undefined {
  * Generates a human-readable ARIA label for an element.
  *
  * Priority:
+ * 0. Decorative (issue G16): empty label, unless the element is actionable
+ *    (PowerPoint disables "Mark as decorative" once an action is attached).
  * 1. Image altText (for image/picture elements)
  * 2. Text content (for text-bearing elements)
  * 3. Chart title (from chartData)
  * 4. Element type fallback label
  *
  * @param element - The element to generate a label for.
+ * @param options - `actionable` outranks the decorative flag, mirroring
+ *   {@link getAriaRole}.
  * @returns A descriptive string for the `aria-label` attribute.
  */
-export function getAriaLabel(element: PptxElement): string {
+export function getAriaLabel(element: PptxElement, options?: AriaRoleOptions): string {
+	if (!options?.actionable && isElementMarkedDecorative(element)) {
+		return '';
+	}
+
 	// Image alt text
 	if (
 		(element.type === 'image' || element.type === 'picture') &&

@@ -130,7 +130,6 @@ vi.mock<typeof import('react-i18next')>(import('react-i18next'), () => ({
 				'pptx.ribbon.exportPdf': 'Export as PDF',
 				'pptx.ribbon.exportVideo': 'Export as Video',
 				'pptx.ribbon.exportGif': 'Export as GIF',
-				'pptx.file.packageTooltip': 'Package for Sharing',
 				'pptx.file.saveAsPptxTooltip': 'Save as Presentation (.pptx)',
 				'pptx.file.saveAsPpsxTooltip': 'Save as Slide Show (.ppsx)',
 				'pptx.file.saveAsPptmTooltip': 'Save as Macro-Enabled (.pptm)',
@@ -376,7 +375,7 @@ function createMockToolbarProps(overrides: Partial<ToolbarProps> = {}): ToolbarP
 		onExportPdf: vi.fn<() => void>(),
 		onExportVideo: vi.fn<() => void>(),
 		onExportGif: vi.fn<() => void>(),
-		onPackageForSharing: vi.fn<() => void>(),
+		onExportJson: vi.fn<() => void>(),
 		onSaveAsPptx: vi.fn<() => void>(),
 		onSaveAsPpsx: vi.fn<() => void>(),
 		onSaveAsPptm: vi.fn<() => void>(),
@@ -637,6 +636,34 @@ describe('toolbar - Home tab', () => {
 		expect(html).toContain('>24</span>');
 	});
 
+	it('font size display converts model pixels to exact PowerPoint points', () => {
+		const html = render(
+			React.createElement(HomeSection, {
+				canEdit: true,
+				clipboardPayload: null,
+				onCopy: vi.fn<() => void>(),
+				onCut: vi.fn<() => void>(),
+				onPaste: vi.fn<() => void>(),
+				layoutOptions: [],
+				onInsertSlideFromLayout: vi.fn<() => void>(),
+				selectedElement: {
+					type: 'text',
+					id: 'font-size',
+					x: 0,
+					y: 0,
+					width: 100,
+					height: 20,
+					text: 'Hello',
+					textStyle: { fontSize: 32 },
+					textSegments: [{ text: 'Hello', style: { fontSize: 48.1 * (96 / 72) } }],
+				} as never,
+				onUpdateTextStyle: vi.fn<() => void>(),
+			}),
+		);
+		expect(html).toContain('>48.1</span>');
+		expect(html).not.toContain('64.133333');
+	});
+
 	it('paste is disabled when no clipboard payload', () => {
 		const html = render(
 			React.createElement(HomeSection, {
@@ -685,7 +712,7 @@ describe('toolbar - File tab', () => {
 		onExportPdf: vi.fn<() => void>(),
 		onExportVideo: vi.fn<() => void>(),
 		onExportGif: vi.fn<() => void>(),
-		onPackageForSharing: vi.fn<() => void>(),
+		onExportJson: vi.fn<() => void>(),
 		onSaveAsPpsx: vi.fn<() => void>(),
 		onSaveAsPptm: vi.fn<() => void>(),
 		hasMacros: false,
@@ -731,6 +758,23 @@ describe('toolbar - File tab', () => {
 		expect(html).toContain('role="dialog"');
 		expect(html).toContain('aria-modal="true"');
 		expect(html).toContain('aria-label="Back to presentation"');
+	});
+
+	it('renders the Export as JSON card on the Export backstage page', async () => {
+		const { BackstageCards } = await import('./file-backstage-cards');
+		const onExportJson = vi.fn<() => void>();
+		const props = createFileProps({
+			onExportJson,
+		}) as unknown as import('./file-backstage-parts').FileSectionProps;
+		const html = render(
+			React.createElement(BackstageCards, {
+				page: 'export',
+				props,
+				run: (action?: () => void) => action?.(),
+			}),
+		);
+		expect(html).toContain('Export as JSON');
+		expect(html).toContain('Save a portable JSON document that re-imports with full fidelity.');
 	});
 });
 
@@ -1075,7 +1119,7 @@ describe('toolbar - Animations tab', () => {
 		expect(html).toContain('>Preview</span>');
 	});
 
-	it('renders Add Animation dropdown', () => {
+	it('renders the whole shared preset catalogue, not a six-effect sample', () => {
 		const html = render(
 			React.createElement(AnimationsSection, {
 				canEdit: true,
@@ -1084,8 +1128,14 @@ describe('toolbar - Animations tab', () => {
 				onToggleInspector: vi.fn<() => void>(),
 			}),
 		);
-		expect(html).toContain('title="Add animation to selected element"');
-		expect(html).toContain('Add Animation');
+		// One button per preset in `pptx-viewer-shared`'s catalogue: the gallery
+		// used to hard-code six, hiding twenty-one applicable effects.
+		expect(html).toContain('>Entrance<');
+		expect(html).toContain('>Emphasis<');
+		expect(html).toContain('>Exit<');
+		for (const label of ['Appear', 'Grow &amp; Turn', 'Bold Flash', 'Shrink Out', 'Disappear']) {
+			expect(html).toContain(`title="${label}"`);
+		}
 	});
 
 	it('renders Remove button', () => {
@@ -1124,7 +1174,7 @@ describe('toolbar - Animations tab', () => {
 			}),
 		);
 		expect(html).toMatch(/title="Preview animation on selected element"[^>]*disabled/u);
-		expect(html).toContain('title="Add animation to selected element"');
+		expect(html).toMatch(/<button[^>]*disabled=""[^>]*title="Appear"/u);
 		expect(html).toMatch(/title="Remove animation from selected element"[^>]*disabled/u);
 	});
 
@@ -1363,10 +1413,12 @@ describe('toolbar - View tab', () => {
 		onSetSpellCheckEnabled: vi.fn<() => void>(),
 		showGrid: false,
 		showRulers: false,
+		showGuides: false,
 		snapToGrid: false,
 		snapToShape: false,
 		onSetShowGrid: vi.fn<() => void>(),
 		onSetShowRulers: vi.fn<() => void>(),
+		onSetShowGuides: vi.fn<() => void>(),
 		onSetSnapToGrid: vi.fn<() => void>(),
 		onSetSnapToShape: vi.fn<() => void>(),
 		onAddGuide: vi.fn<() => void>(),
@@ -1408,7 +1460,19 @@ describe('toolbar - View tab', () => {
 	it('renders Snap controls', () => {
 		const html = render(React.createElement(ViewSection, createViewProps()));
 		expect(html).toContain('>Snap to grid<');
-		expect(html).toContain('>Snap to shape<');
+		expect(html).toContain('>Snap to Shape<');
+	});
+
+	it('leaves Snap to Shape usable and gives Guides the guide overlay', () => {
+		// The pair used to be inverted: Guides drove shape snapping while
+		// Snap to Shape was a permanently disabled placeholder, so the visible
+		// label described a feature that lived on a different control.
+		const onSetSnapToShape = vi.fn<(enabled: boolean) => void>();
+		const html = render(
+			React.createElement(ViewSection, createViewProps({ snapToShape: true, onSetSnapToShape })),
+		);
+		expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*title="Snap to Shape"/u);
+		expect(html).toMatch(/title="Toggle center guide lines"/u);
 	});
 
 	it('renders guide buttons', () => {
@@ -1629,14 +1693,15 @@ describe('toolbar - Arrange tab', () => {
 	const createArrangeProps = (overrides = {}) => ({
 		canEdit: true,
 		selectedElement: { type: 'shape', id: 'test', x: 0, y: 0, width: 100, height: 100 } as never,
-		clipboardPayload: null,
+		selectedCount: 1,
+		selectionGroupable: true,
 		onAlignElements: vi.fn<() => void>(),
-		onCopy: vi.fn<() => void>(),
-		onCut: vi.fn<() => void>(),
-		onPaste: vi.fn<() => void>(),
 		onFlip: vi.fn<() => void>(),
 		onMoveLayer: vi.fn<() => void>(),
 		onMoveLayerToEdge: vi.fn<() => void>(),
+		onGroupElements: vi.fn<() => void>(),
+		onUngroupElement: vi.fn<() => void>(),
+		onUpdateElementStyle: vi.fn<() => void>(),
 		onDuplicate: vi.fn<() => void>(),
 		onDelete: vi.fn<() => void>(),
 		formatPainterActive: false,
@@ -1654,11 +1719,29 @@ describe('toolbar - Arrange tab', () => {
 		expect(html).toContain('title="Align bottom"');
 	});
 
-	it('renders Copy, Cut, Paste buttons', () => {
+	it('leaves the clipboard trio to the Clipboard group', () => {
+		// The Arrange group used to repeat Cut/Copy/Paste, so the Home tab
+		// offered each of them twice. PowerPoint has one Clipboard group.
 		const html = render(React.createElement(ArrangeSection, createArrangeProps()));
-		expect(html).toContain('title="Copy"');
-		expect(html).toContain('title="Cut"');
-		expect(html).toContain('title="Paste"');
+		expect(html).not.toContain('title="Copy"');
+		expect(html).not.toContain('title="Cut"');
+		expect(html).not.toContain('title="Paste"');
+	});
+
+	it('renders Group, Ungroup and the stroke-width spinner', () => {
+		const html = render(React.createElement(ArrangeSection, createArrangeProps()));
+		expect(html).toContain('aria-label="Group"');
+		expect(html).toContain('aria-label="Ungroup"');
+		expect(html).toContain('aria-label="Stroke width"');
+	});
+
+	it('enables Group only once two elements are selected', () => {
+		const single = render(React.createElement(ArrangeSection, createArrangeProps()));
+		expect(single).toMatch(/<button[^>]*disabled=""[^>]*aria-label="Group"/u);
+		const pair = render(
+			React.createElement(ArrangeSection, createArrangeProps({ selectedCount: 2 })),
+		);
+		expect(pair).not.toMatch(/<button[^>]*disabled=""[^>]*aria-label="Group"/u);
 	});
 
 	it('renders Flip H and Flip V buttons', () => {
@@ -1875,7 +1958,7 @@ function createHiddenActionsFileProps(hiddenActions?: ToolbarActionId[]) {
 		onExportPdf: vi.fn<() => void>(),
 		onExportVideo: vi.fn<() => void>(),
 		onExportGif: vi.fn<() => void>(),
-		onPackageForSharing: vi.fn<() => void>(),
+		onExportJson: vi.fn<() => void>(),
 		onSaveAsPpsx: vi.fn<() => void>(),
 		onSaveAsPptm: vi.fn<() => void>(),
 		hasMacros: false,

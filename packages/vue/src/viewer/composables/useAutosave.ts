@@ -1,4 +1,5 @@
 import type { PptxSlide } from 'pptx-viewer-core';
+import { nextAutosaveDelayMs } from 'pptx-viewer-shared';
 import { onScopeDispose, ref, toValue, watch } from 'vue';
 import type { Ref } from 'vue';
 
@@ -31,6 +32,19 @@ export interface UseAutosaveOptions {
 	 * edit, no `deep` needed.
 	 */
 	slides: Ref<PptxSlide[]>;
+	/**
+	 * The separate per-slide store of master/layout (template) elements.
+	 *
+	 * An edit made in edit-template mode rebuilds ONLY this map: it never
+	 * reassigns `slides`, because a template element does not live in
+	 * `slide.elements`. Watching `slides` alone therefore missed every
+	 * template-mode edit, and a user editing a master or layout got no crash
+	 * recovery at all. Svelte never had the bug because its equivalent effect
+	 * reads a value that already folds the template map in; watching the map
+	 * here reaches the same shape, and covers any FUTURE template mutation path
+	 * without that path having to remember to announce itself.
+	 */
+	templateElements?: Ref<unknown>;
 	/** Master on/off switch. When falsy the debounce timer never fires. */
 	enabled?: Ref<boolean> | boolean;
 	/**
@@ -78,7 +92,7 @@ const defaultTimers: AutosaveTimerApi = {
  * any pending debounce. The timer is torn down on scope dispose.
  */
 export function useAutosave(options: UseAutosaveOptions): UseAutosaveResult {
-	const { slides, enabled = true, intervalMs, onSave } = options;
+	const { slides, templateElements, enabled = true, intervalMs, onSave } = options;
 	const timers = options.timers ?? defaultTimers;
 
 	const status = ref<AutosaveStatus>('idle');
@@ -87,6 +101,13 @@ export function useAutosave(options: UseAutosaveOptions): UseAutosaveResult {
 
 	let timerId: number | null = null;
 	let savePromise: Promise<void> | null = null;
+	/**
+	 * When the oldest unsaved edit happened. A plain debounce re-arms on every
+	 * keystroke, so a user who keeps typing could defer the snapshot forever;
+	 * `nextAutosaveDelayMs` caps the wait at one interval from this moment, which
+	 * is the promise React and Angular's polling engines already keep.
+	 */
+	let firstDirtyAt: number | null = null;
 
 	const isEnabled = (): boolean => toValue(enabled) !== false;
 
@@ -109,6 +130,7 @@ export function useAutosave(options: UseAutosaveOptions): UseAutosaveResult {
 				await onSave();
 				lastSavedAt.value = Date.now();
 				isDirty.value = false;
+				firstDirtyAt = null;
 				status.value = 'saved';
 			} catch (err) {
 				status.value = 'error';
@@ -130,21 +152,45 @@ export function useAutosave(options: UseAutosaveOptions): UseAutosaveResult {
 
 	const scheduleSave = (): void => {
 		clearTimer();
+		const delay = nextAutosaveDelayMs({
+			intervalMs: toValue(intervalMs),
+			firstDirtyAt,
+			now: Date.now(),
+		});
 		timerId = timers.setTimer(() => {
 			timerId = null;
-			if (isEnabled()) {
+			// Re-read `isDirty` HERE, not at arming time. The watcher below arms on
+			// every reassignment of the watched stores, including the one that seeds
+			// the freshly loaded deck, and `useAutosaveWiring` clears the flag again
+			// once loading settles. Without this check that already-cancelled arm
+			// still fired, so merely OPENING a deck wrote a crash-recovery snapshot
+			// and the next visit offered to "recover unsaved changes" for a deck the
+			// user had only read. Anything that legitimately clears the flag (a real
+			// save, a host reseed) now also disarms the timer it left behind.
+			//
+			// `saveNow()` is deliberately NOT gated: it is an explicit request, not
+			// a poll, and the same asymmetry holds in the shared
+			// `shouldWriteAutosaveSnapshot`.
+			if (isEnabled() && isDirty.value) {
 				void runSave().catch(() => {});
 			}
-		}, toValue(intervalMs));
+		}, delay);
 	};
 
-	// Fires only on actual reassignments of `slides` (not on setup, since
-	// `immediate` is omitted), so each edit marks the document dirty and
-	// arms the debounce. The host is responsible for not re-priming `slides`
+	// Fires only on actual reassignments of the watched stores (not on setup,
+	// since `immediate` is omitted), so each edit marks the document dirty and
+	// arms the debounce. The host is responsible for not re-priming them
 	// with the freshly-loaded document in a way that should trigger a save.
+	//
+	// Both stores are watched because an edit lands in exactly one of them: a
+	// normal edit rebuilds `slides`, a template-mode edit rebuilds the template
+	// map. Both are reassigned immutably, so a shallow watch is enough.
 	watch(
-		slides,
+		templateElements ? [slides, templateElements] : [slides],
 		() => {
+			if (!isDirty.value || firstDirtyAt === null) {
+				firstDirtyAt = Date.now();
+			}
 			isDirty.value = true;
 			if (isEnabled()) {
 				scheduleSave();
@@ -154,6 +200,19 @@ export function useAutosave(options: UseAutosaveOptions): UseAutosaveResult {
 		// and arms the debounce timer, matching the React effect-on-change
 		// behaviour and keeping fake-timer tests deterministic.
 		{ flush: 'sync' },
+	);
+
+	// File > Options > Save > "AutoRecover interval": re-arm a PENDING timer
+	// immediately when the cadence changes, rather than only picking up the new
+	// value on the next edit. Harmless when `intervalMs` is a plain number
+	// (the getter never changes, so this never re-fires).
+	watch(
+		() => toValue(intervalMs),
+		() => {
+			if (timerId !== null) {
+				scheduleSave();
+			}
+		},
 	);
 
 	onScopeDispose(() => {

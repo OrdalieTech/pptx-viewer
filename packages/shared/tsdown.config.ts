@@ -2,6 +2,7 @@ import { defineConfig } from 'tsdown';
 
 export default defineConfig((options) => ({
 	entry: [
+		'src/collaboration/index.ts',
 		'src/index.ts',
 		'src/theme/index.ts',
 		'src/loader/index.ts',

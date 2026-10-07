@@ -2,6 +2,7 @@ import type { PptxChartBoxWhiskerOptions, PptxChartData, PptxElement } from 'ppt
 
 import { computeBoxStats } from './chart-box-whisker-stats';
 import type { BoxStats } from './chart-box-whisker-stats';
+import { buildValueAxisGridlinesAndLabels, findValueAxis } from './chart-cx-axis-units';
 import { distributionRange } from './chart-distribution-range';
 import type {
 	ChartViewModel,
@@ -15,7 +16,6 @@ import type {
 } from './chart-view-model';
 import {
 	buildCategoryLabels,
-	buildGridlinesAndLabels,
 	buildLegend,
 	buildZeroLine,
 	computePlotLayout,
@@ -54,6 +54,7 @@ export function computeBoxWhiskerGeometry(
 	layout: PlotLayout,
 	range: ValueRange,
 	colorPalette: readonly string[] | undefined,
+	seriesColorOverride?: string,
 ): BoxWhiskerGeometry[] {
 	const groupWidth = layout.plotWidth / catCount;
 	const boxW = groupWidth * 0.5;
@@ -92,7 +93,9 @@ export function computeBoxWhiskerGeometry(
 			yQ3: valueToY(stats.q3, range, layout.plotTop, layout.plotBottom),
 			yMed: valueToY(stats.median, range, layout.plotTop, layout.plotBottom),
 			yMean: valueToY(mean, range, layout.plotTop, layout.plotBottom),
-			fill: paletteColor(categoryIndex, colorPalette),
+			// An explicit series colour (cx:series spPr solidFill) wins over the
+			// per-category palette cycle, as in PowerPoint.
+			fill: seriesColorOverride ?? paletteColor(categoryIndex, colorPalette),
 			points: observations.map((item, index) => ({
 				x: boxX + boxW * (0.2 + (0.6 * (index + 1)) / (observations.length + 1)),
 				y: valueToY(item.value, range, layout.plotTop, layout.plotBottom),
@@ -227,12 +230,17 @@ export function buildBoxWhiskerViewModel(
 		layout,
 		range,
 		chartData.colorPalette,
+		chartData.series[0]?.color,
 	);
 	const primitives = geometries.flatMap((geometry, index) => [
 		...whiskerPrimitives(geometry),
 		...optionPrimitives(geometry, options, index),
 	]);
-	const { gridlines, axisLabels } = buildGridlinesAndLabels(range, layout);
+	const { gridlines, axisLabels } = buildValueAxisGridlinesAndLabels(
+		range,
+		layout,
+		findValueAxis(chartData.axes),
+	);
 	const { legend, legendX, legendY, legendAnchor } = buildLegend(
 		chartData.series,
 		chartData.colorPalette,
@@ -242,7 +250,7 @@ export function buildBoxWhiskerViewModel(
 		layout.plotTop,
 	);
 	const categoryLegend: LegendEntry[] = categoryLabels.map((label, index) => ({
-		color: paletteColor(index, chartData.colorPalette),
+		color: chartData.series[0]?.color ?? paletteColor(index, chartData.colorPalette),
 		label,
 	}));
 	return {

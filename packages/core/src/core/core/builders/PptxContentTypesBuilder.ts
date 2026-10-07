@@ -105,7 +105,17 @@ export class PptxContentTypesBuilder implements IPptxContentTypesBuilder {
 			});
 		}
 
-		this.applyMediaDefaults(defaults, init.usedMediaPaths);
+		const existingPartNames = new Set(
+			filteredOverrides.map((entry) => this.normalizePartName(String(entry['@_PartName'] ?? ''))),
+		);
+		this.applyMediaDefaults(
+			defaults,
+			new Set(
+				[...init.usedMediaPaths].filter(
+					(path) => !existingPartNames.has(this.normalizePartName(path)),
+				),
+			),
+		);
 		this.applyInkOverrides(filteredOverrides, init.usedInkPaths);
 		typesRoot['Default'] = defaults;
 		typesRoot['Override'] = filteredOverrides;

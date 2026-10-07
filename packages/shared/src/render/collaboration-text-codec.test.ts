@@ -74,6 +74,22 @@ describe('encodeTextBody / decodeTextBody', () => {
 		expect(decoded[0].bulletInfo).toStrictEqual({ type: 'bullet', char: '-' });
 		expect(decoded[1].isParagraphBreak).toBeTruthy();
 	});
+
+	it('keeps adjacent merged line breaks stable when encoded again', () => {
+		const first = liveText();
+		encodeTextBody(
+			[
+				{ text: '\n', style: {}, isLineBreak: true },
+				{ text: '\n', style: {}, isLineBreak: true },
+			],
+			first,
+		);
+		const decoded = decodeTextBody(first);
+		const second = liveText();
+		encodeTextBody(decoded, second);
+		expect(second.toString()).toBe('\n\n');
+		expect(decodeTextBody(second)).toStrictEqual(decoded);
+	});
 });
 
 describe('encodeSegmentsToDelta', () => {

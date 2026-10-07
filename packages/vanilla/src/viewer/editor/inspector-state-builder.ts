@@ -1,37 +1,39 @@
-import type { PptxElement } from 'pptx-viewer-core';
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s deriving one inspector field each);
+   merging them isn't a style choice here. */
+import type { PptxElement, PptxThemeColorRef } from 'pptx-viewer-core';
 import {
 	hasShapeProperties,
 	isImageLikeElement,
 	pptxActionToElementAction,
 } from 'pptx-viewer-core';
-import type { GradientState, InlineTextSelection } from 'pptx-viewer-shared';
 import {
 	autoFitModeOf,
+	canInteractWithElement,
+	defaultGradientState,
+	getNonVisualDescriptionFields,
 	gradientStateOf,
 	hasGradientFill,
 	imageAdjustmentsStateOf,
 	imageCropStateOf,
+	isElementLocked,
+	shouldShowAccessibilitySection,
 	tableInspectorStateOf,
 	textAdvancedStateOf,
 	textWrapOf,
 } from 'pptx-viewer-shared';
+import type { InlineTextSelection } from 'pptx-viewer-shared';
 
+import type { ChartPartSelection } from '../render';
 import type { InspectorState } from '../ui';
 import { canFormatShape, canFormatText } from './editor-format-mutations';
-
-const DEFAULT_GRADIENT: GradientState = {
-	type: 'linear',
-	angle: 90,
-	stops: [
-		{ color: '#4472c4', position: 0, opacity: 1 },
-		{ color: '#ffffff', position: 100, opacity: 1 },
-	],
-};
 
 /** Read the shape fill/stroke for the inspector (undefined/0 when not a shape). */
 function shapeStyleOf(el: PptxElement | undefined): {
 	fillColor: string | undefined;
+	fillColorRef: PptxThemeColorRef | undefined;
 	strokeColor: string | undefined;
+	strokeColorRef: PptxThemeColorRef | undefined;
 	strokeWidth: number;
 	fillOpacity: number;
 	strokeOpacity: number;
@@ -39,7 +41,9 @@ function shapeStyleOf(el: PptxElement | undefined): {
 	if (el && hasShapeProperties(el)) {
 		return {
 			fillColor: el.shapeStyle?.fillColor,
+			fillColorRef: el.shapeStyle?.fillColorRef,
 			strokeColor: el.shapeStyle?.strokeColor,
+			strokeColorRef: el.shapeStyle?.strokeColorRef,
 			strokeWidth: el.shapeStyle?.strokeWidth ?? 0,
 			fillOpacity: el.shapeStyle?.fillOpacity ?? 1,
 			strokeOpacity: el.shapeStyle?.strokeOpacity ?? 1,
@@ -47,7 +51,9 @@ function shapeStyleOf(el: PptxElement | undefined): {
 	}
 	return {
 		fillColor: undefined,
+		fillColorRef: undefined,
 		strokeColor: undefined,
+		strokeColorRef: undefined,
 		strokeWidth: 0,
 		fillOpacity: 1,
 		strokeOpacity: 1,
@@ -65,6 +71,9 @@ export function buildInspectorState(
 	selectedTableCells: Array<{ row: number; column: number }> = [],
 	selectedTextRange: InlineTextSelection | null = null,
 	mediaDataUrls: Map<string, string> = new Map(),
+	chartPartSelection: ChartPartSelection | null = null,
+	recentColors: readonly string[] = [],
+	themeColorMap: Record<string, string> | undefined = undefined,
 ): InspectorState {
 	const shape = shapeStyleOf(el);
 	const textAdvanced = el ? textAdvancedStateOf(el) : undefined;
@@ -78,6 +87,11 @@ export function buildInspectorState(
 
 	return {
 		hasSelection: el !== undefined,
+		isLocked: isElementLocked(el),
+		// G7: a:picLocks/@noCrop. G9: arrowheadsChangeable already existed on
+		// element-locks.ts but nothing consulted it in the vanilla inspector.
+		croppable: canInteractWithElement(el, 'crop'),
+		arrowheadsChangeable: canInteractWithElement(el, 'changeArrowheads'),
 		canShape: canFormatShape(el),
 		canText: canFormatText(el),
 		isImage: el !== undefined && isImageLikeElement(el),
@@ -86,13 +100,23 @@ export function buildInspectorState(
 		isTable: el?.type === 'table',
 		isSmartArt: el?.type === 'smartArt',
 		smartArtData: el?.type === 'smartArt' ? el.smartArtData : undefined,
+		isGroup: el?.type === 'group',
+		groupChildCount:
+			el?.type === 'group' && Array.isArray(el.children) ? el.children.length : undefined,
+		isOle: el?.type === 'ole',
+		oleObjectType: el?.type === 'ole' ? el.oleObjectType : undefined,
+		oleFileName: el?.type === 'ole' ? el.fileName : undefined,
+		oleIsLinked: el?.type === 'ole' && el.isLinked === true,
+		oleName: el?.type === 'ole' ? el.oleName : undefined,
 		x: el?.x ?? 0,
 		y: el?.y ?? 0,
 		width: el?.width ?? 0,
 		height: el?.height ?? 0,
 		rotation: el?.rotation ?? 0,
 		fillColor: shape.fillColor,
+		fillColorRef: shape.fillColorRef,
 		strokeColor: shape.strokeColor,
+		strokeColorRef: shape.strokeColorRef,
 		strokeWidth: shape.strokeWidth,
 		shapeStyle: el && hasShapeProperties(el) ? el.shapeStyle : undefined,
 		shapeType: el?.type === 'shape' ? el.shapeType : undefined,
@@ -100,7 +124,7 @@ export function buildInspectorState(
 		fillOpacity: shape.fillOpacity,
 		strokeOpacity: shape.strokeOpacity,
 		gradientEnabled: el !== undefined && hasGradientFill(el),
-		gradient: el ? gradientStateOf(el) : DEFAULT_GRADIENT,
+		gradient: el ? gradientStateOf(el) : defaultGradientState(),
 		vAlign: textAdvanced?.vAlign ?? 'top',
 		textWrap: el ? textWrapOf(el) : 'square',
 		autoFitMode: el ? autoFitModeOf(el) : 'none',
@@ -128,6 +152,16 @@ export function buildInspectorState(
 		imageDuotone2:
 			el && isImageLikeElement(el) ? (el.imageEffects?.duotone?.color2 ?? '#ffffff') : '#ffffff',
 		imageColorWash: el && isImageLikeElement(el) ? el.imageEffects?.colorWash : undefined,
+		altText: el ? getNonVisualDescriptionFields(el).altText : '',
+		title: el ? getNonVisualDescriptionFields(el).title : '',
+		showAccessibilitySection: el !== undefined && shouldShowAccessibilitySection(el),
+		chartHighlightCell:
+			el?.type === 'chart' && chartPartSelection?.elementId === el.id
+				? {
+						seriesIndex: chartPartSelection.part.seriesIndex,
+						pointIndex: chartPartSelection.part.pointIndex,
+					}
+				: null,
 		actionClick: el?.actionClick ? pptxActionToElementAction(el.actionClick, 'click') : undefined,
 		actionHover: el?.actionHover ? pptxActionToElementAction(el.actionHover, 'hover') : undefined,
 		chartData: el?.type === 'chart' ? el.chartData : undefined,
@@ -168,5 +202,8 @@ export function buildInspectorState(
 		tableColumnWidths: el?.type === 'table' ? (el.tableData?.columnWidths ?? []) : [],
 		tableRowHeights:
 			el?.type === 'table' ? (el.tableData?.rows.map((row) => row.height ?? 32) ?? []) : [],
+		tableElement: el?.type === 'table' ? el : undefined,
+		recentColors,
+		themeColorMap,
 	};
 }

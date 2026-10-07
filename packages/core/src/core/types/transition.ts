@@ -70,6 +70,7 @@ export type PptxTransitionType =
 	| 'cube'
 	| 'flip'
 	| 'rotate'
+	| 'box'
 	| 'orbit'
 	| 'fallOver'
 	| 'drape'
@@ -133,6 +134,15 @@ export const TRANSITION_VALID_DIRECTIONS: Readonly<
  * // => { type: "fade", durationMs: 700, advanceOnClick: true, advanceAfterMs: 5000 }
  * ```
  */
+/**
+ * Morph granularity (`<p159:morph @option>`).
+ *
+ * - `byObject`  - match whole shapes (PowerPoint's default)
+ * - `byWord`    - additionally morph text word by word
+ * - `byChar`    - additionally morph text character by character
+ */
+export type PptxMorphOption = 'byObject' | 'byWord' | 'byChar';
+
 export interface PptxSlideTransition {
 	type: PptxTransitionType;
 	/** Schema-defined transition speed. Defaults to `fast` when omitted. */
@@ -149,6 +159,13 @@ export interface PptxSlideTransition {
 	thruBlk?: boolean;
 	/** Split orientation (horz/vert) parsed from `@_orient`. */
 	orient?: PptxSplitOrientation;
+	/**
+	 * Morph granularity from `<p159:morph @option>`: how finely PowerPoint
+	 * matches content between the two slides. Only meaningful when
+	 * {@link type} is `morph`; defaults to `byObject` when the attribute is
+	 * absent, matching PowerPoint's own default.
+	 */
+	morphOption?: PptxMorphOption;
 	/** Relationship ID of transition sound from `p:sndAc/p:stSnd/@r:embed` when present. */
 	soundRId?: string;
 	/** Embedded WAV display name from `p:stSnd/p:snd/@name`. */
@@ -157,8 +174,19 @@ export interface PptxSlideTransition {
 	soundLoop?: boolean;
 	/** Resolved transition sound media path within the package. */
 	soundPath?: string;
-	/** Human-readable sound file name (extracted from soundPath). */
+	/** Human-readable sound file name (extracted from soundPath, or set by the
+	 * UI when a new file is picked, before it has a soundPath at all). */
 	soundFileName?: string;
+	/**
+	 * A newly-picked local sound file awaiting embedding, as a `data:` URL.
+	 * Set by the transitions ribbon's Sound picker (`applyTransitionSoundFile`
+	 * in `pptx-viewer-shared`) when the user chooses a file that is not yet
+	 * part of the package; mirrors `imageData`/`mediaData` on picture and media
+	 * elements. The save pipeline (`embedTransitionSound`) writes the bytes to
+	 * `ppt/media/`, mints a relationship, sets `soundRId`/`soundPath`, and
+	 * clears this field so a later save does not re-embed the same bytes.
+	 */
+	soundData?: string;
 	/**
 	 * When true, the transition stops the currently-playing sound (OOXML `p:sndAc/p:endSnd`).
 	 * Mutually exclusive with `soundRId`/`soundPath` (which use `p:stSnd`).

@@ -1,5 +1,14 @@
-import { cloneSlide, setSmartArtNodeStyle, updateSmartArtNodeText } from 'pptx-viewer-core';
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per handler/method); merging them
+   isn't a style choice here. */
+import {
+	buildThemeColorMap,
+	cloneSlide,
+	setSmartArtNodeStyle,
+	updateSmartArtNodeText,
+} from 'pptx-viewer-core';
 import type {
+	ParsedTableStyleMap,
 	PptxElement,
 	PptxHandler,
 	PptxSaveFormat,
@@ -8,41 +17,62 @@ import type {
 } from 'pptx-viewer-core';
 import type {
 	PresentationSnapshot,
+	Rendering3DFlags,
 	ThemeCatalogEntry,
 	ViewerMode,
+	ViewerQuickAccessOptions,
 	ViewerTheme,
 } from 'pptx-viewer-shared';
 import {
+	buildDeckSaveOptions,
 	buildPresentationAudienceUrl,
 	buildUserFontFaceStyles,
 	clearPresentationDeck,
 	collectAccessibilityIssues,
 	createPresentationSessionId,
+	endAudienceDisplay,
 	isPresentationSessionMessage,
 	loadPresentationDeck,
+	mayLeaveSlideShow,
 	parsePresentationSessionId,
 	placeAudienceWindow,
 	PRESENTATION_CHANNEL_NAME,
 	PRESENTATION_MESSAGE_ORIGIN,
 	readStoredViewerPrefs,
+	reflowSmartArtData,
 	resolveAudienceScreenPlacement,
+	resolveGoogleWebfontHref,
 	shouldCommitSmartArtNodeText,
+	stepPresenterZoom,
 	storePresentationDeck,
+	swapPresentationWindows,
 	createInitialPresentationSnapshot,
+	createPresenterShowGuard,
 	createBlankSlide,
 	createBackstagePresentation,
+	DEFAULT_VIEWER_OPTIONS,
+	describeFontEmbedding,
+	resolve3DRenderingFlags,
+	checkModifyPassword,
 	deleteAutosaveSnapshot,
 	listAutosaveSnapshots,
 	readBackstageRecentFile,
 	makeSlideId,
 	mergePresentationSnapshot,
 	openPptxFile,
+	resolveAuthoredSlideRange,
+	resolveExpiredAutosaveSnapshots,
+	resolveImageResolutionScale,
+	resolveSlideSizeSelection,
+	shouldClearAutosaveCacheOnClose,
+	shouldConfirmExternalHyperlink,
+	shouldDiscardAutosaveOnSuccessfulSave,
 	THEME_CATALOG,
 	writeStoredViewerPrefs,
 } from 'pptx-viewer-shared';
 import type { LocaleCatalogEntry } from 'pptx-viewer-shared/i18n';
 
-import type { AiChatMount } from './ai';
+import type { AiChatMount, AiFocusController } from './ai';
 import { createAiFocusController, createVanillaAiBridge, mountAiChat } from './ai';
 import type { ChromeHost, ChromeLifecycle } from './chrome-lifecycle';
 import { buildMountChromeDeps, mountChrome, unmountChrome } from './chrome-lifecycle';
@@ -59,11 +89,15 @@ import { createParityWorkflows } from './parity-workflows';
 import type { PresentationAnnotationsHost } from './presentation-annotations-host';
 import { createPresentationAnnotationsHost } from './presentation-annotations-host';
 import { applyPresentationThemePreset } from './presentation-theme-controller';
-import { mountPresenterConsole, renderAudienceEffects } from './presenter-console';
+import { createPresenterCaptions, mountPresenterView } from './presenter';
+import type { PresenterCaptions, PresenterViewHandle, PresenterViewOptions } from './presenter';
+import { renderAudienceEffects } from './presenter-console';
 import type { ElementRendererRegistry } from './render';
 import { createDefaultRegistry } from './render';
 import type { RenderController } from './render-controller';
 import { createRenderController } from './render-controller';
+import type { RulerController } from './ruler-controller';
+import { createRulerController } from './ruler-controller';
 import type { SessionControllers } from './session-controllers';
 import { createSessionControllers } from './session-controllers';
 import type { Store, ViewerState } from './state';
@@ -86,6 +120,8 @@ import type {
 } from './types';
 import { openDigitalSignaturesDialog } from './ui/digital-signatures-dialog';
 import { openDocumentPropertiesDialog } from './ui/document-properties-dialog';
+import type { ElementContextMenu } from './ui/element-context-menu';
+import { mountElementContextMenu } from './ui/element-context-menu';
 import { openFontEmbeddingDialog } from './ui/font-embedding-dialog';
 import { openPasswordProtectionDialog } from './ui/password-protection-dialog';
 import { openSignatureStrippedDialog } from './ui/signature-stripped-dialog';
@@ -94,6 +130,7 @@ import type { ViewerControls } from './viewer-controls';
 import { createViewerControls } from './viewer-controls';
 import type { ViewerOptionsController } from './viewer-options-controller';
 import { createViewerOptionsController } from './viewer-options-controller';
+import { removeGoogleWebfontsLink, syncGoogleWebfontsLink } from './webfonts';
 
 /**
  * The zero-framework PowerPoint viewer. Construct via {@link createPptxViewer}:
@@ -129,14 +166,27 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 	private presenterSessionId = '';
 	private presenterSequence = 0;
 	private presenterSnapshot = createInitialPresentationSnapshot();
-	private disposePresenterConsole: (() => void) | null = null;
+	private presenterView: PresenterViewHandle | null = null;
+	private presenterCaptions: PresenterCaptions | null = null;
+	/**
+	 * Latch telling the fullscreen handler that the next exit is the audience
+	 * popup stealing focus, not the presenter leaving. See
+	 * `render/presenter-show-lifecycle`.
+	 */
+	private readonly presenterShowGuard = createPresenterShowGuard();
 	private userFontsStyle: HTMLStyleElement | null = null;
-	private embedFontsEnabled = false;
 	private signatureWarningAcknowledged = false;
 	private detachSignatureWarning: (() => void) | null = null;
+	/** Tags in-flight webfont resolutions; only the newest deck may apply its result. */
+	private webfontsToken = 0;
 	private annotations!: PresentationAnnotationsHost;
 	private parityWorkflows!: ParityWorkflows;
 	private aiChat: AiChatMount | null = null;
+	/** Live AI focus controller while `ai` is configured; the canvas menu's AI entries route to it. */
+	private aiFocus: AiFocusController | null = null;
+	private contextMenu: ElementContextMenu | null = null;
+	/** View > Rulers strips (ticks, labels, drag-out guides) around the stage. */
+	private rulers: RulerController | null = null;
 	/** File > Options store + option-driven behavior (undo depth, ribbon, etc.). */
 	private optionsController!: ViewerOptionsController;
 
@@ -173,8 +223,15 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			// deck and instead re-adopt the room's slides when the shared doc
 			// already has content (`this.sessions` is constructed later, hence
 			// the lazy optional access).
-			onContentApplying: () => this.sessions?.beginCollaborationContentLoad(),
-			onContentApplied: () => this.sessions?.notifyCollaborationContentLoaded(),
+			onContentApplying: (origin) => this.sessions?.beginCollaborationContentLoad(origin),
+			onContentApplied: (origin) => this.sessions?.notifyCollaborationContentLoaded(origin),
+			// Trust Center > "Allow external content"; the options controller is
+			// constructed after this one, hence the lazy read (see its own comment).
+			getAllowExternalContent: () =>
+				this.optionsController?.getOptions().trust.allowExternalContent ??
+				DEFAULT_VIEWER_OPTIONS.trust.allowExternalContent,
+			shouldOpenProtectedView: () => this.optionsController?.isProtectedView() ?? false,
+			setEditableForLoad: (editable) => this.setEditable(editable),
 		});
 		this.renderer = createRenderController({
 			doc: this.doc,
@@ -182,10 +239,17 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			registry: this.registry,
 			getChrome: () => this.lifecycle.chrome,
 			getTranslator: () => this.t,
-			smartArt3D: options.smartArt3D ?? false,
+			getSmartArt3D: () => this.effective3DFlags().smartArt3D,
+			getSurfaceChart3D: () => this.effective3DFlags().surfaceChart3D,
+			getBarChart3D: () => this.effective3DFlags().barChart3D,
+			getLineChart3D: () => this.effective3DFlags().lineChart3D,
+			getAreaChart3D: () => this.effective3DFlags().areaChart3D,
+			getPieChart3D: () => this.effective3DFlags().pieChart3D,
 			onHandoutSlidesPerPageChange: (count) => this.editor?.setHandoutSlidesPerPage(count),
 			onMasterBackgroundColorChange: (color) =>
 				this.editor?.getEditActions().setSlideBackgroundColor(color),
+			onMasterCrudAction: (id) =>
+				void this.editor?.getEditActions().masterView.runMasterViewCrudAction(id),
 			onSectionToggle: (sectionId) =>
 				this.editor?.getEditActions().sections.toggleSection(sectionId),
 			onSectionRename: (sectionId, name) =>
@@ -195,6 +259,13 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			onSectionMove: (sectionId, direction) =>
 				this.editor?.getEditActions().sections.moveSection(sectionId, direction),
 			onZoomClick: (targetSlideIndex) => this.controls.goToSlide(targetSlideIndex),
+			onCommentMarkerClick: () => this.parityWorkflows.openComments(),
+			// Both on-canvas SmartArt commits reflow the cached drawing shapes when
+			// the edit cleared them, as React does: a node-style change clears
+			// them, and without the reflow the diagram silently dropped from
+			// PowerPoint's cached `dsp` geometry to the family approximation. The
+			// reflow is a no-op while the cached drawing survives (a text edit
+			// patches it in place), so the cached-drawing-wins order is unchanged.
 			onSmartArtNodeTextChange: (element, nodeId, text) => {
 				if (
 					element.type !== 'smartArt' ||
@@ -203,8 +274,10 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 				) {
 					return;
 				}
+				const next = updateSmartArtNodeText(element.smartArtData, nodeId, text);
+				const box = { width: element.width, height: element.height };
 				this.editor?.applyElementPatch(element.id, {
-					smartArtData: updateSmartArtNodeText(element.smartArtData, nodeId, text),
+					smartArtData: reflowSmartArtData(next, element.id, box),
 				});
 			},
 			onSmartArtNodeFillChange: (element, nodeId, fill) => {
@@ -213,17 +286,57 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 				}
 				const next = setSmartArtNodeStyle(element.smartArtData, nodeId, { fillColor: fill });
 				if (next !== element.smartArtData) {
-					this.editor?.applyElementPatch(element.id, { smartArtData: next });
+					const box = { width: element.width, height: element.height };
+					this.editor?.applyElementPatch(element.id, {
+						smartArtData: reflowSmartArtData(next, element.id, box),
+					});
 				}
+			},
+			onChartPointChange: (element, chartData) => {
+				if (element.type !== 'chart') {
+					return;
+				}
+				this.editor?.applyElementPatch(element.id, { chartData });
+			},
+			onTableResizeColumns: (element, widths) => {
+				if (element.type !== 'table' || !element.tableData) {
+					return;
+				}
+				this.editor?.applyElementPatch(element.id, {
+					tableData: { ...element.tableData, columnWidths: widths },
+				});
+			},
+			onTableResizeRow: (element, rowIndex, height) => {
+				if (element.type !== 'table' || !element.tableData) {
+					return;
+				}
+				const rows = element.tableData.rows.map((row, index) =>
+					index === rowIndex ? { ...row, height } : row,
+				);
+				this.editor?.applyElementPatch(element.id, {
+					tableData: { ...element.tableData, rows },
+				});
+			},
+			onChartPartSelect: (element, part) => {
+				this.store.set({ chartPartSelection: { elementId: element.id, part } });
 			},
 			onStageRendered: () => {
 				this.editor?.onStageRendered();
+				// The stage wrap's children are replaced on every stage render, so
+				// the ruler strips have to be re-attached here.
+				this.rulers?.sync();
 				this.annotations?.sync(this.presenterSnapshot);
 			},
 		});
-		this.controls = createViewerControls(this.store, this.renderer, () => {
-			void this.exitPresentation();
-		});
+		this.controls = createViewerControls(
+			this.store,
+			this.renderer,
+			() => {
+				void this.exitPresentation();
+			},
+			// Read lazily: the options controller is constructed further down.
+			() => this.optionsController?.getOptions().advanced.slideShowEndWithBlackSlide,
+		);
 
 		ensureViewerStyles(this.doc);
 		const userFontCss = buildUserFontFaceStyles(options.fonts ?? []);
@@ -241,6 +354,10 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			getTranslator: () => this.t,
 			getScale: () => this.renderer.effectiveScale(),
 			getHandler: () => this.loading.getHandler(),
+			setHandler: (handler) => this.loading.setHandler(handler),
+			getUserName: () => this.optionsController?.getOptions().general.userName,
+			transformCommittedText: (text) =>
+				this.optionsController?.transformCommittedText(text) ?? text,
 			onChange: options.onChange,
 			onCursorMove: (x, y) => this.sessions.setCollaborationCursor(x, y),
 			onInlineTextInput: (elementId, text) =>
@@ -248,6 +365,14 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			flushInlineTextInput: () => this.sessions.flushCollaborationLivePatch(),
 		});
 		this.editor.attachChrome();
+		this.rulers = createRulerController({
+			doc: this.doc,
+			store: this.store,
+			getStageWrap: () => this.lifecycle?.chrome.stageWrap ?? null,
+			getScale: () => this.renderer.effectiveScale(),
+			getUnit: () => options.rulerUnit ?? 'inches',
+			onCreateGuide: (axis, position) => this.editor?.getEditActions().addGuide(axis, position),
+		});
 		this.annotations = createPresentationAnnotationsHost({
 			doc: this.doc,
 			t: this.t,
@@ -256,6 +381,9 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			getChrome: () => this.lifecycle.chrome,
 			getSnapshot: () => this.presenterSnapshot,
 			updateSnapshot: (patch) => this.updatePresenterSnapshot(patch),
+			// Read lazily: the options controller is constructed further down.
+			shouldPromptKeepAnnotations: () =>
+				this.optionsController?.getOptions().advanced.slideShowPromptKeepInkAnnotations ?? true,
 		});
 		this.exporter = createExportLifecycle({
 			doc: this.doc,
@@ -263,7 +391,17 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			store: this.store,
 			registry: this.registry,
 			getTranslator: () => this.t,
-			smartArt3D: options.smartArt3D ?? false,
+			getSmartArt3D: () => this.effective3DFlags().smartArt3D,
+			getSurfaceChart3D: () => this.effective3DFlags().surfaceChart3D,
+			getBarChart3D: () => this.effective3DFlags().barChart3D,
+			getLineChart3D: () => this.effective3DFlags().lineChart3D,
+			getAreaChart3D: () => this.effective3DFlags().areaChart3D,
+			getPieChart3D: () => this.effective3DFlags().pieChart3D,
+			getImageResolutionScale: () =>
+				resolveImageResolutionScale(this.optionsController.getOptions()),
+			getIncludeHiddenSlides: () => this.optionsController.getOptions().advanced.printHiddenSlides,
+			getPrintHighQuality: () => this.optionsController.getOptions().advanced.printHighQuality,
+			fileName: options.fileName,
 		});
 		// File > Options controller: owns the persisted options store and turns
 		// option values into behavior. Created before the parity workflows (which
@@ -274,23 +412,31 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			{
 				store: this.store,
 				root: () => this.lifecycle?.chrome.root ?? null,
-				isAutosaveEnabled: () => this.sessions?.isAutosaveEnabled() ?? false,
-				setAutosaveEnabled: (enabled) => this.sessions?.setAutosaveEnabled(enabled),
-				setAutosaveIntervalMs: () => {
-					// The recovery autosave interval is fixed at construction in the
-					// session controllers; a runtime change is a no-op for now.
-				},
+				// The options model stores the user's PREFERENCE, so it is compared
+				// against the preference, not against what the host ceiling and the
+				// read-only gate currently allow to actually run.
+				isAutosaveEnabled: () => this.sessions?.isAutosavePreferred() ?? true,
+				setAutosaveEnabled: (enabled) => this.setAutosaveEnabled(enabled),
+				// Re-read every time the debounce timer is armed, so an AutoRecover
+				// cadence change applies without rebuilding the viewer.
+				setAutosaveIntervalMs: (ms) => this.sessions?.setAutosaveIntervalMs(ms),
 				setHistoryDepth: (depth) => this.editor?.setHistoryDepth(depth),
 				setRibbonHiddenTabs: (tabIds) => this.lifecycle?.chrome.ribbon?.setHiddenOptionTabs(tabIds),
-				refreshQuickAccess: () => this.lifecycle?.chrome.titleBar?.refreshQuickAccess(),
+				refreshQuickAccess: () => {
+					this.lifecycle?.chrome.titleBar?.refreshQuickAccess();
+					this.lifecycle?.chrome.setQuickAccessPosition(this.getQuickAccessOptions().position);
+				},
 				applyScreenTips: () =>
 					this.lifecycle?.chrome.ribbon?.applyScreenTips((label) =>
 						this.optionsController.screenTip(label),
 					),
+				renderStage: () => this.renderer.renderStage(),
 			},
-			// Seed autosave from the constructor option so persisted values (if any)
-			// override it, and the default does not force autosave (+ IndexedDB) on.
-			{ initial: { save: { autoSave: options.autosave ?? false } } },
+			// Seed the AutoSave preference from the constructor option so persisted
+			// values (if any) override it. The default is ON: the host option is a
+			// policy CEILING, not the preference, so only `autosave: false` turns
+			// recovery snapshots off (see `render/autosave-policy` in shared).
+			{ initial: { save: { autoSave: options.autosave ?? true } } },
 		);
 		const parityWorkflowHost: ParityWorkflowHost = {
 			doc: this.doc,
@@ -299,16 +445,31 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			editor: this.editor,
 			optionsStore: this.optionsController.optionsStore,
 			clearOptionsCache: () => this.clearOptionsCache(),
+			registerCustomFont: (family) => {
+				const current = this.store.get().customFontFamilies;
+				if (!current.includes(family)) {
+					this.store.set({ customFontFamilies: [...current, family] });
+				}
+			},
 			aiEnabled: options.ai !== undefined,
 			root: () => this.lifecycle.chrome.root,
 			setAutosaveEnabled: (enabled) => this.setAutosaveEnabled(enabled),
 			print: (printOptions) => this.print(printOptions),
 			goToSlide: (index) => this.goToSlide(index),
+			renderSlideNode: (slide, scale) => this.renderer.renderSlideNode(slide, scale),
 			enterPresentation: () => this.enterPresentation(),
 			setTheme: (theme) => this.setTheme(theme),
 			setLocale: (locale) => this.setLocale(locale),
 			getThemeState: () => ({ key: this.currentThemeKey, catalog: this.availableThemes }),
 			getLocaleState: () => ({ code: this.currentLocale, catalog: this.availableLocales }),
+			getAddinStatus: () => {
+				const rendering3D = !this.optionsController.getOptions().advanced.disable3DRendering;
+				return {
+					smartArt3d: rendering3D,
+					model3d: rendering3D,
+					collaboration: this.getCollaborationStatus() === 'connected',
+				};
+			},
 		};
 		// `t` needs to be a live getter (not the value copy above): `setLocale`
 		// reassigns `this.t` on every language switch, and parityWorkflows'
@@ -316,6 +477,7 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 		// each time they open, not whatever was active when this host was built.
 		Object.defineProperty(parityWorkflowHost, 't', { get: () => this.t });
 		this.parityWorkflows = createParityWorkflows(parityWorkflowHost);
+		this.setupContextMenu();
 		if (options.editable) {
 			this.store.set({ editable: true });
 			this.editor.setEditable(true);
@@ -335,6 +497,11 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			if (previous.presenting && !state.presenting) {
 				void this.annotations.finish();
 			}
+			// The console paints its own copy of the current slide, the next-slide
+			// preview and the notes, none of which the stage renderer touches.
+			if (state.currentSlide !== previous.currentSlide || state.slides !== previous.slides) {
+				this.presenterView?.syncSlide();
+			}
 		});
 		this.detachSignatureWarning = this.store.subscribe((state, previous) => {
 			if (
@@ -347,26 +514,89 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 				openSignatureStrippedDialog(this.doc, this.t, state.digitalSignatureCount);
 			}
 		});
+		// Fetch Google-served webfonts for referenced families that are neither
+		// installed nor embedded (Microsoft 365 "cloud fonts" have no browser
+		// equivalent); re-evaluated only when the inputs actually change, since
+		// resolving walks every text segment of the deck. The catalogue lookup is
+		// session-cached and asynchronous, so each run is tagged and a
+		// superseded deck's late result never applies.
+		this.store.subscribe((state, previous) => {
+			if (state.slides === previous.slides && state.embeddedFonts === previous.embeddedFonts) {
+				return;
+			}
+			const token = ++this.webfontsToken;
+			void resolveGoogleWebfontHref(state.slides, state.embeddedFonts).then((href) => {
+				if (token !== this.webfontsToken) {
+					return null;
+				}
+				syncGoogleWebfontsLink(this.doc, href);
+				return href;
+			});
+		});
 		this.sessions = createSessionControllers({
 			doc: this.doc,
 			store: this.store,
 			options,
 			getHandler: () => this.loading.getHandler(),
+			// Session-level save options (view properties, table styles, tags, deck
+			// properties, ...), built the same way as `editor.save`, so an owner's
+			// write-back file no longer drops every session-level edit outside
+			// `slides`.
+			getSaveOptions: () => {
+				const state = this.store.get();
+				return buildDeckSaveOptions({
+					headerFooter: state.headerFooter,
+					presentationProperties: state.presentationProperties,
+					viewProperties: state.viewProperties,
+					customShows: state.customShows,
+					sections: state.sections,
+					coreProperties: state.coreProperties,
+					appProperties: state.appProperties,
+					customProperties: state.customProperties,
+					tagCollections: state.tagCollections,
+					slideMasters: state.slideMasters,
+					notesMaster: state.notesMaster,
+					handoutMaster: state.handoutMaster,
+					slideSize: resolveSlideSizeSelection({
+						current: state.slideSize,
+						canvas: state.canvasSize,
+					}).size,
+					tableStyleMap: state.tableStyleMap,
+					tableStylesDefaultId: state.tableStylesDefaultId,
+					tableStylesToDelete: state.tableStylesToDelete,
+					embedFonts: state.embedFonts,
+				});
+			},
 			getChrome: () => this.lifecycle.chrome,
 			getTranslator: () => this.t,
 			getScale: () => this.renderer.effectiveScale(),
 			setEditable: (editable) => this.setEditable(editable),
 			goToSlide: (index) => this.controls.goToSlide(index),
+			// Restoring a crash-recovery snapshot re-enters the normal load path,
+			// exactly as `openRecentFile` does, except it is the SAME document the
+			// user was already editing (not a new one), so Protected View does not
+			// apply to it.
+			loadFile: (bytes) => this.loadFile(bytes, { skipProtectedView: true }),
+			// Options > General > "Initials": explicit override for the Share
+			// dialog's local-user avatar-circle fallback (see `getUserInitials`
+			// in `collaboration-active-session.ts`).
+			getUserInitials: () => this.optionsController?.getOptions().general.userInitials,
 		});
 		// Every subsystem the options controller drives now exists: apply the
 		// persisted File > Options values (undo depth, ribbon visibility, root
 		// classes, ScreenTips, etc.) for the first time.
 		this.optionsController.applyAll();
+		// File > Options > Save > "Automatically delete files older than N days":
+		// a one-time sweep on mount is enough since new snapshots only ever land
+		// with a fresh timestamp; no periodic timer is needed to keep it honest.
+		void this.pruneExpiredAutosaveSnapshots();
 		this.renderer.renderAll();
 		this.setupAiChat();
 
 		if (options.source !== undefined) {
-			void this.loading.load(options.source);
+			// The deck the host mounted with: a room that already has slides
+			// outranks it (late-joiner bootstrap), unlike one opened later.
+			void this.loading.load(options.source, 'bootstrap');
 		}
 		this.connectAudienceRole();
 	}
@@ -377,6 +607,29 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 	 * a prior mount first, so it can re-attach after a locale-driven chrome
 	 * remount. No-op (and never touches the `ai` SDK) when `ai` is absent.
 	 */
+	/**
+	 * Mount the canvas right-click menu against the current chrome. Re-callable:
+	 * the chrome (and with it `chrome.viewport`, which owns the `contextmenu`
+	 * listener) is rebuilt on every locale switch, so the menu must be re-bound
+	 * to the new viewport or right-clicking stops opening anything.
+	 */
+	private setupContextMenu(): void {
+		this.contextMenu?.destroy();
+		this.contextMenu = mountElementContextMenu({
+			doc: this.doc,
+			store: this.store,
+			getTranslator: () => this.t,
+			viewport: this.lifecycle.chrome.viewport,
+			getStageRoot: () =>
+				this.lifecycle.chrome.stageWrap.querySelector<HTMLElement>('.pptxv-stage'),
+			getEditActions: () => this.editor.getEditActions(),
+			selectElement: (id) => this.editor.selectElements([id]),
+			openComments: () => this.parityWorkflows.openComments(),
+			openHyperlink: () => this.parityWorkflows.openHyperlink(),
+			getAi: () => this.aiFocus,
+		});
+	}
+
 	private setupAiChat(): void {
 		const config = this.options.ai;
 		if (!config) {
@@ -387,6 +640,9 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			store: this.store,
 			requestOpen: () => this.aiChat?.open(),
 		});
+		// Published so the canvas context menu can offer "Ask AI" / "Fix with AI"
+		// as two of its own entries instead of opening a second, AI-only menu.
+		this.aiFocus = controller;
 		const bridge = createVanillaAiBridge({
 			store: this.store,
 			editor: this.editor,
@@ -427,9 +683,12 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 		this.renderer.renderAll();
 	}
 
-	async loadFile(file: Blob | ArrayBuffer | Uint8Array): Promise<void> {
+	async loadFile(
+		file: Blob | ArrayBuffer | Uint8Array,
+		options?: { skipProtectedView?: boolean },
+	): Promise<void> {
 		this.signatureWarningAcknowledged = false;
-		await this.loading.load(file);
+		await this.loading.load(file, 'user', options);
 	}
 
 	openFile(): void {
@@ -462,6 +721,14 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 	next = (): void => this.controls.next();
 	prev = (): void => this.controls.prev();
 	goToSlide = (index: number): void => this.controls.goToSlide(index);
+	/** PowerPoint's Hide Slide: toggle the active slide's skip-in-show flag. */
+	toggleHideCurrentSlide = (): void => this.toggleHideSlides([this.store.get().currentSlide]);
+	/** Home: the show's first slide (skips a hidden slide 1 while presenting). */
+	goToFirstSlide = (): void => this.controls.firstSlide();
+	/** End: the show's last slide (skips trailing hidden slides while presenting). */
+	goToLastSlide = (): void => this.controls.lastSlide();
+	/** "Present From Beginning"'s target deck index (skips a hidden slide 1 / honours the authored range). */
+	firstShowSlideIndex = (): number => this.controls.firstShowSlideIndex();
 	getSlideCount = (): number => this.controls.slideCount();
 	getCurrentSlide = (): number => this.controls.currentSlide();
 	getZoom = (): number => this.controls.zoom();
@@ -661,6 +928,23 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 		this.parityWorkflows.openSlideSorter();
 	}
 
+	/**
+	 * PowerPoint's Reading View: the deck at full window size with the chrome
+	 * reduced to a nav bar. Not a slide show, so no Fullscreen API is involved.
+	 */
+	openReadingView(): void {
+		this.parityWorkflows.openReadingView();
+	}
+
+	/**
+	 * PowerPoint's Outline view: the deck as an editable indented text document.
+	 * Edits route through the normal whole-deck commit, so they undo like any
+	 * other structural change.
+	 */
+	openOutlineView(): void {
+		this.parityWorkflows.openOutlineView();
+	}
+
 	openComments(): void {
 		this.parityWorkflows.openComments();
 	}
@@ -688,11 +972,17 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 
 	openFontEmbedding(): void {
 		const state = this.store.get();
+		// The toggle lives in the store, not on this instance: the save path reads
+		// it there and passes it to the shared `embeddedFontSaveOptions`, so
+		// turning it off genuinely strips the deck's embedded font data.
+		const descriptor = describeFontEmbedding(state.embeddedFonts.map((font) => font.name));
 		openFontEmbeddingDialog(this.doc, this.t, {
 			slides: state.slides,
 			embeddedFonts: state.embeddedFonts,
-			enabled: this.embedFontsEnabled,
-			onToggle: (enabled) => (this.embedFontsEnabled = enabled),
+			enabled: state.embedFonts,
+			canEmbed: descriptor.interactive,
+			unavailableKey: descriptor.disabledReasonKey,
+			onToggle: (enabled) => this.store.set({ embedFonts: enabled }),
 		});
 	}
 
@@ -709,11 +999,13 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 	openPasswordProtection(): void {
 		openPasswordProtectionDialog(this.doc, this.t, {
 			protected: this.store.get().isPasswordProtected,
-			onSet: () => {
-				this.store.set({ isPasswordProtected: true });
+			// The secret is kept, not just the badge: the save path reads it and
+			// serialises through `saveEncrypted` (shared `planDeckSave`).
+			onSet: (password) => {
+				this.store.set({ isPasswordProtected: true, presentationPassword: password });
 			},
 			onRemove: () => {
-				this.store.set({ isPasswordProtected: false });
+				this.store.set({ isPasswordProtected: false, presentationPassword: null });
 			},
 		});
 	}
@@ -721,39 +1013,70 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 	openVersionHistory(): void {
 		openVersionHistoryPanel(this.doc, this.lifecycle.chrome.root, this.t, {
 			filePath: this.options.autosaveFilePath ?? 'presentation.pptx',
-			onRestore: (bytes) => this.loadFile(bytes),
+			// A prior local AutoRecover snapshot of the SAME document, not a new
+			// file being opened, so Protected View does not apply.
+			onRestore: (bytes) => this.loadFile(bytes, { skipProtectedView: true }),
 		});
 	}
 
-	/** Open a clean audience display while retaining this editor as the presenter surface. */
+	/**
+	 * Mount the presenter console on this screen.
+	 *
+	 * Deliberately does NOT open the audience display. Vanilla used to do both
+	 * at once, which is why its `audience` control always read "Close Audience
+	 * Window" the moment the console appeared while the other four read "Open".
+	 * In every other binding presenter view is the presenter's own surface and
+	 * the audience window is a separate, explicit toggle; coupling them also
+	 * meant a presenter who only wanted their notes got a popup they had to
+	 * dismiss.
+	 */
 	openPresenterView(): void {
+		this.store.set({ notesExpanded: true });
+		this.presenterView?.dispose();
+		this.presenterView = mountPresenterView(this.buildPresenterViewOptions());
+		this.markPresenterConsoleOpen(true);
+
+		// The presenter's own screen must be IN the show, not an editor with a
+		// console laid over it: without this `presenting` stayed false, so the
+		// slide stayed editable and neither click-to-advance nor the presentation
+		// keymap reached it.
+		if (!this.store.get().presenting) {
+			void this.enterPresentation();
+		}
+	}
+
+	/**
+	 * Open the audience display in its own window and hand it the deck.
+	 *
+	 * Split out of {@link openPresenterView} so the console and the second
+	 * screen are independent, as they are in the other four bindings.
+	 */
+	openAudienceWindow(): void {
 		this.closeAudienceWindow();
+		// Arm the latch BEFORE the popup exists. Opening it drops this window out
+		// of fullscreen, and the `fullscreenchange` that says so is dispatched on
+		// a later task: by the time it arrives, nothing in the DOM distinguishes
+		// it from the presenter pressing Escape. Only intent does, and this is
+		// where the intent is known. Arm it only when a show is actually running;
+		// arming from the editor would leave the latch to swallow the presenter's
+		// first real Escape a moment later.
+		if (this.store.get().presenting) {
+			this.presenterShowGuard.expectAudienceBounce();
+		}
 		const popup = window.open(
 			'about:blank',
 			'pptx-viewer-audience',
 			'popup=yes,width=1280,height=720',
 		);
 		if (!popup) {
+			// A blocked popup causes no bounce, so a latch left armed here would
+			// eat the presenter's next Escape.
+			this.presenterShowGuard.disarm();
 			return;
 		}
 		this.audienceWindow = popup;
 		this.presenterSessionId = createPresentationSessionId();
-		this.store.set({ notesExpanded: true });
-		this.disposePresenterConsole?.();
-		this.disposePresenterConsole = mountPresenterConsole({
-			container: this.container,
-			getSnapshot: () => this.presenterSnapshot,
-			getSlides: () => this.store.get().slides,
-			getCurrent: () => this.getCurrentSlide(),
-			update: (patch) => this.updatePresenterSnapshot(patch),
-			navigate: (index) => this.goToSlide(index),
-			toggleAudience: () =>
-				this.isAudienceWindowOpen() ? this.closeAudienceWindow() : this.openPresenterView(),
-			end: () => {
-				this.closeAudienceWindow();
-				void this.exitPresentation();
-			},
-		});
+		this.presenterView?.syncSnapshot();
 		const sessionId = this.presenterSessionId;
 		const url = buildPresentationAudienceUrl(window.location.href, sessionId);
 		void resolveAudienceScreenPlacement(window).then((placement) => {
@@ -772,15 +1095,6 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			.then((bytes) => storePresentationDeck(sessionId, bytes))
 			.then(() => popup.location.replace(url))
 			.catch(() => this.closeAudienceWindow());
-
-		// The presenter's own screen must be IN the show, not an editor with a
-		// console strip laid over it: without this `presenting` stayed false, so
-		// the slide stayed editable and neither click-to-advance nor the
-		// presentation keymap reached it. This runs AFTER the popup is opened
-		// because opening a popup cancels an in-flight fullscreen request.
-		if (!this.store.get().presenting) {
-			void this.enterPresentation();
-		}
 	}
 
 	private getPresenterChannel(): BroadcastChannel | null {
@@ -815,9 +1129,195 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 
 	updatePresenterSnapshot(patch: Partial<PresentationSnapshot>): void {
 		this.presenterSnapshot = mergePresentationSnapshot(this.presenterSnapshot, patch);
-		renderAudienceEffects(this.container, this.presenterSnapshot);
+		// Painted into the CHROME ROOT (the element the Fullscreen API holds and
+		// the `.pptxv` positioning context), not the host container: a blackout
+		// sheet mounted beside the fullscreen element is never drawn during a
+		// real fullscreen show.
+		renderAudienceEffects(this.lifecycle.chrome.root, this.presenterSnapshot);
 		this.syncAudience(this.presenterSnapshot.slideIndex);
 		this.annotations.sync(this.presenterSnapshot);
+		this.syncPresentationToolbar();
+		// The console reads the snapshot for its pressed states and its zoom, and
+		// it holds no copy of its own: every mutation, wherever it came from,
+		// lands here and repaints it.
+		this.presenterView?.syncSnapshot();
+	}
+
+	/**
+	 * Assemble the presenter console's dependencies.
+	 *
+	 * All of it is read through getters rather than captured: the console
+	 * outlives individual slides, snapshots and even chrome remounts, and a
+	 * captured slide array is how a console ends up painting a stale deck after
+	 * an edit.
+	 */
+	private buildPresenterViewOptions(): PresenterViewOptions {
+		return {
+			doc: this.doc,
+			t: this.t,
+			// The CHROME ROOT, not the host container. The chrome root is the
+			// element the Fullscreen API is holding, and a fullscreen browser
+			// paints only that element's subtree: a console mounted alongside it
+			// is in the DOM, reports its own layout, and is simply never drawn.
+			container: this.lifecycle.chrome.root,
+			getSnapshot: () => this.presenterSnapshot,
+			getSlides: () => this.store.get().slides,
+			getCurrent: () => this.getCurrentSlide(),
+			getElapsedMs: () => this.presenterSnapshot.elapsedMs ?? 0,
+			canvasSize: () => this.store.get().canvasSize,
+			// Resolved on every read so a show selected (or deleted) mid session is
+			// honoured; the same rule `viewer-controls`' `showOrder` uses.
+			getActiveCustomShow: () => {
+				const state = this.store.get();
+				return state.activeCustomShowId
+					? (state.customShows.find(({ id }) => id === state.activeCustomShowId) ?? null)
+					: null;
+			},
+			getAuthoredRange: () => {
+				const state = this.store.get();
+				return resolveAuthoredSlideRange(state.presentationProperties, state.slides.length);
+			},
+			renderSlide: (slide, scale) => this.renderer.renderSlideNode(slide, scale),
+			navigate: (index) => this.goToSlide(index),
+			move: (direction) => (direction === 1 ? this.controls.next() : this.controls.prev()),
+			isAudienceOpen: () => this.isAudienceWindowOpen(),
+			toggleTimer: () => this.updatePresenterSnapshot({ paused: !this.presenterSnapshot.paused }),
+			resetTimer: () => this.updatePresenterSnapshot({ paused: false, elapsedMs: 0 }),
+			stepZoom: (direction) =>
+				this.updatePresenterSnapshot({
+					zoom: stepPresenterZoom(
+						this.presenterSnapshot.zoom ?? { scale: 1, originX: 0.5, originY: 0.5 },
+						direction,
+					),
+				}),
+			resetZoom: () =>
+				this.updatePresenterSnapshot({ zoom: { scale: 1, originX: 0.5, originY: 0.5 } }),
+			setPointerTool: (tool) =>
+				this.updatePresenterSnapshot({
+					pointer: {
+						...(this.presenterSnapshot.pointer ?? { x: 0.5, y: 0.5, color: '#ef4444' }),
+						tool,
+					},
+				}),
+			setBlackout: (value) =>
+				this.updatePresenterSnapshot({
+					blackout: this.presenterSnapshot.blackout === value ? 'none' : value,
+				}),
+			toggleCaptions: () => this.togglePresenterCaptions(),
+			toggleAudience: () =>
+				this.isAudienceWindowOpen() ? this.closeAudienceWindow() : this.openAudienceWindow(),
+			swapDisplays: () => this.swapPresenterDisplays(),
+			end: () => {
+				this.closeAudienceWindow();
+				void this.exitPresentation();
+			},
+		};
+	}
+
+	/** Discard the show's ink strokes (E, and the show toolbar's Clear button). */
+	clearPresentationAnnotations(): void {
+		this.annotations.clear();
+	}
+
+	/**
+	 * Reflect the presenter snapshot on the show toolbar.
+	 *
+	 * The snapshot is the single source of truth for the active pointer tool and
+	 * the show's ink, so the bar never keeps its own copy: every mutation, from a
+	 * bar button, a keyboard shortcut or the presenter console, lands here.
+	 */
+	/**
+	 * Mark the chrome while the presenter console owns the screen.
+	 *
+	 * The show toolbar has to stand down: the console carries its own
+	 * navigation, annotation tools and End control, and leaving the bar up put a
+	 * SECOND set of them over the console, at a higher stacking order.
+	 */
+	private markPresenterConsoleOpen(open: boolean): void {
+		this.lifecycle.chrome.root.classList.toggle('pptxv-presenter-open', open);
+	}
+
+	private syncPresentationToolbar(): void {
+		this.lifecycle.chrome.presentationToolbar.update({
+			tool: this.presenterSnapshot.pointer?.tool ?? 'none',
+			blackout: this.presenterSnapshot.blackout,
+			hasAnnotations: (this.presenterSnapshot.inkStrokes?.length ?? 0) > 0,
+			presenterViewActive: this.presenterView !== null,
+		});
+	}
+
+	/**
+	 * The show toolbar's presenter-view control: mount the presenter console
+	 * when it is closed, tear it down when it is open. Closing the console also
+	 * closes the audience display, because the console owns the only control
+	 * that could close it afterwards.
+	 */
+	togglePresenterView(): void {
+		if (this.presenterView) {
+			this.closeAudienceWindow();
+			this.presenterView.dispose();
+			this.presenterView = null;
+			this.presenterCaptions?.dispose();
+			this.presenterCaptions = null;
+			this.markPresenterConsoleOpen(false);
+			this.syncPresentationToolbar();
+			return;
+		}
+		this.openPresenterView();
+		this.syncPresentationToolbar();
+	}
+
+	/**
+	 * PowerPoint's Ctrl+S during a show: raise "See All Slides".
+	 *
+	 * The navigator is built by the presenter console, so the console comes up
+	 * with it rather than a second grid being assembled over the show. The key
+	 * resolved in the shared map long before this existed and was then dropped on
+	 * the floor, so the show swallowed Ctrl+S and did nothing at all.
+	 */
+	showPresentationAllSlides(): void {
+		if (!this.presenterView) {
+			this.openPresenterView();
+			this.syncPresentationToolbar();
+		}
+		this.presenterView?.showAllSlides();
+	}
+
+	/** File > Options > Advanced > "Show menu on right mouse click". */
+	shouldShowPresentationContextMenu(): boolean {
+		return this.optionsController?.getOptions().advanced.slideShowShowMenuOnRightClick ?? true;
+	}
+
+	/** Start or stop the console's live captions, publishing onto the snapshot. */
+	private togglePresenterCaptions(): void {
+		this.presenterCaptions ??= createPresenterCaptions({
+			doc: this.doc,
+			t: this.t,
+			emit: (patch) => this.updatePresenterSnapshot(patch),
+		});
+		this.presenterCaptions.toggle();
+	}
+
+	/**
+	 * Trade places with the audience display, PowerPoint's "Swap displays".
+	 * A no-op when no audience window is open, which is why the console's
+	 * control is disabled in that state.
+	 */
+	private swapPresenterDisplays(): void {
+		const audience = this.audienceWindow;
+		if (!audience || audience.closed) {
+			return;
+		}
+		void swapPresentationWindows(window, audience);
+	}
+
+	/**
+	 * Tell the fullscreen handler what a fullscreen exit during a running show
+	 * meant. Delegates to the shared one-shot latch, which only answers
+	 * `'restore-show'` for the bounce {@link openPresenterView} armed it for.
+	 */
+	classifyPresentationExit(): 'end-show' | 'restore-show' {
+		return this.presenterShowGuard.classifyFullscreenExit();
 	}
 
 	private connectAudienceRole(): void {
@@ -834,14 +1334,21 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			if (audienceSession && message.sessionId === audienceSession) {
 				if (message.type === 'presenter-state') {
 					this.presenterSnapshot = message.snapshot;
-					renderAudienceEffects(this.container, message.snapshot);
+					// Same target as updatePresenterSnapshot: the chrome root, so the
+					// effects stay visible when this audience tab goes fullscreen.
+					renderAudienceEffects(this.lifecycle.chrome.root, message.snapshot);
 					this.goToSlide(message.snapshot.slideIndex);
 				}
 				if (message.type === 'presenter-slide-change') {
 					this.goToSlide(message.slideIndex);
 				}
 				if (message.type === 'presenter-exit') {
-					void this.exitPresentation();
+					// Close this tab; when the browser refuses, raise the black
+					// end-of-slide-show screen. Leaving presentation mode would drop
+					// the room into the editor.
+					if (endAudienceDisplay(window)) {
+						this.store.set({ endOfShow: true });
+					}
 				}
 			} else if (
 				message.type === 'audience-ready' &&
@@ -863,7 +1370,9 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 				if (!bytes) {
 					return undefined;
 				}
-				await this.loading.load(bytes);
+				// An audience-view handoff is a bootstrap too: nobody picked this
+				// deck during the session.
+				await this.loading.load(bytes, 'bootstrap');
 				await this.enterPresentation();
 				return undefined;
 			});
@@ -887,8 +1396,16 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 		}
 		this.audienceWindow = null;
 		this.presenterSessionId = '';
-		this.disposePresenterConsole?.();
-		this.disposePresenterConsole = null;
+		// The console outlives the audience display: they are independent
+		// surfaces, and repainting is only needed so the `audience` control
+		// flips back to "Open Audience Window".
+		this.presenterView?.syncSnapshot();
+		// Deliberately does NOT disarm the latch. Closing the audience display
+		// again does not un-open the popup, so a fullscreen bounce it already
+		// caused can still be in flight; the latch's own time bound is what
+		// stops it outliving that. This path is also reached when the deck fails
+		// to hand over, and ending the presenter's show because of a failed
+		// handover would be the very bug this guard exists to prevent.
 	}
 
 	/**
@@ -902,6 +1419,7 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 		// Chrome labels are baked at build time; rebuild it under the new locale.
 		this.remountChrome();
 		this.editor.attachChrome();
+		this.setupContextMenu();
 		this.setupAiChat();
 		this.renderer.renderAll();
 		if (this.options.onLocaleChange) {
@@ -914,6 +1432,94 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 	setEditable(editable: boolean): void {
 		this.store.set({ editable });
 		this.editor.setEditable(editable);
+	}
+
+	/** Trust Center > Protected View's "Enable Editing" banner button. */
+	enableEditingFromProtectedView(): void {
+		this.store.set({ protectedView: false });
+		this.setEditable(true);
+	}
+
+	/**
+	 * The read-only recommendation banner's "Edit anyway" button
+	 * (`p:modifyVerifier` / "Mark as Final"): lifts the lock and hides the
+	 * banner, unlike plain dismiss which only hides it.
+	 *
+	 * When the recommendation's `requiresPassword` is set (a `modifyVerifier`
+	 * with a hash this viewer can check), this opens the inline password
+	 * prompt instead of unlocking immediately: PowerPoint's own "read-only
+	 * recommended" prompt keeps the deck locked until the correct password is
+	 * entered, and a wrong one leaves it locked.
+	 */
+	editAnywayFromReadOnlyRecommendation(): void {
+		if (this.store.get().readOnlyRecommendation?.requiresPassword) {
+			this.store.set({ readOnlyPasswordPromptOpen: true, readOnlyPasswordError: null });
+			return;
+		}
+		this.store.set({ readOnlyBannerDismissed: true });
+		this.setEditable(true);
+	}
+
+	/** The read-only recommendation banner's plain close button: hides the banner, keeps the lock. */
+	dismissReadOnlyBanner(): void {
+		this.store.set({ readOnlyBannerDismissed: true });
+	}
+
+	/** The read-only recommendation banner's password form "Cancel": closes the prompt without unlocking. */
+	cancelReadOnlyPasswordPrompt(): void {
+		this.store.set({ readOnlyPasswordPromptOpen: false, readOnlyPasswordError: null });
+	}
+
+	/**
+	 * Check `password` against the deck's `modifyVerifier`
+	 * (`checkModifyPassword`, `pptx-viewer-shared`); unlocks and closes the
+	 * prompt on a match, otherwise leaves the deck locked and reports why.
+	 */
+	submitReadOnlyPassword(password: string): void {
+		void this.checkReadOnlyPassword(password);
+	}
+
+	private async checkReadOnlyPassword(password: string): Promise<void> {
+		this.store.set({ readOnlyCheckingPassword: true });
+		try {
+			const result = await checkModifyPassword(this.store.get().modifyVerifier, password);
+			if (result.ok) {
+				this.store.set({
+					readOnlyBannerDismissed: true,
+					readOnlyPasswordPromptOpen: false,
+					readOnlyPasswordError: null,
+				});
+				this.setEditable(true);
+			} else {
+				this.store.set({ readOnlyPasswordError: result.reason });
+			}
+		} finally {
+			this.store.set({ readOnlyCheckingPassword: false });
+		}
+	}
+
+	/** One compatibility toast's own dismiss button. */
+	dismissCompatToast(id: string): void {
+		this.store.set({
+			compatToasts: this.store.get().compatToasts.filter((toast) => toast.id !== id),
+		});
+	}
+
+	/** The compatibility toast stack's "Dismiss all" button. */
+	dismissAllCompatToasts(): void {
+		this.store.set({ compatToasts: [] });
+	}
+
+	/**
+	 * Trust Center > "Confirm before opening external hyperlinks": both a
+	 * run-level text hyperlink click and an on-slide Action Setting's
+	 * "Hyperlink to a URL" clear this same gate before the URL opens.
+	 */
+	confirmExternalHyperlink(url: string): boolean {
+		if (!shouldConfirmExternalHyperlink(this.optionsController.getOptions(), url)) {
+			return true;
+		}
+		return window.confirm(`${this.t('pptx.options.trust.confirmHyperlinks')}\n\n${url}`);
 	}
 
 	setEditTemplateMode(enabled: boolean): void {
@@ -942,29 +1548,145 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 	undo = (): void => this.editor.undo();
 	redo = (): void => this.editor.redo();
 
+	/**
+	 * Flip the user's AutoSave preference and report the switch's new state.
+	 *
+	 * Returns the state the switch must actually show, which is NOT always the
+	 * requested one: when the host passed `autosave: false` the preference cannot
+	 * exceed that policy, so the toggle is inert and the switch snaps back off.
+	 */
 	toggleAutosave(): boolean {
-		const enabled = !this.sessions.isAutosaveEnabled();
-		this.setAutosaveEnabled(enabled);
-		return enabled;
+		this.setAutosaveEnabled(!this.sessions.isAutosavePreferred());
+		return this.isAutosaveSwitchOn();
+	}
+
+	/**
+	 * Whether the host permits the AutoSave switch to change anything. Falls back
+	 * to the raw option while the session controllers are still being built (the
+	 * chrome mounts before them).
+	 */
+	isAutosaveToggleAvailable = (): boolean =>
+		this.sessions?.getAutosaveActivation().toggleAvailable ?? this.options.autosave !== false;
+
+	/**
+	 * The title-bar switch state: the user's preference inside the host ceiling.
+	 * Deliberately not {@link isAutosaveEnabled}, which also reports the
+	 * read-only gate; a read-only deck must not look like the user turned
+	 * AutoSave off. Falls back to the option while the session controllers are
+	 * still being constructed (the chrome mounts before them).
+	 */
+	isAutosaveSwitchOn = (): boolean =>
+		this.sessions?.isAutosavePreferred() ?? this.isAutosaveToggleAvailable();
+
+	/**
+	 * Live Quick Access Toolbar options for the title-bar strip.
+	 *
+	 * The chrome is mounted BEFORE the options controller is constructed, so the
+	 * very first strip render falls back to the shared defaults; the controller's
+	 * `applyAll()` re-renders it from the persisted options moments later.
+	 */
+	getQuickAccessOptions(): ViewerQuickAccessOptions {
+		const controller = this.optionsController as ViewerOptionsController | undefined;
+		return controller?.getOptions().quickAccess ?? DEFAULT_VIEWER_OPTIONS.quickAccess;
+	}
+
+	/** ScreenTip-styled tooltip for a Quick Access button; see above for timing. */
+	quickAccessScreenTip(label: string): string | undefined {
+		const controller = this.optionsController as ViewerOptionsController | undefined;
+		return controller?.screenTip(label) ?? label;
+	}
+
+	/**
+	 * File > Options > Advanced > "Properties follow chart data point for
+	 * current workbook", read fresh on every category removal. Defaults to
+	 * PowerPoint's own default (`true`) before the options controller exists
+	 * (same pre-construction timing note as `getQuickAccessOptions`).
+	 */
+	getChartFollowDataPoint(): boolean {
+		const controller = this.optionsController as ViewerOptionsController | undefined;
+		return controller?.getOptions().advanced.chartPropertiesFollowDataPoint ?? true;
+	}
+
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, for the table properties
+	 * panel's "Edit style...".
+	 */
+	getTableStyleMap(): ParsedTableStyleMap | undefined {
+		return this.store.get().tableStyleMap;
+	}
+
+	/** The current theme colour map (scheme key -> hex), for resolving scheme-based table style colours. */
+	getThemeColorMap(): Record<string, string> | undefined {
+		const colorScheme = this.store.get().colorScheme;
+		return colorScheme ? buildThemeColorMap(colorScheme) : undefined;
+	}
+
+	/**
+	 * File > Options > Advanced > "Quickly access this number of Recent
+	 * Documents" (0-50). Defaults to the schema default before the options
+	 * controller exists (same pre-construction timing note as
+	 * `getQuickAccessOptions`).
+	 */
+	getRecentPresentationsCount(): number {
+		const controller = this.optionsController as ViewerOptionsController | undefined;
+		return (
+			controller?.getOptions().advanced.recentPresentationsCount ??
+			DEFAULT_VIEWER_OPTIONS.advanced.recentPresentationsCount
+		);
 	}
 
 	canUndo = (): boolean => this.editor.canUndo();
 	canRedo = (): boolean => this.editor.canRedo();
 
 	async save(format: PptxSaveFormat = 'pptx'): Promise<Uint8Array> {
-		return this.editor.save(format);
+		const bytes = await this.editor.save(format);
+		this.afterSuccessfulSave(format);
+		return bytes;
 	}
 
 	async downloadAs(format: PptxSaveFormat, fileName?: string): Promise<void> {
-		return this.editor.downloadAs(format, fileName);
+		await this.editor.downloadAs(format, fileName);
+		this.afterSuccessfulSave(format);
 	}
 
 	async downloadPptx(fileName?: string): Promise<void> {
-		return this.editor.downloadPptx(fileName);
+		await this.editor.downloadPptx(fileName);
+		this.afterSuccessfulSave('pptx');
 	}
 
-	async packageForSharing(fileName?: string): Promise<void> {
-		return this.editor.packageForSharing(fileName);
+	/**
+	 * Options > Accessibility > "feedback with sound" cue, plus Options > Save >
+	 * "keep the last AutoRecover version": once a `.pptx` save actually landed,
+	 * the crash-recovery snapshot for this file is stale (the real file already
+	 * has the work), so it is discarded unless the user asked to keep it.
+	 */
+	private afterSuccessfulSave(format: PptxSaveFormat): void {
+		this.optionsController.notifyActionSuccess();
+		if (
+			format === 'pptx' &&
+			shouldDiscardAutosaveOnSuccessfulSave(this.optionsController.getOptions())
+		) {
+			void deleteAutosaveSnapshot(this.autosaveFilePath());
+		}
+	}
+
+	/** IndexedDB key for this deck's AutoRecover snapshot. */
+	private autosaveFilePath(): string {
+		return this.options.autosaveFilePath ?? 'presentation.pptx';
+	}
+
+	/** File > Options > Save > "cache retention": a one-time sweep on mount. */
+	private async pruneExpiredAutosaveSnapshots(): Promise<void> {
+		try {
+			const snapshots = await listAutosaveSnapshots();
+			const expired = resolveExpiredAutosaveSnapshots(
+				snapshots,
+				this.optionsController.getOptions(),
+			);
+			await Promise.all(expired.map((key) => deleteAutosaveSnapshot(key)));
+		} catch {
+			// Best-effort background maintenance; a blocked IndexedDB just skips it.
+		}
 	}
 
 	deleteSelected = (): void => this.editor.deleteSelected();
@@ -975,10 +1697,24 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 	getSelectedElementId = (): string | null => this.editor.getSelectedElementId();
 
 	async enterPresentation(): Promise<void> {
+		// Every "from current slide" way into the show (status-bar button, ribbon
+		// From Current Slide, Shift+F5, `setMode('present')`, mobile toolbar) seeds
+		// the presentation index here, not the raw active slide: a deck authored
+		// with `p:showPr/p:sldRg` or a custom show can have an active slide the
+		// show does not include. "From Beginning" already lands on
+		// `firstShowSlideIndex()` before calling this, which this leaves alone
+		// (it is by definition already in the show).
+		this.controls.goToSlide(this.controls.presentationEntryIndex());
 		await this.lifecycle.presentation.enter();
 	}
 
 	async exitPresentation(): Promise<void> {
+		// An audience display mirrors the presenter's screen: Escape, leaving
+		// fullscreen and the advance past the end screen must never hand the room
+		// the editing chrome.
+		if (!mayLeaveSlideShow()) {
+			return;
+		}
 		await this.lifecycle.presentation.exit();
 	}
 
@@ -998,7 +1734,8 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 
 	setAutosaveEnabled(enabled: boolean): void {
 		this.sessions.setAutosaveEnabled(enabled);
-		this.lifecycle.chrome.titleBar?.setAutosaveEnabled(enabled);
+		// Reflect what the session actually accepted, not what was asked for.
+		this.lifecycle.chrome.titleBar?.setAutosaveEnabled(this.isAutosaveSwitchOn());
 	}
 
 	isAutosaveEnabled = (): boolean => this.sessions.isAutosaveEnabled();
@@ -1016,8 +1753,20 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			return;
 		}
 		this.destroyed = true;
+		// File > Options > Save > "clear cache on close": wipe recovery snapshots
+		// before the options store that answers the question is disposed below.
+		if (shouldClearAutosaveCacheOnClose(this.optionsController.getOptions())) {
+			this.clearOptionsCache();
+		}
 		this.aiChat?.destroy();
 		this.aiChat = null;
+		this.aiFocus = null;
+		this.contextMenu?.destroy();
+		this.contextMenu = null;
+		this.rulers?.destroy();
+		this.rulers = null;
+		this.parityWorkflows.closeReadingView();
+		this.parityWorkflows.closeOutlineView();
 		this.closeAudienceWindow();
 		this.presenterChannel?.close();
 		this.sessions.destroy();
@@ -1028,6 +1777,8 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 		this.annotations.dispose();
 		this.exporter.destroy();
 		this.userFontsStyle?.remove();
+		this.webfontsToken++;
+		removeGoogleWebfontsLink(this.doc);
 		unmountChrome(this.lifecycle, () => this.editor?.detachChrome());
 		this.loading.releaseLoaded();
 	}
@@ -1038,6 +1789,25 @@ export class PptxViewer extends ViewerExportHost implements PptxViewerInstance, 
 			const snapshots = await listAutosaveSnapshots();
 			await Promise.all(snapshots.map((entry) => deleteAutosaveSnapshot(entry.key)));
 		})();
+	}
+
+	/**
+	 * The six 3D opt-in flags this host was constructed with, ANDed against
+	 * File > Options > Advanced > "Disable 3D rendering". Read fresh (never
+	 * cached) so a mid-session toggle reaches the very next render/export.
+	 */
+	private effective3DFlags(): Rendering3DFlags {
+		return resolve3DRenderingFlags(
+			{
+				smartArt3D: this.options.smartArt3D ?? false,
+				surfaceChart3D: this.options.surfaceChart3D ?? false,
+				barChart3D: this.options.barChart3D ?? false,
+				lineChart3D: this.options.lineChart3D ?? false,
+				areaChart3D: this.options.areaChart3D ?? false,
+				pieChart3D: this.options.pieChart3D ?? false,
+			},
+			this.optionsController.getOptions(),
+		);
 	}
 
 	private remountChrome(): void {

@@ -26,7 +26,19 @@ import type {
 	ParsedTableStyleText,
 	XmlObject,
 } from '../../types';
-import { parseSolidFillStyle } from './table-style-border-parse';
+import { parseSolidFillStyle, parseTintShadeVal } from './table-style-border-parse';
+
+/**
+ * Resolves a table style section's `a:blipFill` relationship id (`r:embed` /
+ * `r:link`) to an archive-relative path (or an already-external URL), the
+ * same way core resolves any other blip. Optional so callers without a
+ * relationship map wired up (e.g. unit tests, or the built-in style
+ * catalogue generator) simply skip the `a:blipFill` branch.
+ */
+export type ResolveTableStyleImagePath = (
+	rEmbed: string | undefined,
+	rLink: string | undefined,
+) => string | undefined;
 
 /** Normalise a raw sRGB hex value to a `#RRGGBB` CSS string. */
 function toHex(raw: string | undefined): string | undefined {
@@ -57,12 +69,12 @@ function parseColorChoiceFill(node: XmlObject | undefined): ParsedTableStyleFill
 	}
 	const fill: ParsedTableStyleFill = { schemeColor: '', color };
 	const tintRaw = srgb?.['a:tint'] as XmlObject | undefined;
-	const tint = tintRaw ? parseInt(String(tintRaw['@_val'] || '0'), 10) || undefined : undefined;
+	const tint = tintRaw ? parseTintShadeVal(tintRaw['@_val']) : undefined;
 	if (tint !== undefined) {
 		fill.tint = tint;
 	}
 	const shadeRaw = srgb?.['a:shade'] as XmlObject | undefined;
-	const shade = shadeRaw ? parseInt(String(shadeRaw['@_val'] || '0'), 10) || undefined : undefined;
+	const shade = shadeRaw ? parseTintShadeVal(shadeRaw['@_val']) : undefined;
 	if (shade !== undefined) {
 		fill.shade = shade;
 	}
@@ -118,21 +130,18 @@ function parsePatternFill(pattFill: XmlObject): ParsedTableStylePattern | undefi
 }
 
 /**
- * Extract the fill of a table style section (`a:wholeTbl`, `a:band1H`,
- * `a:seCell`, ...) from its `a:tcStyle/a:fill` choice. Handles solid (scheme +
- * sRGB), gradient, pattern, and no-fill. Returns `undefined` when the section
- * defines no resolvable fill (including the unresolved `a:fillRef` case).
+ * Resolve an already-unwrapped EG_FillProperties choice node (a `a:tcStyle/
+ * a:fill` wrapper's contents, or `a:tblPr`'s own directly-child fill) into a
+ * {@link ParsedTableStyleFill}. Handles solid (scheme + sRGB), gradient,
+ * pattern, image, and no-fill. Shared by {@link parseTableStyleSectionFill}
+ * (table-style sections) and {@link parseTablePropertiesFill} (`a:tblPr`'s
+ * own fill, issue G6), which differ only in where the choice node sits.
  */
-export function parseTableStyleSectionFill(
-	section: XmlObject | undefined,
+function parseFillChoiceNode(
+	fillWrap: XmlObject | undefined,
+	resolveImagePath?: ResolveTableStyleImagePath,
 ): ParsedTableStyleFill | undefined {
-	if (!section) {
-		return undefined;
-	}
-	const tcStyle = section['a:tcStyle'] as XmlObject | undefined;
-	const fillWrap = tcStyle?.['a:fill'] as XmlObject | undefined;
 	if (!fillWrap) {
-		// `a:fillRef` style-matrix references are not resolvable here.
 		return undefined;
 	}
 	if (fillWrap['a:noFill'] !== undefined) {
@@ -156,7 +165,57 @@ export function parseTableStyleSectionFill(
 			return { schemeColor: '', pattern };
 		}
 	}
+	const blip = fillWrap['a:blipFill'] as XmlObject | undefined;
+	if (blip && resolveImagePath) {
+		const blipNode = blip['a:blip'] as XmlObject | undefined;
+		const rEmbed = blipNode?.['@_r:embed'] ? String(blipNode['@_r:embed']) : undefined;
+		const rLink = blipNode?.['@_r:link'] ? String(blipNode['@_r:link']) : undefined;
+		const path = resolveImagePath(rEmbed, rLink);
+		if (path) {
+			return { schemeColor: '', image: { path } };
+		}
+	}
 	return undefined;
+}
+
+/**
+ * Extract the fill of a table style section (`a:wholeTbl`, `a:band1H`,
+ * `a:seCell`, ...) from its `a:tcStyle/a:fill` choice. Returns `undefined`
+ * when the section defines no resolvable fill (including the unresolved
+ * `a:fillRef` case).
+ */
+export function parseTableStyleSectionFill(
+	section: XmlObject | undefined,
+	resolveImagePath?: ResolveTableStyleImagePath,
+): ParsedTableStyleFill | undefined {
+	if (!section) {
+		return undefined;
+	}
+	const tcStyle = section['a:tcStyle'] as XmlObject | undefined;
+	const fillWrap = tcStyle?.['a:fill'] as XmlObject | undefined;
+	if (!fillWrap) {
+		// `a:fillRef` style-matrix references are not resolvable here.
+		return undefined;
+	}
+	return parseFillChoiceNode(fillWrap, resolveImagePath);
+}
+
+/**
+ * Extract `<a:tblPr>`'s OWN fill (`CT_TableProperties` §21.1.3.15's
+ * `EG_FillProperties` group), independent of `a:tblStyleLst`/`a:tblBg`.
+ *
+ * Unlike a table-style section's fill, which nests under `a:tcStyle/a:fill`,
+ * `a:tblPr`'s fill choice (`a:noFill`/`a:solidFill`/`a:gradFill`/
+ * `a:blipFill`/`a:pattFill`) sits directly on `a:tblPr` itself. Real
+ * PowerPoint decks route table appearance through `tableStyleId` instead, so
+ * this is reachable mainly from non-PowerPoint authoring tools or hand-edited
+ * XML (issue G6).
+ */
+export function parseTablePropertiesFill(
+	tblPr: XmlObject | undefined,
+	resolveImagePath?: ResolveTableStyleImagePath,
+): ParsedTableStyleFill | undefined {
+	return parseFillChoiceNode(tblPr, resolveImagePath);
 }
 
 /**
@@ -203,7 +262,12 @@ export function parseTableStyleSectionText(
 		hasProps = true;
 	}
 
-	const schemeClr = (fontRef?.['a:schemeClr'] ?? tcTxStyle['a:schemeClr']) as XmlObject | undefined;
+	// `CT_TableStyleTextStyle`'s own colour child is the text colour PowerPoint
+	// applies (its built-in styles pair a placeholder `a:prstClr black` inside
+	// `a:fontRef` with the real `a:schemeClr` beside it). A colour nested inside
+	// `a:fontRef` is read only as a fallback, for files an earlier writer of this
+	// library produced.
+	const schemeClr = (tcTxStyle['a:schemeClr'] ?? fontRef?.['a:schemeClr']) as XmlObject | undefined;
 	if (schemeClr) {
 		const val = String(schemeClr['@_val'] || '').trim();
 		if (val) {
@@ -211,15 +275,15 @@ export function parseTableStyleSectionText(
 			hasProps = true;
 			const tintNode = schemeClr['a:tint'] as XmlObject | undefined;
 			if (tintNode) {
-				result.fontTint = parseInt(String(tintNode['@_val'] || '0'), 10) || undefined;
+				result.fontTint = parseTintShadeVal(tintNode['@_val']);
 			}
 			const shadeNode = schemeClr['a:shade'] as XmlObject | undefined;
 			if (shadeNode) {
-				result.fontShade = parseInt(String(shadeNode['@_val'] || '0'), 10) || undefined;
+				result.fontShade = parseTintShadeVal(shadeNode['@_val']);
 			}
 		}
 	} else {
-		const srgb = (fontRef?.['a:srgbClr'] ?? tcTxStyle['a:srgbClr']) as XmlObject | undefined;
+		const srgb = (tcTxStyle['a:srgbClr'] ?? fontRef?.['a:srgbClr']) as XmlObject | undefined;
 		const hex = toHex(srgb?.['@_val']);
 		if (hex) {
 			result.fontColor = hex;

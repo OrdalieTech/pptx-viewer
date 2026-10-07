@@ -103,11 +103,22 @@ describe('getConnectorPathGeometry', () => {
 		expect(geom.endY).toBe(100);
 	});
 
-	it('clamps minimum width and height to 1', () => {
+	// issue #132: the geometry keeps the connector's TRUE extent. It used to be
+	// clamped up to 1, which tilted a `<a:ext cx="0"/>` vertical connector by a
+	// pixel over its whole length once the renderer stretched the SVG across the
+	// padded, grabbable wrapper box. Padding is the renderer's business now
+	// (`ConnectorElementRenderer` sizes the viewBox to the padded box); these
+	// coordinates stay authored.
+	it('keeps a zero extent at zero rather than clamping it to 1', () => {
 		const el = makeElement({ width: 0, height: 0 });
 		const geom = getConnectorPathGeometry(el);
-		expect(geom.endX).toBe(1);
-		expect(geom.endY).toBe(1);
+		expect(geom.endX).toBe(0);
+		expect(geom.endY).toBe(0);
+	});
+
+	it('keeps a zero-width vertical connector plumb', () => {
+		const geom = getConnectorPathGeometry(makeElement({ width: 0, height: 145 }));
+		expect(geom.pathData).toBe('M 0 0 L 0 145');
 	});
 
 	// ── Bent connector (generic) ──────────────────────────────────────────
@@ -339,9 +350,9 @@ describe('getConnectionSites', () => {
 		expect(top.y).toBe(0);
 	});
 
-	it('right center site is at (width, height/2)', () => {
+	it('right center site (index 3, as in the ECMA-376 rect cxnLst) is at (width, height/2)', () => {
 		const sites = getConnectionSites(200, 100);
-		const right = sites.find((s) => s.index === 1)!;
+		const right = sites.find((s) => s.index === 3)!;
 		expect(right.x).toBe(200);
 		expect(right.y).toBe(50);
 	});
@@ -353,9 +364,9 @@ describe('getConnectionSites', () => {
 		expect(bottom.y).toBe(100);
 	});
 
-	it('left center site is at (0, height/2)', () => {
+	it('left center site (index 1) is at (0, height/2)', () => {
 		const sites = getConnectionSites(200, 100);
-		const left = sites.find((s) => s.index === 3)!;
+		const left = sites.find((s) => s.index === 1)!;
 		expect(left.x).toBe(0);
 		expect(left.y).toBe(50);
 	});
@@ -363,9 +374,9 @@ describe('getConnectionSites', () => {
 	it('handles square dimensions', () => {
 		const sites = getConnectionSites(100, 100);
 		expect(sites[0]).toStrictEqual({ x: 50, y: 0, index: 0 });
-		expect(sites[1]).toStrictEqual({ x: 100, y: 50, index: 1 });
+		expect(sites[1]).toStrictEqual({ x: 0, y: 50, index: 1 });
 		expect(sites[2]).toStrictEqual({ x: 50, y: 100, index: 2 });
-		expect(sites[3]).toStrictEqual({ x: 0, y: 50, index: 3 });
+		expect(sites[3]).toStrictEqual({ x: 100, y: 50, index: 3 });
 	});
 
 	it('indices are sequential 0-3', () => {

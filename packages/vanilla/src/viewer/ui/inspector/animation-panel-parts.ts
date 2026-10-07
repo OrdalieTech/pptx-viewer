@@ -1,6 +1,6 @@
 import type { PptxElement, PptxElementAnimation } from 'pptx-viewer-core';
 import { hasTextProperties } from 'pptx-viewer-core';
-import { buildPreviewAnimation } from 'pptx-viewer-shared';
+import { animationEffectLabel, buildAnimationTimelineBars } from 'pptx-viewer-shared';
 
 import type { Translator } from '../../i18n';
 import { createEl } from '../../render';
@@ -46,29 +46,54 @@ function animationKind(animation: PptxElementAnimation): 'entrance' | 'emphasis'
  */
 export function renderTimelineBar(
 	doc: Document,
+	t: Translator,
 	bar: HTMLElement,
 	ordered: readonly PptxElementAnimation[],
 	elements: readonly PptxElement[],
 	selectedElementId: string | undefined,
 ): void {
-	let totalMs = 1;
-	for (const animation of ordered) {
-		totalMs = Math.max(totalMs, (animation.delayMs ?? 0) + (animation.durationMs ?? 500));
-	}
+	const bars = buildAnimationTimelineBars(ordered);
 	bar.replaceChildren(
-		...ordered.map((animation) => {
+		...ordered.map((animation, index) => {
 			const seg = createEl(doc, 'div', 'pptxv-anim-bar-seg');
 			seg.classList.add(`is-${animationKind(animation)}`);
 			seg.classList.toggle('is-selected', animation.elementId === selectedElementId);
-			const left = ((animation.delayMs ?? 0) / totalMs) * 100;
-			const width = Math.max(((animation.durationMs ?? 500) / totalMs) * 100, 2);
-			seg.style.left = `${left}%`;
-			seg.style.width = `${width}%`;
-			const effect = animation.entrance ?? animation.emphasis ?? animation.exit ?? 'custom';
+			seg.style.left = `${bars[index].leftPercent}%`;
+			seg.style.width = `${bars[index].widthPercent}%`;
+			// Named through the shared resolver: the tooltip used to print the raw
+			// preset token (`fadeIn`) where the effect's name belongs.
+			const effect = animationEffectLabel(animation, t);
 			seg.title = `${animationTargetLabel(animation, elements)} - ${effect} (${animation.durationMs ?? 500}ms)`;
 			return seg;
 		}),
 	);
+}
+
+/**
+ * A read-only row for one of the deck's own effect groups: no move buttons,
+ * since it never moves on its own, but it stays a visible anchor an
+ * editor-authored effect's up/down buttons can cross.
+ */
+export function renderNativeOrderRow(
+	doc: Document,
+	t: Translator,
+	targetIds: readonly string[],
+	index: number,
+	elements: readonly PptxElement[],
+): HTMLElement {
+	const row = createEl(doc, 'div', 'pptxv-animation-timeline-row');
+	row.classList.add('is-native');
+	row.title = t('pptx.animation.nativeEffectHint');
+	const label = createEl(doc, 'span', 'pptxv-animation-timeline-name');
+	const names = targetIds
+		.map((id) => {
+			const element = elements.find((entry) => entry.id === id);
+			return element ? elementDisplayLabel(element) : id.slice(0, 8);
+		})
+		.join(', ');
+	label.textContent = `${index + 1}. ${t('pptx.animation.nativeEffect')}: ${names}`;
+	row.append(label);
+	return row;
 }
 
 /**
@@ -108,52 +133,4 @@ export function renderOrderRow(
 		makeMove('down', '↓', !editable || index === total - 1),
 	);
 	return row;
-}
-
-/**
- * Play a one-shot canvas preview of the element's active effect by injecting
- * the shared `buildPreviewAnimation` keyframes and applying the shorthand to
- * the stage node for the element (React's `useAnimationPreview` DOM player).
- */
-export function playAnimationPreview(
-	doc: Document,
-	animation: PptxElementAnimation | undefined,
-): void {
-	if (!animation) {
-		return;
-	}
-	const preset = animation.entrance ?? animation.emphasis ?? animation.exit;
-	if (!preset) {
-		return;
-	}
-	const descriptor = buildPreviewAnimation(preset, {
-		direction: animation.direction,
-		durationMs: animation.durationMs,
-		timingCurve: animation.timingCurve,
-	});
-	if (!descriptor) {
-		return;
-	}
-	const target = doc.querySelector<HTMLElement>(
-		`[data-element-id="${CSS.escape(animation.elementId)}"]`,
-	);
-	if (!target) {
-		return;
-	}
-	const styleId = `pptxv-anim-preview-${descriptor.keyframeName}`;
-	if (!doc.getElementById(styleId)) {
-		const style = doc.createElement('style');
-		style.id = styleId;
-		style.textContent = descriptor.keyframesCss;
-		(doc.head ?? doc.documentElement).appendChild(style);
-	}
-	target.style.animation = 'none';
-	// Force a reflow so re-applying the same animation restarts it.
-	void target.offsetWidth;
-	target.style.animation = descriptor.cssAnimation;
-	const clear = (): void => {
-		target.style.animation = '';
-	};
-	target.addEventListener('animationend', clear, { once: true });
-	setTimeout(clear, descriptor.durationMs + 250);
 }

@@ -23,7 +23,7 @@ import {
 	buildVerticalAxisLine,
 	buildVerticalTickMark,
 } from './chart-axis-primitives';
-import { chartAxisTextStyle } from './chart-axis-style';
+import { chartAxisTextStyle, unitsLabelTextStyle } from './chart-axis-style';
 import type { PlotLayout, SvgLine, SvgText, ValueRange } from './chart-view-model';
 import { formatAxisValue, valueToY } from './chart-view-model';
 
@@ -53,12 +53,16 @@ function valueAxisLabelPlacement(
 		: { x: layout.plotRight + 4, textAnchor: 'start' };
 }
 
-/** Format a value-axis tick: display-unit scaled when the axis declares units. */
+/**
+ * Format a value-axis tick: display-unit scaled when the axis declares units,
+ * otherwise through the axis's own `c:numFmt/@formatCode`. Without the format
+ * code a percentage axis renders its cached fractions raw (`0.2` for `20%`).
+ */
 function formatTick(val: number, axis: PptxChartAxisFormatting | undefined): string {
 	if (axis?.displayUnits) {
 		return formatAxisValueWithUnits(val, axis);
 	}
-	return formatAxisValue(val);
+	return formatAxisValue(val, axis?.numFmt?.formatCode);
 }
 
 /**
@@ -72,6 +76,12 @@ export function buildPrimaryAxis(
 	layout: PlotLayout,
 	axis: PptxChartAxisFormatting | undefined,
 	axisX = layout.plotLeft,
+	/**
+	 * `false` keeps the axis line, tick marks and labels but draws no major
+	 * gridlines: `c:majorGridlines` absent on the axis (the caller decides via
+	 * `shouldRenderMajorGridlines`; defaults to drawn for legacy callers).
+	 */
+	showMajorGridlines = true,
 ): { gridlines: SvgLine[]; axisLabels: SvgText[] } {
 	const gridlines: SvgLine[] = [];
 	const axisLabels: SvgText[] = [];
@@ -107,17 +117,19 @@ export function buildPrimaryAxis(
 
 	for (const val of tickVals) {
 		const y = valueToY(val, range, layout.plotTop, layout.plotBottom);
-		gridlines.push(
-			buildStyledGridline(
-				y,
-				layout,
-				axis?.majorGridlinesSpPr,
-				GRIDLINE_COLOR,
-				1,
-				undefined,
-				undefined,
-			),
-		);
+		if (showMajorGridlines) {
+			gridlines.push(
+				buildStyledGridline(
+					y,
+					layout,
+					axis?.majorGridlinesSpPr,
+					GRIDLINE_COLOR,
+					1,
+					undefined,
+					undefined,
+				),
+			);
+		}
 		const tick = buildVerticalTickMark(
 			axisX,
 			y,
@@ -152,7 +164,7 @@ export function buildPrimaryAxis(
 				x: labelX,
 				y: midY,
 				text: unitLabel,
-				...chartAxisTextStyle(axis, 9),
+				...unitsLabelTextStyle(axis, chartAxisTextStyle(axis)),
 				textAnchor: 'middle',
 				transform: `rotate(-90, ${labelX}, ${midY})`,
 			});
@@ -176,7 +188,7 @@ export function buildSecondaryAxis(
 	const gridlines: SvgLine[] = [];
 	const axisLabels: SvgText[] = [];
 	const textStyle = chartAxisTextStyle(axis);
-	const captionStyle = chartAxisTextStyle(axis, 9);
+	const captionStyle = chartAxisTextStyle(axis);
 	const axisLine = buildVerticalAxisLine(axis, axisX, layout);
 	if (axisLine) {
 		gridlines.push(axisLine);
@@ -276,7 +288,7 @@ export function buildSecondaryAxis(
 				x: labelX,
 				y: midY,
 				text: unitLabel,
-				...captionStyle,
+				...unitsLabelTextStyle(axis, captionStyle),
 				textAnchor: 'middle',
 				transform: `rotate(-90, ${labelX}, ${midY})`,
 			});

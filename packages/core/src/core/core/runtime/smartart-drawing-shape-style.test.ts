@@ -54,10 +54,19 @@ function parseColor(node: XmlObject | undefined): string | undefined {
 	return val ? `#${val}` : undefined;
 }
 
+/** Presence check that tolerates valueless elements such as `a:noFill`. */
+function hasChild(node: XmlObject | undefined, name: string): boolean {
+	if (!node) {
+		return false;
+	}
+	return Object.keys(node).some((key) => !key.startsWith('@_') && local(key) === name);
+}
+
 /** Deps wired to mirror the real gradient/shadow codec semantics closely enough
  * to prove `gradFill` / `pattFill` / `blipFill` route onto the model. */
 const deps: DrawingShapeStyleDeps = {
 	getChild,
+	hasChild,
 	getChildren,
 	parseColor,
 	extractGradientStops: (gradFill) =>
@@ -74,6 +83,33 @@ const deps: DrawingShapeStyleDeps = {
 };
 
 describe('extractDrawingShapeFill', () => {
+	it('flags a:noFill so the shape stays unpainted', () => {
+		const result = extractDrawingShapeFill({ 'a:noFill': '' } as unknown as XmlObject, deps);
+
+		expect(result.fillNone).toBeTruthy();
+		expect(result.fillColor).toBeUndefined();
+	});
+
+	it('keeps the shadow of an unfilled shape', () => {
+		const spPr = {
+			'a:noFill': '',
+			'a:effectLst': { 'a:outerShdw': { 'a:srgbClr': { '@_val': '333333' } } },
+		} as unknown as XmlObject;
+		const result = extractDrawingShapeFill(spPr, deps);
+
+		expect(result.fillNone).toBeTruthy();
+		expect(result.hasShadow).toBeTruthy();
+		expect(result.shadowColor).toBe('#333333');
+	});
+
+	it('does not treat a shape with a resolvable fill as unfilled', () => {
+		const spPr: XmlObject = { 'a:solidFill': { 'a:srgbClr': { '@_val': '156082' } } };
+		const result = extractDrawingShapeFill(spPr, deps);
+
+		expect(result.fillNone).toBeUndefined();
+		expect(result.fillColor).toBe('#156082');
+	});
+
 	it('parses a gradient fill onto the drawing-shape model (issue #73)', () => {
 		const spPr: XmlObject = {
 			'a:gradFill': {
@@ -163,9 +199,47 @@ describe('extractDrawingShapeTextStyle', () => {
 			},
 		};
 
-		const style = extractDrawingShapeTextStyle(txBody, deps);
+		const style = extractDrawingShapeTextStyle(txBody, deps, 9525);
 
-		expect(style.fontSize).toBe(18);
+		expect(style.fontSize).toBe(24);
 		expect(style.fontColor).toBe('#FFFFFF');
+	});
+
+	it('reads CJK font, insets, and paragraph spacing in renderer units', () => {
+		const txBody: XmlObject = {
+			'a:bodyPr': {
+				'@_lIns': '95250',
+				'@_rIns': '190500',
+				'@_anchor': 'ctr',
+			},
+			'a:p': {
+				'a:pPr': {
+					'a:lnSpc': { 'a:spcPct': { '@_val': '90000' } },
+					'a:spcAft': { 'a:spcPct': { '@_val': '35000' } },
+				},
+				'a:r': {
+					'a:rPr': {
+						'@_sz': '1800',
+						'@_b': '1',
+						'@_i': '1',
+						'a:ea': { '@_typeface': '微软雅黑' },
+					},
+				},
+			},
+		};
+
+		const style = extractDrawingShapeTextStyle(txBody, deps, 9525);
+
+		expect(style).toMatchObject({
+			fontFamily: '微软雅黑',
+			fontSize: 24,
+			fontStyle: 'italic',
+			fontWeight: 700,
+			lineHeightRatio: 0.9,
+			lineSpacingAfterRatio: 0.35,
+			textInsetLeft: 10,
+			textInsetRight: 20,
+			textVerticalAnchor: 'ctr',
+		});
 	});
 });

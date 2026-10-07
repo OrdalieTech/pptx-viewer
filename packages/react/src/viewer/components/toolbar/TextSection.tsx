@@ -1,5 +1,10 @@
 import { hasTextProperties } from 'pptx-viewer-core';
-import type { PptxElement, TextStyle } from 'pptx-viewer-core';
+import type { PptxElement, PptxThemeColorRef, TextStyle } from 'pptx-viewer-core';
+import {
+	CHARACTER_SPACING_OPTIONS,
+	OFFICE_COLOR_SWATCHES,
+	textFontSizePtToPx,
+} from 'pptx-viewer-shared';
 import React, { useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -15,6 +20,9 @@ import {
 
 import type { TableCellEditorState } from '../../types';
 import type { ChangeCaseMode } from '../../utils/text-case-transform';
+import { useRecentColors } from '../inspector/RecentColorsContext';
+import { RecentColorsRow } from '../inspector/RecentColorsRow';
+import { ThemeColorSwatchGrid } from '../inspector/ThemeColorSwatchGrid';
 import { ColumnsDropdown, LineSpacingDropdown, TextDirectionDropdown } from './ParagraphDropdowns';
 import { RibbonMenu } from './RibbonMenu';
 import { gB, gL, grp, FMT, ATXT, pill, ic, sep } from './toolbar-constants';
@@ -47,19 +55,6 @@ function getEffectiveTextStyle(
 	}
 	return undefined;
 }
-
-const FONT_COLOR_PRESETS = [
-	'#000000',
-	'#ffffff',
-	'#ff0000',
-	'#00aa00',
-	'#0000ff',
-	'#ff8800',
-	'#8800cc',
-	'#00cccc',
-	'#ff69b4',
-	'#808080',
-];
 
 const HIGHLIGHT_COLOR_PRESETS = [
 	'#ffff00',
@@ -100,6 +95,12 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 				'#000000')
 			: (effectiveTs?.color ?? '#000000');
 
+	const currentColorThemeRef: PptxThemeColorRef | undefined =
+		isTextEl && p.selectedElement && hasTextProperties(p.selectedElement)
+			? (p.selectedElement.textSegments?.[0]?.style?.colorRef ??
+				p.selectedElement.textStyle?.colorRef)
+			: undefined;
+
 	const currentHighlight =
 		isTextEl && p.selectedElement && hasTextProperties(p.selectedElement)
 			? (p.selectedElement.textSegments?.[0]?.style?.highlightColor ??
@@ -113,14 +114,16 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 	const changeCaseRef = useRef<HTMLDivElement>(null);
 	const fontColorRef = useRef<HTMLDivElement>(null);
 	const highlightMenuRef = useRef<HTMLDivElement>(null);
+	const { pushColor } = useRecentColors();
 	const handleColorChange = useCallback(
-		(color: string) => {
+		(color: string, ref?: PptxThemeColorRef) => {
 			if (!canFormat) {
 				return;
 			}
-			p.onUpdateTextStyle({ color });
+			p.onUpdateTextStyle({ color, colorRef: ref });
+			pushColor(color);
 		},
-		[canFormat, p],
+		[canFormat, p, pushColor],
 	);
 	const handleHighlightChange = useCallback(
 		(highlightColor: string) => {
@@ -128,8 +131,9 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 				return;
 			}
 			p.onUpdateTextStyle({ highlightColor });
+			pushColor(highlightColor);
 		},
-		[canFormat, p],
+		[canFormat, p, pushColor],
 	);
 
 	return (
@@ -245,8 +249,9 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 								if (!canFormat || !p.selectedElement) {
 									return;
 								}
-								const current = effectiveTs?.fontSize ?? 18;
-								p.onUpdateTextStyle({ fontSize: current + 2 });
+								const current = effectiveTs?.fontSize ?? (isTextEl ? textFontSizePtToPx(18) : 18);
+								const delta = isTextEl ? textFontSizePtToPx(2) : 2;
+								p.onUpdateTextStyle({ fontSize: current + delta });
 							}}
 							className={gB}
 							title={t('pptx.text.increaseFontSize')}
@@ -261,8 +266,10 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 								if (!canFormat || !p.selectedElement) {
 									return;
 								}
-								const current = effectiveTs?.fontSize ?? 18;
-								p.onUpdateTextStyle({ fontSize: Math.max(1, current - 2) });
+								const current = effectiveTs?.fontSize ?? (isTextEl ? textFontSizePtToPx(18) : 18);
+								const delta = isTextEl ? textFontSizePtToPx(2) : 2;
+								const minimum = isTextEl ? textFontSizePtToPx(1) : 1;
+								p.onUpdateTextStyle({ fontSize: Math.max(minimum, current - delta) });
 							}}
 							className={gB}
 							title={t('pptx.text.decreaseFontSize')}
@@ -325,15 +332,9 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 						</button>
 						<RibbonMenu anchorRef={charSpacingRef} className='hidden group-hover:block pt-1'>
 							<div className='rounded-lg border border-border bg-popover backdrop-blur-lg shadow-2xl py-1 w-32'>
-								{[
-									{ label: 'Very Tight', value: -150 },
-									{ label: 'Tight', value: -75 },
-									{ label: 'Normal', value: 0 },
-									{ label: 'Loose', value: 75 },
-									{ label: 'Very Loose', value: 150 },
-								].map((opt) => (
+								{CHARACTER_SPACING_OPTIONS.map((opt) => (
 									<button
-										key={opt.label}
+										key={opt.i18nKey}
 										type='button'
 										className='flex items-center w-full px-3 py-1.5 text-xs hover:bg-muted transition-colors'
 										onMouseDown={(e) => e.preventDefault()}
@@ -344,7 +345,7 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 											p.onUpdateTextStyle({ characterSpacing: opt.value });
 										}}
 									>
-										{opt.label}
+										{t(opt.i18nKey)}
 									</button>
 								))}
 							</div>
@@ -443,22 +444,33 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 							/>
 						</button>
 						<RibbonMenu anchorRef={fontColorRef} className='hidden group-hover:block pt-1'>
-							<div className='rounded-lg border border-border bg-popover backdrop-blur-lg shadow-2xl p-2 w-36'>
+							<div className='rounded-lg border border-border bg-popover backdrop-blur-lg shadow-2xl p-2 w-48'>
+								<ThemeColorSwatchGrid
+									prefix='font-color'
+									disabled={!canMut}
+									selectedRef={currentColorThemeRef}
+									selectedHex={currentColor}
+									onPick={(c) => handleColorChange(c.hex, c.ref)}
+								/>
+								<div className='text-[10px] text-muted-foreground mt-1 mb-1'>
+									{t('pptx.colorPicker.standardColors')}
+								</div>
 								<div className='grid grid-cols-5 gap-1.5 mb-2'>
-									{FONT_COLOR_PRESETS.map((c) => (
+									{OFFICE_COLOR_SWATCHES.map((c) => (
 										<button
-											key={c}
+											key={c.hex}
 											type='button'
-											aria-label={c}
+											aria-label={c.label}
+											title={c.label}
 											data-pptx-compact
 											className={`w-5 h-5 rounded-full border transition-transform hover:scale-125 ${
-												currentColor?.toLowerCase() === c
+												currentColor?.toLowerCase() === c.hex
 													? 'border-primary ring-1 ring-primary'
 													: 'border-border'
 											}`}
-											style={{ backgroundColor: c }}
+											style={{ backgroundColor: c.hex }}
 											onMouseDown={(e) => e.preventDefault()}
-											onClick={() => handleColorChange(c)}
+											onClick={() => handleColorChange(c.hex)}
 										/>
 									))}
 								</div>
@@ -476,6 +488,11 @@ export function TextSection(p: TextSectionProps): React.ReactElement {
 									className='sr-only'
 									value={currentColor}
 									onChange={(e) => handleColorChange(e.target.value)}
+								/>
+								<RecentColorsRow
+									prefix='font-color'
+									disabled={!canMut}
+									onCommit={handleColorChange}
 								/>
 							</div>
 						</RibbonMenu>

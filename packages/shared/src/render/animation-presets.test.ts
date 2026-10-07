@@ -20,8 +20,8 @@ describe('pRESET_ID_TO_EFFECT', () => {
 			expect(PRESET_ID_TO_EFFECT.entr[23]).toBe('zoomIn');
 		});
 
-		it('should map preset ID 37 to "bounceIn"', () => {
-			expect(PRESET_ID_TO_EFFECT.entr[37]).toBe('bounceIn');
+		it('should map preset ID 37 to "riseUp" (Rise Up, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[37]).toBe('riseUp');
 		});
 
 		it('should map preset ID 22 to "wipeIn"', () => {
@@ -58,8 +58,22 @@ describe('pRESET_ID_TO_EFFECT', () => {
 			expect(PRESET_ID_TO_EFFECT.exit[23]).toBe('zoomOut');
 		});
 
-		it('should map preset ID 37 to "bounceOut"', () => {
-			expect(PRESET_ID_TO_EFFECT.exit[37]).toBe('bounceOut');
+		it('should map preset ID 26 to "bounceOut" (Bounce, verified via a fresh COM pass)', () => {
+			// A fresh COM pass shows `msoAnimEffectBounce` with `Effect.Exit =
+			// True` re-emits presetID 26 (the SAME id as its entrance form),
+			// not 37 (see the sinkDown test below for the real exit.37).
+			expect(PRESET_ID_TO_EFFECT.exit[26]).toBe('bounceOut');
+		});
+
+		it('should map preset ID 37 to "sinkDown", not the old (wrong) "bounceOut"', () => {
+			// This table previously had exit[37] = 'bounceOut', which a fresh
+			// COM pass shows is wrong: `msoAnimEffectRiseUp` with
+			// `Effect.Exit = True` re-emits presetID 37 (matching its
+			// entrance form, entr.37), not Bounce (real Bounce exit is
+			// exit.26, see above). The two were swapped, mirroring the
+			// already-fixed entr.26/37 mix-up.
+			expect(PRESET_ID_TO_EFFECT.exit[37]).toBe('sinkDown');
+			expect(PRESET_ID_TO_EFFECT.exit[37]).not.toBe('bounceOut');
 		});
 
 		it('should map preset ID 2 to "flyOutBottom"', () => {
@@ -72,8 +86,16 @@ describe('pRESET_ID_TO_EFFECT', () => {
 	});
 
 	describe('emphasis presets', () => {
-		it('should map preset ID 1 to "boldFlash"', () => {
-			expect(PRESET_ID_TO_EFFECT.emph[1]).toBe('boldFlash');
+		it('should leave preset ID 1 unmapped (Change Fill Color, not Bold Flash)', () => {
+			// emph.1 is Change Fill Color (verified via COM: it emits a
+			// `p:animClr` node targeting fill); it must stay unmapped here so
+			// the colour-animation dynamic-keyframe path renders it instead of
+			// a wrong static "boldFlash" effect. Real Bold Flash is emph.10.
+			expect(PRESET_ID_TO_EFFECT.emph[1]).toBeUndefined();
+		});
+
+		it('should map preset ID 10 to "boldFlash" (Bold Flash, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.emph[10]).toBe('boldFlash');
 		});
 
 		it('should map preset ID 8 to "spin"', () => {
@@ -84,8 +106,21 @@ describe('pRESET_ID_TO_EFFECT', () => {
 			expect(PRESET_ID_TO_EFFECT.emph[26]).toBe('pulse');
 		});
 
-		it('should map preset ID 14 to "teeter"', () => {
-			expect(PRESET_ID_TO_EFFECT.emph[14]).toBe('teeter');
+		it('should map preset ID 32 to "teeter", not the old (wrong) preset ID 14', () => {
+			// A fresh COM pass shows `msoAnimEffectTeeter` serializes as
+			// emph.32, not 14 (real emph.14 is Blast, which has no dedicated
+			// keyframe and is correctly left unmapped, see below).
+			expect(PRESET_ID_TO_EFFECT.emph[32]).toBe('teeter');
+			expect(PRESET_ID_TO_EFFECT.emph[14]).toBeUndefined();
+		});
+
+		it('should map preset ID 20 to "colorWave" and 34 to "wave" (verified via COM)', () => {
+			// Both dedicated keyframes already existed (a hue-rotate pulse for
+			// Color Wave, a vertical bob for Wave) but neither preset id was
+			// ever wired up in this table, even though `animation-write-mappings.ts`
+			// and the UI catalog already carried the COM-verified ids.
+			expect(PRESET_ID_TO_EFFECT.emph[20]).toBe('colorWave');
+			expect(PRESET_ID_TO_EFFECT.emph[34]).toBe('wave');
 		});
 
 		it('should map preset ID 6 to "growShrink"', () => {
@@ -135,24 +170,24 @@ describe('pRESET_ID_TO_EFFECT', () => {
 	});
 
 	describe('additional entrance presets', () => {
-		it('should map preset ID 6 to "expandIn"', () => {
-			expect(PRESET_ID_TO_EFFECT.entr[6]).toBe('expandIn');
+		it('should map preset ID 6 to "circleIn" (Circle, not a duplicate of Expand)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[6]).toBe('circleIn');
 		});
 
 		it('should map preset ID 9 to "dissolveIn"', () => {
 			expect(PRESET_ID_TO_EFFECT.entr[9]).toBe('dissolveIn');
 		});
 
-		it('should map preset ID 12 to "flashIn"', () => {
-			expect(PRESET_ID_TO_EFFECT.entr[12]).toBe('flashIn');
+		it('should map preset ID 12 to "peekIn" (Peek In)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[12]).toBe('peekIn');
 		});
 
-		it('should map preset ID 16 to "peekIn"', () => {
-			expect(PRESET_ID_TO_EFFECT.entr[16]).toBe('peekIn');
+		it('should map preset ID 16 to "splitIn" (Split)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[16]).toBe('splitIn');
 		});
 
-		it('should map preset ID 17 to "splitIn" (spec: entr.17 = Split)', () => {
-			expect(PRESET_ID_TO_EFFECT.entr[17]).toBe('splitIn');
+		it('should map preset ID 17 to "expandIn" (Stretch, closest existing keyframe)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[17]).toBe('expandIn');
 		});
 
 		it('should map preset ID 14 to "randomBarsIn" (spec: entr.14 = Random Bars)', () => {
@@ -163,8 +198,17 @@ describe('pRESET_ID_TO_EFFECT', () => {
 			expect(PRESET_ID_TO_EFFECT.entr[21]).toBe('wheelIn');
 		});
 
-		it('should map preset ID 26 to "riseUp"', () => {
-			expect(PRESET_ID_TO_EFFECT.entr[26]).toBe('riseUp');
+		it('should map preset ID 19 to "swivel" (Swivel, verified via COM)', () => {
+			// entr.19 was already COM-verified as Swivel in the authoring
+			// reverse lookup and the UI catalog (see the entr.47 test below),
+			// and the `swivel` keyframe already existed for its initial-style
+			// resolution, but this id was never wired up in the playback
+			// table itself.
+			expect(PRESET_ID_TO_EFFECT.entr[19]).toBe('swivel');
+		});
+
+		it('should map preset ID 26 to "bounceIn" (Bounce, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[26]).toBe('bounceIn');
 		});
 
 		it('should map preset ID 31 to "expandIn"', () => {
@@ -175,8 +219,28 @@ describe('pRESET_ID_TO_EFFECT', () => {
 			expect(PRESET_ID_TO_EFFECT.entr[42]).toBe('floatIn');
 		});
 
-		it('should map preset ID 47 to "swivel"', () => {
-			expect(PRESET_ID_TO_EFFECT.entr[47]).toBe('swivel');
+		it('should map preset ID 47 to "flyInTop" (Descend, verified via COM; real Swivel is entr.19, not 47)', () => {
+			// entr.47 is really "Descend" per COM, not Swivel (real Swivel is
+			// entr.19). No dedicated "falls from above" keyframe exists, so
+			// this reuses `flyInTop` (falls from the top edge into place) as a
+			// documented approximation.
+			expect(PRESET_ID_TO_EFFECT.entr[47]).toBe('flyInTop');
+		});
+
+		it('should map preset ID 8 to "diamondIn" (Diamond, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[8]).toBe('diamondIn');
+		});
+
+		it('should map preset ID 13 to "plusIn" (Plus, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[13]).toBe('plusIn');
+		});
+
+		it('should map preset ID 20 to "wedgeIn" (Wedge, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[20]).toBe('wedgeIn');
+		});
+
+		it('should map preset ID 18 to "wipeIn" (Strips, verified via COM; approximation)', () => {
+			expect(PRESET_ID_TO_EFFECT.entr[18]).toBe('wipeIn');
 		});
 
 		it('should map preset ID 49 to "spinnerIn"', () => {
@@ -200,27 +264,73 @@ describe('pRESET_ID_TO_EFFECT', () => {
 		it('should map preset ID 22 to "wipeOut"', () => {
 			expect(PRESET_ID_TO_EFFECT.exit[22]).toBe('wipeOut');
 		});
+
+		it('should map preset ID 3 to "blindsOut" (Blinds exit, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[3]).toBe('blindsOut');
+		});
+
+		it('should map preset ID 4 to "boxOut" (Box exit, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[4]).toBe('boxOut');
+		});
+
+		it('should map preset ID 5 to "checkerboardOut" (Checkerboard exit, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[5]).toBe('checkerboardOut');
+		});
+
+		it('should map preset ID 8 to "diamondOut" (Diamond exit, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[8]).toBe('diamondOut');
+		});
+
+		it('should map preset ID 13 to "plusOut" (Plus exit, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[13]).toBe('plusOut');
+		});
+
+		it('should map preset ID 14 to "randomBarsOut" (Random Bars exit, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[14]).toBe('randomBarsOut');
+		});
+
+		it('should map preset ID 20 to "wedgeOut" (Wedge exit, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[20]).toBe('wedgeOut');
+		});
+
+		it('should map preset ID 21 to "wheelOut" (Wheel exit, verified via COM)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[21]).toBe('wheelOut');
+		});
+
+		it('should map preset ID 18 to "wipeOut" (Strips exit, verified via COM; approximation)', () => {
+			expect(PRESET_ID_TO_EFFECT.exit[18]).toBe('wipeOut');
+		});
 	});
 
 	describe('additional emphasis presets', () => {
-		it('should map preset ID 2 to "wave"', () => {
-			expect(PRESET_ID_TO_EFFECT.emph[2]).toBe('wave');
+		it('should leave preset ID 2 unmapped (Change Font, not Wave)', () => {
+			// emph.2 is really Change Font (a font-family swap, verified via
+			// COM), not Wave (real Wave is emph.34) or Color Wave (real Color
+			// Wave is emph.20). No dynamic keyframe covers a font-family swap,
+			// so it correctly falls back to the neutral emphasis animation.
+			expect(PRESET_ID_TO_EFFECT.emph[2]).toBeUndefined();
 		});
 
 		it('should map preset ID 9 to "transparency"', () => {
 			expect(PRESET_ID_TO_EFFECT.emph[9]).toBe('transparency');
 		});
 
-		it('should map preset ID 7 (blink) to the "flash" keyframe', () => {
-			expect(PRESET_ID_TO_EFFECT.emph[7]).toBe('flash');
+		it('should leave preset ID 7 unmapped (Change Line Color, not Blink)', () => {
+			// emph.7 is Change Line Color; it must stay unmapped here so the
+			// colour-animation (`p:animClr`) dynamic-keyframe path in
+			// `animation-timeline-helpers.ts` renders it instead of a wrong
+			// static "flash"/blink effect.
+			expect(PRESET_ID_TO_EFFECT.emph[7]).toBeUndefined();
 		});
 	});
 
 	describe('eMPH_FILTER_PRESETS', () => {
-		it('maps darken/lighten/desaturate to CSS filter values', () => {
-			expect(EMPH_FILTER_PRESETS[3].name).toBe('desaturate');
-			expect(EMPH_FILTER_PRESETS[4].filterMid).toContain('brightness(0.55)');
-			expect(EMPH_FILTER_PRESETS[5].filterMid).toContain('brightness(1.6)');
+		it('no longer mislabels Change Font Color/Size/Style (3/4/5) as desaturate/darken/lighten', () => {
+			// emph.3/4/5 are Change Font Color/Size/Style, not filter-based
+			// colour effects; they must not appear in this table.
+			expect(EMPH_FILTER_PRESETS[3]).toBeUndefined();
+			expect(EMPH_FILTER_PRESETS[4]).toBeUndefined();
+			expect(EMPH_FILTER_PRESETS[5]).toBeUndefined();
 		});
 
 		it('does not collide with statically-mapped emphasis preset ids', () => {

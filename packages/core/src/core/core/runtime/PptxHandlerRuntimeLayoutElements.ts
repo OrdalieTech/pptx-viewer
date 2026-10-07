@@ -1,10 +1,16 @@
 import { XmlObject, PptxElement } from '../../types';
+import { partRelsPath } from '../../utils/part-rels-path';
 import { stripParentDirSegments } from '../../utils/strip-parent-dir-segments';
 import { xmlAttr, xmlChild, xmlPath } from '../../utils/xml-access';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeAuxiliaryMasterElements';
 import type { PlaceholderInfo } from './PptxHandlerRuntimeTypes';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
+	/**
+	 * Parse the layout artwork inherited by a slide.
+	 *
+	 * @param slidePath - Archive path of the slide whose layout to resolve.
+	 */
 	protected async getLayoutElements(slidePath: string): Promise<PptxElement[]> {
 		// Get the slide's relationship file to find the layout
 		const slideRels = this.slideRelsMap.get(slidePath);
@@ -30,6 +36,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			return [];
 		}
 
+		return this.getLayoutElementsByPath(layoutPath);
+	}
+
+	/**
+	 * Parse a layout's artwork given the layout's own archive path.
+	 *
+	 * Split out from {@link getLayoutElements} so callers that already know
+	 * which layout they want (the layout gallery) do not have to invent a slide
+	 * that points at it.
+	 *
+	 * @param layoutPath - Archive path of the `p:sldLayout` part.
+	 */
+	protected async getLayoutElementsByPath(layoutPath: string): Promise<PptxElement[]> {
 		// Check cache first
 		if (this.layoutCache.has(layoutPath)) {
 			return this.layoutCache.get(layoutPath)!;
@@ -50,11 +69,23 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				return [];
 			}
 
-			const layoutXmlObj = this.parser.parse(layoutXmlStr);
+			// Reuse the parse already cached for this part rather than replacing
+			// it. This function runs a second time for a layout whose artwork is
+			// already on a slide (`getLayoutPreview` drops the ELEMENT cache to
+			// re-read the part with image decoding on), and a fresh parse used to
+			// take over `layoutXmlMap` while the elements handed to the viewer kept
+			// `rawXml` nodes belonging to the first parse. The save writer routes
+			// an inherited layout/master edit back by patching that `rawXml` node
+			// IN PLACE, so pointing the map at a different tree made every template
+			// edit a silent no-op: `ensureTemplateShapeAttached` matched the twin
+			// node in the new tree by `p:cNvPr` identity and returned it, throwing
+			// the patched one away. One parse per part per handler keeps the
+			// element -> part-XML link the writer depends on.
+			const layoutXmlObj = this.layoutXmlMap.get(layoutPath) ?? this.parser.parse(layoutXmlStr);
 			this.layoutXmlMap.set(layoutPath, layoutXmlObj as XmlObject);
 
 			// Load layout relationships
-			const layoutRelsPath = `${layoutPath.replace('slideLayouts/', 'slideLayouts/_rels/')}.rels`;
+			const layoutRelsPath = partRelsPath(layoutPath);
 			await this.loadSlideRelationships(layoutPath, layoutRelsPath);
 
 			// Apply layout-level colour map override while parsing its elements
@@ -196,10 +227,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					if (!group) {
 						continue;
 					}
+					// Pass the part's raw XML: without it the group parser falls
+					// back to tag-grouped child order (all `p:sp`, then all
+					// `p:pic`, then all `p:grpSp`), which silently restacks any
+					// group with mixed child tags. See `group-child-order.ts`.
 					const element = await this.parseGroupShapeAsGroup(
 						group,
 						`layout-group-${layoutToken}-${entry.indexInType}`,
 						layoutPath,
+						layoutXmlStr,
 					);
 					if (element) {
 						element.id = `layout-${element.id}`;

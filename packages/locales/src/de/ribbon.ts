@@ -125,7 +125,6 @@ export const translations = {
 	'pptx.ribbon.toggleGridOverlay': 'Rasterüberlagerung umschalten',
 	'pptx.ribbon.guides': 'Hilfslinien',
 	'pptx.ribbon.toggleGuides': 'Schalten Sie die mittleren Hilfslinien um',
-	'pptx.ribbon.toggleSelectionPane': 'Blendet den Auswahlbereich ein/aus',
 	'pptx.ribbon.snapToGridTitle': 'Elemente beim Verschieben am Raster ausrichten',
 	'pptx.ribbon.templatesOn': 'Vorlagen aktiviert',
 	'pptx.ribbon.templatesOff': 'Vorlagen aus',
@@ -158,6 +157,7 @@ export const translations = {
 	'pptx.ribbon.advanceAfterSeconds': 'Nach angegebener Dauer weiterschalten',
 	'pptx.ribbon.sound': 'Sound:',
 	'pptx.ribbon.soundNone': '[Kein Sound]',
+	'pptx.ribbon.soundOther': 'Anderer Sound...',
 	'pptx.ribbon.inspector': 'Inspektor',
 	'pptx.ribbon.openInspectorTransitions':
 		'Öffnen Sie den Inspektor für vollständige Übergangsoptionen',
@@ -172,6 +172,8 @@ export const translations = {
 	'pptx.ribbon.customColour': 'Benutzerdefinierte Farbe...',
 	'pptx.ribbon.textHighlightColour': 'Texthervorhebungsfarbe',
 	'pptx.ribbon.highlightColourValue': 'Texthervorhebungsfarbe {{color}}',
+	'pptx.ribbon.fillColourValue': 'Füllfarbe {{color}}',
+	'pptx.ribbon.outlineColourValue': 'Umrissfarbe {{color}}',
 	'pptx.ribbon.bulletList': 'Bullet-Liste',
 	'pptx.ribbon.justify': 'Blocksatz',
 	'pptx.home.chooseLayout': 'Wählen Sie Layout',
@@ -192,4 +194,7 @@ export const translations = {
 	'pptx.ribbon.textDirectionRotate90': 'Um 90° drehen',
 	'pptx.ribbon.textDirectionStacked': 'Gestapelt',
 	'pptx.ribbon.groupShapeStyles': 'Formstile',
+	'pptx.ribbon.editing': 'Bearbeiten',
+	'pptx.ribbon.selectionPane': 'Auswahlbereich',
+	'pptx.ribbon.slides': 'Folien',
 } as const;

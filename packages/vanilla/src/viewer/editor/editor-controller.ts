@@ -6,19 +6,27 @@ import type {
 	PptxElement,
 	PptxHandler,
 	PptxHeaderFooter,
+	PptxLayoutPreview,
 	PptxPresentationProperties,
 	PptxSaveFormat,
 	PptxSection,
 	PptxSlide,
 	TextSegment,
 } from 'pptx-viewer-core';
-import { downloadBlob } from 'pptx-viewer-shared';
+import {
+	armEditorKeyboard,
+	downloadBlob,
+	moveGuide,
+	removeGuide,
+	savedPresentationFileName,
+} from 'pptx-viewer-shared';
 
-import { buildSharingPackage } from '../export/package-sharing';
 import type { Translator } from '../i18n';
 import type { DrawTool, Store, ViewerState } from '../state';
 import type { ViewerChrome } from '../ui';
 import { syncAlignmentGuides } from './alignment-guide-view';
+import { createConnectorEndpointOverlay } from './connector-endpoint-overlay';
+import type { ConnectorEndpointOverlay } from './connector-endpoint-overlay';
 import { createEditingChromeSync } from './editing-chrome-sync';
 import { getActiveElements, replaceActiveElements } from './editor-active-elements';
 import { selectionOverlayBox } from './editor-controller-overlay';
@@ -28,10 +36,14 @@ import { createEditActions } from './editor-edit-ops';
 import type { FindReplaceActions } from './editor-find-replace-actions';
 import { createFindReplaceActions } from './editor-find-replace-actions';
 import { createEditorKeydownHandler } from './editor-keyboard';
+import { selectionInteractivity } from './editor-lock-gates';
 import { createEditorOps } from './editor-operations';
+import { recordRecentColor } from './editor-recent-colors';
 import { createStageInteractions } from './editor-stage-interactions';
+import { createMotionPathController } from './motion-path-controller';
 import type { SelectionOverlay } from './selection-overlay';
 import { createSelectionOverlay } from './selection-overlay';
+import { selectedAdjustmentDescriptors } from './shape-adjust-gesture';
 
 export interface EditorControllerDeps {
 	doc: Document;
@@ -40,6 +52,12 @@ export interface EditorControllerDeps {
 	getTranslator(): Translator;
 	getScale(): number;
 	getHandler(): PptxHandler | null;
+	/** Adopt a handler produced by an in-session mutation (Slide Master view CRUD). */
+	setHandler(handler: PptxHandler): void;
+	/** Options > General > "User name" override for new comment/reply authorship. */
+	getUserName?: () => string | undefined;
+	/** Options > Proofing > AutoCorrect, applied to committed inline-edit text. */
+	transformCommittedText?: (text: string) => string;
 	/** Host `onChange` callback: fired after every committed mutation. */
 	onChange?: () => void;
 	/** Notified with slide-space coordinates on stage pointer move (collaboration cursor broadcast). */
@@ -97,7 +115,6 @@ export interface EditorController {
 	updateCustomShows(value: PptxCustomShow[]): void;
 	save(format?: PptxSaveFormat): Promise<Uint8Array>;
 	downloadAs(format: PptxSaveFormat, fileName?: string): Promise<void>;
-	packageForSharing(fileName?: string): Promise<void>;
 	downloadPptx(fileName?: string): Promise<void>;
 	destroy(): void;
 }
@@ -111,6 +128,7 @@ const PRESENTATION_MIME: Record<PptxSaveFormat, string> = {
 export function createEditorController(deps: EditorControllerDeps): EditorController {
 	const { doc, store } = deps;
 	let overlay: SelectionOverlay | null = null;
+	let connectorEndpoints: ConnectorEndpointOverlay | null = null;
 	let attachedWrap: HTMLElement | null = null;
 	let attachedRoot: HTMLElement | null = null;
 
@@ -130,15 +148,56 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 		getHandler: deps.getHandler,
 		onChange: deps.onChange,
 		onHistoryChange: () => updateToolbar(),
+		transformCommittedText: deps.transformCommittedText,
 	});
 
-	const editActions = createEditActions({ doc, store, ops, getHandler: deps.getHandler });
+	const editActions = createEditActions({
+		doc,
+		getTranslator: deps.getTranslator,
+		store,
+		ops,
+		getHandler: deps.getHandler,
+		setHandler: deps.setHandler,
+		getUserName: deps.getUserName,
+	});
 	const findReplaceActions = createFindReplaceActions({ store, ops });
+
+	/**
+	 * Layout artwork for the New Slide / Layout gallery thumbnails.
+	 *
+	 * Fetched once a deck is present rather than during load, because parsing
+	 * every layout part (and decoding the pictures it references) is only worth
+	 * doing for a user who opens one of those menus. Core memoises the parse, so
+	 * the second sync after it resolves is free.
+	 */
+	let layoutPreviews: ReadonlyMap<string, PptxLayoutPreview> = new Map();
+	let layoutPreviewsPending = false;
+	function ensureLayoutPreviews(): ReadonlyMap<string, PptxLayoutPreview> {
+		const handler = deps.getHandler();
+		if (handler && !layoutPreviewsPending && layoutPreviews.size === 0) {
+			layoutPreviewsPending = true;
+			void handler
+				.getLayoutPreviews()
+				.then((previews) => {
+					layoutPreviews = new Map(previews.map((preview) => [preview.path, preview]));
+					syncEditingChrome();
+					return undefined;
+				})
+				// A layout that will not parse costs the user a name-only tile,
+				// not a broken menu.
+				.catch(() => undefined)
+				.finally(() => {
+					layoutPreviewsPending = false;
+				});
+		}
+		return layoutPreviews;
+	}
 
 	const syncEditingChrome = createEditingChromeSync({
 		store,
 		getChrome: deps.getChrome,
 		selectedElement: (state) => ops.selectedElement(state),
+		layoutPreviews: ensureLayoutPreviews,
 	});
 
 	const interactions = createStageInteractions({
@@ -157,6 +216,7 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 
 	// Draw mode owns stage gestures while a pen, highlighter, or eraser is active.
 	const drawMode = createDrawModeController({
+		doc,
 		store,
 		editActions,
 		interactions,
@@ -168,10 +228,23 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 		getStageRoot: () => attachedWrap?.querySelector('.pptxv-stage') ?? null,
 	});
 
+	// The on-canvas motion-path layer; it lives inside the stage transform, so it
+	// owns its own re-mount lifecycle (see `motion-path-controller.ts`).
+	const motionPath = createMotionPathController({
+		doc,
+		store,
+		getTranslator: deps.getTranslator,
+		getScale: deps.getScale,
+		getStageWrap: () => attachedWrap,
+		getSelectedElement: (state) => ops.selectedElement(state),
+		onChangePath: (path) => editActions.setMotionPathData(path),
+	});
+
 	const syncOverlay = (): void => {
 		// The format toolbar + inspector track selection even before the overlay
 		// layer is mounted, so refresh them regardless of the overlay guard.
 		syncEditingChrome();
+		motionPath.sync();
 		if (!overlay) {
 			return;
 		}
@@ -183,7 +256,34 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 					)
 				: [];
 		overlay.setBox(selectionOverlayBox(selected), deps.getScale());
-		syncAlignmentGuides(doc, overlay.root, state.guides, deps.getScale());
+		// The chrome must only offer what the selection's `a:spLocks` allow: a
+		// `noResize` shape shows no resize handles, a `noRotation` one no knob.
+		const allowed = selectionInteractivity(state);
+		overlay.setHandleVisibility({ resizable: allowed.resizable, rotatable: allowed.rotatable });
+		overlay.setAdjustHandles(selectedAdjustmentDescriptors(state), deps.getScale());
+		connectorEndpoints?.sync();
+		// View > Guides hides the overlay, never the model: `state.guides` stays
+		// whole so snapping and saving still see every guide.
+		syncAlignmentGuides(
+			doc,
+			overlay.root,
+			state.showGuides ? state.guides : [],
+			deps.getScale(),
+			// Draggable + double-click-removable only while editing gestures apply
+			// at all; a read-only or presenting viewer shows static lines, same as
+			// every other on-canvas interaction.
+			state.editable && !state.presenting
+				? {
+						onMoveGuide: (id, position) => {
+							const current = store.get();
+							store.set({ guides: moveGuide(current.guides, id, position, current.canvasSize) });
+						},
+						onRemoveGuide: (id) => {
+							store.set({ guides: removeGuide(store.get().guides, id) });
+						},
+					}
+				: undefined,
+		);
 	};
 
 	const onKeyDown = createEditorKeydownHandler({
@@ -198,6 +298,9 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 		copySelected: () => editActions.copy(),
 		cutSelected: () => editActions.cut(),
 		paste: () => editActions.paste(),
+		selectAll: () => editActions.selectAll(),
+		groupSelected: () => editActions.groupSelected(),
+		ungroupSelected: () => editActions.ungroupSelected(),
 		nudgeSelected: (dx, dy) => ops.nudgeSelected(dx, dy),
 		undo: () => ops.undo(),
 		redo: () => ops.redo(),
@@ -208,11 +311,37 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 			store.set({ formatPainterSourceId: null });
 			return true;
 		},
+		toggleShortcuts: () => deps.getChrome().shortcuts.toggle(),
+		// Same action as Home > Editing > Find. Null when the host disabled the
+		// ribbon, in which case there is no find panel to open and the chord
+		// correctly does nothing.
+		toggleFind: () => deps.getChrome().ribbon?.toggleFindReplace(),
+		closeShortcuts: () => {
+			const panel = deps.getChrome().shortcuts;
+			if (!panel.isOpen()) {
+				return false;
+			}
+			panel.close();
+			return true;
+		},
 	});
+
+	/**
+	 * Stage pointerdown: keep the keymap armed, then run the gesture.
+	 *
+	 * The gesture handlers call `preventDefault()`, which suppresses the focus
+	 * move the click would otherwise make. Without this the keydown listener on
+	 * the viewer root never fires again after a canvas click: focus sits on
+	 * `document.body` and pressing Delete on a selected shape does nothing.
+	 */
+	const onStagePointerDown = (event: PointerEvent): void => {
+		armEditorKeyboard(attachedRoot);
+		drawMode.onStagePointerDown(event);
+	};
 
 	const detachChrome = (): void => {
 		interactions.closeInline(true);
-		attachedWrap?.removeEventListener('pointerdown', drawMode.onStagePointerDown);
+		attachedWrap?.removeEventListener('pointerdown', onStagePointerDown);
 		attachedWrap?.removeEventListener('pointermove', interactions.onStagePointerMove);
 		attachedWrap?.removeEventListener('dblclick', drawMode.onStageDblClick);
 		attachedRoot?.removeEventListener('keydown', onKeyDown);
@@ -220,6 +349,9 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 		attachedRoot = null;
 		overlay?.destroy();
 		overlay = null;
+		connectorEndpoints?.dispose();
+		connectorEndpoints = null;
+		motionPath.detach();
 	};
 
 	// -- Store subscription: keep selection/overlay/toolbar consistent -------------
@@ -270,14 +402,31 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 				onRotatePointerDown(event) {
 					interactions.beginHandleGesture('rotate', event);
 				},
+				onAdjustPointerDown(event, descriptor) {
+					interactions.beginAdjustGesture(event, descriptor);
+				},
 			});
+			connectorEndpoints = createConnectorEndpointOverlay({
+				doc,
+				store,
+				ops,
+				getScale: deps.getScale,
+				label: (kind) =>
+					deps.getTranslator()(
+						kind === 'start'
+							? 'pptx.canvas.connectorEndpointStart'
+							: 'pptx.canvas.connectorEndpointEnd',
+					),
+			});
+			motionPath.attach();
 			attachedWrap = chrome.stageWrap;
 			attachedRoot = chrome.root;
-			attachedWrap.addEventListener('pointerdown', drawMode.onStagePointerDown);
+			attachedWrap.addEventListener('pointerdown', onStagePointerDown);
 			attachedWrap.addEventListener('pointermove', interactions.onStagePointerMove);
 			attachedWrap.addEventListener('dblclick', drawMode.onStageDblClick);
 			attachedRoot.addEventListener('keydown', onKeyDown);
 			overlay.mount(attachedWrap);
+			connectorEndpoints.mount(attachedWrap);
 			updateToolbar();
 			drawMode.syncCursor(attachedWrap);
 			syncOverlay();
@@ -286,6 +435,7 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 		onStageRendered() {
 			if (overlay && attachedWrap) {
 				overlay.mount(attachedWrap);
+				connectorEndpoints?.mount(attachedWrap);
 				syncOverlay();
 			}
 		},
@@ -357,7 +507,10 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 			ops.commitChange();
 		},
 		setDrawTool: (tool) => drawMode.setTool(tool),
-		setDrawColor: (color) => drawMode.setColor(color),
+		setDrawColor: (color) => {
+			recordRecentColor(store, color);
+			drawMode.setColor(color);
+		},
 		setDrawWidth: (width) => drawMode.setWidth(width),
 		getEditActions: () => editActions,
 		getFindReplaceActions: () => findReplaceActions,
@@ -370,20 +523,18 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 		updateHeaderFooter: (value) => ops.updateHeaderFooter(value),
 		updateCustomShows: (value) => ops.updateCustomShows(value),
 		save: (format) => ops.save(format),
-		async downloadAs(format, fileName = `presentation.${format}`) {
+		// Every name below goes through the shared save-name decision, so a host
+		// that passes the deck it opened (`report.ppt`) gets `report.pptx` back
+		// rather than a `.ppt` whose bytes are an OpenXML package.
+		async downloadAs(format, fileName) {
 			const bytes = await ops.save(format);
 			downloadBlob(
 				new Blob([bytes as unknown as BlobPart], { type: PRESENTATION_MIME[format] }),
-				fileName,
+				savedPresentationFileName(fileName, format),
 			);
 		},
-		async downloadPptx(fileName = 'presentation.pptx') {
+		async downloadPptx(fileName) {
 			await this.downloadAs('pptx', fileName);
-		},
-		async packageForSharing(fileName = 'presentation.pptx') {
-			const bytes = await ops.save('pptx');
-			const blob = await buildSharingPackage(bytes, fileName);
-			downloadBlob(blob, `${fileName.replace(/\.pptx$/iu, '')}-package.zip`);
 		},
 		destroy() {
 			unsubscribe();

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import { TimelineEngine } from './animation-timeline-engine';
+import { finalizeClickGroup } from './animation-timeline-helpers';
 import type {
 	AnimationTimeline,
 	TimelineClickGroup,
@@ -21,15 +22,14 @@ function makeStep(overrides: Partial<TimelineStep> = {}): TimelineStep {
 	};
 }
 
+/**
+ * Delegates to the real `finalizeClickGroup` (rather than reimplementing its
+ * `totalDurationMs` + `seqConcurrent`/`seqNextAction`/`seqPrevAction`
+ * aggregation here) so these fixtures behave exactly like `buildTimeline`'s
+ * output for the `p:seq` gating tests below.
+ */
 function makeGroup(steps: TimelineStep[]): TimelineClickGroup {
-	let maxEnd = 0;
-	for (const step of steps) {
-		const end = step.delayMs + step.durationMs;
-		if (end > maxEnd) {
-			maxEnd = end;
-		}
-	}
-	return { steps, totalDurationMs: maxEnd };
+	return finalizeClickGroup(steps);
 }
 
 function makeTimeline(overrides: Partial<AnimationTimeline> = {}): AnimationTimeline {
@@ -424,5 +424,496 @@ describe('timelineEngine', () => {
 			expect(state?.build).toBeUndefined();
 			expect(state?.animatesFill).toBeUndefined();
 		});
+	});
+});
+
+describe('p:seq @concurrent / @nextAc (advance gating)', () => {
+	it('swallows a rapid re-advance while a non-concurrent group with nextAc="none" is active', () => {
+		const g1 = makeGroup([makeStep({ elementId: 'a', durationMs: 1000, seqNextAction: 'none' })]);
+		const g2 = makeGroup([makeStep({ elementId: 'b' })]);
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [g1, g2] }));
+
+		expect(engine.advance(0)).toBe(g1);
+		// Pressing "next" again 200ms later, while g1 is still active (1000ms), is
+		// swallowed: this must be a TRUTHY empty group, not `null`. A binding
+		// treats `null` as "nothing left on this slide" and falls through to
+		// slide navigation (see React's `useSlideNavigation`), so returning
+		// `null` here would incorrectly skip to the next slide instead of
+		// waiting for g1 to finish.
+		const blocked = engine.advance(200);
+		expect(blocked).not.toBeNull();
+		expect(blocked?.steps).toHaveLength(0);
+		expect(engine.currentGroup).toBe(0);
+		// Once g1's active window elapses, the same press succeeds.
+		expect(engine.advance(1000)).toBe(g2);
+		expect(engine.currentGroup).toBe(1);
+	});
+
+	it('does not block when the group is concurrent, even with nextAc="none"', () => {
+		const g1 = makeGroup([
+			makeStep({ elementId: 'a', durationMs: 1000, seqConcurrent: true, seqNextAction: 'none' }),
+		]);
+		const g2 = makeGroup([makeStep({ elementId: 'b' })]);
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [g1, g2] }));
+
+		expect(engine.advance(0)).toBe(g1);
+		expect(engine.advance(50)).toBe(g2);
+	});
+
+	it('does not block when nextAc is "seek" or absent (PowerPoint default: finish in place)', () => {
+		const g1 = makeGroup([makeStep({ elementId: 'a', durationMs: 1000, seqNextAction: 'seek' })]);
+		const g2 = makeGroup([makeStep({ elementId: 'b' })]);
+		const g3 = makeGroup([makeStep({ elementId: 'c' })]);
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [g1, g2, g3] }));
+
+		expect(engine.advance(0)).toBe(g1);
+		expect(engine.advance(50)).toBe(g2); // seqNextAction "seek": never swallowed.
+		expect(engine.advance(60)).toBe(g3); // g2 has no seq attrs at all: unaffected default.
+	});
+
+	it('applies the same gating to interactive sequences', () => {
+		const interactiveSequences = new Map<string, TimelineClickGroup[]>();
+		interactiveSequences.set('btn', [
+			makeGroup([makeStep({ elementId: 'a', durationMs: 1000, seqNextAction: 'none' })]),
+			makeGroup([makeStep({ elementId: 'b' })]),
+		]);
+		const engine = new TimelineEngine(makeTimeline({ interactiveSequences }));
+
+		expect(engine.advanceInteractive('btn', 0)).not.toBeNull();
+		const blocked = engine.advanceInteractive('btn', 100);
+		expect(blocked).not.toBeNull(); // consumed, not "exhausted"
+		expect(blocked?.steps).toHaveLength(0);
+		expect(engine.advanceInteractive('btn', 1000)).not.toBeNull();
+	});
+
+	it('restarts an interactive sequence only when endSync marks it replayable', () => {
+		const group = makeGroup([makeStep({ elementId: 'a' })]);
+		const interactiveSequences = new Map([['btn', [group]]]);
+		const restartableInteractiveSequences = new Set(['btn']);
+		const engine = new TimelineEngine(
+			makeTimeline({ interactiveSequences, restartableInteractiveSequences }),
+		);
+
+		expect(engine.advanceInteractive('btn', 0)).toBe(group);
+		expect(engine.advanceInteractive('btn', 1000)).toBe(group);
+	});
+
+	it('leaves an interactive sequence exhausted without endSync replay', () => {
+		const group = makeGroup([makeStep({ elementId: 'a' })]);
+		const engine = new TimelineEngine(
+			makeTimeline({ interactiveSequences: new Map([['btn', [group]]]) }),
+		);
+
+		expect(engine.advanceInteractive('btn', 0)).toBe(group);
+		expect(engine.advanceInteractive('btn', 1000)).toBeNull();
+	});
+
+	it('a blocked advance never falls through as "exhausted" even on the LAST group', () => {
+		// Regression guard: with only one group, a naive implementation could
+		// conflate "blocked, try again later" with "nextIndex out of range,
+		// truly done" since both would otherwise return `null`.
+		const g1 = makeGroup([makeStep({ elementId: 'a', durationMs: 1000, seqNextAction: 'none' })]);
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [g1] }));
+
+		expect(engine.advance(0)).toBe(g1);
+		const blocked = engine.advance(100);
+		expect(blocked).not.toBeNull();
+		expect(blocked?.steps).toHaveLength(0);
+		// Once g1 finishes, advancing again correctly reports genuine exhaustion.
+		expect(engine.advance(1000)).toBeNull();
+	});
+});
+
+describe('p:seq @prevAc (resetHover gating)', () => {
+	it('defers resetHover while the active group has prevAc="none"', () => {
+		const hoverSequences = new Map<string, TimelineClickGroup[]>();
+		hoverSequences.set('shape', [
+			makeGroup([makeStep({ elementId: 'a', durationMs: 1000, seqPrevAction: 'none' })]),
+		]);
+		const engine = new TimelineEngine(makeTimeline({ hoverSequences }));
+
+		expect(engine.advanceHover('shape', 0)).not.toBeNull();
+		// Mouse leaves at 200ms, while the effect is still active: deferred.
+		engine.resetHover('shape', 200);
+		expect(engine.advanceHover('shape', 250)).toBeNull(); // still index 0, no more groups from there
+
+		// Once the effect finishes, the reset is allowed and hover can replay.
+		engine.resetHover('shape', 1000);
+		expect(engine.advanceHover('shape', 1001)).not.toBeNull();
+	});
+
+	it('resets immediately when prevAc is "skipTimeNode" or absent (original behaviour)', () => {
+		const hoverSequences = new Map<string, TimelineClickGroup[]>();
+		hoverSequences.set('shape', [makeGroup([makeStep({ elementId: 'a', durationMs: 1000 })])]);
+		const engine = new TimelineEngine(makeTimeline({ hoverSequences }));
+
+		expect(engine.advanceHover('shape', 0)).not.toBeNull();
+		engine.resetHover('shape', 50); // well within the 1000ms window
+		expect(engine.advanceHover('shape', 51)).not.toBeNull(); // replays immediately
+	});
+});
+
+describe('p:cTn @restart (re-trigger gating)', () => {
+	// A binding's playback loop (React's `applyAnimationGroupSteps` and its
+	// Vue/Angular/Svelte/Vanilla equivalents) applies CSS and schedules cleanup
+	// purely from the RETURNED group's `steps`, so the decisive proof that a
+	// re-trigger was blocked is that the blocked step is absent from that list
+	// (not merely that the internal bookkeeping Maps hold an unchanged value,
+	// which would look identical whether the step reapplied or not).
+
+	it('"whenNotActive" strips the step from the returned group while its effect is still playing', () => {
+		const hoverSequences = new Map<string, TimelineClickGroup[]>();
+		hoverSequences.set('shape', [
+			makeGroup([makeStep({ elementId: 'a', durationMs: 500, restart: 'whenNotActive' })]),
+		]);
+		const engine = new TimelineEngine(makeTimeline({ hoverSequences }));
+
+		const first = engine.advanceHover('shape', 0);
+		expect(first?.steps).toHaveLength(1);
+
+		// Hover out and back in quickly, well inside the 500ms window.
+		engine.resetHover('shape', 50);
+		const blocked = engine.advanceHover('shape', 100);
+		expect(blocked?.steps).toHaveLength(0); // blocked: nothing for a binding to (re)apply
+
+		// Once the effect's window elapses, a fresh hover restarts it for real.
+		engine.resetHover('shape', 500);
+		const restarted = engine.advanceHover('shape', 500);
+		expect(restarted?.steps).toHaveLength(1);
+	});
+
+	it('"never" strips the step from every subsequent trigger, active or not', () => {
+		const hoverSequences = new Map<string, TimelineClickGroup[]>();
+		hoverSequences.set('shape', [makeGroup([makeStep({ elementId: 'a', restart: 'never' })])]);
+		const engine = new TimelineEngine(makeTimeline({ hoverSequences }));
+
+		expect(engine.advanceHover('shape', 0)?.steps).toHaveLength(1);
+
+		engine.resetHover('shape', 10_000); // long after the effect finished
+		expect(engine.advanceHover('shape', 10_000)?.steps).toHaveLength(0);
+	});
+
+	it('"always" (or absent) keeps the step in every returned group, unchanged', () => {
+		const hoverSequences = new Map<string, TimelineClickGroup[]>();
+		hoverSequences.set('shape', [makeGroup([makeStep({ elementId: 'a', durationMs: 1000 })])]);
+		const engine = new TimelineEngine(makeTimeline({ hoverSequences }));
+
+		expect(engine.advanceHover('shape', 0)?.steps).toHaveLength(1);
+		engine.resetHover('shape', 50); // well inside the 1000ms window
+		expect(engine.advanceHover('shape', 60)?.steps).toHaveLength(1); // still restarts
+	});
+
+	it('leaves the returned group reference untouched when nothing is blocked', () => {
+		const g1 = makeGroup([makeStep({ elementId: 'a' })]);
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [g1] }));
+		expect(engine.advance(0)).toBe(g1);
+	});
+
+	it('reset() clears restart state so the slide replays cleanly', () => {
+		const step = makeStep({ elementId: 'a', durationMs: 1000, restart: 'never' });
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [makeGroup([step])] }));
+
+		expect(engine.advance(0)?.steps).toHaveLength(1);
+
+		engine.reset();
+		expect(engine.advance(0)?.steps).toHaveLength(1);
+	});
+});
+
+describe('completeAll', () => {
+	it('reveals every entrance and applies every exit with nothing animating', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([makeStep({ elementId: 'a', presetClass: 'entr' })]),
+					makeGroup([makeStep({ elementId: 'b', presetClass: 'entr' })]),
+					makeGroup([makeStep({ elementId: 'a', presetClass: 'exit' })]),
+				],
+				entranceElementIds: new Set(['a', 'b']),
+			}),
+		);
+
+		engine.completeAll();
+
+		// `b` entered and stayed; `a` entered then exited.
+		expect(engine.isElementVisible('b')).toBeTruthy();
+		expect(engine.isElementVisible('a')).toBeFalsy();
+		// Nothing is left animating: a slide entered backward is static.
+		expect(engine.getElementAnimation('a')).toBeUndefined();
+		expect(engine.getElementAnimation('b')).toBeUndefined();
+		// The timeline is spent, so a forward press leaves the slide.
+		expect(engine.hasMoreSteps()).toBeFalsy();
+	});
+
+	it('is undone by reset, so the slide can replay', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [makeGroup([makeStep({ elementId: 'a', presetClass: 'entr' })])],
+				entranceElementIds: new Set(['a']),
+			}),
+		);
+
+		engine.completeAll();
+		expect(engine.isElementVisible('a')).toBeTruthy();
+
+		engine.reset();
+		expect(engine.isElementVisible('a')).toBeFalsy();
+		expect(engine.hasMoreSteps()).toBeTruthy();
+	});
+});
+
+describe('p:graphicEl chart reveal (getElementStates.chartReveal)', () => {
+	/** One per-series chart-build step, mirroring what `buildTimeline` emits for a `p:par` targeting `p:graphicEl/p:chart[@seriesIdx]`. */
+	function chartStep(seriesIdx: number): TimelineStep {
+		return makeStep({
+			elementId: 'chart1',
+			build: { kind: 'chart', mode: 'bySeries', animateBackground: true },
+			graphicElement: { seriesIdx, bldStep: 'series' },
+		});
+	}
+
+	it('derives the authored series set from fired steps, in REVERSE authoring order', () => {
+		// PowerPoint's "Enter by Series, Reverse Order" authors one `p:par` per
+		// series but fires seriesIdx 2 first, then 1, then 0. A click-count-based
+		// reveal would show series [0], [0,1] after two clicks; the authored set
+		// must instead be {2}, then {2,1}.
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([chartStep(2)]),
+					makeGroup([chartStep(1)]),
+					makeGroup([chartStep(0)]),
+				],
+			}),
+		);
+
+		engine.advance();
+		let state = engine.getElementStates(['chart1']).get('chart1');
+		expect(state?.chartReveal?.descriptor.series).toStrictEqual(new Set([2]));
+		expect(state?.chartReveal?.mode).toBe('bySeries');
+
+		engine.advance();
+		state = engine.getElementStates(['chart1']).get('chart1');
+		expect(state?.chartReveal?.descriptor.series).toStrictEqual(new Set([2, 1]));
+
+		engine.advance();
+		state = engine.getElementStates(['chart1']).get('chart1');
+		expect(state?.chartReveal?.descriptor.series).toStrictEqual(new Set([2, 1, 0]));
+	});
+
+	it('background reveal follows animateBackground: shown WITH the first stage by default', () => {
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [makeGroup([chartStep(0)])] }));
+		expect(
+			engine.getElementStates(['chart1']).get('chart1')?.chartReveal?.descriptor.background,
+		).toBeFalsy();
+		engine.advance();
+		expect(
+			engine.getElementStates(['chart1']).get('chart1')?.chartReveal?.descriptor.background,
+		).toBeTruthy();
+	});
+
+	it('background is shown throughout when animateBackground is false', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([
+						makeStep({
+							elementId: 'chart1',
+							build: { kind: 'chart', mode: 'bySeries', animateBackground: false },
+							graphicElement: { seriesIdx: 0, bldStep: 'series' },
+						}),
+					]),
+				],
+			}),
+		);
+		// Before the first click: no data revealed yet, but the background is
+		// authored to show throughout regardless of build progress.
+		expect(
+			engine.getElementStates(['chart1']).get('chart1')?.chartReveal?.descriptor.background,
+		).toBeTruthy();
+	});
+
+	it('leaves chartReveal undefined for a chart whose build has no graphicEl index data', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([
+						makeStep({ elementId: 'chart1', build: { kind: 'chart', mode: 'bySeries' } }),
+					]),
+				],
+			}),
+		);
+		engine.advance();
+		expect(engine.getElementStates(['chart1']).get('chart1')?.chartReveal).toBeUndefined();
+	});
+
+	it('completeAll reveals the full authored series set', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([chartStep(2)]),
+					makeGroup([chartStep(1)]),
+					makeGroup([chartStep(0)]),
+				],
+			}),
+		);
+		engine.completeAll();
+		expect(
+			engine.getElementStates(['chart1']).get('chart1')?.chartReveal?.descriptor.series,
+		).toStrictEqual(new Set([2, 1, 0]));
+	});
+
+	it('reset clears the accumulated chart reveal history', () => {
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [makeGroup([chartStep(0)])] }));
+		engine.advance();
+		engine.reset();
+		expect(
+			engine.getElementStates(['chart1']).get('chart1')?.chartReveal?.descriptor.series.size,
+		).toBe(0);
+	});
+});
+
+describe('p:graphicEl diagram reveal (getElementStates.diagramReveal)', () => {
+	/** One per-node diagram-build step, mirroring what `buildTimeline` emits for a `p:par` targeting `p:graphicEl/p:dgm[@id]`. */
+	function dgmStep(id: string): TimelineStep {
+		return makeStep({
+			elementId: 'dgm1',
+			build: { kind: 'diagram', mode: 'byOne' },
+			graphicElement: { id, bldStep: 'sp' },
+		});
+	}
+
+	it('derives the authored node-id set from fired steps, in REVERSE authoring order', () => {
+		// PowerPoint's "Reverse Order" fires the last node first: the authored set
+		// must reflect exactly what fired, not a forward document-order guess.
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([dgmStep('c')]),
+					makeGroup([dgmStep('b')]),
+					makeGroup([dgmStep('a')]),
+				],
+			}),
+		);
+
+		engine.advance();
+		let state = engine.getElementStates(['dgm1']).get('dgm1');
+		expect(state?.diagramReveal?.descriptor.nodeIds).toStrictEqual(new Set(['c']));
+		expect(state?.diagramReveal?.mode).toBe('byOne');
+
+		engine.advance();
+		state = engine.getElementStates(['dgm1']).get('dgm1');
+		expect(state?.diagramReveal?.descriptor.nodeIds).toStrictEqual(new Set(['c', 'b']));
+
+		engine.advance();
+		state = engine.getElementStates(['dgm1']).get('dgm1');
+		expect(state?.diagramReveal?.descriptor.nodeIds).toStrictEqual(new Set(['c', 'b', 'a']));
+	});
+
+	it('leaves diagramReveal undefined for a diagram whose build has no graphicEl id data', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([makeStep({ elementId: 'dgm1', build: { kind: 'diagram', mode: 'byOne' } })]),
+				],
+			}),
+		);
+		engine.advance();
+		expect(engine.getElementStates(['dgm1']).get('dgm1')?.diagramReveal).toBeUndefined();
+	});
+
+	it('completeAll reveals the full authored node-id set', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([dgmStep('c')]),
+					makeGroup([dgmStep('b')]),
+					makeGroup([dgmStep('a')]),
+				],
+			}),
+		);
+		engine.completeAll();
+		expect(
+			engine.getElementStates(['dgm1']).get('dgm1')?.diagramReveal?.descriptor.nodeIds,
+		).toStrictEqual(new Set(['c', 'b', 'a']));
+	});
+
+	it('reset clears the accumulated diagram reveal history', () => {
+		const engine = new TimelineEngine(makeTimeline({ clickGroups: [makeGroup([dgmStep('a')])] }));
+		engine.advance();
+		engine.reset();
+		expect(
+			engine.getElementStates(['dgm1']).get('dgm1')?.diagramReveal?.descriptor.nodeIds.size,
+		).toBe(0);
+	});
+});
+
+describe('p:excl exclusivity (exclGroupId)', () => {
+	it('stops the previous holder of the same exclGroupId when a new one starts', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([makeStep({ elementId: 'a', presetClass: 'emph', exclGroupId: 1 })]),
+					makeGroup([makeStep({ elementId: 'b', presetClass: 'emph', exclGroupId: 1 })]),
+				],
+			}),
+		);
+
+		engine.advance();
+		expect(engine.getElementAnimation('a')).toBeDefined();
+
+		engine.advance();
+		// `b` starting in the SAME exclusive group stops `a`'s running effect.
+		expect(engine.getElementAnimation('a')).toBeUndefined();
+		expect(engine.getElementAnimation('b')).toBeDefined();
+	});
+
+	it('does not stop an element in a DIFFERENT exclGroupId', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([makeStep({ elementId: 'a', presetClass: 'emph', exclGroupId: 1 })]),
+					makeGroup([makeStep({ elementId: 'b', presetClass: 'emph', exclGroupId: 2 })]),
+				],
+			}),
+		);
+
+		engine.advance();
+		engine.advance();
+		expect(engine.getElementAnimation('a')).toBeDefined();
+		expect(engine.getElementAnimation('b')).toBeDefined();
+	});
+
+	it('does not affect an entrance-revealed element: stopping the effect leaves it visible', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([makeStep({ elementId: 'a', presetClass: 'entr', exclGroupId: 1 })]),
+					makeGroup([makeStep({ elementId: 'b', presetClass: 'emph', exclGroupId: 1 })]),
+				],
+				entranceElementIds: new Set(['a']),
+			}),
+		);
+
+		engine.advance();
+		engine.advance();
+		expect(engine.getElementAnimation('a')).toBeUndefined();
+		expect(engine.isElementVisible('a')).toBeTruthy();
+	});
+
+	it('leaves non-exclusive steps (no exclGroupId) unaffected by each other', () => {
+		const engine = new TimelineEngine(
+			makeTimeline({
+				clickGroups: [
+					makeGroup([makeStep({ elementId: 'a', presetClass: 'emph' })]),
+					makeGroup([makeStep({ elementId: 'b', presetClass: 'emph' })]),
+				],
+			}),
+		);
+
+		engine.advance();
+		engine.advance();
+		expect(engine.getElementAnimation('a')).toBeDefined();
+		expect(engine.getElementAnimation('b')).toBeDefined();
 	});
 });

@@ -4,30 +4,11 @@ import { describe, expect, it } from 'vitest';
 import {
 	computeAutoFitTextStyle,
 	isVerticalTextDirection,
-	resolveLineHeight,
+	resolveVerticalAnchorJustifyContent,
 	toCssTextOrientation,
 	toCssVerticalDirection,
 	toCssWritingMode,
 } from './text-style-helpers';
-
-describe('resolveLineHeight', () => {
-	it('returns an exact pt string when lineSpacingExactPt is set', () => {
-		expect(resolveLineHeight({ lineSpacingExactPt: 18 }, false)).toBe('18pt');
-	});
-
-	it('ignores a non-positive exact pt and uses the multiplier', () => {
-		expect(resolveLineHeight({ lineSpacingExactPt: 0, lineSpacing: 1.5 }, false)).toBe(1.5);
-	});
-
-	it('uses the proportional multiplier when set', () => {
-		expect(resolveLineHeight({ lineSpacing: 2 }, false)).toBe(2);
-	});
-
-	it('defaults to 1.25, or 1.35 with italic runs', () => {
-		expect(resolveLineHeight(undefined, false)).toBe(1.25);
-		expect(resolveLineHeight(undefined, true)).toBe(1.35);
-	});
-});
 
 describe('vertical text mapping', () => {
 	it('maps text directions to writing-mode', () => {
@@ -80,10 +61,14 @@ describe('computeAutoFitTextStyle', () => {
 
 	it('reduces line-height for lnSpcReduction', () => {
 		const ts: TextStyle = { autoFit: true, lineSpacing: 1.2, autoFitLineSpacingReduction: 0.25 };
-		expect(computeAutoFitTextStyle({ ...base, textStyle: ts }).lineHeight).toBeCloseTo(0.9, 5);
+		expect(computeAutoFitTextStyle({ ...base, textStyle: ts }).lineHeight).toBeCloseTo(1.08, 5);
 	});
 
-	it('shrinks via heuristic when spAutoFit text overflows', () => {
+	it('never shrinks the font for spAutoFit, however much text overflows', () => {
+		// a:spAutoFit resizes the SHAPE to fit the text, not the font (ECMA-376).
+		// A box authored/edited in PowerPoint already has its `a:ext` set to the
+		// resized box, so the font must render at its authored size unshrunk even
+		// when the measured text would overflow a small box.
 		const ts: TextStyle = { autoFit: true, fontSize: 40, autoFitMode: 'shrink' };
 		const longText = 'x'.repeat(2000);
 		const result = computeAutoFitTextStyle({
@@ -93,8 +78,92 @@ describe('computeAutoFitTextStyle', () => {
 			height: 40,
 			textStyle: ts,
 		});
-		expect(result.fontSize).toBeDefined();
-		expect(result.fontSize!).toBeLessThan(40);
-		expect(result.fontSize!).toBeGreaterThanOrEqual(6);
+		expect(result).toStrictEqual({});
+	});
+
+	it('ignores a stale fontScale when autoFitMode is spAutoFit', () => {
+		// fontScale is a normAutofit-only attribute; a source that also stamps
+		// autoFitMode: 'shrink' must not have that stale value applied.
+		const ts: TextStyle = {
+			autoFit: true,
+			fontSize: 40,
+			autoFitMode: 'shrink',
+			autoFitFontScale: 0.5,
+		};
+		expect(computeAutoFitTextStyle({ ...base, textStyle: ts }).fontSize).toBeUndefined();
+	});
+
+	it('still applies the authored fontScale for normAutofit', () => {
+		const ts: TextStyle = {
+			autoFit: true,
+			fontSize: 40,
+			autoFitMode: 'normal',
+			autoFitFontScale: 0.5,
+		};
+		expect(computeAutoFitTextStyle({ ...base, textStyle: ts }).fontSize).toBe(20);
+	});
+
+	it('still applies lnSpcReduction for normAutofit but not for spAutoFit', () => {
+		const normal: TextStyle = {
+			autoFit: true,
+			lineSpacing: 1.2,
+			autoFitMode: 'normal',
+			autoFitLineSpacingReduction: 0.25,
+		};
+		expect(computeAutoFitTextStyle({ ...base, textStyle: normal }).lineHeight).toBeCloseTo(1.08, 5);
+
+		const shrink: TextStyle = {
+			autoFit: true,
+			lineSpacing: 1.2,
+			autoFitMode: 'shrink',
+			autoFitLineSpacingReduction: 0.25,
+		};
+		expect(computeAutoFitTextStyle({ ...base, textStyle: shrink }).lineHeight).toBeUndefined();
+	});
+});
+
+// D2-G5: `a:bodyPr/@anchor="dist"|"just"` round-trips losslessly (core fix)
+// and approximates as a vertical distribution here (render fix).
+describe('resolveVerticalAnchorJustifyContent', () => {
+	it('maps top/middle/bottom/undefined to the existing flex-column values', () => {
+		expect(resolveVerticalAnchorJustifyContent('top', undefined)).toBe('flex-start');
+		expect(resolveVerticalAnchorJustifyContent('middle', undefined)).toBe('center');
+		expect(resolveVerticalAnchorJustifyContent('bottom', undefined)).toBe('flex-end');
+		expect(resolveVerticalAnchorJustifyContent(undefined, undefined)).toBe('flex-start');
+	});
+
+	it('centers a single-paragraph distributed/justified body (nothing to distribute)', () => {
+		expect(resolveVerticalAnchorJustifyContent('distributed', undefined)).toBe('center');
+		expect(resolveVerticalAnchorJustifyContent('justified', [{ text: 'one', style: {} }])).toBe(
+			'center',
+		);
+	});
+
+	it('spreads a multi-paragraph distributed/justified body with space-between', () => {
+		const segments = [
+			{ text: 'first', style: {} },
+			{ text: '\n', style: {} },
+			{ text: 'second', style: {} },
+		];
+		expect(resolveVerticalAnchorJustifyContent('distributed', segments)).toBe('space-between');
+		expect(resolveVerticalAnchorJustifyContent('justified', segments)).toBe('space-between');
+	});
+
+	it('does not split on a soft line break (isLineBreak), only a real paragraph break', () => {
+		const segments = [
+			{ text: 'first', style: {} },
+			{ text: '\n', style: {}, isLineBreak: true },
+			{ text: 'still same paragraph', style: {} },
+		];
+		expect(resolveVerticalAnchorJustifyContent('distributed', segments)).toBe('center');
+	});
+
+	it('treats an explicit isParagraphBreak segment the same as a bare newline', () => {
+		const segments = [
+			{ text: 'first', style: {} },
+			{ text: '', style: {}, isParagraphBreak: true },
+			{ text: 'second', style: {} },
+		];
+		expect(resolveVerticalAnchorJustifyContent('distributed', segments)).toBe('space-between');
 	});
 });

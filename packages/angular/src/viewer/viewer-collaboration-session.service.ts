@@ -15,9 +15,12 @@
  * (`providers: [ViewerCollaborationSessionService]`).
  */
 
+/* oxlint-disable eslint/one-var -- pre-existing throughout this file; independent concerns, not one statement */
 import { computed, inject, Injectable, signal } from '@angular/core';
-import type { PptxSlide } from 'pptx-viewer-core';
+import type { PptxHandlerSaveOptions, PptxSlide } from 'pptx-viewer-core';
 
+import type { ActiveSessionUserDescriptor } from '../internal/shared';
+import { buildActiveSessionUsers } from '../internal/shared';
 import type { BroadcastConfig } from './broadcast-helpers';
 import { buildBroadcastViewerUrl } from './broadcast-helpers';
 import { CollaborationService } from './collaboration.service';
@@ -25,6 +28,7 @@ import type { ConnectOptions } from './collaboration.service';
 import { buildShareUrl } from './share-helpers';
 import type { TemplateElementsBySlideId } from './template-mode';
 import type { CollaborationConfig } from './types';
+import { ViewerOptionsService } from './viewer-options.service';
 
 /** Seed values for the Share dialog's start form. */
 interface ShareDefaults {
@@ -44,6 +48,13 @@ interface CollaborationSessionHost {
 	readonly canvasSize: () => { width: number; height: number };
 	/** The loaded source `.pptx` bytes for elected-writer write-back, if any. */
 	readonly getSourceBytes: () => Uint8Array | null;
+	/**
+	 * Session-level save options (view properties, table styles, tags, deck
+	 * properties, ...), built the same way as the Save/Export path. Without
+	 * this the elected-writer write-back dropped every session-level edit
+	 * outside `slides`.
+	 */
+	readonly getSaveOptions: () => PptxHandlerSaveOptions;
 	/** The current editable deck (seeds the sync baseline after connecting). */
 	readonly currentSlides: () => readonly PptxSlide[];
 	readonly emitStart: (config: CollaborationConfig) => void;
@@ -53,16 +64,18 @@ interface CollaborationSessionHost {
 @Injectable()
 export class ViewerCollaborationSessionService {
 	private readonly collab = inject(CollaborationService);
+	private readonly viewerOpts = inject(ViewerOptionsService, { optional: true });
 
 	/** Share (collaboration) dialog visibility. */
 	readonly showShare = signal(false);
 	/** Broadcast dialog visibility. */
 	readonly showBroadcast = signal(false);
 	/**
-	 * Room/server of the currently active session, used to build the shareable
-	 * join/follow links shown in the dialogs. Null when no session is active.
+	 * The config the currently active session was started/joined with, used to
+	 * build the shareable join/follow links and the Share dialog's local-user
+	 * identity + connected-users list. Null when no session is active.
 	 */
-	private readonly activeSession = signal<{ roomId: string; serverUrl: string } | null>(null);
+	readonly activeCollaboration = signal<CollaborationConfig | null>(null);
 
 	private host: CollaborationSessionHost | null = null;
 
@@ -96,13 +109,13 @@ export class ViewerCollaborationSessionService {
 
 	/** Shareable join link for the active collaboration session. */
 	readonly shareUrl = computed<string>(() => {
-		const session = this.activeSession();
+		const session = this.activeCollaboration();
 		return session ? buildShareUrl(session.roomId, session.serverUrl, this.browserLocation()) : '';
 	});
 
 	/** Shareable follow link for the active broadcast. */
 	readonly broadcastViewerUrl = computed<string>(() => {
-		const session = this.activeSession();
+		const session = this.activeCollaboration();
 		return session
 			? buildBroadcastViewerUrl(session.roomId, session.serverUrl, this.browserLocation())
 			: '';
@@ -110,8 +123,22 @@ export class ViewerCollaborationSessionService {
 
 	/** Whether the active session is serverless (peer-to-peer / webrtc). */
 	readonly activeSessionP2p = computed<boolean>(
-		() => (this.activeSession()?.serverUrl ?? '').trim().length === 0 && this.collab.active(),
+		() => (this.activeCollaboration()?.serverUrl ?? '').trim().length === 0 && this.collab.active(),
 	);
+
+	/** Connected-users list (local user + remote presence) for the Share dialog. */
+	readonly users = computed<ActiveSessionUserDescriptor[]>(() => {
+		const config = this.activeCollaboration();
+		if (!config) {
+			return [];
+		}
+		return buildActiveSessionUsers({
+			localUserName: config.userName,
+			localUserInitials: this.viewerOpts?.options().general.userInitials,
+			localUserColor: config.userColor,
+			remoteUsers: this.collab.presence(),
+		});
+	});
 
 	/**
 	 * Assemble the {@link ConnectOptions} shared by every connect call site: apply
@@ -126,7 +153,9 @@ export class ViewerCollaborationSessionService {
 			canvasWidth: size.width,
 			canvasHeight: size.height,
 			getSourceBytes: () => host.getSourceBytes(),
+			getSourceSlides: () => host.currentSlides(),
 			getTemplateElements: () => host.getTemplateElements(),
+			getSaveOptions: () => host.getSaveOptions(),
 		};
 	}
 
@@ -164,11 +193,11 @@ export class ViewerCollaborationSessionService {
 		}
 		this.lastSyncedConfig = config;
 		if (config) {
-			this.activeSession.set({ roomId: config.roomId, serverUrl: config.serverUrl });
+			this.activeCollaboration.set(config);
 			this.connectWithBaseline(config);
 		} else {
 			this.collab.disconnect();
-			this.activeSession.set(null);
+			this.activeCollaboration.set(null);
 		}
 	}
 
@@ -181,10 +210,7 @@ export class ViewerCollaborationSessionService {
 			...config,
 			userName: config.userName || (host.authorName() ?? 'You'),
 		};
-		this.activeSession.set({
-			roomId: collaboratorConfig.roomId,
-			serverUrl: collaboratorConfig.serverUrl,
-		});
+		this.activeCollaboration.set(collaboratorConfig);
 		this.connectWithBaseline(collaboratorConfig);
 		host.emitStart(collaboratorConfig);
 	}
@@ -192,7 +218,7 @@ export class ViewerCollaborationSessionService {
 	onShareStop(): void {
 		this.lastSyncedConfig = undefined;
 		this.collab.disconnect();
-		this.activeSession.set(null);
+		this.activeCollaboration.set(null);
 		this.requireHost().emitStop();
 	}
 
@@ -206,7 +232,7 @@ export class ViewerCollaborationSessionService {
 			userName: host.authorName() ?? 'Presenter',
 			role: 'owner',
 		};
-		this.activeSession.set({ roomId: config.roomId, serverUrl: config.serverUrl });
+		this.activeCollaboration.set(collabConfig);
 		this.connectWithBaseline(collabConfig);
 		host.emitStart(collabConfig);
 	}
@@ -214,7 +240,7 @@ export class ViewerCollaborationSessionService {
 	onBroadcastStop(): void {
 		this.lastSyncedConfig = undefined;
 		this.collab.disconnect();
-		this.activeSession.set(null);
+		this.activeCollaboration.set(null);
 		this.requireHost().emitStop();
 	}
 }

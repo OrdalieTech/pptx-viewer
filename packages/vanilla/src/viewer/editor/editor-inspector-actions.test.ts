@@ -139,6 +139,44 @@ describe('createInspectorActions text', () => {
 		expect(segments?.[1].style).toMatchObject({ bold: true, textGlowColor: '#ffff00' });
 		expect(segments?.[0].style).not.toMatchObject({ bold: true });
 	});
+
+	it('reconciles against a live open inline editor before slicing a selection range', () => {
+		// The inline editor is uncontrolled: text typed since the edit session
+		// began is not yet on `el.textSegments`. Regression: previously the range
+		// slice ran against that stale snapshot, silently discarding anything
+		// typed since once the edit session committed.
+		const element = {
+			...textElement(),
+			text: 'hello',
+			textSegments: [{ text: 'hello', style: { color: '#000000' } }],
+		} as PptxElement;
+		const { store, actions } = buildActions(element);
+
+		const surface = document.createElement('div');
+		surface.dataset.inlineEditor = '';
+		surface.textContent = 'hello world'; // live text: 6 more chars than the model
+		document.body.appendChild(surface);
+		try {
+			// Selection offsets are DOM-accurate (as `getInlineEditorSelection`
+			// would produce against the live surface): select "world".
+			actions.setTextStyle(
+				{ bold: true },
+				{ startSegIdx: 0, startOffset: 6, endSegIdx: 0, endOffset: 11 },
+			);
+		} finally {
+			surface.remove();
+		}
+
+		const el = selectedEl(store) as {
+			text?: string;
+			textSegments?: Array<{ text: string; style?: { bold?: boolean } }>;
+		};
+		const combined = el.textSegments?.map(({ text }) => text).join('') ?? '';
+		expect(combined).toBe('hello world');
+		expect(el.text).toBe('hello world');
+		const boldSegment = el.textSegments?.find((s) => s.style?.bold === true);
+		expect(boldSegment?.text).toBe('world');
+	});
 });
 
 describe('createInspectorActions fill/gradient', () => {
@@ -355,5 +393,116 @@ describe('createInspectorActions table', () => {
 			align: 'center',
 			marginLeft: 6,
 		});
+	});
+});
+
+/**
+ * A structural SmartArt edit clears the cached `dsp` drawing shapes to `[]`.
+ * React has always followed such an edit with `rebuildDrawingShapesIfCleared`
+ * so the richer cached-shape render path stays active; this binding never did,
+ * leaving the diagram to fall back to the crude family approximation.
+ */
+function smartArtElement(): PptxElement {
+	return {
+		type: 'smartArt',
+		id: 'sa1',
+		x: 0,
+		y: 0,
+		width: 400,
+		height: 300,
+		smartArtData: {
+			nodes: [
+				{ id: 'n1', text: 'One' },
+				{ id: 'n2', text: 'Two' },
+			],
+			resolvedLayoutType: 'list',
+			// A cached PowerPoint drawing, as a real deck carries.
+			drawingShapes: [
+				{ id: 'dsp1', shapeType: 'roundRect', x: 0, y: 0, width: 100, height: 40, text: 'One' },
+				{ id: 'dsp2', shapeType: 'roundRect', x: 0, y: 50, width: 100, height: 40, text: 'Two' },
+			],
+		},
+	} as PptxElement;
+}
+
+function smartArtData(store: Store<ViewerState>) {
+	const el = selectedEl(store);
+	return el.type === 'smartArt' ? el.smartArtData : undefined;
+}
+
+describe('createInspectorActions smartArt reflow', () => {
+	it('rebuilds the cached drawing shapes a structural edit cleared', () => {
+		const { store, actions } = buildActions(smartArtElement());
+		actions.mutateSmartArtNode('n2', 'add');
+		const data = smartArtData(store)!;
+		expect(data.nodes).toHaveLength(3);
+		// Without the reflow this is the empty array the core op left behind.
+		expect(data.drawingShapes).toHaveLength(3);
+		expect(data.drawingShapes?.[0]?.id).toBe('reflow-list-n1');
+	});
+
+	it('rebuilds after a layout switch', () => {
+		const { store, actions } = buildActions(smartArtElement());
+		actions.setSmartArtLayout('cycle');
+		const shapes = smartArtData(store)?.drawingShapes ?? [];
+		expect(shapes).toHaveLength(2);
+		expect(shapes[0]?.id).toBe('reflow-cycle-n1');
+	});
+
+	it('leaves an intact cached drawing alone on a text edit', () => {
+		const { store, actions } = buildActions(smartArtElement());
+		actions.setSmartArtNodeText('n1', 'Uno');
+		const shapes = smartArtData(store)?.drawingShapes ?? [];
+		// The cached `dsp` drawing still wins: patched in place, never regenerated.
+		expect(shapes.map((s) => s.id)).toStrictEqual(['dsp1', 'dsp2']);
+		expect(shapes[0]?.text).toBe('Uno');
+	});
+});
+
+describe('createInspectorActions toggleElementLock', () => {
+	it('locks an unlocked element, writing noMove/noResize (not noSelect)', () => {
+		const { store, actions } = buildActions(textElement());
+		actions.toggleElementLock();
+		expect((selectedEl(store) as { locks?: unknown }).locks).toStrictEqual({
+			noMove: true,
+			noResize: true,
+		});
+	});
+
+	it('unlocks an already-locked element', () => {
+		const el = { ...textElement(), locks: { noMove: true, noResize: true } };
+		const { store, actions } = buildActions(el);
+		actions.toggleElementLock();
+		expect((selectedEl(store) as { locks?: unknown }).locks).toBeUndefined();
+	});
+
+	it('is undoable', () => {
+		const { store, ops, actions } = buildActions(textElement());
+		actions.toggleElementLock();
+		expect((selectedEl(store) as { locks?: unknown }).locks).toBeTruthy();
+		ops.undo();
+		expect((selectedEl(store) as { locks?: unknown }).locks).toBeUndefined();
+	});
+});
+
+describe('createInspectorActions setAltText / setTitle', () => {
+	it('writes altText onto a text element (a base-element field, not image-only)', () => {
+		const { store, actions } = buildActions(textElement());
+		actions.setAltText('A red rectangle');
+		expect((selectedEl(store) as { altText?: string }).altText).toBe('A red rectangle');
+	});
+
+	it('writes title onto a text element', () => {
+		const { store, actions } = buildActions(textElement());
+		actions.setTitle('Callout');
+		expect((selectedEl(store) as { title?: string }).title).toBe('Callout');
+	});
+
+	it('setTitle is undoable', () => {
+		const { store, ops, actions } = buildActions(textElement());
+		actions.setTitle('Callout');
+		expect((selectedEl(store) as { title?: string }).title).toBe('Callout');
+		ops.undo();
+		expect((selectedEl(store) as { title?: string }).title).toBeUndefined();
 	});
 });

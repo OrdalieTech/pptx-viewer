@@ -1,5 +1,12 @@
 import type { PresentationPointerTool } from 'pptx-viewer-shared';
-import { createPresentationKeyBuffer, mapPresentationKey } from 'pptx-viewer-shared';
+import {
+	acceptsPresentationInput,
+	createPresentationKeyBuffer,
+	createWheelStepBuffer,
+	mapPresentationKey,
+	mapPresentationWheel,
+	mapSlideShowStartKey,
+} from 'pptx-viewer-shared';
 
 export interface KeyboardHandlers {
 	next(): void;
@@ -22,6 +29,16 @@ export interface KeyboardHandlers {
 	toggleInkMarkup?(): void;
 	/** Blank the screen black or white (B / W, or `.` / `,`). */
 	toggleBlank?(value: 'black' | 'white'): void;
+	/** Show or hide live captions (PowerPoint's bare `J`). */
+	toggleSubtitles?(): void;
+	/** Show or hide the running show's own chrome (Ctrl+H). */
+	toggleChrome?(): void;
+	/** Raise PowerPoint's "See All Slides" navigator (Ctrl+S). */
+	showAllSlides?(): void;
+	/** Bare F5: the exact entry point the ribbon's "From Beginning" button calls. */
+	startFromBeginning?(): void;
+	/** Shift+F5: the exact entry point the ribbon's "From Current Slide" button calls. */
+	startFromCurrent?(): void;
 }
 
 /**
@@ -41,6 +58,25 @@ export function attachKeyboardNavigation(
 	const keyBuffer = createPresentationKeyBuffer();
 
 	const onKeyDown = (event: KeyboardEvent) => {
+		// PowerPoint starts a show with F5 / Shift+F5 even while the caret sits in
+		// a text box, so this runs ahead of the "ignore form-field keys" guard
+		// below (which exists for the paging shortcuts, not this one) and ahead of
+		// every editing gate. A running show already owns F5 through the
+		// presentation keymap below, which `mapSlideShowStartKey`'s own guard
+		// mirrors.
+		const startAction = mapSlideShowStartKey(event, {
+			isPresenting: handlers.isPresenting?.() ?? false,
+		});
+		if (startAction) {
+			event.preventDefault();
+			if (startAction === 'fromBeginning') {
+				handlers.startFromBeginning?.();
+			} else {
+				handlers.startFromCurrent?.();
+			}
+			return;
+		}
+
 		const target = event.target as HTMLElement | null;
 		if (target && /^(?:INPUT|TEXTAREA|SELECT)$/u.test(target.tagName)) {
 			return;
@@ -78,9 +114,29 @@ export function attachKeyboardNavigation(
 		event.preventDefault();
 	};
 
+	// PowerPoint navigates a running show on the wheel: down advances, up goes
+	// back. The step buffer keeps one trackpad flick to one slide.
+	const wheelBuffer = createWheelStepBuffer();
+	const onWheel = (event: WheelEvent): void => {
+		// Only a running show navigates; the editor scrolls natively.
+		if (!handlers.isPresenting?.() || !acceptsPresentationInput()) {
+			return;
+		}
+		const mapped = mapPresentationWheel(event, wheelBuffer);
+		if (mapped.intent === 'next-slide') {
+			event.preventDefault();
+			handlers.next();
+		} else if (mapped.intent === 'previous-slide') {
+			event.preventDefault();
+			handlers.prev();
+		}
+	};
+
 	root.addEventListener('keydown', onKeyDown);
+	root.addEventListener('wheel', onWheel, { passive: false });
 	return () => {
 		root.removeEventListener('keydown', onKeyDown);
+		root.removeEventListener('wheel', onWheel);
 	};
 }
 
@@ -90,6 +146,12 @@ function handlePresentationKey(
 	handlers: KeyboardHandlers,
 	keyBuffer: ReturnType<typeof createPresentationKeyBuffer>,
 ): void {
+	// An audience display mirrors the presenter's screen. If its own keyboard
+	// navigated, a stray key moved it off the presenter's slide and the next
+	// snapshot yanked it back, which reads as the display refusing to advance.
+	if (!acceptsPresentationInput()) {
+		return;
+	}
 	const mapped = mapPresentationKey(event, keyBuffer);
 	if (mapped.action === 'none') {
 		return;
@@ -135,6 +197,18 @@ function handlePresentationKey(
 			return;
 		case 'toggleWhiteScreen':
 			handlers.toggleBlank?.('white');
+			return;
+		case 'toggleSubtitles':
+			handlers.toggleSubtitles?.();
+			break;
+		// Both of these resolved in the shared map and were then dropped: the
+		// `preventDefault()` above had already run, so the show swallowed the key
+		// and did nothing, which is worse than leaving it to the browser.
+		case 'toggleChrome':
+			handlers.toggleChrome?.();
+			break;
+		case 'showAllSlides':
+			handlers.showAllSlides?.();
 			break;
 		// A pending slide number and the context-menu key are consumed above so
 		// the browser does not act on them; nothing further to do.

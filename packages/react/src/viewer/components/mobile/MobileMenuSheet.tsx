@@ -144,6 +144,8 @@ function MobileSectionBody({
 						onToggleFormatPainter={p.onToggleFormatPainter}
 						layoutOptions={p.layoutOptions}
 						onInsertSlideFromLayout={p.onInsertSlideFromLayout}
+						onInsertSlideFromTemplate={p.onInsertSlideFromTemplate}
+						templateScheme={p.templateScheme}
 						selectedElement={p.selectedElement}
 						onUpdateTextStyle={p.onUpdateTextStyle}
 					/>
@@ -166,6 +168,8 @@ function MobileSectionBody({
 						onInsertField={p.onInsertField}
 						onOpenImagePicker={p.onOpenImagePicker}
 						onOpenMediaPicker={p.onOpenMediaPicker}
+						hasSelection={Boolean(p.selectedElement)}
+						onOpenHyperlinkDialog={p.onOpenHyperlinkDialog}
 					/>
 				</div>
 			);
@@ -200,16 +204,17 @@ function MobileSectionBody({
 					<ArrangeSection
 						canEdit={p.canEdit}
 						selectedElement={p.selectedElement}
-						clipboardPayload={p.clipboardPayload}
+						selectedCount={p.selectedCount}
+						selectionGroupable={p.selectionGroupable}
 						onAlignElements={p.onAlignElements}
 						onDistributeElements={p.onDistributeElements}
 						canDistribute={p.canDistribute}
-						onCopy={p.onCopy}
-						onCut={p.onCut}
-						onPaste={p.onPaste}
 						onFlip={p.onFlip}
 						onMoveLayer={p.onMoveLayer}
 						onMoveLayerToEdge={p.onMoveLayerToEdge}
+						onGroupElements={p.onGroupElements}
+						onUngroupElement={p.onUngroupElement}
+						onUpdateElementStyle={p.onUpdateElementStyle}
 						onDuplicate={p.onDuplicate}
 						onDelete={p.onDelete}
 						formatPainterActive={p.formatPainterActive}
@@ -228,6 +233,7 @@ function MobileSectionBody({
 						onToggleThemeEditor={p.onToggleThemeEditor}
 						isThemeEditorOpen={p.isThemeEditorOpen}
 						onOpenDocumentProperties={p.onOpenDocumentProperties}
+						onOpenSlideSize={p.onOpenSlideSize}
 						onToggleInspector={p.onToggleInspector}
 						isInspectorPaneOpen={p.isInspectorPaneOpen}
 					/>
@@ -239,6 +245,10 @@ function MobileSectionBody({
 					<TransitionsSection
 						isInspectorPaneOpen={p.isInspectorPaneOpen}
 						onToggleInspector={p.onToggleInspector}
+						canEdit={p.canEdit}
+						activeSlide={p.activeSlide}
+						onTransitionChange={p.onTransitionChange}
+						onApplyTransitionToAll={p.onApplyTransitionToAll}
 					/>
 				</div>
 			);
@@ -261,13 +271,17 @@ function MobileSectionBody({
 				<div className={wrap}>
 					<SlideShowSection
 						onPresent={() => p.onSetMode('present')}
+						onPresentFromBeginning={p.onPresentFromBeginning}
 						onEnterPresenterView={p.onEnterPresenterView ?? (() => {})}
 						onEnterRehearsalMode={p.onEnterRehearsalMode ?? (() => {})}
 						onOpenSetUpSlideShow={p.onOpenSetUpSlideShow ?? (() => {})}
+						onToggleHideSlide={p.onToggleHideSlide ?? (() => {})}
+						activeSlideHidden={p.activeSlideHidden ?? false}
 						onOpenBroadcastDialog={p.onOpenBroadcastDialog ?? (() => {})}
 						onToggleSubtitles={p.onToggleSubtitles ?? (() => {})}
 						showSubtitles={p.showSubtitles ?? false}
 						onSetMode={p.onSetMode}
+						customShowControls={p}
 						hiddenActions={p.hiddenActions}
 					/>
 				</div>
@@ -297,6 +311,8 @@ function MobileSectionBody({
 						onSetSpellCheckEnabled={p.onSetSpellCheckEnabled}
 						showGrid={p.showGrid}
 						showRulers={p.showRulers}
+						showGuides={p.showGuides}
+						onSetShowGuides={p.onSetShowGuides}
 						snapToGrid={p.snapToGrid}
 						snapToShape={p.snapToShape}
 						onSetShowGrid={p.onSetShowGrid}
@@ -309,6 +325,8 @@ function MobileSectionBody({
 						onToggleSelectionPane={p.onToggleSelectionPane}
 						eyedropperActive={p.eyedropperActive}
 						onToggleEyedropper={p.onToggleEyedropper}
+						onToggleSlideSorter={p.onToggleSlideSorter}
+						onOpenReadingView={p.onOpenReadingView}
 					/>
 				</div>
 			);
@@ -325,7 +343,7 @@ function MobileSectionBody({
 						onExportPdf={p.onExportPdf}
 						onExportVideo={p.onExportVideo}
 						onExportGif={p.onExportGif}
-						onPackageForSharing={p.onPackageForSharing}
+						onExportJson={p.onExportJson}
 						onSaveAsPptx={p.onSaveAsPptx}
 						onSaveAsPpsx={p.onSaveAsPpsx}
 						onSaveAsPptm={p.onSaveAsPptm}
@@ -338,7 +356,9 @@ function MobileSectionBody({
 						onOpenPasswordProtection={p.onOpenPasswordProtection}
 						onOpenFontEmbedding={p.onOpenFontEmbedding}
 						onOpenDigitalSignatures={p.onOpenDigitalSignatures}
+						onOpenVersionHistory={p.onToggleVersionHistory}
 						hiddenActions={p.hiddenActions}
+						recentPresentationsCount={p.recentPresentationsCount}
 					/>
 				</div>
 			);

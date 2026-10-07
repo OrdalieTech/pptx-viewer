@@ -5,6 +5,7 @@
  * `reconcileSlidesInYDoc` (tagged `LOCAL_SYNC_ORIGIN`; the observer skips its
  * own writes). Role 'owner' debounces write-back.
  */
+import type { PptxSlide } from 'pptx-viewer-core';
 import type {
 	CollaborationConfig,
 	CollaborationRole,
@@ -13,18 +14,19 @@ import type {
 	YDocLike,
 } from 'pptx-viewer-shared';
 import {
+	assignUserColor,
 	CONNECTION_TIMEOUT_MS,
 	createCollaborationLivePatcher,
 	createPresencePublisher,
 	createSyncGate,
 	createWriteBackScheduler,
-	DEFAULT_CURSOR_COLOR,
 	isMixedContentBlocked,
 	LOCAL_SYNC_ORIGIN,
 	observeYDocSlides,
 	PRESENCE_HEARTBEAT_MS,
 	reconcileSlidesInYDoc,
 	readSlidesFromYDoc,
+	registerCollaborationSource,
 	registerCollaborationTeardown,
 	resolveTransportForServerUrl,
 	validateRoomId,
@@ -33,7 +35,7 @@ import { computed, onScopeDispose, ref, watch } from 'vue';
 
 import type { RemoteCursor } from '../components/CollaborationCursors.vue';
 import { watchLoadAdoption } from './collaboration-load-adoption';
-import { projectPresence, readBound } from './collaboration-presence-view';
+import { createPresenceProjection, readBound } from './collaboration-presence-view';
 import { createCollabProvider } from './collaboration-provider';
 import type { CollabProviderHandle } from './collaboration-provider';
 import type {
@@ -94,11 +96,12 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 		getSourceBytes: options.getSourceBytes,
 		getTemplateElements: options.getTemplateElements,
 		mergeTemplateElements: buildSaveSlides,
+		getSaveOptions: options.getSaveOptions,
 	});
 
 	/** Write the current local slides into the doc (granular, echo-deduped). */
 	function flushLocalSlides(): void {
-		if (!currentYDoc || !yFactories || applyingRemote) {
+		if (!currentYDoc || !yFactories || applyingRemote || lastConfig?.role === 'viewer') {
 			return;
 		}
 		const s = JSON.stringify(options.slides.value);
@@ -116,7 +119,34 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 	// grace period elapses for a lone webrtc peer), local slides must not seed
 	// the doc, or a late joiner's bootstrap deck would merge into the room's
 	// real content. Opening the gate performs the deferred first write.
-	const syncGate = createSyncGate(flushLocalSlides);
+	let didSync = false;
+	const syncGate = createSyncGate(() => {
+		const firstSync = !didSync;
+		didSync = true;
+		if (currentYDoc && firstSync) {
+			const remote = readRemoteSlides(currentYDoc);
+			if (remote.length) {
+				lastSynced = JSON.stringify(remote);
+				options.onRemoteSlides(remote);
+				return;
+			}
+		}
+		flushLocalSlides();
+	});
+
+	function failRemote(error: unknown): void {
+		stop();
+		status.value = 'error';
+		lastConfig?.onstatus?.('error', error instanceof Error ? error : new Error(String(error)));
+	}
+	function readRemoteSlides(doc: YDocLike): PptxSlide[] {
+		try {
+			return readSlidesFromYDoc(doc);
+		} catch (error) {
+			failRemote(error);
+			return [];
+		}
+	}
 
 	function clearTimers(): void {
 		if (connectTimer !== null) {
@@ -130,19 +160,35 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 		writeBack.cancel();
 	}
 
+	// Memoises the awareness -> view-model projection so idle peer heartbeats
+	// do not re-render the collaboration overlay.
+	const presenceProjection = createPresenceProjection();
+
 	function refreshPresence(): void {
 		if (!awareness) {
+			presenceProjection.reset();
 			remotePresences.value = [];
 			cursors.value = [];
 			return;
 		}
-		const { presences, cursors: nextCursors } = projectPresence(
+		// Assigning a ref triggers whether or not the value differs, and awareness
+		// fires on every peer heartbeat, so an idle room re-rendered the cursor
+		// overlay on a fixed interval. Skip the writes entirely when the shared
+		// projector reports nothing visible moved (issue #145).
+		const {
+			presences,
+			cursors: nextCursors,
+			changed,
+		} = presenceProjection.project(
 			awareness.getStates(),
 			selfId,
 			readBound(options.canvasWidth),
 			readBound(options.canvasHeight),
 			localActiveSlide,
 		);
+		if (!changed) {
+			return;
+		}
 		remotePresences.value = presences;
 		cursors.value = nextCursors;
 		if (
@@ -153,25 +199,32 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 		}
 	}
 
+	let connectionGeneration = 0;
 	async function start(config: CollaborationConfig): Promise<void> {
 		stop();
+		const generation = connectionGeneration;
 		lastConfig = config;
 		activeRole.value = config.role;
 		try {
 			validateRoomId(config.roomId);
 		} catch {
 			status.value = 'error';
+			config.onstatus?.('error', new Error('Invalid collaboration room'));
 			return;
 		}
 		const transport = config.transport ?? resolveTransportForServerUrl(config.serverUrl);
 		// Mixed-content only affects a ws:// socket from an https page.
 		if (transport === 'websocket' && isMixedContentBlocked(config.serverUrl)) {
 			status.value = 'error';
+			config.onstatus?.('error', new Error('Insecure collaboration connection'));
 			return;
 		}
 		status.value = 'connecting';
 		try {
 			const Y = await import('yjs');
+			if (generation !== connectionGeneration) {
+				return;
+			}
 			const doc = new Y.Doc();
 			ydoc = doc;
 			yFactories = {
@@ -180,9 +233,16 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 				createText: () => new Y.Text(),
 			};
 			currentYDoc = doc as unknown as YDocLike;
+			registerCollaborationSource(currentYDoc, options.slides.value);
 			livePatcher.configure(currentYDoc, yFactories);
 
-			provider = await createCollabProvider(transport, config, doc);
+			const nextProvider = await createCollabProvider(transport, config, doc);
+			if (generation !== connectionGeneration) {
+				nextProvider.destroy();
+				doc.destroy();
+				return;
+			}
+			provider = nextProvider;
 			awareness = provider.awareness;
 			selfId = awareness.clientID ?? -1;
 
@@ -192,13 +252,18 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 			provider.onSynced(() => syncGate.open());
 			if (provider.syncedNow) {
 				syncGate.open();
-			} else {
+			} else if (transport === 'webrtc') {
 				syncGate.arm();
 			}
 
 			publisher = createPresencePublisher(awareness, {
 				userName: config.userName,
-				userColor: options.userColor ?? config.userColor ?? DEFAULT_CURSOR_COLOR,
+				// Deterministic per-user colour when the host app supplied none: the
+				// same `userName` always lands on the same palette entry, so a peer
+				// keeps a stable hue across sessions instead of every unlabelled peer
+				// sharing one flat default colour (indistinguishable cursors in a
+				// room with more than one anonymous participant).
+				userColor: options.userColor ?? config.userColor ?? assignUserColor(config.userName),
 				userAvatar: config.userAvatar,
 				role: config.role,
 			});
@@ -234,7 +299,6 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 						// rejoins keeps the gate permanently open from the first
 						// connection and can clobber the room with a stale local doc.
 						syncGate.reset();
-						syncGate.arm();
 					}
 				});
 				if (provider.connectedNow) {
@@ -243,8 +307,8 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 					connectTimer = setTimeout(() => {
 						connectTimer = null;
 						if (status.value !== 'connected') {
-							stop();
 							status.value = 'error';
+							config.onstatus?.('error', new Error('Collaboration unavailable'));
 						}
 					}, CONNECTION_TIMEOUT_MS);
 				}
@@ -255,7 +319,7 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 				if (transaction?.origin === LOCAL_SYNC_ORIGIN || applyingRemote || !currentYDoc) {
 					return;
 				}
-				const remote = readSlidesFromYDoc(currentYDoc);
+				const remote = readRemoteSlides(currentYDoc);
 				if (remote.length === 0) {
 					return;
 				}
@@ -271,7 +335,7 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 			// attached never fires the observer, so a late joiner would render an
 			// empty deck until the next remote edit. React reads the array on its
 			// first observe for the same reason; mirror it here.
-			const initialSlides = readSlidesFromYDoc(currentYDoc);
+			const initialSlides = readRemoteSlides(currentYDoc);
 			if (initialSlides.length > 0) {
 				applyingRemote = true;
 				options.onRemoteSlides(initialSlides);
@@ -288,7 +352,10 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 				stopLoadAdoption = watchLoadAdoption({
 					loadVersion: options.loadVersion,
 					getYDoc: () => currentYDoc,
+					getSourceSlides: () => options.slides.value,
+					onError: failRemote,
 					isConnected: () => status.value === 'connected',
+					getLoadOrigin: options.getLoadOrigin,
 					adoptDocSlides: (docSlides) => {
 						applyingRemote = true;
 						options.onRemoteSlides(docSlides);
@@ -314,13 +381,22 @@ export function useCollaboration(options: UseCollaborationOptions): UseCollabora
 			heartbeat = setInterval(() => publisher?.flush(), PRESENCE_HEARTBEAT_MS);
 			active.value = true;
 			refreshPresence();
-		} catch {
+		} catch (error) {
+			if (generation !== connectionGeneration) {
+				return;
+			}
 			stop();
 			status.value = 'error';
+			config.onstatus?.(
+				'error',
+				error instanceof Error ? error : new Error('Collaboration unavailable'),
+			);
 		}
 	}
 
 	function stop(): void {
+		didSync = false;
+		connectionGeneration++;
 		clearTimers();
 		syncGate.reset();
 		unobserveSlides?.();

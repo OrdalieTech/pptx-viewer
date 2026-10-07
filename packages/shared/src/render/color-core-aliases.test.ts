@@ -13,13 +13,14 @@ import {
 	buildInnerShadowCssFromShapeStyle,
 	buildMultiLayerShadowCss,
 	buildGlowBoxShadow,
-	buildReflectionCss,
 } from './visual-effects';
 
 // Ported from the React `color-core.test.ts` (now a thin shim over shared's
-// `fill-style` colour primitives + `visual-effects` shadow/glow/reflection
-// builders). Verifies the per-binding alias names and the optional
-// default-fallback behaviour of `normalizeHexColor`.
+// `fill-style` colour primitives + `visual-effects` shadow/glow builders).
+// Verifies the per-binding alias names and the optional default-fallback
+// behaviour of `normalizeHexColor`. Reflection coverage moved to
+// `reflection.test.ts` when the `-webkit-box-reflect` builder was replaced
+// with a cross-browser mirrored-sibling wrapper style.
 
 describe('normalizeHexColor', () => {
 	it('returns the colour unchanged when already a valid 6-digit hex', () => {
@@ -96,10 +97,15 @@ describe('clampCropValue', () => {
 		expect(clampCropValue(Infinity)).toBe(0);
 	});
 
-	it('clamps to the [0, 0.95] range', () => {
-		expect(clampCropValue(-0.5)).toBe(0);
+	it('clamps magnitude to 0.95 while preserving sign', () => {
 		expect(clampCropValue(1)).toBe(0.95);
 		expect(clampCropValue(0.5)).toBe(0.5);
+		expect(clampCropValue(-1)).toBe(-0.95);
+	});
+
+	it('preserves a negative outward-crop inset instead of clamping to 0 (issue G2)', () => {
+		expect(clampCropValue(-0.5)).toBe(-0.5);
+		expect(clampCropValue(-0.2)).toBe(-0.2);
 	});
 });
 
@@ -183,19 +189,5 @@ describe('buildGlowBoxShadow', () => {
 
 	it('defaults opacity to 0.75 when undefined', () => {
 		expect(buildGlowBoxShadow('#00FF00', 30, undefined)).toContain('rgba(0, 255, 0, 0.75)');
-	});
-});
-
-describe('buildReflectionCss', () => {
-	it('produces a two-stop gradient with no blur', () => {
-		const result = buildReflectionCss(5, 0.5, 0, 100, 0);
-		expect(result).toContain('below 5px');
-		expect(result).toContain('rgba(255,255,255,0) 100px)');
-	});
-
-	it('produces a three-stop gradient with blur', () => {
-		const result = buildReflectionCss(10, 0.5, 0, 100, 5);
-		expect(result).toContain('rgba(255,255,255,0.25)');
-		expect(result).toContain('110px)');
 	});
 });

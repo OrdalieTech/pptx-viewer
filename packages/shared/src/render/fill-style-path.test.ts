@@ -110,7 +110,10 @@ describe('buildCirclePathGradient', () => {
 			r: 0.5,
 			b: 0.5,
 		});
-		expect(result).toContain('circle 50% at 50% 50%');
+		// Sized as matching ellipse semi-axes: `circle <percentage>` is invalid
+		// CSS (a circle's radius must be a length) and browsers drop the whole
+		// declaration, leaving the shape unfilled (#132).
+		expect(result).toContain('ellipse 50% 50% at 50% 50%');
 	});
 
 	it('uses farthest-edge radius for off-center fillToRect', () => {
@@ -120,7 +123,7 @@ describe('buildCirclePathGradient', () => {
 			r: 1,
 			b: 1,
 		});
-		expect(result).toContain('circle 100% at 0% 0%');
+		expect(result).toContain('ellipse 100% 100% at 0% 0%');
 	});
 
 	it('includes multiple gradient stops', () => {
@@ -135,20 +138,58 @@ describe('buildCirclePathGradient', () => {
 // buildRectPathGradient
 // ---------------------------------------------------------------------------
 
+/**
+ * `buildRectPathGradient` renders a `path="rect"` gradient as a nested-square
+ * SVG data URI (see `path-gradient-rect.ts`), not a single CSS ellipse:
+ * PowerPoint's own rect path gradient has square corners, which no native
+ * CSS/SVG radial gradient can express. These helpers decode that image back
+ * out for assertions.
+ */
+function decodeRectGradientSvg(cssValue: string): string {
+	const match = /^url\("data:image\/svg\+xml,(.+)"\)$/u.exec(cssValue);
+	if (!match) {
+		throw new Error(`not a rect path gradient image: ${cssValue}`);
+	}
+	return decodeURIComponent(match[1]);
+}
+
+/**
+ * The centre of the innermost (last-drawn, on-top) band, i.e. the gradient's
+ * own resolved centre. That band can have real width/height (a `fillToRect`
+ * with room left over defines a genuine flat target rectangle, not just a
+ * point), so this reads its `x`/`y`/`width`/`height` and returns the centre
+ * rather than its top-left corner.
+ */
+function innerBandCenter(svg: string): { x: number; y: number } {
+	const rects = [
+		...svg.matchAll(/<rect x="([^"]+)" y="([^"]+)" width="([^"]+)" height="([^"]+)"/gu),
+	];
+	const last = rects[rects.length - 1];
+	return {
+		x: Number(last[1]) + Number(last[3]) / 2,
+		y: Number(last[2]) + Number(last[4]) / 2,
+	};
+}
+
 describe('buildRectPathGradient', () => {
-	it('produces elliptical gradient with "ellipse" keyword for rect type', () => {
+	it('produces a nested-rectangle SVG data URI, not a CSS ellipse', () => {
 		const result = buildRectPathGradient(twoStops);
-		expect(result).toContain('radial-gradient(ellipse at');
+		expect(result).toMatch(/^url\("data:image\/svg\+xml,/u);
+		const svg = decodeRectGradientSvg(result);
+		expect(svg).toContain('<rect');
+		expect(svg).not.toContain('radial-gradient');
 	});
 
-	it('centers gradient from fillToRect LTRB fractions', () => {
+	it('centers the gradient from fillToRect LTRB fractions', () => {
 		const result = buildRectPathGradient(twoStops, undefined, {
 			l: 0.2,
 			t: 0.3,
 			r: 0.2,
 			b: 0.3,
 		});
-		expect(result).toContain('at 50% 50%');
+		const { x, y } = innerBandCenter(decodeRectGradientSvg(result));
+		expect(x).toBeCloseTo(50, 0);
+		expect(y).toBeCloseTo(50, 0);
 	});
 
 	it('handles edge-value fillToRect (all zeros)', () => {
@@ -158,8 +199,9 @@ describe('buildRectPathGradient', () => {
 			r: 0,
 			b: 0,
 		});
-		expect(result).toContain('at 50% 50%');
-		expect(result).toContain('50% 50% at');
+		const { x, y } = innerBandCenter(decodeRectGradientSvg(result));
+		expect(x).toBeCloseTo(50, 0);
+		expect(y).toBeCloseTo(50, 0);
 	});
 
 	it('handles edge-value fillToRect (all ones)', () => {
@@ -169,7 +211,9 @@ describe('buildRectPathGradient', () => {
 			r: 1,
 			b: 1,
 		});
-		expect(result).toContain('at 50% 50%');
+		const { x, y } = innerBandCenter(decodeRectGradientSvg(result));
+		expect(x).toBeCloseTo(50, 0);
+		expect(y).toBeCloseTo(50, 0);
 	});
 
 	it('uses focalPoint offset when combined with fillToRect', () => {
@@ -178,7 +222,9 @@ describe('buildRectPathGradient', () => {
 			{ x: 0.0, y: 0.0 },
 			{ l: 0.25, t: 0.25, r: 0.25, b: 0.25 },
 		);
-		expect(result).toContain('at 25% 25%');
+		const { x, y } = innerBandCenter(decodeRectGradientSvg(result));
+		expect(x).toBeCloseTo(25, 0);
+		expect(y).toBeCloseTo(25, 0);
 	});
 });
 
@@ -290,7 +336,7 @@ describe('buildCssGradientFromShapeStyle path integration', () => {
 			fillGradientStops: twoStops,
 		};
 		const result = buildCssGradientFromShapeStyle(style);
-		expect(result).toContain('circle');
+		expect(result).toContain('ellipse 100% 100%');
 		expect(result).toContain('at 0% 0%');
 	});
 
@@ -304,7 +350,9 @@ describe('buildCssGradientFromShapeStyle path integration', () => {
 		});
 
 		expect(buildCssGradientFromShapeStyle(makeStyle('circle'))).toContain('circle');
-		expect(buildCssGradientFromShapeStyle(makeStyle('rect'))).toContain('ellipse');
+		expect(buildCssGradientFromShapeStyle(makeStyle('rect'))).toMatch(
+			/^url\("data:image\/svg\+xml,/u,
+		);
 		expect(buildCssGradientFromShapeStyle(makeStyle('shape'))).toContain('farthest-side');
 	});
 });

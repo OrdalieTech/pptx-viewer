@@ -32,6 +32,11 @@
 	"module": "dist/index.mjs",
 	"types": "dist/index.d.ts",
 	"exports": {
+		"./collaboration": {
+			"types": "./dist/collaboration/index.d.ts",
+			"import": "./dist/collaboration/index.mjs",
+			"require": "./dist/collaboration/index.js"
+		},
 		".": {
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.mjs",
@@ -73,13 +78,14 @@
 	},
 	"dependencies": {
 		"dompurify": "^3.4.12",
+		"lib0": "^0.2.117",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@ai-sdk/openai-compatible": "^3.0.12",
 		"@types/dompurify": "^3.2.0",
-		"@types/three": "^0.185.1",
-		"ai": "^7.0.37",
+		"@types/three": "^0.185.4",
+		"ai": "^7.0.44",
 		"fake-indexeddb": "^6.2.2",
 		"pptx-viewer-core": "workspace:*",
 		"pptx-viewer-mcp": "workspace:*",
@@ -88,7 +94,7 @@
 		"tsup": "^8.5.1",
 		"typescript": "^7.0.2",
 		"vitest": "^4.1.10",
-		"yjs": "^13.6.31",
+		"yjs": "^13.6.32",
 		"zod": "^4.4.3"
 	},
 	"peerDependencies": {

@@ -205,6 +205,11 @@ export type CollaborationSessionIntent = 'create' | 'join';
  *
  * The same shape is accepted by every framework binding.
  */
+export interface CollaborationError extends Error {
+	code?: 'source_conflict' | 'too_large';
+	closeCode?: number;
+}
+
 export interface CollaborationConfig {
 	/** Unique identifier for the collaboration room (alphanumeric, hyphens, underscores). */
 	roomId: string;
@@ -227,8 +232,17 @@ export interface CollaborationConfig {
 	userAvatar?: string;
 	/** Hex colour for the local user's cursor/presence indicator. */
 	userColor?: string;
-	/** Optional authentication token sent with the WebSocket handshake. */
+	/** WebRTC room password. WebSocket hosts must use websocketProtocols or getWebsocketProtocols instead. */
 	authToken?: string;
+	/** WebSocket subprotocols. When set, authToken is never put in URL parameters. */
+	websocketProtocols?: string[];
+	/** Resolve fresh subprotocol credentials before every socket attempt, including reconnects. */
+	getWebsocketProtocols?: () => Promise<string[]>;
+	/** Transport lifecycle; only 'synced' confirms receipt of authoritative server state. */
+	onstatus?: (
+		status: 'connecting' | 'connected' | 'synced' | 'disconnected' | 'error',
+		error?: CollaborationError,
+	) => void;
 	/** Role in the session; defaults to `'collaborator'`. */
 	role?: CollaborationRole;
 	/**

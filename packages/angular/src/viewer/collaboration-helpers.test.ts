@@ -430,6 +430,7 @@ function makeMockAwareness(): {
 
 vi.mock(import('y-websocket'), () => ({
 	WebsocketProvider: class {
+		connect() {}
 		awareness = makeMockAwareness();
 		constructor() {
 			hoisted.createdProviders.push('websocket');
@@ -659,15 +660,21 @@ describe('collaborationService', () => {
 		hoisted.syncCb?.(true);
 
 		// Empty room: this client is the seeder, so its loaded deck stands.
-		expect(svc.adoptDocSlidesAfterLoad()).toBeFalsy();
+		expect(svc.adoptDocSlidesAfterLoad('bootstrap')).toBeFalsy();
 		expect(onRemoteSlides).not.toHaveBeenCalled();
 
 		// The room's real slides arrive (written by a remote peer). A local
 		// bootstrap load that finishes AFTER this point would clobber them; the
 		// adoption step re-applies the doc content instead.
 		hoisted.slidesArray?.push([remoteSlideYMap('9')]);
-		expect(svc.adoptDocSlidesAfterLoad()).toBeTruthy();
+		expect(svc.adoptDocSlidesAfterLoad('bootstrap')).toBeTruthy();
 		expect(onRemoteSlides).toHaveBeenCalledWith([expect.objectContaining({ id: '9' })]);
+
+		// A deck the USER opened mid-session is not a bootstrap: the room must
+		// not replace it, or opening a file in a room loses the file.
+		onRemoteSlides.mockClear();
+		expect(svc.adoptDocSlidesAfterLoad('user')).toBeFalsy();
+		expect(onRemoteSlides).not.toHaveBeenCalled();
 
 		destroy();
 	});
@@ -713,7 +720,7 @@ describe('collaborationService', () => {
 		destroy();
 	});
 
-	it('times out to error when the websocket never connects', async () => {
+	it('reports a timeout and keeps the session available for authenticated reconnect', async () => {
 		reset();
 		vi.useFakeTimers();
 		try {
@@ -722,7 +729,9 @@ describe('collaborationService', () => {
 			expect(svc.status()).toBe('connecting');
 			vi.advanceTimersByTime(CONNECTION_TIMEOUT_MS + 1);
 			expect(svc.status()).toBe('error');
-			expect(svc.active()).toBeFalsy();
+			expect(svc.active()).toBeTruthy();
+			hoisted.statusCb?.({ status: 'connected' });
+			expect(svc.status()).toBe('connected');
 			destroy();
 		} finally {
 			vi.useRealTimers();

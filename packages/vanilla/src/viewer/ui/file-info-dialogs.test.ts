@@ -44,6 +44,23 @@ describe('file info dialogs', () => {
 		expect(onToggle).toHaveBeenCalledWith(true);
 	});
 
+	it('makes the embed toggle inert, with a reason, for a deck that embeds nothing', () => {
+		const t = createTranslator();
+		const overlay = openFontEmbeddingDialog(document, t, {
+			slides: [],
+			embeddedFonts: [],
+			enabled: false,
+			canEmbed: false,
+			unavailableKey: 'pptx.fonts.embedUnavailable',
+			onToggle: vi.fn(),
+		});
+		expect(
+			overlay.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled,
+		).toBeTruthy();
+		expect(overlay.textContent).toContain(t('pptx.fonts.embedUnavailable'));
+		expect(overlay.textContent).not.toContain(t('pptx.fonts.embedKeepsExisting'));
+	});
+
 	it('reports signature count and accepts a protection password', () => {
 		const signatures = openDigitalSignaturesDialog(document, createTranslator(), true, 2);
 		expect(signatures.textContent).toContain('2');
@@ -56,8 +73,10 @@ describe('file info dialogs', () => {
 		const inputs = protection.querySelectorAll<HTMLInputElement>('input');
 		inputs[0].value = 'Safe123!';
 		inputs[1].value = 'Safe123!';
+		// "Set Password" (`pptx.security.setPassword`), the label all five bindings
+		// now share; it used to be a generic "Save" here.
 		const save = Array.from(protection.querySelectorAll('button')).find(
-			(button) => button.textContent === 'Save',
+			(button) => button.textContent === 'Set Password',
 		)!;
 		save.click();
 		expect(onSet).toHaveBeenCalledWith('Safe123!');

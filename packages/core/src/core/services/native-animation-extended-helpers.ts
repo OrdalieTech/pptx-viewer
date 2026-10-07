@@ -1,3 +1,4 @@
+import { themeColorRefFromSchemeClr } from '../color/theme-color-ref';
 /**
  * Extended animation parsing helpers for OOXML animation node types:
  * p:animClr, p:excl, p:cmd, p:iterate, and text-level targets (p:txEl).
@@ -6,8 +7,10 @@ import type {
 	PptxColorAnimation,
 	PptxTextAnimationTarget,
 	PptxAnimationIterate,
+	PptxThemeColorRef,
 	XmlObject,
 } from '../types';
+import { extractAttrNameFromCBhvr } from './native-animation-attr-name';
 import { ensureArray } from './native-animation-helpers';
 
 /**
@@ -25,8 +28,13 @@ export function extractColorAnimation(
 	if (animClrNodes.length === 0) {
 		return undefined;
 	}
+	const components = animClrNodes.map(extractSingleColorAnimation);
+	const primary = components[0];
+	return components.length > 1 ? { ...primary, components } : primary;
+}
 
-	const node = animClrNodes[0];
+/** Parse one `p:animClr` behaviour while keeping the public aggregate flat. */
+function extractSingleColorAnimation(node: XmlObject): PptxColorAnimation {
 	const clrSpc = String(node['@_clrSpc'] || 'rgb').toLowerCase();
 	const colorSpace: 'hsl' | 'rgb' = clrSpc === 'hsl' ? 'hsl' : 'rgb';
 	const dir = String(node['@_dir'] || '').toLowerCase();
@@ -36,51 +44,69 @@ export function extractColorAnimation(
 	// the value here, only ensure it survives a parse/save cycle.
 	const path = node['@_path'] !== undefined ? String(node['@_path']) : undefined;
 
-	const fromColor = extractColorValue(node['p:from'] as XmlObject | undefined);
-	const toColor = extractColorValue(node['p:to'] as XmlObject | undefined);
-	const byColor = extractHslDeltaOrColorValue(node['p:by'] as XmlObject | undefined, colorSpace);
+	const fromContainer = node['p:from'] as XmlObject | undefined;
+	const toContainer = node['p:to'] as XmlObject | undefined;
+	const byContainer = node['p:by'] as XmlObject | undefined;
+	const fromColor = extractColorValue(fromContainer);
+	const toColor = extractColorValue(toContainer);
+	const byColor = extractHslDeltaOrColorValue(byContainer, colorSpace);
+	const hslDelta = colorSpace === 'hsl' ? extractHslDelta(byContainer) : undefined;
+	const fromColorRef = extractSchemeColorRef(fromContainer);
+	const toColorRef = extractSchemeColorRef(toContainer);
+	// An HSL `by` is a signed delta (see `hslDelta`), never a theme colour.
+	const byColorRef = colorSpace === 'hsl' ? undefined : extractSchemeColorRef(byContainer);
 
-	// Extract target attribute from p:cBhvr/p:attrNameLst/p:attrName. Note:
-	// `p:attrName` is a TEXT element ("fillcolor" / "style.color" / ...), so it
-	// parses to a plain string (or `{ '#text': ... }`), NOT an XmlObject - it must
-	// NOT go through `ensureArray`, which filters to objects and would silently
-	// drop the string, leaving every real p:animClr with no target attribute.
-	let targetAttribute: string | undefined;
-	const cBhvr = node['p:cBhvr'] as XmlObject | undefined;
-	const attrNameLst = cBhvr?.['p:attrNameLst'] as XmlObject | undefined;
-	const rawAttrName = attrNameLst?.['p:attrName'];
-	const firstAttrName = Array.isArray(rawAttrName) ? rawAttrName[0] : rawAttrName;
-	if (firstAttrName !== undefined && firstAttrName !== null) {
-		const name = (
-			typeof firstAttrName === 'object'
-				? String((firstAttrName as XmlObject)['#text'] ?? '')
-				: String(firstAttrName)
-		)
-			.toLowerCase()
-			.trim();
-		if (name !== '') {
-			targetAttribute = name;
-		}
-	}
+	// Extract target attribute from p:cBhvr/p:attrNameLst/p:attrName.
+	const targetAttribute = extractAttrNameFromCBhvr(node['p:cBhvr'] as XmlObject | undefined);
 
-	return {
+	const result: PptxColorAnimation = {
 		colorSpace,
 		direction,
 		path,
 		fromColor,
 		toColor,
 		byColor,
+		hslDelta,
 		targetAttribute,
+	};
+	if (fromColorRef) {
+		result.fromColorRef = fromColorRef;
+	}
+	if (toColorRef) {
+		result.toColorRef = toColorRef;
+	}
+	if (byColorRef) {
+		result.byColorRef = byColorRef;
+	}
+	return result;
+}
+
+/** The typed theme reference for a colour container's `a:schemeClr` child, when present. */
+function extractSchemeColorRef(
+	colorContainer: XmlObject | undefined,
+): PptxThemeColorRef | undefined {
+	return themeColorRefFromSchemeClr(colorContainer?.['a:schemeClr'] as XmlObject | undefined);
+}
+
+/** Decode OOXML's signed HSL offsets into degrees / percentage points. */
+function extractHslDelta(colorContainer: XmlObject | undefined): PptxColorAnimation['hslDelta'] {
+	const hsl = colorContainer?.['p:hsl'] as XmlObject | undefined;
+	if (!hsl) {
+		return undefined;
+	}
+	return {
+		hue: Number(hsl['@_h'] ?? 0) / 60000,
+		saturation: Number(hsl['@_s'] ?? 0) / 1000,
+		lightness: Number(hsl['@_l'] ?? 0) / 1000,
 	};
 }
 
 /**
- * Extract a `p:by` colour container, preserving HSL deltas as `#rrggbb`-style
- * delta-hex (channels packed as `#HHSSLL` where each pair is the lower byte of
- * the signed delta). For RGB animations behaves identically to
- * {@link extractColorValue}. The intent is round-trip fidelity: the byte-packed
- * form is reversible because we always emit it verbatim again through
- * the value, and consumers that don't understand HSL deltas can ignore it.
+ * Extract a `p:by` colour container, retaining the historical HSL delta-hex
+ * compatibility value (`#HHSSLL`, each channel's low byte). The structured
+ * `hslDelta` parsed alongside it is authoritative because it preserves signs
+ * and values outside one byte. RGB animations behave like
+ * {@link extractColorValue}.
  */
 function extractHslDeltaOrColorValue(
 	colorContainer: XmlObject | undefined,

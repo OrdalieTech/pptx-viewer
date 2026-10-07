@@ -1,28 +1,13 @@
-/**
- * collaboration-reconcile.ts: Granular Y.Doc reconciliation for collaborative
- * editing.
- *
- * `writeSlidesToYDoc` replaces the entire pptx:slides array on every write,
- * which makes concurrent edits collide at document granularity (last writer
- * wins for the whole deck). `reconcileSlidesInYDoc` instead diffs the desired
- * slide state against the live Y.Doc and only mutates what changed:
- *
- *  - slides and elements are matched by `id`; unchanged ones keep their Y.Map
- *    instance so concurrent field edits merge via Yjs
- *  - scalar / complex fields are compared and only set when different
- *  - textBody is edited in place (minimal char-level diff via
- *    collaboration-text-merge.ts) when its canonical decoded form differs;
- *    wholesale replacement is only a fallback
- *  - removed items are deleted, new ones inserted at their position; moves
- *    are delete+reinsert (Yjs has no move primitive)
- *
- * All mutations run in a single transaction tagged with LOCAL_SYNC_ORIGIN (or
- * a caller-supplied origin) so observers can ignore their own writes.
+/** Reconcile slides and elements by identity, preserving Yjs maps and merging text deltas.
+ * Apply local changes and remove unreferenced media in one transaction so observers
+ * can ignore their own writes via LOCAL_SYNC_ORIGIN.
  */
 
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 
-import { getAssetsMap, reconcileAssetFields } from './collaboration-assets';
+import { ASSET_ELEMENT_FIELDS, getAssetsMap, reconcileAssetFields } from './collaboration-assets';
+import { reorderYArray } from './collaboration-order';
+import { mapSourceAssets } from './collaboration-source';
 import type { YArrayLike, YDocLike, YjsFactories, YMapLike } from './collaboration-sync';
 import {
 	COMPLEX_ELEMENT_FIELDS,
@@ -32,7 +17,11 @@ import {
 	writeElementToYMap,
 	writeSlideToYMap,
 	YDOC_SLIDES_KEY,
+	assertCollaborationSchema,
+	YDOC_META_KEY,
+	YDOC_SCHEMA_VERSION,
 } from './collaboration-sync';
+import { reconcileTableData } from './collaboration-table';
 import {
 	decodeDelta,
 	encodeSegmentsToDelta,
@@ -54,6 +43,9 @@ function reconcileScalars(
 	keys: ReadonlySet<string>,
 ): void {
 	for (const key of keys) {
+		if (key === 'backgroundImage' || ASSET_ELEMENT_FIELDS.has(key)) {
+			continue;
+		}
 		const next = rec[key];
 		const current = ymap.get(key);
 		if (next === undefined) {
@@ -70,9 +62,13 @@ function reconcileComplexFields(
 	ymap: YMapLike,
 	rec: Record<string, unknown>,
 	fields: Readonly<Record<string, string>>,
+	assets: YMapLike,
 ): void {
 	for (const [original, prefixed] of Object.entries(fields)) {
-		const next = rec[original] === undefined ? undefined : JSON.stringify(rec[original]);
+		const next =
+			rec[original] === undefined
+				? undefined
+				: JSON.stringify(mapSourceAssets(rec[original], assets, true));
 		const current = ymap.get(prefixed);
 		if (next === undefined) {
 			if (current !== undefined) {
@@ -130,9 +126,28 @@ export function reconcileElementYMap(
 ): void {
 	const rec = element as unknown as Record<string, unknown>;
 	reconcileScalars(ymap, rec, SCALAR_ELEMENT_KEYS);
-	reconcileComplexFields(ymap, rec, COMPLEX_ELEMENT_FIELDS);
+	reconcileComplexFields(ymap, rec, COMPLEX_ELEMENT_FIELDS, assets);
 	reconcileElementTextBody(ymap, rec, factories);
 	reconcileAssetFields(rec.id as string, rec, ymap, assets);
+	if (element.type === 'table' && element.tableData) {
+		reconcileTableData(element.tableData, ymap, factories, element.id);
+	}
+	if (element.type === 'group') {
+		let children = ymap.get('children');
+		if (!isYArrayLike(children)) {
+			children = factories.createArray();
+			ymap.set('children', children);
+		}
+		reconcileYArrayById<PptxElement>(children as YArrayLike, element.children, {
+			idOf: (child) => child.id,
+			create: (child) => {
+				const map = factories.createMap();
+				writeElementToYMap(child, map, factories, assets);
+				return map;
+			},
+			update: (map, child) => reconcileElementYMap(map, child, factories, assets),
+		});
+	}
 }
 
 interface ReconcileAdapter<T> {
@@ -152,74 +167,44 @@ function mapIdAt(arr: YArrayLike, index: number): string | undefined {
 
 /**
  * Reconcile a Y.Array of Y.Maps against a desired item list, matching by id.
- * Items without a string id fall back to positional matching.
+ * Every collaborative item requires a stable string ID.
  */
 function reconcileYArrayById<T>(
 	arr: YArrayLike,
 	items: readonly T[],
 	adapter: ReconcileAdapter<T>,
 ): void {
-	const desiredIds = new Set<string>();
-	for (const item of items) {
-		const id = adapter.idOf(item);
-		if (typeof id === 'string') {
-			desiredIds.add(id);
+	const ids = items.map(adapter.idOf);
+	if (ids.every((id): id is string => typeof id === 'string')) {
+		if (new Set(ids).size !== ids.length) {
+			throw new Error('Duplicate PPTX collaboration ID');
 		}
-	}
-
-	// Pass 1: delete maps whose id is gone (or duplicated); keep the last dup.
-	const seen = new Set<string>();
-	for (let i = arr.length - 1; i >= 0; i--) {
-		const id = mapIdAt(arr, i);
-		if (id === undefined) {
-			continue;
+		const desired = new Set(ids);
+		for (let i = arr.length - 1; i >= 0; i--) {
+			if (!desired.has(mapIdAt(arr, i) ?? '')) {
+				arr.delete(i, 1);
+			}
 		}
-		if (!desiredIds.has(id) || seen.has(id)) {
-			arr.delete(i, 1);
-		} else {
-			seen.add(id);
-		}
-	}
-
-	// Pass 2: walk desired order; update in place, move, or insert.
-	for (let pos = 0; pos < items.length; pos++) {
-		const item = items[pos];
-		const id = adapter.idOf(item);
-		const idAtPos = pos < arr.length ? mapIdAt(arr, pos) : undefined;
-
-		if (id === undefined) {
-			// Positional fallback for id-less items.
-			if (pos < arr.length && idAtPos === undefined) {
-				adapter.update(arr.get(pos) as YMapLike, item);
+		const existing = new Map(
+			arr.toArray().map((entry) => {
+				const map = entry as YMapLike;
+				return [map.get('id'), map] as const;
+			}),
+		);
+		items.forEach((item, index) => {
+			const map = existing.get(ids[index]);
+			if (map) {
+				adapter.update(map, item);
 			} else {
-				arr.insert(pos, [adapter.create(item)]);
+				const created = adapter.create(item);
+				created.set('_order', arr.length);
+				arr.push([created]);
 			}
-			continue;
-		}
-
-		if (idAtPos === id) {
-			adapter.update(arr.get(pos) as YMapLike, item);
-			continue;
-		}
-
-		let foundAt = -1;
-		for (let j = pos + 1; j < arr.length; j++) {
-			if (mapIdAt(arr, j) === id) {
-				foundAt = j;
-				break;
-			}
-		}
-		if (foundAt >= 0) {
-			// Move: Yjs cannot re-insert an integrated type, so rebuild at pos.
-			arr.delete(foundAt, 1);
-		}
-		arr.insert(pos, [adapter.create(item)]);
+		});
+		reorderYArray(arr, ids);
+		return;
 	}
-
-	// Pass 3: trim trailing leftovers.
-	if (arr.length > items.length) {
-		arr.delete(items.length, arr.length - items.length);
-	}
+	throw new Error('PPTX collaborative slides and elements require stable string IDs');
 }
 
 const isYArrayLike = (value: unknown): value is YArrayLike =>
@@ -236,7 +221,8 @@ export function reconcileSlideYMap(
 ): void {
 	const rec = slide as unknown as Record<string, unknown>;
 	reconcileScalars(ymap, rec, SCALAR_SLIDE_KEYS);
-	reconcileComplexFields(ymap, rec, COMPLEX_SLIDE_FIELDS);
+	reconcileComplexFields(ymap, rec, COMPLEX_SLIDE_FIELDS, assets);
+	reconcileAssetFields(slide.id, rec, ymap, assets);
 
 	let elements = ymap.get('elements');
 	if (!isYArrayLike(elements)) {
@@ -254,6 +240,27 @@ export function reconcileSlideYMap(
 	});
 }
 
+function collectAssetRefs(value: unknown, assets: YMapLike, refs = new Set<string>()): Set<string> {
+	if (typeof value === 'string') {
+		if (assets.get(value) !== undefined) {
+			refs.add(value);
+		}
+	} else if (isYArrayLike(value)) {
+		value.toArray().forEach((child) => collectAssetRefs(child, assets, refs));
+	} else if (
+		value &&
+		typeof value === 'object' &&
+		'forEach' in value &&
+		typeof value.forEach === 'function' &&
+		'get' in value &&
+		typeof value.get === 'function' &&
+		!isYTextLike(value)
+	) {
+		(value as YMapLike).forEach((child: unknown) => collectAssetRefs(child, assets, refs));
+	}
+	return refs;
+}
+
 /**
  * Granular local -> Y.Doc sync: mutate only what changed, inside one
  * transaction tagged with `origin` (default LOCAL_SYNC_ORIGIN) so the
@@ -267,6 +274,11 @@ export function reconcileSlidesInYDoc(
 ): void {
 	const assets = getAssetsMap(ydoc);
 	ydoc.transact(() => {
+		const before = collectAssetRefs(ydoc.getArray(YDOC_SLIDES_KEY), assets);
+		assertCollaborationSchema(ydoc);
+		if (ydoc.getMap(YDOC_META_KEY).get('schemaVersion') === undefined) {
+			ydoc.getMap(YDOC_META_KEY).set('schemaVersion', YDOC_SCHEMA_VERSION);
+		}
 		const arr = ydoc.getArray(YDOC_SLIDES_KEY);
 		reconcileYArrayById<PptxSlide>(arr, slides, {
 			idOf: (slide) => (typeof slide.id === 'string' ? slide.id : undefined),
@@ -277,5 +289,11 @@ export function reconcileSlidesInYDoc(
 			},
 			update: (map, slide) => reconcileSlideYMap(map, slide, factories, assets),
 		});
+		const after = collectAssetRefs(arr, assets);
+		for (const ref of before) {
+			if (!after.has(ref)) {
+				assets.delete(ref);
+			}
+		}
 	}, origin);
 }

@@ -1,5 +1,6 @@
 // oxlint-disable react-hooks/rules-of-hooks
 import type { PptxSlide } from 'pptx-viewer-core';
+import { assignUserColor } from 'pptx-viewer-shared';
 import { describe, expect, it, vi } from 'vitest';
 import { effectScope, nextTick, ref } from 'vue';
 
@@ -78,7 +79,10 @@ vi.mock(import('yjs'), () => {
 	class YText {
 		private _delta: { insert: string; attributes?: Record<string, string> }[] = [];
 		insert(_index: number, text: string, attrs?: Record<string, string>) {
-			this._delta.push({ insert: text, ...(attrs ? { attributes: attrs } : {}) });
+			this._delta.push({
+				insert: text,
+				...(attrs ? { attributes: attrs } : {}),
+			});
 		}
 		toDelta() {
 			return this._delta;
@@ -135,6 +139,7 @@ const awarenessSurface = {
 
 vi.mock(import('y-websocket'), () => ({
 	WebsocketProvider: class {
+		connect() {}
 		awareness = awarenessSurface;
 		wsconnected = false;
 		synced = false;
@@ -202,10 +207,19 @@ describe('useCollaboration', () => {
 		expect(collab.connected.value).toBeTruthy();
 
 		// A remote peer appears with a cursor on the same slide (index 0).
-		remotePresence(2, { userName: 'Bob', userColor: '#ff0000', cursorX: 10, cursorY: 20 });
+		remotePresence(2, {
+			userName: 'Bob',
+			userColor: '#ff0000',
+			cursorX: 10,
+			cursorY: 20,
+		});
 		state.awarenessChange?.();
 		expect(collab.cursors.value).toHaveLength(1);
-		expect(collab.cursors.value[0]).toMatchObject({ userName: 'Bob', x: 10, y: 20 });
+		expect(collab.cursors.value[0]).toMatchObject({
+			userName: 'Bob',
+			x: 10,
+			y: 20,
+		});
 
 		scope.stop();
 	});
@@ -242,6 +256,29 @@ describe('useCollaboration', () => {
 		scope.stop();
 	});
 
+	it('falls back to a deterministic per-user colour (shared assignUserColor) when none is supplied', async () => {
+		state.slidesArray = null;
+		state.awarenessStates.clear();
+		const slides = ref<PptxSlide[]>([slide('1')]);
+		const onRemoteSlides = vi.fn();
+		const scope = effectScope();
+		// `config` carries no `userColor`, and no `options.userColor` is passed
+		// either: every peer without an explicit colour used to collapse onto the
+		// same flat `DEFAULT_CURSOR_COLOR`, making simultaneous anonymous
+		// collaborators indistinguishable. It must now resolve to shared's
+		// `assignUserColor`, keyed on the user's name so the same person keeps a
+		// stable hue across sessions/reconnects.
+		const collab = scope.run(() => useCollaboration({ slides, onRemoteSlides }))!;
+		await collab.start(config);
+
+		const self = state.awarenessStates.get(1);
+		expect(self?.presence).toMatchObject({
+			userColor: assignUserColor(config.userName),
+		});
+
+		scope.stop();
+	});
+
 	it('surfaces remote presence + selection from the nested schema', async () => {
 		state.slidesArray = null;
 		state.awarenessStates.clear();
@@ -252,7 +289,11 @@ describe('useCollaboration', () => {
 		await collab.start(config);
 
 		// A remote peer publishes selection + active slide (no cursor movement).
-		remotePresence(2, { userName: 'Bob', selectedElementId: 'el-9', activeSlideIndex: 2 });
+		remotePresence(2, {
+			userName: 'Bob',
+			selectedElementId: 'el-9',
+			activeSlideIndex: 2,
+		});
 		state.awarenessChange?.();
 
 		expect(collab.remotePresences.value).toHaveLength(1);
@@ -361,7 +402,11 @@ describe('useCollaboration', () => {
 		const scope = effectScope();
 		const collab = scope.run(() => useCollaboration({ slides, onRemoteSlides: vi.fn() }))!;
 
-		await collab.start({ roomId: 'bad room id', serverUrl: 'wss://x', userName: 'Ada' });
+		await collab.start({
+			roomId: 'bad room id',
+			serverUrl: 'wss://x',
+			userName: 'Ada',
+		});
 		expect(collab.status.value).toBe('error');
 		expect(collab.active.value).toBeFalsy();
 		scope.stop();
@@ -410,7 +455,12 @@ describe('useCollaboration', () => {
 		const slides = ref<PptxSlide[]>([slide('1')]);
 		const scope = effectScope();
 		const collab = scope.run(() =>
-			useCollaboration({ slides, onRemoteSlides: vi.fn(), canvasWidth: 100, canvasHeight: 100 }),
+			useCollaboration({
+				slides,
+				onRemoteSlides: vi.fn(),
+				canvasWidth: 100,
+				canvasHeight: 100,
+			}),
 		)!;
 		await collab.start(config);
 
@@ -441,7 +491,15 @@ describe('useCollaboration', () => {
 			slides.value = remote;
 		});
 		const scope = effectScope();
-		const collab = scope.run(() => useCollaboration({ slides, onRemoteSlides, loadVersion }))!;
+		const collab = scope.run(() =>
+			useCollaboration({
+				slides,
+				onRemoteSlides,
+				loadVersion,
+				// The deck the host mounted with: the room outranks it.
+				getLoadOrigin: () => 'bootstrap',
+			}),
+		)!;
 		await collab.start(config);
 		state.statusCb?.({ status: 'connected' });
 		state.syncCb?.(true); // open the first-write gate
@@ -464,6 +522,45 @@ describe('useCollaboration', () => {
 		// The bootstrap deck never reached the doc (no local-sync transaction).
 		expect(state.lastTransactionOrigin).toBeUndefined();
 		expect(state.slidesArray?.length).toBe(1);
+
+		collab.stop();
+		scope.stop();
+	});
+
+	it('keeps a deck the user opened mid-session instead of re-adopting the room', async () => {
+		// Joining a room and then opening a file used to leave the room's deck on
+		// screen; only a bootstrap load may lose that argument.
+		state.slidesArray = null;
+		state.slidesObserverCb = null;
+		state.awarenessStates.clear();
+		state.lastTransactionOrigin = undefined;
+		const slides = ref<PptxSlide[]>([]);
+		const loadVersion = ref(0);
+		const onRemoteSlides = vi.fn((remote: PptxSlide[]) => {
+			slides.value = remote;
+		});
+		const scope = effectScope();
+		const collab = scope.run(() =>
+			useCollaboration({
+				slides,
+				onRemoteSlides,
+				loadVersion,
+				getLoadOrigin: () => 'user',
+			}),
+		)!;
+		await collab.start(config);
+		state.statusCb?.({ status: 'connected' });
+		state.syncCb?.(true);
+
+		state.slidesArray?.push([remoteSlideMap('9')]);
+		state.slidesObserverCb?.(undefined, { origin: 'remote-peer' });
+		expect(slides.value[0]?.id).toBe('9');
+
+		slides.value = [slide('opened-by-user')];
+		loadVersion.value += 1;
+		await nextTick();
+
+		expect(slides.value[0]?.id).toBe('opened-by-user');
 
 		collab.stop();
 		scope.stop();

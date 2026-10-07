@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { PptxSlide, PptxSlideTransition, PptxTransitionType } from 'pptx-viewer-core';
+import { SLIDE_TRANSITION_OPTIONS, TRANSITION_SPEED_OPTIONS } from 'pptx-viewer-shared';
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
@@ -21,57 +22,13 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 /**
- * The complete set of transition effects from the core `PptxTransitionType`
- * union. `"none"` is part of the union and doubles as the "clear transition"
- * option, so it is excluded from the effect list and surfaced separately.
+ * The complete set of transition effects offered by the Type select, from
+ * shared's `SLIDE_TRANSITION_OPTIONS` (the same 47-entry catalogue React
+ * offers). `"none"` is part of that catalogue and doubles as the "clear
+ * transition" option, so it is excluded from the effect list and surfaced
+ * separately.
  */
-const TRANSITION_TYPES: readonly PptxTransitionType[] = [
-	'cut',
-	'fade',
-	'push',
-	'wipe',
-	'split',
-	'randomBar',
-	'blinds',
-	'checker',
-	'circle',
-	'comb',
-	'cover',
-	'diamond',
-	'dissolve',
-	'plus',
-	'pull',
-	'random',
-	'strips',
-	'uncover',
-	'wedge',
-	'wheel',
-	'zoom',
-	'newsflash',
-	'morph',
-	'conveyor',
-	'doors',
-	'ferris',
-	'flash',
-	'flythrough',
-	'gallery',
-	'glitter',
-	'honeycomb',
-	'pan',
-	'prism',
-	'reveal',
-	'ripple',
-	'shred',
-	'switch',
-	'vortex',
-	'warp',
-	'wheelReverse',
-	'window',
-	'cube',
-	'flip',
-	'rotate',
-	'orbit',
-];
+const TRANSITION_OPTIONS = SLIDE_TRANSITION_OPTIONS.filter((option) => option.value !== 'none');
 
 /** Sentinel `<option>` value representing "no transition" (clears the field). */
 const NONE_VALUE = '__none__';
@@ -122,6 +79,23 @@ function onDurationChange(event: Event): void {
 	}
 	emit('update', { ...existing, durationMs: ms });
 }
+
+/** Speed shown in the select: defaults to `fast`, matching the schema default. */
+const speed = computed<NonNullable<PptxSlideTransition['speed']>>(
+	() => current.value?.speed ?? 'fast',
+);
+
+function onSpeedChange(event: Event): void {
+	const value = (event.target as HTMLSelectElement).value as NonNullable<
+		PptxSlideTransition['speed']
+	>;
+	const existing = current.value;
+	// Editing speed with no active effect is a no-op; there is nothing to update.
+	if (!existing || existing.type === 'none') {
+		return;
+	}
+	emit('update', { ...existing, speed: value });
+}
 </script>
 
 <template>
@@ -130,15 +104,25 @@ function onDurationChange(event: Event): void {
 			<span class="pptx-vue-transition-panel__label font-medium text-muted-foreground">{{
 				t('pptx.transition.label')
 			}}</span>
+			<!--
+			 The explicit `aria-label` is load-bearing, not decoration. A `<select>`
+			 nested inside its `<label>` takes the WHOLE label element's text as its
+			 accessible label, and that text includes every option: this control
+			 announced itself as "Transition None Cut Fade ... Rotate ..." and, since
+			 one effect is called Rotate, a running show matched a "rotate" affordance
+			 that was never on screen. Angular's transition card labels its select the
+			 same way; this is the binding that had drifted.
+			-->
 			<select
 				class="pptx-vue-transition-panel__select rounded border border-border bg-popover px-1.5 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
 				:value="selectedType"
+				:aria-label="t('pptx.transition.label')"
 				data-testid="transition-type"
 				@change="onTypeChange"
 			>
 				<option :value="NONE_VALUE">{{ t('pptx.transition.none') }}</option>
-				<option v-for="type in TRANSITION_TYPES" :key="type" :value="type">
-					{{ type }}
+				<option v-for="option in TRANSITION_OPTIONS" :key="option.value" :value="option.value">
+					{{ t(option.i18nKey) }}
 				</option>
 			</select>
 		</label>
@@ -154,9 +138,32 @@ function onDurationChange(event: Event): void {
 				step="100"
 				:value="durationMs"
 				:disabled="!hasTransition"
+				:aria-label="t('pptx.transition.duration')"
 				data-testid="transition-duration"
 				@change="onDurationChange"
 			/>
+		</label>
+
+		<label class="pptx-vue-transition-panel__field flex flex-col gap-1">
+			<span class="pptx-vue-transition-panel__label font-medium text-muted-foreground">{{
+				t('pptx.transition.speed')
+			}}</span>
+			<select
+				class="pptx-vue-transition-panel__select rounded border border-border bg-popover px-1.5 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+				:value="speed"
+				:disabled="!hasTransition"
+				:aria-label="t('pptx.transition.speed')"
+				data-testid="transition-speed"
+				@change="onSpeedChange"
+			>
+				<option
+					v-for="option in TRANSITION_SPEED_OPTIONS"
+					:key="option.value"
+					:value="option.value"
+				>
+					{{ t(option.i18nKey) }}
+				</option>
+			</select>
 		</label>
 	</div>
 </template>

@@ -16,7 +16,10 @@ import { ChangeDetectionStrategy, Component, computed, inject, input, output } f
 import { TranslatePipe } from '@ngx-translate/core';
 import type { PptxTableCellStyle, PptxTableData, TablePptxElement } from 'pptx-viewer-core';
 
+import type { ThemeColorPickerCommit } from '../internal/shared';
+import { RecentColorsService } from './recent-colors.service';
 import { TableCellAdvancedFillComponent } from './table-cell-advanced-fill.component';
+import { TableCellColorFieldComponent } from './table-cell-color-field.component';
 import {
 	mergeDown,
 	mergeRight,
@@ -48,14 +51,13 @@ type NumKey =
 	selector: 'pptx-table-cell-formatting',
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
-	imports: [TableCellAdvancedFillComponent, TranslatePipe],
+	imports: [TableCellAdvancedFillComponent, TableCellColorFieldComponent, TranslatePipe],
 	template: `
 		@if (cell(); as c) {
 			<div class="pptx-tcf">
 				<div class="pptx-tcf__heading">
 					{{
-						'pptx.table.cell'
-							| translate: { row: sel()!.rowIndex + 1, col: sel()!.columnIndex + 1 }
+						'pptx.table.cell' | translate: { row: sel()!.rowIndex + 1, col: sel()!.columnIndex + 1 }
 					}}
 				</div>
 
@@ -73,26 +75,22 @@ type NumKey =
 				</label>
 
 				<div class="pptx-tcf__grid2">
-					<label class="pptx-tcf__field">
-						<span class="pptx-tcf__lbl">{{ 'pptx.table.color' | translate }}</span>
-						<input
-							type="color"
-							class="pptx-tcf__color"
-							[disabled]="!canEdit()"
-							[value]="style().color ?? '#000000'"
-							(input)="onColor('color', $event)"
-						/>
-					</label>
-					<label class="pptx-tcf__field">
-						<span class="pptx-tcf__lbl">{{ 'pptx.table.background' | translate }}</span>
-						<input
-							type="color"
-							class="pptx-tcf__color"
-							[disabled]="!canEdit()"
-							[value]="style().backgroundColor ?? '#ffffff'"
-							(input)="onColor('backgroundColor', $event)"
-						/>
-					</label>
+					<pptx-table-cell-color-field
+						[label]="'pptx.table.color' | translate"
+						[value]="style().color"
+						fallback="#000000"
+						[selectedRef]="style().colorRef"
+						[disabled]="!canEdit()"
+						(commit)="onColorCommit('color', 'colorRef', $event)"
+					/>
+					<pptx-table-cell-color-field
+						[label]="'pptx.table.background' | translate"
+						[value]="style().backgroundColor"
+						fallback="#ffffff"
+						[selectedRef]="style().backgroundColorRef"
+						[disabled]="!canEdit()"
+						(commit)="onColorCommit('backgroundColor', 'backgroundColorRef', $event)"
+					/>
 				</div>
 
 				<pptx-table-cell-advanced-fill
@@ -154,6 +152,7 @@ type NumKey =
 								[disabled]="!canEdit()"
 								[value]="colorOf(edge.colorKey)"
 								(input)="onColor(edge.colorKey, $event)"
+								(change)="pushRecentColor($event)"
 							/>
 							<input
 								type="number"
@@ -169,10 +168,20 @@ type NumKey =
 				</div>
 
 				<div class="pptx-tcf__btns">
-					<button type="button" class="pptx-tcf__btn" [disabled]="!canEdit()" (click)="onMergeRight()">
+					<button
+						type="button"
+						class="pptx-tcf__btn"
+						[disabled]="!canEdit()"
+						(click)="onMergeRight()"
+					>
 						{{ 'pptx.table.mergeRight' | translate }}
 					</button>
-					<button type="button" class="pptx-tcf__btn" [disabled]="!canEdit()" (click)="onMergeDown()">
+					<button
+						type="button"
+						class="pptx-tcf__btn"
+						[disabled]="!canEdit()"
+						(click)="onMergeDown()"
+					>
 						{{ 'pptx.table.mergeDown' | translate }}
 					</button>
 					<button type="button" class="pptx-tcf__btn" [disabled]="!canEdit()" (click)="onSplit()">
@@ -274,6 +283,8 @@ export class TableCellFormattingComponent {
 	readonly elementChange = output<TablePptxElement>();
 
 	private readonly selection = inject(TableSelectionService, { optional: true });
+	/** Optional: absent in a standalone unit test with no viewer-level DI tree. */
+	private readonly recentColors = inject(RecentColorsService, { optional: true });
 
 	protected readonly textToggles: ReadonlyArray<{
 		key: 'bold' | 'italic' | 'underline';
@@ -347,6 +358,31 @@ export class TableCellFormattingComponent {
 		const t = event.target;
 		if (t instanceof HTMLInputElement) {
 			this.updateStyle({ [key]: t.value });
+		}
+	}
+
+	/**
+	 * A `pptx-table-cell-color-field` commit (text colour or fill colour): sets
+	 * both the hex and its ref field, so a theme-swatch pick keeps following
+	 * the deck's theme after a later theme change, and a native pick clears any
+	 * previously-stored ref (the field always emits `ref: undefined` for one).
+	 */
+	protected onColorCommit(
+		hexKey: 'color' | 'backgroundColor',
+		refKey: 'colorRef' | 'backgroundColorRef',
+		commit: ThemeColorPickerCommit,
+	): void {
+		this.updateStyle({ [hexKey]: commit.hex, [refKey]: commit.ref });
+	}
+
+	/**
+	 * Record the committed (native `change`, not the live-preview `input`)
+	 * colour into the shared "Recent colours" list.
+	 */
+	protected pushRecentColor(event: Event): void {
+		const t = event.target;
+		if (t instanceof HTMLInputElement && t.value) {
+			this.recentColors?.push(t.value);
 		}
 	}
 

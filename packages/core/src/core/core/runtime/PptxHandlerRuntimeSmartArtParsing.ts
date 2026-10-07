@@ -6,18 +6,17 @@ import type {
 	PptxSmartArtQuickStyle,
 } from '../../types';
 import type { DiagramRelationshipIds } from '../../utils/diagram-relationship-ids';
+import { collectSmartArtTransitionText } from '../../utils/smartart-connector-labels';
 import { parseSmartArtConnection } from '../../utils/smartart-data-model-attributes';
-import {
-	parseSmartArtDefinitionMetadata,
-	parseSmartArtQuickStyleLabels,
-} from '../../utils/smartart-definition-metadata';
 import { projectSmartArtNodeText } from '../../utils/smartart-node-text-projection';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSmartArtXmlUtils';
 import {
+	drawingTextEmuAttribute,
 	extractDrawingShapeFill,
 	extractDrawingShapeTextStyle,
 } from './smartart-drawing-shape-style';
 import type { DrawingShapeStyleDeps } from './smartart-drawing-shape-style';
+import { buildSmartArtQuickStyle } from './smartart-style-label-refs';
 import { parseSmartArtTextParagraphs, smartArtParagraphsText } from './smartart-text-paragraphs';
 import { resolveSmartArtTextStyles } from './smartart-text-style-resolution';
 
@@ -60,6 +59,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	} {
 		const connectionList = this.xmlLookupService.getChildByLocalName(dataModel, 'cxnLst');
 		const rawConnections = this.xmlLookupService.getChildrenArrayByLocalName(connectionList, 'cxn');
+		// `parTrans`/`sibTrans` points carry the connector text PowerPoint's own
+		// diagram editor lets a user type onto an org-chart relationship line;
+		// resolved here (needs the FULL ptLst, not just content points) and
+		// attached to the connection that references the transition point.
+		const pointList = this.xmlLookupService.getChildByLocalName(dataModel, 'ptLst');
+		const points = this.xmlLookupService.getChildrenArrayByLocalName(pointList, 'pt');
+		const transitionTextById = collectSmartArtTransitionText(points, (point) => {
+			const values: string[] = [];
+			this.collectLocalTextValues(point, 't', values);
+			return values.join('');
+		});
 		const parentByNodeId = new Map<string, string>();
 		const parsedConnections: PptxSmartArtConnection[] = [];
 
@@ -68,8 +78,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			if (!parsed) {
 				return;
 			}
-			parsedConnections.push(parsed);
-			if (!parentByNodeId.has(parsed.destId)) {
+			const transitionId = parsed.parentTransitionId ?? parsed.siblingTransitionId;
+			const label = transitionId ? transitionTextById.get(transitionId) : undefined;
+			parsedConnections.push(label ? { ...parsed, label } : parsed);
+			// `parOf` (the schema default when `@_type` is omitted, per ECMA-376
+			// CT_Cxn) is the only connection type expressing a data-graph
+			// parent/child edge; without this check a `presOf`/`presParOf`/
+			// `sibTrans` connection sharing the same `destId` space could shadow
+			// a genuine `parOf` edge depending on document order, instead of
+			// relying on incidental id-space separation.
+			const isParentChildEdge = !parsed.type || parsed.type === 'parOf';
+			if (isParentChildEdge && !parentByNodeId.has(parsed.destId)) {
 				parentByNodeId.set(parsed.destId, parsed.sourceId);
 			}
 		});
@@ -100,32 +119,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			}
 
 			const localName = (key: string) => this.compatibilityService.getXmlLocalName(key);
-			const metadata = parseSmartArtDefinitionMetadata(styleDef, localName);
-			const labels = parseSmartArtQuickStyleLabels(styleDef, localName);
-			const name =
-				metadata.titles?.[0]?.value ||
-				String(styleDef['@_title'] || styleDef['@_uniqueId'] || '').trim() ||
-				undefined;
-
-			let effectIntensity: string | undefined;
 			const styleLbls = this.xmlLookupService.getChildrenArrayByLocalName(styleDef, 'styleLbl');
-			for (const lbl of styleLbls) {
-				const lblName = String(lbl?.['@_name'] || '').toLowerCase();
-				if (lblName.includes('intense') || lblName.includes('3d')) {
-					effectIntensity = 'intense';
-					break;
-				}
-				if (lblName.includes('moderate') || lblName.includes('semi')) {
-					effectIntensity = 'moderate';
-					break;
-				}
-				if (lblName.includes('subtle') || lblName.includes('flat')) {
-					effectIntensity = 'subtle';
-					break;
-				}
-			}
-
-			return { ...metadata, name, effectIntensity, labels };
+			// G13: theme-resolved fill/line/effect/font per label, instead of only
+			// the coarse subtle/moderate/intense enum.
+			return buildSmartArtQuickStyle(styleDef, localName, styleLbls, {
+				resolveThemeFillRef: this.resolveThemeFillRef.bind(this),
+				resolveThemeLineRef: this.resolveThemeLineRef.bind(this),
+				resolveThemeEffectRef: this.resolveThemeEffectRef.bind(this),
+				resolveThemeTypeface: this.resolveThemeTypeface.bind(this),
+			});
 		} catch {
 			return undefined;
 		}
@@ -191,16 +193,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const y = Math.round(parseInt(String(off['@_y'] || '0'), 10) / emuPerPx);
 		const width = Math.round(parseInt(String(ext['@_cx'] || '0'), 10) / emuPerPx);
 		const height = Math.round(parseInt(String(ext['@_cy'] || '0'), 10) / emuPerPx);
-		if (width <= 0 || height <= 0) {
-			return null;
-		}
 
 		const rotation = xfrm?.['@_rot'] ? parseInt(String(xfrm['@_rot']), 10) / 60000 : undefined;
+		const flipHorizontal = ['1', 'true'].includes(String(xfrm?.['@_flipH'] ?? '').toLowerCase());
+		const flipVertical = ['1', 'true'].includes(String(xfrm?.['@_flipV'] ?? '').toLowerCase());
 		const skewX = xfrm?.['@_skewX'] ? parseInt(String(xfrm['@_skewX']), 10) / 60000 : undefined;
 		const skewY = xfrm?.['@_skewY'] ? parseInt(String(xfrm['@_skewY']), 10) / 60000 : undefined;
 
 		const prstGeom = this.xmlLookupService.getChildByLocalName(spPr, 'prstGeom');
 		const custGeom = this.xmlLookupService.getChildByLocalName(spPr, 'custGeom');
+		const shapeAdjustments = prstGeom ? this.parseGeometryAdjustments(prstGeom) : undefined;
 		let shapeType = prstGeom ? String(prstGeom['@_prst'] || 'rect') : 'rect';
 		let customGeometry: PptxCustomPathProperties = {};
 		if (custGeom) {
@@ -224,6 +226,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			}
 		}
 
+		// A zero-width or zero-height cached shape is normally a producer's
+		// stale/degenerate frame extent and gets dropped. `line` preset geometry
+		// (ECMA-376 Part 1 20.1.9.18) is the one legitimate exception: PowerPoint's
+		// built-in Timeline layout, among others, caches connector rails/stems as a
+		// `line` with zero height or width by design.
+		if ((width <= 0 || height <= 0) && shapeType !== 'line') {
+			return null;
+		}
+
 		// Fills (solid / gradient / pattern / picture) + outer shadow. Built-in
 		// SmartArt layouts routinely use non-solid fills; reading only solidFill
 		// flattened them to plain boxes (issue #73).
@@ -245,10 +256,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 		const text = textValues.join('').trim() || undefined;
 
-		const { fontSize, fontColor } = extractDrawingShapeTextStyle(
-			txBody,
-			this.drawingShapeStyleDeps(),
-		);
+		const textStyle = extractDrawingShapeTextStyle(txBody, this.drawingShapeStyleDeps(), emuPerPx);
+		const { fontSize, fontColor } = textStyle;
+		const txXfrm = this.xmlLookupService.getChildByLocalName(sp, 'txXfrm');
+		const txOff = this.xmlLookupService.getChildByLocalName(txXfrm, 'off');
+		const txExt = this.xmlLookupService.getChildByLocalName(txXfrm, 'ext');
+		const textFrameX = drawingTextEmuAttribute(txOff, 'x', emuPerPx);
+		const textFrameY = drawingTextEmuAttribute(txOff, 'y', emuPerPx);
+		const textFrameWidth = drawingTextEmuAttribute(txExt, 'cx', emuPerPx);
+		const textFrameHeight = drawingTextEmuAttribute(txExt, 'cy', emuPerPx);
 		const paragraphs = txBody
 			? resolveSmartArtTextStyles(parseSmartArtTextParagraphs({ 'dgm:t': txBody }), (rPr) =>
 					this.extractTextRunStyle(rPr, undefined, undefined, false),
@@ -281,16 +297,22 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			width,
 			height,
 			rotation,
+			flipHorizontal,
+			flipVertical,
 			skewX,
 			skewY,
+			shapeAdjustments,
 			...fill,
 			fillColor: fill.fillColor ?? undefined,
 			strokeColor: strokeColor ?? undefined,
 			strokeWidth,
 			text: structuredText,
 			textSegments,
-			fontSize,
-			fontColor,
+			...textStyle,
+			textFrameX,
+			textFrameY,
+			textFrameWidth,
+			textFrameHeight,
 			...customGeometry,
 		};
 	}
@@ -303,6 +325,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	private drawingShapeStyleDeps(): DrawingShapeStyleDeps {
 		return {
 			getChild: (node, local) => this.xmlLookupService.getChildByLocalName(node, local),
+			hasChild: (node, local) => this.xmlLookupService.hasChildByLocalName(node, local),
 			getChildren: (node, local) => this.xmlLookupService.getChildrenArrayByLocalName(node, local),
 			parseColor: (node) => this.parseColor(node),
 			extractGradientStops: (gradFill) => this.extractGradientStops(gradFill),

@@ -20,22 +20,24 @@ import { setSmartArtNodeStyle } from 'pptx-viewer-core';
 import {
 	buildSmartArtA11y,
 	computeInlineEditorRect,
-	computeSmartArtLayout,
+	computeSmartArtElementLayout,
 	flattenNodes,
 	rebuildDrawingShapesIfCleared,
-	resolveDrawingShapeNodeId,
-	revealedSmartArtNodeCount,
+	resolveRevealedDrawingShapeNodeIds,
+	resolveRevealedDrawingShapes,
+	resolveRevealedSmartArtNodes,
 } from '../internal/shared';
 import type {
 	ElementAnimationState,
 	InlineEditRect,
 	RenderedNode,
 	SmartArtA11y,
+	SmartArtConnectorPaint,
 	SmartArtLayoutResult,
+	SmartArtNodeLabel,
 } from '../internal/shared';
 import { EditorStateService } from './editor-state.service';
 import type { StyleMap } from './element-style';
-import { getContainerStyle } from './element-style';
 import { SLIDE_CONTEXT } from './slide-context';
 import {
 	buildChromeStyle,
@@ -47,13 +49,14 @@ import {
 import type { DrawingViewBox, RenderedShape } from './smart-art-drawing';
 import {
 	beginNodeEdit,
+	canEditSmartArtNodes,
 	commitNodeText,
 	findOwningSlideIndex,
-	nodeIdFromKey,
 } from './smart-art-inline-edit';
 import type { InlineEditState } from './smart-art-inline-edit';
 import {
-	computeTextLines,
+	layoutConnectorPaints,
+	layoutNodeLabels,
 	narrowToCircle,
 	narrowToPolygon,
 	narrowToRect,
@@ -73,346 +76,25 @@ import {
  *     `RenderedConnector[]` view-models. Every binding renders the same
  *     geometry; this maps those view-models to SVG exactly as Vue does.
  *  3. **Placeholder** -- when there is neither data nor any nodes/shapes.
+ *
+ * Positioning is NOT this component's job: its chrome root fills the positioned,
+ * element-id bearing box its host draws (the element dispatcher, the 3D
+ * renderer's fallback branch, or a preview stage), the same contract the chart
+ * and table renderers follow. Owning `left`/`top` here too offset the diagram
+ * twice, and stamping the element id on this root hid the host's marked node
+ * from anything reading the element contract by id.
  */
 @Component({
 	selector: 'pptx-smart-art-renderer',
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
 	imports: [NgStyle, TranslatePipe],
-	template: `
-		<div
-			class="pptx-ng-element pptx-ng-smartart"
-			[ngStyle]="containerStyle()"
-			[attr.data-element-id]="element().id"
-		>
-			<div
-				#smartartContainer
-				class="pptx-ng-smartart-chrome"
-				[ngStyle]="chromeStyle()"
-				[attr.role]="a11y() ? a11y()!.role : null"
-				[attr.aria-label]="a11y()?.label ?? null"
-				(mousemove)="onMouseMove($event)"
-				(mouseleave)="onMouseLeave()"
-			>
-				@if (isEmpty()) {
-					<div class="pptx-ng-smartart-placeholder">
-						{{ 'pptx.smartArt.placeholder' | translate }}
-					</div>
-				} @else if (hasDrawingShapes()) {
-					<svg
-						class="pptx-ng-smartart-svg"
-						data-testid="smartart-drawing-shapes"
-						[attr.viewBox]="svgViewBox()"
-						preserveAspectRatio="xMidYMid meet"
-					>
-						@for (shape of renderedShapes(); track shape.key; let i = $index) {
-							<g
-								[ngStyle]="shadowFilter() ? { filter: shadowFilter() } : {}"
-								[attr.data-smartart-node-id]="drawingShapeNodeIds()[i] ?? null"
-								[class.pptx-ng-smartart-node--editable]="
-									canEditNodes() && !!drawingShapeNodeIds()[i]
-								"
-							>
-								@if (shape.isEllipse) {
-									<ellipse
-										[attr.cx]="shape.cx"
-										[attr.cy]="shape.cy"
-										[attr.rx]="shape.width / 2"
-										[attr.ry]="shape.height / 2"
-										[attr.fill]="shape.fill"
-										[attr.stroke]="shape.stroke"
-										[attr.stroke-width]="shape.strokeWidth"
-										[attr.transform]="shape.transform ?? null"
-									/>
-								} @else {
-									<rect
-										[attr.x]="shape.x"
-										[attr.y]="shape.y"
-										[attr.width]="shape.width"
-										[attr.height]="shape.height"
-										[attr.rx]="shape.rx"
-										[attr.fill]="shape.fill"
-										[attr.stroke]="shape.stroke"
-										[attr.stroke-width]="shape.strokeWidth"
-										[attr.transform]="shape.transform ?? null"
-									/>
-								}
-								@if (shape.text) {
-									<text
-										[attr.x]="shape.textX"
-										text-anchor="middle"
-										dominant-baseline="central"
-										[attr.fill]="shape.fontColor"
-										[attr.font-size]="shape.fontSize"
-									>
-										@for (line of textLines(shape.text, shape.fontSize); track $index) {
-											<tspan [attr.x]="shape.textX" [attr.y]="shape.textY + line.offsetY">
-												{{ line.text }}
-											</tspan>
-										}
-									</text>
-								}
-							</g>
-						}
-					</svg>
-				} @else if (hasLayout()) {
-					<svg
-						class="pptx-ng-smartart-svg"
-						[attr.data-testid]="'smartart-' + layout().family"
-						[attr.viewBox]="layout().viewBox"
-						preserveAspectRatio="xMidYMid meet"
-						[attr.data-layout-family]="layout().family"
-					>
-						@for (conn of layout().connectors; track conn.key) {
-							<path
-								[attr.d]="conn.d"
-								fill="none"
-								stroke="#94a3b8"
-								stroke-width="1.5"
-								opacity="0.5"
-							/>
-						}
-						@for (node of layout().nodes; track node.key) {
-							<g
-								[ngStyle]="shadowFilter() ? { filter: shadowFilter() } : {}"
-								[class.pptx-ng-smartart-node--editable]="canEditNodes()"
-								[attr.tabindex]="canEditNodes() ? 0 : null"
-								[attr.role]="canEditNodes() ? 'button' : 'img'"
-								[attr.aria-label]="nodeAriaLabel(node) ?? node.text"
-								[attr.data-smartart-node-id]="nodeKeyId(node)"
-								(dblclick)="onNodeDblClick($event, node)"
-								(keydown)="onNodeKeydown($event, node)"
-							>
-								@if (nodeAriaLabel(node); as title) {
-									<title>{{ title }}</title>
-								}
-								@if (asCircle(node); as c) {
-									<circle
-										[attr.cx]="c.cx"
-										[attr.cy]="c.cy"
-										[attr.r]="c.r"
-										[attr.fill]="c.fill"
-										[attr.stroke]="c.stroke"
-										[attr.stroke-width]="c.strokeWidth"
-										[attr.opacity]="c.opacity"
-									/>
-									<text
-										[attr.x]="c.cx"
-										text-anchor="middle"
-										dominant-baseline="central"
-										fill="white"
-										[attr.font-size]="c.fontSize"
-									>
-										@for (line of textLines(c.text, c.fontSize); track $index) {
-											<tspan [attr.x]="c.cx" [attr.y]="c.cy + line.offsetY">{{ line.text }}</tspan>
-										}
-									</text>
-								} @else if (asPolygon(node); as p) {
-									<polygon
-										[attr.points]="p.points"
-										[attr.fill]="p.fill"
-										[attr.stroke]="p.stroke"
-										[attr.stroke-width]="p.strokeWidth"
-										[attr.opacity]="p.opacity"
-									/>
-									<text
-										[attr.x]="p.textX"
-										text-anchor="middle"
-										dominant-baseline="central"
-										fill="white"
-										[attr.font-size]="p.fontSize"
-									>
-										@for (line of textLines(p.text, p.fontSize); track $index) {
-											<tspan [attr.x]="p.textX" [attr.y]="p.textY + line.offsetY">
-												{{ line.text }}
-											</tspan>
-										}
-									</text>
-								} @else if (asRect(node); as r) {
-									<rect
-										[attr.x]="r.x"
-										[attr.y]="r.y"
-										[attr.width]="r.width"
-										[attr.height]="r.height"
-										[attr.rx]="r.rx"
-										[attr.fill]="r.fill"
-										[attr.stroke]="r.stroke"
-										[attr.stroke-width]="r.strokeWidth"
-										[attr.opacity]="r.opacity"
-									/>
-									<text
-										[attr.x]="r.textX"
-										text-anchor="middle"
-										dominant-baseline="central"
-										fill="white"
-										[attr.font-size]="r.fontSize"
-									>
-										@for (line of textLines(r.text, r.fontSize); track $index) {
-											<tspan [attr.x]="r.textX" [attr.y]="r.textY + line.offsetY">
-												{{ line.text }}
-											</tspan>
-										}
-									</text>
-								}
-							</g>
-						}
-					</svg>
-				} @else {
-					<div class="pptx-ng-smartart-placeholder">
-						{{ 'pptx.smartArt.placeholder' | translate }}
-					</div>
-				}
-
-				@if (canEditNodes() && hoveredNodeId() && !editState() && styleBarStyle()) {
-					<div
-						#styleBar
-						class="pptx-ng-smartart-style-bar"
-						[ngStyle]="styleBarStyle()!"
-						(mousedown)="$event.stopPropagation()"
-						(click)="$event.stopPropagation()"
-					>
-						@for (color of palette().slice(0, 6); track color) {
-							<button
-								type="button"
-								class="pptx-ng-smartart-swatch"
-								data-pptx-compact
-								[attr.aria-label]="'pptx.smartArt.setFill' | translate: { color: color }"
-								[style.background]="color"
-								(click)="handleChangeNodeStyle(hoveredNodeId()!, color)"
-							></button>
-						}
-					</div>
-				}
-
-				<!--
-					Inline node-text editor. Positioned in element-local px (== viewBox
-					units, since the SVG viewBox matches the element pixel size and the
-					svg fills the chrome) over the double-clicked node. Commits via the
-					shared EditorStateService.updateElement path on Enter / blur.
-				-->
-				@if (editState(); as edit) {
-					<textarea
-						#nodeEditor
-						class="pptx-ng-smartart-node-editor"
-						[style.left.px]="edit.box.x"
-						[style.top.px]="edit.box.y"
-						[style.width.px]="edit.box.width"
-						[style.height.px]="edit.box.height"
-						[value]="edit.text"
-						(pointerdown)="$event.stopPropagation()"
-						(mousedown)="$event.stopPropagation()"
-						(click)="$event.stopPropagation()"
-						(dblclick)="$event.stopPropagation()"
-						(blur)="commitEdit($event)"
-						(keydown)="onEditorKeydown($event)"
-					></textarea>
-				}
-
-				<!-- Polite live region: announces node-text edit commits to AT. -->
-				<span class="pptx-ng-sr-only" aria-live="polite" role="status">{{ liveMessage() }}</span>
-			</div>
-		</div>
-	`,
-	styles: `
-		.pptx-ng-smartart-chrome {
-			box-sizing: border-box;
-			overflow: hidden;
-			position: relative;
-		}
-
-		.pptx-ng-smartart-svg {
-			width: 100%;
-			height: 100%;
-			pointer-events: none;
-		}
-
-		/* Editable nodes accept pointer + keyboard interaction for inline editing. */
-		.pptx-ng-smartart-node--editable {
-			pointer-events: auto;
-			cursor: text;
-		}
-
-		/* Hover ring: outline does not render on SVG <g> elements in all browsers,
-		   so drop-shadow is used as the visual confirmation that a node is editable. */
-		.pptx-ng-smartart-node--editable:hover {
-			filter: drop-shadow(0 0 2px rgba(96, 165, 250, 0.8));
-		}
-
-		.pptx-ng-smartart-node-editor {
-			position: absolute;
-			box-sizing: border-box;
-			margin: 0;
-			padding: 1px 2px;
-			border: 1px solid var(--pptx-inspector-active, #0078d4);
-			border-radius: 2px;
-			background: #fff;
-			color: #111;
-			font-size: 11px;
-			line-height: 1.1;
-			text-align: center;
-			resize: none;
-			overflow: hidden;
-			z-index: 2;
-		}
-
-		.pptx-ng-smartart-placeholder {
-			width: 100%;
-			height: 100%;
-			display: flex;
-			align-items: center;
-			justify-content: center;
-			font-size: 11px;
-			color: rgba(255, 255, 255, 0.8);
-			pointer-events: none;
-		}
-
-		/* Visually hidden but available to assistive technology. */
-		.pptx-ng-sr-only {
-			position: absolute;
-			width: 1px;
-			height: 1px;
-			padding: 0;
-			margin: -1px;
-			overflow: hidden;
-			clip: rect(0, 0, 0, 0);
-			white-space: nowrap;
-			border: 0;
-		}
-
-		.pptx-ng-smartart-style-bar {
-			position: absolute;
-			pointer-events: auto;
-			display: flex;
-			gap: 6px;
-			padding: 6px 8px;
-			background: rgba(255, 255, 255, 0.9);
-			border: 1px solid var(--border, #e2e8f0);
-			border-radius: 9999px;
-			box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-		}
-
-		/* Sized generously (not the historical 14px) because this popover lives
-		   inside the slide canvas's zoom transform: at typical zoom-out levels a
-		   small swatch shrinks to just a few real on-screen pixels and becomes
-		   nearly unclickable. */
-		.pptx-ng-smartart-swatch {
-			width: 20px;
-			height: 20px;
-			border-radius: 50%;
-			border: 1px solid rgba(0, 0, 0, 0.1);
-			cursor: pointer;
-			transition: transform 0.1s;
-		}
-
-		.pptx-ng-smartart-swatch:hover {
-			transform: scale(1.25);
-		}
-	`,
+	templateUrl: './smart-art-renderer.component.html',
+	styleUrl: './smart-art-renderer.component.css',
 })
 export class SmartArtRendererComponent {
 	/** The smartArt element to render. Must be `type === 'smartArt'`. */
 	readonly element = input.required<PptxElement>();
-	readonly zIndex = input<number>(0);
 
 	/**
 	 * Whether inline on-canvas node-text editing is enabled. False in
@@ -468,7 +150,9 @@ export class SmartArtRendererComponent {
 	private editSettled = false;
 
 	/** Whether node double-click / Enter enters inline edit (editable + has editor). */
-	readonly canEditNodes = computed(() => this.editable() && this.editor !== null);
+	readonly canEditNodes = computed(() =>
+		canEditSmartArtNodes(this.editable(), this.editor !== null, this.element()),
+	);
 
 	constructor() {
 		inject(DestroyRef).onDestroy(() => this.cancelPendingHide());
@@ -495,10 +179,6 @@ export class SmartArtRendererComponent {
 		return el.type === 'smartArt' ? el.smartArtData : undefined;
 	});
 
-	readonly containerStyle = computed<StyleMap>(() =>
-		getContainerStyle(this.element(), this.zIndex()),
-	);
-
 	readonly chromeStyle = computed<StyleMap>(() => buildChromeStyle(this.smartArtData()?.chrome));
 
 	readonly palette = computed<string[]>(() => resolvePalette(this.smartArtData()));
@@ -516,38 +196,28 @@ export class SmartArtRendererComponent {
 	// ── Staged diagram build (p:bldDgm) reveal ──────────────────────────────
 	//
 	// When an active native animation carries a staged diagram build, reveal only
-	// the leading nodes / drawing shapes for the current progress; the view box is
-	// still computed from the FULL shape set so the diagram does not rescale.
+	// the leading nodes / drawing shapes for the current progress, preferring the
+	// AUTHORED per-node `p:graphicEl/@id` reveal set (animationState().diagramReveal)
+	// over the click-count estimate when available; the view box is still computed
+	// from the FULL shape set so the diagram does not rescale.
 
-	private readonly diagramBuild = computed(() => {
-		const build = this.animationState()?.build;
-		return build?.kind === 'diagram' ? build : undefined;
-	});
-
-	private readonly shownNodeCount = computed(() => {
-		const build = this.diagramBuild();
-		return build ? revealedSmartArtNodeCount(this.nodes(), build) : this.nodes().length;
-	});
-
-	private readonly isPartialBuild = computed(
-		() => this.diagramBuild() !== undefined && this.shownNodeCount() < this.nodes().length,
+	private readonly diagramReveal = computed(() =>
+		resolveRevealedSmartArtNodes(
+			this.nodes(),
+			this.animationState(),
+			this.smartArtData()?.presLayoutVars,
+		),
 	);
 
 	/** Leading node prefix revealed so far (full list when no partial build). */
-	private readonly revealedNodes = computed(() =>
-		this.isPartialBuild() ? this.nodes().slice(0, this.shownNodeCount()) : this.nodes(),
-	);
+	private readonly revealedNodes = computed(() => this.diagramReveal().nodes);
 
-	/** Leading drawing-shape prefix revealed so far (proportional to nodes). */
+	/** Revealed drawing-shape subset, preferring the authored node-id set. */
 	private readonly revealedShapeList = computed(() => {
 		const shapes = this.rawDrawingShapes();
-		if (!this.isPartialBuild() || shapes.length === 0) {
-			return shapes;
-		}
-		const count = Math.ceil(
-			(this.shownNodeCount() / Math.max(this.nodes().length, 1)) * shapes.length,
-		);
-		return shapes.slice(0, count);
+		return shapes.length === 0
+			? shapes
+			: resolveRevealedDrawingShapes(shapes, this.nodes(), this.animationState());
 	});
 
 	private readonly viewBox = computed<DrawingViewBox>(() =>
@@ -574,33 +244,54 @@ export class SmartArtRendererComponent {
 	 * Node id for each drawing shape (index-aligned with `renderedShapes`).
 	 * Used to tag `<g>` elements with `data-smartart-node-id` so the 3D
 	 * renderer's hit-test overlay can resolve a click to a node.
+	 *
+	 * Aligned with the REVEALED subset `renderedShapes` projects: during a staged
+	 * `p:bldDgm` build that differs from the full list, and indexing the full
+	 * list's ids by rendered position stamped the first node's id onto whichever
+	 * shape the authored reveal showed first (Gamma carried Alpha's id).
 	 */
-	readonly drawingShapeNodeIds = computed<(string | undefined)[]>(() => {
-		const shapes = this.rawDrawingShapes();
-		const nodes = this.nodes();
-		return shapes.map((shape, i) => resolveDrawingShapeNodeId(shape, i, shapes, nodes));
-	});
+	readonly drawingShapeNodeIds = computed<(string | undefined)[]>(() =>
+		resolveRevealedDrawingShapeNodeIds(
+			this.rawDrawingShapes(),
+			this.revealedShapeList(),
+			this.nodes(),
+		),
+	);
 
 	// ── Shared SVG-fallback engine (no drawing shapes) ──────────────────────
 
 	readonly layout = computed<SmartArtLayoutResult>(() => {
 		const el = this.element();
 		const data = this.smartArtData();
-		return computeSmartArtLayout(
+		return computeSmartArtElementLayout(
+			data ?? {},
 			this.revealedNodes(),
 			{ width: Math.max(el.width, 1), height: Math.max(el.height, 1) },
 			this.palette(),
 			this.artStyle(),
 			el.id,
-			data?.resolvedLayoutType,
-			data?.layout,
-			undefined,
-			data?.layoutDefinition,
-			data?.presLayoutVars,
 		);
 	});
 
 	readonly hasLayout = computed(() => this.layout().nodes.length > 0);
+
+	// ── Fallback-layout label / connector paint (shared decisions) ──────────
+	//
+	// `RenderedNode` / `RenderedConnector` carry OPTIONAL paint and placement
+	// fields (per-node font colour / weight / style, off-centre label anchors,
+	// per-connector stroke / width / opacity / dash). This template used to
+	// hardcode `fill="white"` and park circle labels on `cx`/`cy`, so target
+	// leader captions, gear legend rows and timeline captions all sat on the
+	// node centre. Both descriptors below are resolved once per layout by the
+	// shared decision functions; the template binds them and computes nothing.
+
+	/** Label descriptors, index-aligned with `layout().nodes`. */
+	readonly layoutLabels = computed<SmartArtNodeLabel[]>(() => layoutNodeLabels(this.layout()));
+
+	/** Connector paint, index-aligned with `layout().connectors`. */
+	readonly layoutConnectors = computed<SmartArtConnectorPaint[]>(() =>
+		layoutConnectorPaints(this.layout()),
+	);
 
 	// ── Accessibility view-model (shared) ───────────────────────────────────
 
@@ -624,17 +315,32 @@ export class SmartArtRendererComponent {
 	});
 
 	/**
-	 * Parsed data-model node id for a rendered node (or `null` when the key does
-	 * not map to one). Exposed as a method so the template can use it: Angular
-	 * AOT templates can only call component members, not imported functions.
+	 * Source node ids in fallback render order, index-aligned with
+	 * `layout().nodes`. The layout engine walks the node tree depth-first, so
+	 * flattening it is the mapping every binding uses.
+	 *
+	 * This component used to parse the id back out of the rendered node's `key`
+	 * instead, which broke on any family whose key carries an extra segment: the
+	 * gear legend's `<id>-gear-extra-<nodeId>-<i>` resolved to `extra-<nodeId>`,
+	 * so its `data-smartart-node-id` did not match any model node and an inline
+	 * edit on a legend row committed nowhere.
 	 */
-	nodeKeyId(node: RenderedNode): string | null {
-		return nodeIdFromKey(node.key, this.element().id);
+	readonly layoutNodeIds = computed<(string | undefined)[]>(() =>
+		flattenNodes(this.revealedNodes()).map((node) => node.id),
+	);
+
+	/**
+	 * Data-model node id for the rendered node at `index` (or `null`). Exposed
+	 * as a method so the template can use it: Angular AOT templates can only
+	 * call component members, not imported functions.
+	 */
+	nodeIdAt(index: number): string | null {
+		return this.layoutNodeIds()[index] ?? null;
 	}
 
-	/** Resolve the accessibility label for a rendered node (by parsed node id). */
-	nodeAriaLabel(node: RenderedNode): string | null {
-		const nodeId = this.nodeKeyId(node);
+	/** Resolve the accessibility label for the rendered node at `index`. */
+	nodeAriaLabel(index: number): string | null {
+		const nodeId = this.nodeIdAt(index);
 		if (nodeId === null) {
 			return null;
 		}
@@ -654,27 +360,26 @@ export class SmartArtRendererComponent {
 	protected readonly asCircle = narrowToCircle;
 	protected readonly asPolygon = narrowToPolygon;
 	protected readonly asRect = narrowToRect;
-	protected readonly textLines = computeTextLines;
 
 	// ── Inline node-text editing ───────────────────────────────────────────
 
 	/** Double-click a node enters inline edit mode (when editable). */
-	onNodeDblClick(event: Event, node: RenderedNode): void {
+	onNodeDblClick(event: Event, node: RenderedNode, index: number): void {
 		if (!this.canEditNodes()) {
 			return;
 		}
 		event.stopPropagation();
-		this.enterEdit(node);
+		this.enterEdit(node, index);
 	}
 
 	/** Enter / F2 on a focused node enters inline edit mode (when editable). */
-	onNodeKeydown(event: KeyboardEvent, node: RenderedNode): void {
+	onNodeKeydown(event: KeyboardEvent, node: RenderedNode, index: number): void {
 		if (!this.canEditNodes() || (event.key !== 'Enter' && event.key !== 'F2')) {
 			return;
 		}
 		event.preventDefault();
 		event.stopPropagation();
-		this.enterEdit(node);
+		this.enterEdit(node, index);
 	}
 
 	/** Commit the current edit (called on blur). */
@@ -708,18 +413,18 @@ export class SmartArtRendererComponent {
 	}
 
 	/** Resolve the node id + geometry and open the editor seeded with full text. */
-	private enterEdit(node: RenderedNode): void {
+	private enterEdit(node: RenderedNode, index: number): void {
 		this.editSettled = false;
-		const elementId = this.element().id;
-		const seed = beginNodeEdit(node, elementId, this.rawNodeText(node));
+		const nodeId = this.nodeIdAt(index);
+		const seed = beginNodeEdit(node, this.element().id, this.rawNodeText(node, index), nodeId);
 		if (seed) {
 			this.editState.set(seed);
 		}
 	}
 
 	/** The node's full (untruncated) data-model text, falling back to rendered text. */
-	private rawNodeText(node: RenderedNode): string {
-		const nodeId = this.nodeKeyId(node);
+	private rawNodeText(node: RenderedNode, index: number): string {
+		const nodeId = this.nodeIdAt(index);
 		if (nodeId === null) {
 			return node.text;
 		}

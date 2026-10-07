@@ -7,11 +7,15 @@ import type {
 	PptxPhotoAlbum,
 	PptxPresentationProperties,
 	PptxSection,
+	PptxSlideSize,
+	PptxTextStyleLevels,
 	XmlObject,
 } from '../../types';
 import { applyKinsokuToXml } from '../../utils/kinsoku-parser';
+import { applyPresentationDefaultTextStyle } from '../../utils/master-text-style-writer';
 import { applyCustomShows, applySections } from '../../utils/presentation-collections';
 import type { PptxSlideReferenceRemap } from '../../utils/presentation-collections';
+import { PRESENTATION_CHILD_ORDER, reorderObjectKeysByLocalName } from '../../utils/xml-reorder';
 
 export interface PptxPresentationSaveBuilderOptions {
 	headerFooter?: PptxHeaderFooter;
@@ -21,6 +25,16 @@ export interface PptxPresentationSaveBuilderOptions {
 	photoAlbum?: PptxPhotoAlbum;
 	kinsoku?: PptxKinsoku | null;
 	modifyVerifier?: PptxModifyVerifier | null;
+	/**
+	 * Slide dimensions to write instead of the load-time ones. Only the
+	 * fields that are present override; a missing `type` keeps whatever the
+	 * loaded `p:sldSz` carried, and an explicitly empty string removes it.
+	 */
+	slideSize?: PptxSlideSize;
+	/** `p:presentation/@embedTrueTypeFonts` to write. `undefined` preserves the loaded value. */
+	embedTrueTypeFonts?: boolean;
+	/** `p:defaultTextStyle` level edits to merge in. `undefined` preserves the loaded value. */
+	defaultTextStyle?: PptxTextStyleLevels;
 }
 
 export interface PptxPresentationSaveBuildInput {
@@ -55,11 +69,16 @@ export class PptxPresentationSaveBuilder implements IPptxPresentationSaveBuilder
 		}
 
 		this.applyHeaderFooter(presentation, init.options?.headerFooter);
+		const requested = init.options?.slideSize;
 		this.applySlideDimensions(
 			presentation,
-			init.rawSlideWidthEmu,
-			init.rawSlideHeightEmu,
-			init.rawSlideSizeType,
+			requested?.widthEmu !== undefined && requested.widthEmu > 0
+				? requested.widthEmu
+				: init.rawSlideWidthEmu,
+			requested?.heightEmu !== undefined && requested.heightEmu > 0
+				? requested.heightEmu
+				: init.rawSlideHeightEmu,
+			requested?.type !== undefined ? requested.type : init.rawSlideSizeType,
 		);
 		applyCustomShows(
 			presentation,
@@ -76,8 +95,28 @@ export class PptxPresentationSaveBuilder implements IPptxPresentationSaveBuilder
 		this.applyPhotoAlbum(presentation, init.options?.photoAlbum);
 		presentation = this.applyKinsoku(presentation, init.options?.kinsoku);
 		this.applyModifyVerifier(presentation, init.options?.modifyVerifier);
+		this.applyEmbedTrueTypeFonts(presentation, init.options?.embedTrueTypeFonts);
+		if (init.options?.defaultTextStyle) {
+			applyPresentationDefaultTextStyle(presentation, init.options.defaultTextStyle);
+		}
 
-		init.presentationData[rootKey ?? 'p:presentation'] = presentation;
+		// Every mutation above (and any earlier surgical edit that assigned a
+		// key directly, e.g. `presentation['p:photoAlbum'] = pa`) can only
+		// APPEND a freshly-introduced child at the end of the object's key
+		// order. CT_Presentation (S19.2.1.26) is a strict `xsd:sequence`, so a
+		// child introduced after `p:extLst` (or after any later sibling) is
+		// schema-invalid and can trigger PowerPoint's repair dialog. Re-assert
+		// the canonical order unconditionally as the final step: for a file
+		// whose children were already correctly ordered this is a no-op
+		// (the reorder only reshuffles, never drops or renames), and
+		// for one where an edit above just introduced or repositioned a child,
+		// it puts every recognised child back in schema order. Unknown keys
+		// (attributes, and any child this table does not know about) keep
+		// their original relative order, appended after the recognised ones.
+		init.presentationData[rootKey ?? 'p:presentation'] = reorderObjectKeysByLocalName(
+			presentation,
+			PRESENTATION_CHILD_ORDER,
+		);
 		return init.presentationData;
 	}
 
@@ -86,15 +125,19 @@ export class PptxPresentationSaveBuilder implements IPptxPresentationSaveBuilder
 		_headerFooter: PptxHeaderFooter | undefined,
 	): void {
 		// `<p:hf>` is not a valid child of `<p:presentation>` per the OOXML
-		// schema (ECMA-376 CT_Presentation) — it belongs on slide masters,
-		// notes masters, handout masters, and slides. Emitting it here
+		// schema (ECMA-376 CT_Presentation): it belongs on slide masters,
+		// notes masters, handout masters and slide layouts. Emitting it here
 		// produces `Sch_InvalidElementContentExpectingComplex` and triggers
-		// PowerPoint's file-corruption / repair dialog on open.
+		// PowerPoint's file-corruption / repair dialog on open. So all this
+		// step does is strip any `p:hf` a prior (broken) save left at the
+		// presentation root.
 		//
-		// Strip any existing `p:hf` that a prior (broken) save may have left
-		// at the presentation root. Header/footer settings applied through
-		// the UI are intentionally a no-op at the presentation level until
-		// proper slide-master-level support is implemented.
+		// The dialog's state is NOT discarded any more: the save pipeline
+		// applies it to every slide master through `applyHeaderFooterToMaster`
+		// (`runtime/header-footer-parts.ts`), which is where PowerPoint keeps
+		// both the flags and the footer/date text. The parameter stays on this
+		// signature so the option's shape is visible at the presentation
+		// level, where callers pass it.
 		if (presentation['p:hf'] !== undefined) {
 			delete presentation['p:hf'];
 		}
@@ -122,10 +165,15 @@ export class PptxPresentationSaveBuilder implements IPptxPresentationSaveBuilder
 		}
 		if (rawSlideSizeType) {
 			slideSize['@_type'] = rawSlideSizeType;
+		} else if (rawSlideSizeType === '') {
+			// An explicitly empty type means "no preset": drop the attribute so
+			// the schema default (`custom`) applies, which is what PowerPoint
+			// itself emits for a hand-sized deck.
+			delete slideSize['@_type'];
 		}
 
 		// Preserve p:notesSz (already present in presentation XML from load)
-		// No modification needed — we just ensure it stays in the tree.
+		// No modification needed - we just ensure it stays in the tree.
 	}
 
 	private applyPhotoAlbum(presentation: XmlObject, photoAlbum: PptxPhotoAlbum | undefined): void {
@@ -146,8 +194,24 @@ export class PptxPresentationSaveBuilder implements IPptxPresentationSaveBuilder
 		if (photoAlbum.frame !== undefined) {
 			pa['@_frame'] = photoAlbum.frame;
 		}
+		if (photoAlbum.isPhoto !== undefined) {
+			pa['@_isPhoto'] = photoAlbum.isPhoto ? '1' : '0';
+		}
 
 		presentation['p:photoAlbum'] = pa;
+	}
+
+	/**
+	 * `@embedTrueTypeFonts` is a bare boolean attribute, so it always writes
+	 * the literal `1`/`0` a caller explicitly asked for (never omitted for an
+	 * explicit `false`), matching `@showMasterPhAnim`'s convention elsewhere.
+	 * `undefined` leaves whatever the loaded XML already carried untouched.
+	 */
+	private applyEmbedTrueTypeFonts(presentation: XmlObject, value: boolean | undefined): void {
+		if (value === undefined) {
+			return;
+		}
+		presentation['@_embedTrueTypeFonts'] = value ? '1' : '0';
 	}
 
 	private applyKinsoku(
@@ -166,7 +230,7 @@ export class PptxPresentationSaveBuilder implements IPptxPresentationSaveBuilder
 			delete presentation['p:modifyVerifier'];
 			return;
 		}
-		// undefined means no change — preserve whatever is in the XML tree
+		// undefined means no change: preserve whatever is in the XML tree
 		if (!modifyVerifier) {
 			return;
 		}

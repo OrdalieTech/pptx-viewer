@@ -20,8 +20,41 @@
  *               SVG path serialisation), `connector-reroute` (dynamic endpoint
  *               recalculation when connected shapes move + connection sites).
  */
+export * from './hollow-shape-hit-test';
+export * from './custom-geometry-live-path';
 export * from './shape-geometry';
+export * from './wheel-intent';
+export * from './shape-geometry-cascade';
 export * from './fill-style';
+// `a:gradFill/a:path@type="rect"`: nested-rectangle SVG data-URI approximation
+// (PowerPoint's own rect path gradient has square corners, which no native
+// CSS/SVG radial gradient can express), consumed by `fill-style`'s
+// `buildRectPathGradient`.
+export * from './path-gradient-rect';
+// `a:gradFill` → SVG paint server, for the freeform (`a:custGeom`) shapes that
+// are painted as a real `<path>` and so cannot take a CSS gradient.
+export * from './svg-gradient-paint';
+// Stroked SVG outlines: a gradient line (`a:ln/a:gradFill`), which a CSS border
+// cannot express, and a stroke-only ("open") preset such as `line` or `arc`,
+// which has no box to put a border on.
+export * from './stroke-outline';
+export * from './stroke-only-preset';
+export * from './stroke-paint';
+// Pure per-sub-path paint decision (fill colour adjustment for lighten/darken/
+// none, and the stroke opt-out), shared by custom geometry AND multi-sub-path
+// preset shapes. The mechanism behind `subpath-fill-overlay`.
+export * from './vector-subpath-paint';
+// Per-sub-path FILL overlay: which elements need layered SVG paths instead of
+// one merged clip-path + flat background (a multi-sub-path preset shading/
+// bevel, or custom geometry with structured per-sub-path fill modes), and the
+// paints to render. `suppressesCssFill` is consumed by `getComputedFillStyle`.
+export * from './subpath-fill-overlay';
+// The whole `a:ln` -> CSS decision (border width/style/colour, compound lines,
+// line join / cap / miter limit) as one descriptor, so no binding re-derives it.
+export * from './stroke-style';
+// `a:blipFill/a:tile`: scale, offset, alignment and mirror-flip of a tiled
+// picture, which four of five bindings used to render as one stretched copy.
+export * from './image-tiling';
 // `a:grpFill` inheritance: pull a group's fill + resolve a grpFill child's paint.
 export * from './group-fill';
 // Stroke/dash normalisation, compound-line box-shadow + dasharray, element
@@ -33,23 +66,101 @@ export * from './drawing-color';
 // Unicode script detection for font fallback (latin/eastAsia/complexScript/
 // symbol classification + run segmentation + per-script font resolution).
 export * from './unicode-script-detection';
+// Per-run per-script (`a:ea`/`a:cs`/`a:sym`) font fallback, folded into
+// `ParagraphRun.scriptRuns` by `paragraph-run-build`. React's own copy
+// (`text-segment-render.tsx`) is gone; all five bindings render the same
+// descriptor now.
+export * from './text-script-fonts';
 export * from './visual-effects';
+export * from './reflection';
 export * from './image-effects';
+export * from './image-background-removal';
 export * from './image-effect-filter-values';
+export * from './image-fill-overlay';
+export * from './text-segment-paragraph-break';
 export * from './text-warp';
+export * from './text-warp-envelope-curves';
+export * from './text-warp-envelope-layout';
+export * from './text-warp-glyph-slicing';
+export * from './text-warp-preset-definitions';
+export * from './text-warp-preset-sampler';
 export * from './omml-to-mathml';
 export * from './latex-to-omml';
 export * from './equation-templates';
+// LaTeX -> OMML -> sanitised MathML, the pipeline every binding's equation
+// editor drives its live preview and insert payload from.
+export * from './equation-compile';
 export * from './chart-helpers';
+export * from './chart-area-fill';
+export * from './chart-font';
+export * from './chart-style-defaults';
+export * from './chart-title-style';
+export * from './chart-number-format';
 export * from './chart-trendlines';
 export * from './chart-axis';
 export * from './chart-palette';
+export * from './chart-datapoint-picture-fills';
 export * from './chart-datapoint-style';
+// `bar3D` extrusion-face (side/end) picture-fill targeting + the untargeted-
+// face tint/shade fallback every solid-filled bar already used (C2-G9 3-D
+// face-targeting half); `bar-chart-3d-face-fill.ts`'s three.js round-shape
+// resolver reuses the same fallback, so both presentations agree.
+export * from './chart-bar3d-face-picture';
 export * from './chart-sparkline';
+// Legend swatch/label placement (horizontal row vs. vertical stack), shared by
+// every binding's chart projector so `LEGEND_ITEM_WIDTH` and the placement
+// formula are fixed once instead of five times.
+export * from './chart-legend-layout';
+// `c:legendPos` -> plot-area reservation + placement side, incl. the `tr`
+// (top-right corner) overlay every legend-placement call site used to miss.
+export * from './chart-legend-placement';
 // Pure option lists + chart-type capability Sets for the chart inspector
 // controls (type/grouping/legend/axis/data-label/trendline/error-bar/marker/
 // gridline/combo selectors), shared by every binding's chart editor.
 export * from './chart-editor-options';
+// Pareto detection for the display-only "Pareto" chart-type label: a Pareto
+// chart is `chartType: 'histogram'` plus a `paretoLine`-layout series, with no
+// `PptxChartType` of its own, so pickers/inspectors resolve what to show via
+// `resolveDisplayedChartType` instead of reading `chartType` raw.
+export { isParetoChart, resolveDisplayedChartType } from './chart-pareto';
+// Per-type default categories/series/categoryLevels for the six ChartEx kinds
+// (histogram, funnel, treemap, sunburst, boxWhisker, regionMap) an insert
+// needs to actually look like that chart type.
+export * from './chart-ex-insert-defaults';
+// Wire-token -> i18n key lookups, so a control can spell an OOXML enum without
+// its option set being dictated by a shared catalogue.
+export * from './schema-label-keys';
+export * from './chart-schema-label-keys';
+export * from './fill-pattern-label-keys';
+export * from './slide-transition-label-keys';
+// Guarded add/remove/edit operations behind the chart inspector's data grid
+// (auto-naming, last-series/category protection, non-numeric cell rejection).
+export * from './chart-data-grid-ops';
+// What a data label SAYS: the c:showVal / c:showCatName / c:showSerName /
+// c:showPercent / c:separator cascade (per-point -> series -> chart-type).
+export * from './chart-data-label-text';
+// WHERE a data label sits: c:dLblPos -> pixel anchor for bar/column (ctr/
+// inBase/inEnd/outEnd) and line/scatter/bubble (t/b/l/r/ctr) labels, plus the
+// per-point c:dLbl/c:layout manual-drag offset applied on top of it.
+export * from './chart-data-label-anchor';
+// Direct on-canvas chart editing, framework-neutral half: the value-drag state
+// machine, the hit-target stylesheet and the selected-part highlight.
+export * from './chart-canvas-drag';
+// Chart drawing-overlay (c:userShapes) inspector editing: descriptor list,
+// default text-box factory, pixel<->fraction anchor conversion, validation.
+export * from './chart-user-shape-edit';
+// Chart drawing-overlay FULL tree editing: a grpSp's grouped children (and
+// nested groups) flattened into indented rows, plus path-based row edits.
+export * from './chart-user-shape-tree';
+// A row's own rotation/flip write helpers, split out of chart-user-shape-tree
+// to stay under this repo's file-size limit.
+export * from './chart-user-shape-row-transform';
+// Chart drawing-overlay group container editing: a nested row's chart-relative
+// fraction position/size (converted to/from its own EMU child-space off/ext
+// through the ancestor group chain).
+export * from './chart-user-shape-row-frame';
+// Insert a new default shape into an existing group row's children.
+export * from './chart-user-shape-group-child';
 // SVG-primitive chart engine. Its low-level helpers `ValueRange` / `PlotLayout`
 // / `valueToY` / `formatAxisValue` / `computeValueRange` / `seriesColor` /
 // `paletteColor` duplicate (with deliberately different signatures) the ones in
@@ -73,11 +184,13 @@ export {
 	computePieLayout,
 	computePieSlices,
 	computeScatterDots,
+	computeScatterXDomain,
 	computeBubbleRadius,
 	radarAngle,
 	computeRadarPoints,
 	radarRingPoints,
 	resolveChartKind,
+	chartPreserveAspectRatio,
 	DEFAULT_PALETTE,
 } from './chart-view-model';
 export type {
@@ -98,10 +211,18 @@ export type {
 	LinePoint,
 	PieSliceGeometry,
 	ScatterDot,
+	ScatterXDomain,
 	RadarPoint,
 	SupportedChartKind,
 	PlotLayoutOptions,
+	ChartSvgDef,
+	ChartSvgPatternDef,
 } from './chart-view-model';
+// `c:manualLayout` (CT_ManualLayout) conversion: the pure edge / factor
+// fraction-to-pixel resolver the chart engine uses to honour a hand-placed
+// title, plot area or legend, plus the title / legend post-pass.
+export * from './chart-manual-layout';
+export { withManualLayouts } from './chart-view-model-manual';
 // Direct on-canvas chart editing: data-attribute hit-testing bridge,
 // drag-to-value inversion, and immutable chart-data edit helpers.
 export {
@@ -118,13 +239,36 @@ export {
 	dragAnchorViewY,
 	withChartPointValue,
 	withChartTitle,
+	shareToValue,
+	buildChartMarkDragGeometry,
+	resolveChartDragValue,
 } from './chart-interaction';
-export type { ChartPartElement } from './chart-interaction';
+export type { ChartPartElement, ChartMarkDragGeometry } from './chart-interaction';
+// Direct on-canvas chart editing for pie/doughnut/radar/stacked marks: the
+// per-kind drag geometry builders + the pointer/state-machine glue.
+export { buildPieDragGeometry, resolvePieDragValue } from './chart-interaction-pie';
+export type { PieDragGeometry } from './chart-interaction-pie';
+export { buildRadarDragGeometry, resolveRadarDragValue } from './chart-interaction-radar';
+export type { RadarDragGeometry } from './chart-interaction-radar';
+export { buildStackedDragGeometry, resolveStackedDragValue } from './chart-interaction-stacked';
+export type { StackedDragGeometry } from './chart-interaction-stacked';
+export {
+	clientPointToViewBox,
+	beginChartMarkDrag,
+	advanceChartMarkDrag,
+} from './chart-interaction-mark-drag';
+export type {
+	ChartClientRect,
+	ChartMarkDragState,
+	ChartMarkDragStep,
+} from './chart-interaction-mark-drag';
 // Enriched cartesian builder (log axis / display units / secondary value axis /
 // percentStacked / overlays) + its value-axis gridline/label primitive builders.
 export { buildCartesianViewModel } from './chart-cartesian';
 export { buildPrimaryAxis, buildSecondaryAxis } from './chart-axis-render';
+export { buildValueAxisGridlinesAndLabels, findValueAxis } from './chart-cx-axis-units';
 export { buildComboViewModel, buildStockViewModel } from './chart-combo-stock';
+export { buildStockCloseLabel } from './chart-stock-close-label';
 export { buildSurfaceViewModel, buildTreemapViewModel } from './chart-surface-treemap';
 export {
 	buildFunnelViewModel,
@@ -160,16 +304,19 @@ export {
 	computeTrendlinePrimitives,
 	computeErrorBarPrimitives,
 	computeAxisTitlePrimitives,
-	computeDataTablePrimitives,
 	computeLinearRegression,
 	fitPolynomial,
 	computeRSquared,
+} from './chart-overlays';
+export type { LinearFit } from './chart-overlays';
+export {
+	computeDataTablePrimitives,
 	DATA_TABLE_ROW_H,
 	DATA_TABLE_HEADER_H,
 	DATA_TABLE_KEY_W,
 	DATA_TABLE_PADDING,
-} from './chart-overlays';
-export type { LinearFit } from './chart-overlays';
+} from './chart-data-table-render';
+export { applyLegendEntryOverrides } from './chart-legend-entries';
 export * from './animation-css';
 // Editor element-animation preset model — distinct from the native OOXML
 // `p:timing` timeline below. `animation-authoring` holds the immutable
@@ -179,6 +326,19 @@ export * from './animation-css';
 // `animation-css` for the preset → CSS keyframe mapping. The stateful hooks /
 // services / RAF loops stay in each binding.
 export * from './animation-authoring';
+// Merges `animations[]` with the deck's own read-only effect anchors into one
+// draggable timeline, so drag-to-reorder can target the FULL sequence
+// (editor-authored AND deck-native effects), not just the editor's own.
+export * from './animation-timeline-rows';
+// Effect sound picker (`p:stSnd`) and "after animation" (dim/hide) authoring
+// controls: same immutable-patch-builder shape as `animation-authoring`,
+// split into their own modules since they're optional add-on rows the panel
+// only shows once an effect exists, not part of the core preset/timing form.
+export * from './animation-sound-authoring';
+export * from './animation-after-effect-authoring';
+// Naming layer over both preset vocabularies (editor `PptxAnimationPreset`
+// tokens and core's OOXML preset catalogue), so no timeline prints a wire id.
+export * from './animation-preset-labels';
 export * from './animation-playback';
 // Native-animation (OOXML `p:timing` tree) timeline engine — preset tables,
 // keyframe definitions, colour interpolation, dynamic/static keyframe
@@ -187,20 +347,63 @@ export * from './animation-playback';
 // injection, audio playback, and file reading stay in each binding.
 export * from './animation-timeline-types';
 export * from './animation-presets';
+// Discrete `p:set`/boolean-`p:anim` font-style emphasis resolution (Bold
+// Flash, Bold Reveal, Underline, Change Font Style/Size) + the CSS override +
+// playback-state carry helpers a binding's text renderer and the playback
+// engine consume.
+export * from './animation-text-style-resolve';
+export * from './animation-text-style-css';
+export * from './animation-text-style-state';
+// `p:animEffect/@filter` fallback resolution, consulted by `resolveEffect`
+// only when `presetId` is absent/unmapped (see `animation-timeline-helpers`).
+export * from './animation-filter-effects';
+// CSS `mask` reveal states for the wipe / peek / blinds / split / box family.
+// A mask composites with the element's own geometry `clip-path`, which a
+// `clip-path` keyframe would replace (flooding a thin shape's bounding box).
+export * from './animation-mask-reveal';
+// `p:animEffect/@filter="pixelate"` mosaic reveal/conceal: self-contained
+// SVG `<filter>` data-URIs stepped through discrete `@keyframes` stops.
+export * from './animation-pixelate-filter';
 export * from './animation-keyframes';
 export * from './animation-color';
+export * from './animation-color-base-style';
 // Staged-build (p:bldChart / p:bldDgm) mode resolution + time->progress helpers
 // consumed by staged chart / SmartArt reveal renderers.
 export * from './animation-build';
 // Staged chart / SmartArt reveal projection: trim chart data / count revealed
 // diagram nodes for the current build progress.
 export * from './chart-build';
+// Authored-index (`p:graphicEl` seriesIdx/categoryIdx/bldStep) chart reveal,
+// consumed by `TimelineEngine` in place of `chart-build`'s count-based path
+// whenever every fired chart-build step for a chart carries index data.
+export * from './chart-reveal-descriptor';
 export * from './diagram-build';
+export * from './diagram-drawing-shape-reveal';
+export * from './diagram-reveal-descriptor';
 export * from './animation-timeline-helpers';
+// Absolute `p:animRot`/`p:animScale` `from`/`to` keyframes, plus `p:tavLst`
+// opacity and colour ramps for a generic `p:anim` node (attributed via
+// `PptxNativeAnimation.attrName`), consumed by `animation-timeline-helpers`
+// / `animation-timeline-builder` as the sibling of their relative-`@by` and
+// canned-static keyframe paths respectively.
+export * from './animation-timeline-absolute';
+// `@fill` / `@repeatDur` / `@spd` timing decisions consumed by the timeline
+// builder and (for `holdEndState`) by each binding's cleanup-timer step.
+export * from './animation-fill-repeat';
 // Compound / simultaneous OOXML start+end condition evaluation (p:stCondLst /
 // p:endCondLst OR-sets), consumed by the sequencer + timeline builder.
 export * from './animation-advanced-triggers';
+// Real `<audio>`/`<video>` `ended`-event gating for `p:cond/@evt="onStopAudio"`
+// (targeting a specific media time node), consumed by `animation-playback-engine`
+// and each binding's presentation-mode media playback.
+export * from './animation-media-end-gating';
 export * from './animation-timeline-text-build';
+// `p:bldP/@bldLvl` paragraph grouping for a by-paragraph text build, consumed
+// by `animation-timeline-text-build`.
+export * from './animation-timeline-build-level';
+// `p:txEl` (pRg/charRg) text-level target scoping, consumed by
+// `presentation-animation-controller`.
+export * from './animation-timeline-text-range';
 export * from './animation-effects';
 export * from './animation-sequencer';
 export * from './animation-timeline-builder';
@@ -212,20 +415,49 @@ export * from './animation-timeline-engine';
 // DOM injection, and step application stay in each binding.
 export * from './presentation-animation-controller';
 // OOXML `p:cmd` media playback commands (play/pause/seek) surfaced on timeline
-// steps; the DOM `HTMLMediaElement` control stays in each binding.
+// steps: `-commands` recognises/parses them, `-playback` drives the resolved
+// `HTMLMediaElement`. Only the target lookup stays per binding (React resolves
+// through its element registry; the rest query the stage by `data-element-id`).
 export * from './animation-media-commands';
+export * from './animation-media-playback';
 export * from './animation-preview';
+// Motion-path authoring (`p:animMotion`): the Lines/Arcs/Turns/Shapes/Loops
+// preset catalogue, the slide-space geometry the canvas overlay draws and drags,
+// and the slide-`animations[]` patch builders + preview descriptor. The gallery,
+// the overlay view and the `<style>` injection stay in each binding.
+export * from './motion-path-presets';
+export * from './motion-path-geometry';
+export * from './motion-path-authoring';
 // `visual-3d` is the public surface; it re-exports the symbols from its sibling
 // modules (`visual-3d-camera`, `visual-3d-materials`, `visual-3d-extrusion`,
 // `visual-3d-color`, `visual-3d-constants`), so they are NOT flattened here to
 // avoid duplicate-export conflicts.
 export * from './visual-3d';
 export * from './table-style';
+// PowerPoint's 74 built-in table styles, keyed by GUID. They are absent from a
+// deck's `ppt/tableStyles.xml` by design, so without this catalogue every table
+// using a gallery style resolved to nothing and painted a hardcoded blue.
+export * from './table-style-builtins';
+// The three-layer `<td>` cascade (inherited base -> table-style band -> explicit
+// cell style -> text-colour floor). It was composed by hand in all five
+// bindings; React had lost the band layer on programmatic tables and Angular the
+// colour floor, so both are decided here now.
+export * from './table-cell-css';
+// Whether a canvas press extends the table CELL range or falls through to the
+// element selection. Vue let a Shift-click fall through, which toggled the table
+// out of the selection and wiped the range anchor, so block merge was
+// unreachable there however correct its range maths was.
+export * from './table-cell-pointer';
 export * from './table-merge';
 export * from './table-layout';
 // Immutable single-cell text edit (`setCellText`) for inline cell editing,
 // shared by every binding's table renderer.
 export * from './table-cell-edit';
+// Inspector table data grid: normalised render model (`buildTableDataGrid`) plus
+// element-level row/column operations, so all five bindings edit cell text from
+// the sidebar through one implementation.
+export * from './table-data-grid';
+export * from './table-data-grid-ops';
 // Cursor-anchored cell merge/split helpers (`computeMergeCellRight` /
 // `computeMergeCellDown` / `computeSplitCell`): merge the neighbour to the
 // right/below the cursor cell, or split the merged cell under it. Complements
@@ -255,6 +487,19 @@ export * from './clone';
 export * from './element';
 export * from './element-align';
 export * from './element-interaction';
+// Authored `p:gridSpacing` (EMU, from `viewProperties`) -> CSS pixel step,
+// used by snap-to-grid and the grid overlay in every binding.
+export * from './grid-spacing';
+// `a:spLocks` enforcement: one predicate deciding whether a select / move /
+// resize / rotate / text-edit / adjust gesture may proceed on an element, so a
+// locked shape behaves the same in all five bindings (it used to be honoured in
+// React alone, while Vue and Angular shipped a Lock button that locked nothing).
+export * from './element-locks';
+// `@highlightClick` (Action Settings "Highlight click"): the brief flash a
+// shape gets on click/hover, decided once here so all five bindings render
+// the identical style instead of only React drawing it.
+export * from './element-highlight-click';
+export * from './selection-handle-visibility';
 export * from './selection-transform';
 // Element CSS-style builders: absolute container style (position/transform/
 // opacity/z-index) + displayable image-source resolution, shared by every
@@ -267,6 +512,10 @@ export * from './group-ops';
 // Slide-background style cascade: resolved background fields -> CSS map
 // (image -> gradient -> pattern -> solid colour precedence).
 export * from './slide-background';
+// Legacy PowerPoint 97-2003 `shadeToTitle` background hint: anchors a slide's
+// gradient background as a rectangular path gradient on its title
+// placeholder's bounds (COM-measured against real PowerPoint).
+export * from './background-shade-to-title';
 // Editor lifecycle foundation: `editor-insert` (pure factory functions that
 // build new `PptxElement`s with `id: ''` for the caller to assign), `element-
 // operations` (immutable array transforms: update/move/resize/delete/duplicate
@@ -283,6 +532,11 @@ export * from './section-operations';
 // Slide CRUD factories: blank-slide builder + `slide-<ts>-<rand>` id helper
 // (with optional id override). Each binding's slide-management layer calls these.
 export * from './slide-operations';
+// Slide template gallery: catalogue of pre-designed starter slides (title,
+// agenda, comparison, ...) built as theme-aware PptxSlide content. Single
+// source of truth for every binding's New Slide template gallery and its
+// live-rendered previews.
+export * from './slide-templates';
 // OLE download/open helpers: file-size formatting + browser-openable MIME check
 // for the binding OLE renderers' download/open actions.
 export * from './ole-actions';
@@ -298,6 +552,8 @@ export * from './snap-guides';
 export * from './ruler';
 export * from './bullet-autonum';
 export * from './bullet-list';
+// Ribbon Bullets / Numbering toggle: authors real `bulletInfo`, not `listType`.
+export * from './bullet-toggle';
 // Rich speaker-notes editor: segment/paragraph maths, contentEditable HTML
 // serialise/parse, caret-aware toolbar commands, and the print-notes document
 // builder. The view layer (contentEditable + textarea fallback) stays per
@@ -310,42 +566,142 @@ export * from './notes';
 // substitution` (slide-number/date/header-footer/docproperty field text), and
 // the text-effect builders `text-fill` (gradient/pattern background-clip:text),
 // `text-effects` (shadow/glow/blur/HSL/reflection/alpha), `text-effects-3d`
-// (extrusion/bevel text-shadow stack + scene perspective). Each binding casts
-// the neutral record to its own style type; React keeps the JSX (SVG filters).
+// (text body scene perspective/rotation). Each binding casts the neutral
+// record to its own style type; React keeps the JSX (SVG filters).
 export * from './text-style-helpers';
+// Line-height resolution: PowerPoint's single-spacing pitch, proportional
+// (`a:spcPct`) / exact (`a:spcPts`) modes, `compatLnSpc`'s legacy model.
+export * from './text-line-height';
+// `a:pPr/@fontAlgn` (font alignment within a line) -> CSS `vertical-align`.
+export * from './text-font-alignment';
+// This paragraph's own kinsoku / font-alignment / tab-default override,
+// falling back to the text body's when the paragraph authors none.
+export * from './paragraph-geometry-overrides';
+// The ONE text-body (block) style builder all five bindings render text with:
+// colour, font declaration, decorations, insets, `wrap="none"` and autofit.
+// Replaced React's `getTextStyleForElement` plus four drifting copies of it.
+export * from './text-block-style';
+// The `a:bodyPr` LAYOUT decisions the block builder folds in: columns
+// (`@numCol`/`@spcCol`), `tab-size`, `@anchor` / `@anchorCtr`, the kinsoku
+// rules and `@vertOverflow`. All five used to reach React only.
+export * from './text-body-layout';
+// The preset / `a:custGeom` text rectangle (`a:rect`) as body padding, so text
+// in a chevron, callout or arrow sits inside the geometry rather than its box.
+export * from './text-body-rect';
 export * from './text-decoration';
 export * from './text-paragraph-style';
 export * from './text-field-substitution';
+// Assembly of that substitution context from deck header/footer settings,
+// custom document properties and the slide being painted, so every binding
+// resolves field runs from the same inputs (and a thumbnail can re-point the
+// deck context at its own slide).
+export * from './field-context';
 export * from './text-fill';
 export * from './text-effects';
 export * from './text-effects-3d';
-// Per-run text-effect composer: folds fill + shadow (incl. 3D) + filter chain
+// Per-run text-effect composer: folds fill + shadow + filter chain
 // (glow/inner-shadow/blur/HSL) + alpha opacity + reflection into ONE neutral
 // CSS record (no-op `{}` for plain runs), mirroring React's per-run span style.
 export * from './text-run-effects';
+// Per-run inline-style builder (Vue / Angular / Svelte / Vanilla run spans).
+export * from './text-run-style';
+// Hollow/outline-only text fill decision, split out of `text-run-style`.
+export * from './text-run-hollow';
+// Per-run letter-spacing + metric-tracking split helpers, split out of
+// `text-run-style`.
+export * from './text-run-spacing';
+// Nested-span decoration repeat + underline-variant CSS, split out of
+// `text-run-style`.
+export * from './text-run-decoration';
+// Per-run advance-width compensation that makes the browser break lines where
+// PowerPoint breaks them. React layers it into its own span style.
+export * from './text-metric-tracking';
 // MathML/SVG sanitisation (DOMPurify wrapper, non-DOM fallback) for equation
 // rendering. React + Vue consume it; Angular uses its own DomSanitizer.
 export * from './mathml-sanitize';
+// Per-run hyperlink + inline-equation descriptors carried on `ParagraphRun`,
+// so every binding renders a link and an inline `m:oMath` from the same model.
+export * from './text-run-meta';
+// `a:ruby` phonetic guides (furigana / pinyin) as a run field, so all five
+// bindings render the annotation React alone used to.
+export * from './text-run-ruby';
+// `ParagraphRun` / `RenderParagraph`: the descriptor types `buildParagraphs`
+// (below) returns, split into their own module so every binding's shared
+// import of them resolves here directly rather than through a re-export shim.
+export * from './paragraph-types';
 export * from './text-paragraphs';
+// Per-paragraph spacing resolver (`a:spcBef`/`a:spcAft`/`a:lnSpc`), consumed by
+// `buildParagraphs` and exported directly rather than via a `./text-paragraphs`
+// re-export shim.
+export * from './paragraph-spacing';
+export * from './paragraph-strut';
+// `a:spAutoFit` editor-time shape resize: the pure height decision plus the
+// one shared DOM measurement (clone-to-height:auto) every binding's inline
+// text editor commit handler calls, so typing into an autofit box grows or
+// shrinks the box exactly once, not five slightly different ways.
+export * from './shape-autofit-resize';
+// `a:normAutofit` editor-time text shrink: the pure fontScale/lnSpcReduction
+// decision plus the shared DOM measurement, so typing past capacity in a
+// shrink-to-fit box recomputes the same way in all five bindings.
+export * from './text-autofit-shrink';
+export * from './text-autofit-shrink-measure';
+export * from './morph-plan';
 export * from './text-advanced';
 export * from './text-theme';
 export * from './kinsoku-styles';
 export * from './tab-leader';
+// Measured tab-stop layout (per-stop alignment + leader glyphs), folded into
+// `ParagraphRun.tabLines` by `paragraph-run-build`. Extracted from React's
+// private `text-tab-layout.tsx`; the JSX-only piece (`renderTabbedLine`) stays
+// there, thin over these.
+export * from './text-tab-layout';
+export * from './text-tab-run-build';
 export * from './inline-selection-utils';
+export * from './inline-caret';
 export * from './text-case-transform';
 export * from './linked-text-box-overflow';
 export * from './connector-router';
 export * from './connector-reroute';
+// Authoring the other half of the same contract: what a drag between two
+// connection sites should produce (`a:stCxn`/`a:endCxn` bindings, span-chosen
+// preset), resolved through the SAME site list the reroute uses so a new
+// connector cannot be drawn to a point the first shape move disagrees with.
+export * from './connector-authoring';
+// Attaching / detaching an existing connector's ends on canvas (the endpoint
+// handles PowerPoint shows on a selected connector).
+export * from './connector-endpoints';
+// Pointer-anchored overlay placement (context menus): clamp against BOTH edges,
+// not just the low one. Svelte clamped only the low edge, so a menu opened near
+// the bottom of the window rendered below the fold and could not be clicked.
+export * from './flyout-position';
 export * from './connector-style';
 // Connector SVG-geometry builder: from a connector `PptxElement`, derive stroke
 // style, flip-adjusted endpoints, bent/curved path data (with optional A*
 // obstacle routing), and arrow `<marker>` shapes. Re-uses `connectorKind` from
 // `connector-style`. The `<svg>`/`<path>` emission stays in each binding.
+// `connector-elbow-geometry` (orientation-aware bentConnector3/4/5 +
+// curvedConnector3/4/5 bend-point / smooth-curve formulas) is a satellite of
+// this module, like `connector-hit-target`/`connector-markers`/`connector-dash`:
+// its two public entry points (`connectorAdjustmentFraction`,
+// `connectorBendFraction`) are re-exported by `connector-path` itself rather
+// than star-exported here too, to avoid a duplicate-export ambiguity.
 export * from './connector-path';
+// The inspector's six connector arrowhead dropdowns (`a:headEnd`/`a:tailEnd`
+// type + `@w` + `@len`), described once so no binding restates the option
+// order, the fallbacks or the caption keys in a private table of its own.
+export * from './connector-arrow-controls';
 export * from './format-painter';
 export * from './remap-text';
 export * from './shape-adjustment';
+export * from './shape-adjustment-handles';
+export * from './shape-adjustment-model';
+export * from './shape-adjustment-probe';
+export * from './shape-adjustment-solver';
 export * from './hyperlink-security';
+// `a:hlinkClick/@tgtFrame`: the `target`/`rel` a hyperlink `<a>` should carry,
+// decided once so a deck's authored frame name (not just the hardcoded
+// `_blank`) reaches every binding's anchor.
+export * from './hyperlink-target';
 // Real-time collaboration presence: pure validators + sanitisers for inbound
 // Yjs awareness data (room id, username/colour/avatar, cursor clamping, stale
 // drop), deterministic per-user colour, mixed-content (ws:// from https)
@@ -355,6 +711,13 @@ export * from './collaboration-presence';
 // Throttled local-presence publisher, shared by every binding's collaboration
 // layer (writes the same nested `presence` awareness field they all read).
 export * from './collaboration-presence-publisher';
+// Memoising awareness -> presence/cursor projection: returns the previous
+// result by identity when an awareness event carries no visible change.
+export * from './collaboration-presence-projector';
+// Share dialog "active session" view-model: connected-users list (initials,
+// colour, avatar, slide number) built from the presence projection above plus
+// the local user's own name/colour. Only React had this feature before.
+export * from './collaboration-active-session';
 export * from './collaboration-sync';
 // One-way broadcast auto-follow policy (only a local `viewer` follows the
 // session `owner`), shared by every binding so the rule cannot drift.
@@ -372,6 +735,9 @@ export * from './collaboration-text-merge';
 // First-write gate: block local doc writes until the provider's initial sync
 // (or a grace period) so late joiners never seed placeholder content.
 export * from './collaboration-sync-gate';
+// Whether a freshly loaded deck yields to the room: only a bootstrap load does,
+// or opening a file mid-session silently loses it (issue: vanilla + room).
+export * from './collaboration-load-origin';
 // Document-teardown listeners (pagehide / beforeunload / host postMessage) so a
 // peer whose document is destroyed (tab close, navigation, or an embedding page
 // removing the viewer iframe) leaves the room instead of lingering as a ghost
@@ -393,7 +759,18 @@ export * from './morph-types';
 export * from './morph-color';
 export * from './morph-svg-path';
 export * from './morph-matching';
+// Group decomposition so a `!!`-named shape matches across a grouping boundary.
+export * from './morph-flatten';
+// One merged z-order over both slides, so the transition overlay knows which
+// arriving shapes it would otherwise hide behind a ghost.
+export * from './morph-overlay-order';
 export * from './morph-text';
+// "Same slot, new wording": the pair PowerPoint dissolves where it stands
+// instead of interpolating a box it only re-fitted around the new text.
+export * from './morph-text-slot';
+// The two halves of such a dissolve, paired so the overlay can sum them inside
+// an isolated group rather than stacking two fades (issue #161).
+export * from './morph-crossfade-group';
 // Intelligent token-level text morph: LCS diff (shared/added/removed) + per-
 // token slide/fade keyframe building, consumed by `morph-animation`.
 export * from './morph-text-tokens';
@@ -404,7 +781,12 @@ export * from './morph-text-tokens';
 export * from './morph-geometry';
 export * from './morph-geometry-interp';
 export * from './morph-geometry-keyframes';
+// Picture source-crop (`a:srcRect`) morphing: PowerPoint's "Scale Height" /
+// "Scale Width" is a crop inside an unchanged frame, so a rescaled picture is
+// invisible to every other comparison in the engine (issue #148).
+export * from './morph-image-crop';
 export * from './morph-animation';
+export * from './morph-z-order';
 // Slide-transition (slide-to-slide swap) CSS/keyframe generation — pure mapping
 // from a `PptxSlideTransition` to the outgoing/incoming `animation` shorthands
 // plus the `@keyframes` strings each binding injects once. Keyframe names use
@@ -416,6 +798,22 @@ export * from './morph-animation';
 export * from './slide-transition-types';
 export * from './slide-transition-keyframes';
 export * from './slide-transition-css';
+// Inspector-side option catalogues for the transition section: the type list,
+// the orientation-vs-direction rule, and the arrow-grid tables.
+export * from './slide-transition-options';
+export * from './slide-transition-edits';
+// What the Transitions ribbon's Sound picker shows and what picking a file
+// (or clearing one) writes; packages/core embeds the picked file on save.
+export * from './slide-transition-sound';
+// Ribbon-side decision functions: what a Transitions-tab commit writes, what
+// the Slide Show tab's Options checkboxes mean, and the three Home commands
+// (Reset / Shape Fill / Shape Outline) that shipped inert in two bindings.
+export * from './ribbon-transitions';
+export * from './ribbon-slide-show-options';
+export * from './ribbon-home-commands';
+// Transitions > Preview: replays the slide's transition on the editing stage,
+// which is the one thing that button does in every binding.
+export * from './transition-preview';
 export * from './p14-transition-keyframes';
 export * from './p14-transition-css';
 // SmartArt SVG-fallback layout engine — pure node geometry/positioning for the
@@ -438,6 +836,18 @@ export * from './smartart-3d-spatial';
 // diagram, per-node ARIA labels, and the `SmartArtA11y` view-model each binding
 // maps onto `role="img"` + `aria-label` + per-node `<title>`/`aria-label`.
 export * from './smartart-accessibility';
+// SmartArt node-count bounds: the soft per-layout min/max table (venn/matrix/
+// pyramid/funnel/target/gear/cycle/default) plus canAddTopLevelNode /
+// canRemoveTopLevelNode / describeSmartArtBounds, so the text-pane Add /
+// Remove affordances agree across all bindings instead of each hand-porting
+// the same table.
+export * from './smartart-node-limits';
+// SmartArt text-pane keyboard/reorder handlers: pure Enter/Backspace/Tab/
+// move-up/move-down decision functions for the inspector text pane, plus the
+// "connections beyond the editable parent/child tree" classifier. Every
+// function delegates to the core editing ops; each binding's own
+// `smartart-node-pane-handlers.ts` is a thin re-export of this module.
+export * from './smartart-node-pane-handlers';
 // Vanilla three.js GLTF/GLB model scene controller: mounts an interactive 3D
 // model into a container element (auto-centre/fit, lights, OrbitControls, RAF
 // loop) and exposes resize()/dispose(). `three` is dynamically imported and
@@ -452,6 +862,87 @@ export * from './model3d-scene';
 // no-op sentinel handle when it is missing so the chart falls back to 2D.
 export * from './surface-chart-3d-geom';
 export * from './surface-chart-3d-scene';
+// Pure raycast-hit -> (row, col) grid cell -> hover-tooltip text mapping the
+// interactive scene uses to give the WebGL mesh the same native hover tooltip
+// every other chart kind's SVG mark gets via `buildMarkTooltip`.
+export * from './surface-chart-3d-hit-test';
+// Adapts a chart element's `PptxChartData` into the flat typed-array grid
+// `mountSurfaceChart3D` needs, sharing `computeValueRange` + `surfaceColor`
+// with the 2D SVG fallback so both presentations agree on the same values.
+export * from './surface-chart-3d-data';
+// Generalised camera/grid/label geometry for an interactive 3D CARTESIAN
+// chart scene (category x depth/series x value axes), shared by bar3D today
+// and intended for line3D/area3D to reuse unchanged.
+export * from './cartesian-chart-3d-geom';
+// Vanilla three.js 3D bar-chart scene controller: one real `THREE.BoxGeometry`
+// mesh per data point (clustered = each series its own depth plane; stacked/
+// percentStacked = coplanar, stacked in Y), authored wall/floor panels, a
+// `c:view3D`-driven perspective camera, OrbitControls, and a RAF loop. Like
+// `surface-chart-3d-scene`, `three` is dynamically imported and optional,
+// resolving to a no-op sentinel so the chart falls back to the flat 2D
+// oblique-projection bar3D renderer when it is missing.
+export * from './bar-chart-3d-scene';
+// Pure raycast-hit (series, category, value) -> hover-tooltip text mapping
+// the bar3D scene uses to give each box mesh the same native hover tooltip
+// every other chart kind's SVG mark gets via `buildMarkTooltip`.
+export * from './bar-chart-3d-hit-test';
+// Box-mesh layout maths (clustered vs stacked/percentStacked) the bar3D data
+// adapter below builds on; split out to its own module for reuse and to stay
+// under the file-size cap.
+export * from './bar-chart-3d-layout';
+// Adapts a `bar3D` chart element's `PptxChartData` into the box-mesh layout
+// `mountBarChart3D` needs, sharing colour/value-range resolution with the
+// flat SVG oblique-projection engine so both presentations agree.
+export * from './bar-chart-3d-data';
+// Pure per-series depth-plane path layout shared by the interactive line3D
+// and area3D true-3D scenes (each series gets its own Z plane, exactly like
+// bar3D's clustered layout), plus the area3D ribbon-fill triangle builder.
+export * from './cartesian-line-chart-3d-layout';
+// Chart-type-agnostic point/series data-shaping shared by line3D and area3D
+// (`line-chart-3d-data`/`area-chart-3d-data` below only differ in which
+// `c:chartType` they gate on).
+export * from './cartesian-line-chart-3d-data';
+// `line3D` element-gate onto the shared cartesian line/area 3D data shaping.
+export * from './line-chart-3d-data';
+// `area3D` element-gate onto the shared cartesian line/area 3D data shaping.
+export * from './area-chart-3d-data';
+// Pure raycast-hit (series, category, value) -> hover-tooltip text mapping
+// shared by the interactive line3D/area3D scenes, mirroring
+// `bar-chart-3d-hit-test`'s pattern.
+export * from './cartesian-chart-3d-hit-test';
+// Vanilla three.js 3D line-chart scene controller: one `THREE.TubeGeometry`
+// path per series (its own depth plane) plus per-vertex hover markers. Like
+// `bar-chart-3d-scene`, `three` is dynamically imported and optional,
+// resolving to a no-op sentinel so the chart falls back to the flat 2D
+// oblique-projection line3D renderer when it is missing.
+export * from './line-chart-3d-scene';
+// Vanilla three.js 3D area-chart scene controller: identical to
+// `line-chart-3d-scene` plus a translucent ribbon fill from each series' path
+// down to its baseline. Falls back to the flat 2D oblique-projection area3D
+// renderer when `three` is missing.
+export * from './area-chart-3d-scene';
+// Pure geometry for an interactive 3D `pie3D` chart scene: fixed disc radius,
+// `c:view3D/@hPercent`-driven wedge thickness, and per-slice wedge angles
+// (mirroring the flat engine's `computePieSlices` bookkeeping). Reuses
+// `cartesian-chart-3d-geom`'s sphere camera placement rather than its
+// grid-specific framing, since a pie has no category/series grid.
+export * from './pie-chart-3d-geom';
+// Vanilla three.js 3D pie-chart scene controller: one real
+// `THREE.CylinderGeometry` wedge mesh per data point (a partial-arc cylinder,
+// giving a flat top/bottom + curved rim + flat radial "cut" faces for free), a
+// `c:view3D`-driven perspective camera, OrbitControls, and a RAF loop. Like
+// `bar-chart-3d-scene`, `three` is dynamically imported and optional,
+// resolving to a no-op sentinel so the chart falls back to the flat 2D
+// oblique-projection pie3D renderer when it is missing.
+export * from './pie-chart-3d-scene';
+// Pure raycast-hit (point index, value) -> hover-tooltip text mapping the
+// pie3D scene uses to give each wedge mesh the same native hover tooltip
+// every other chart kind's SVG mark gets via `buildMarkTooltip`.
+export * from './pie-chart-3d-hit-test';
+// Adapts a `pie3D` chart element's `PptxChartData` into the wedge-mesh layout
+// `mountPieChart3D` needs, sharing colour/explosion resolution with the flat
+// SVG oblique-projection engine so both presentations agree.
+export * from './pie-chart-3d-data';
 // SmartArt pre-computed drawing-shapes projection (the `smartArtData.
 // drawingShapes` path the core engine extracts from `ppt/diagrams/drawing*.xml`,
 // preferred over the SVG-fallback layout engine when present): palette
@@ -465,10 +956,37 @@ export {
 	resolvePalette,
 	buildChromeStyle,
 	computeDrawingViewBox,
+	drawingShapeLabelColor,
 	projectDrawingShapes,
 	styleShadowFilter,
 } from './smartart-drawing';
-export type { RenderedShape, DrawingViewBox } from './smartart-drawing';
+export type {
+	RenderedShape,
+	RenderedShapeKind,
+	RenderedGradient,
+	RenderedGradientStop,
+	DrawingViewBox,
+} from './smartart-drawing';
+// SmartArt fallback-layout paint decisions: the label placement / colour and
+// the connector stroke a binding should use once the descriptor's OPTIONAL
+// fields have had their documented defaults applied. Pure; each binding maps
+// the returned descriptor straight onto `<text>` / `<tspan>` / `<path>`.
+export {
+	smartArtConnectorPaint,
+	smartArtNodeLabel,
+	SMARTART_CONNECTOR_OPACITY,
+	SMARTART_CONNECTOR_STROKE,
+	SMARTART_CONNECTOR_WIDTH,
+	SMARTART_LABEL_COLOR,
+} from './smartart-node-label';
+export type { SmartArtConnectorPaint, SmartArtNodeLabel } from './smartart-node-label';
+// Centred multi-line SVG label layout (SmartArt nodes and cached shapes): each
+// binding places one `<tspan>` per returned line and owns nothing else.
+export { centeredSvgTextLines } from './svg-text-lines';
+export type { SvgTextLine, CenteredSvgTextOptions } from './svg-text-lines';
+// Word wrapping for targets with no text-measurement API (PDF streams, SVG).
+export { wrapTextByEstimatedWidth } from './text-wrap-estimate';
+export type { EstimatedWrapOptions } from './text-wrap-estimate';
 // Inspector panel: shapeStyle/textStyle value readers + shallow-merge patch
 // builders (fill/stroke/colour/font-size/bold/italic/underline).
 export * from './inspector-helpers';
@@ -479,20 +997,32 @@ export * from './effects-helpers';
 // fallback, and the resolved-variant -> stylesheet/family-list build (the
 // managed <style> id + object-URL minting stay per-binding).
 export * from './embedded-fonts';
+// Pure Google Fonts webfont-fallback helpers: referenced-family collection,
+// known-family selection, and CSS2 href building (the managed <link> id +
+// injection stay per-binding).
+export * from './google-webfonts';
 // Pure slide text search: per-element/-slide text collection + case-insensitive
 // substring search with match counts and context snippets.
 export * from './slide-search';
 // Custom shows: named slide-subset list type + immutable id/create helpers.
 export * from './custom-shows';
+// Design > Slide Size: the 16 ST_SlideSizeType presets with COM-confirmed EMU
+// dimensions, the orientation swap, and the pixel-canvas <-> EMU decision that
+// keeps a preset's exact dimensions through a save.
+export * from './slide-size';
 // Export-progress maths shared by every binding's export handlers: the
 // `(current, total)` slide cursor → 0-100 percentage mapping (single-phase and
 // two-phase capture+record), the "verb slide N of M" status label, and the
 // cooperative-cancellation `AbortError` helpers. The stateful modal + the
 // capture/encode loop that calls these stay in each binding.
 export * from './export-progress';
-// Native file-open picker — framework-agnostic `<input type=file>` helper +
-// default `.pptx/.ppsx/.pptm/.potx` accept list, used by every binding's
-// File ▸ Open action to load another presentation.
+// Which files the viewer can OPEN (`.pptx/.ppsx/.pptm/.potx/.ppt/.json`, the
+// accept list and the matching drop-target predicate) and what a SAVED copy
+// should be called. Read is a superset of write, so a deck opened as `.ppt` is
+// offered back as `.pptx`. Imports nothing, so anything may depend on it.
+export * from './presentation-file-kinds';
+// Native file-open picker: framework-agnostic `<input type=file>` helper used
+// by every binding's File > Open action to load another presentation.
 export * from './open-file-picker';
 // Mobile-adapted presenter view: pure geometry (next-slide thumbnail scaling),
 // slide-counter / first-last labels, and elapsed-time formatting for the
@@ -519,6 +1049,9 @@ export * from './format-helpers';
 // `crypto.getRandomValues` rather than `Math.random()`. Used anywhere a value
 // gates something security-sensitive (session nonces, room codes, GUIDs).
 export * from './secure-random';
+// Session restore: remember the deck a host has open (per browser tab) so a
+// page refresh reopens it instead of dropping the user back on the dropzone.
+export * from './session-restore';
 // Broadcast helpers: room-id generation, start-form validation, and the
 // viewer-link builder for the one-way broadcast (presenter -> viewers) session.
 export * from './broadcast-helpers';
@@ -534,19 +1067,84 @@ export * from './text-build-spans';
 export * from './presenter-console';
 export * from './presentation-print-settings';
 export * from './presentation-session';
+// The selectively-subscribable store the shared viewer state is built on.
+export * from './viewer-store';
+// The canvas zoom slice, first vertical slice on that runtime.
+export * from './viewer-zoom-store';
+// No-op-write guards for the hot state paths (presenter snapshot, presence
+// list). Shared so a write that carries no new information is dropped once,
+// rather than re-rendering each binding in turn (issue #145).
+export * from './state-equality';
 // Audience content store: IndexedDB presenter <-> audience deck handoff, plus
 // the audience-tab hash detection helpers. Shared by every binding.
 export * from './audience-content-store';
+// Audience display policy: an audience tab is a mirror of the presenter's
+// screen and must never fall back into the editor. Used by every exit path.
+export * from './audience-display';
 // EyeDropper colour sampler: native EyeDropper API plus an elementFromPoint /
 // canvas DOM-sampling fallback for browsers without it.
 export * from './eyedropper';
 // Presentation toolbar: bottom-trigger-zone visibility math, auto-hide timing,
 // pen/highlighter colour swatches, and slide-counter formatting.
 export * from './presentation-toolbar';
+// Show chrome inventory: which controls the slide-show toolbar carries, in what
+// order, under which accessible names, and at what measurements. The content
+// counterpart to `presentation-toolbar`'s behaviour, so no binding invents its
+// own bar.
+export * from './present-chrome';
+
+// Blackboard mode: the z-index rule that keeps show ink above the blackout
+// sheet, and the one-click "black screen + pen" toggle state used by the show
+// toolbar's Blackboard action.
+export * from './presentation-blackboard';
+// Slide-show right-click menu: shared item structure (order/grouping/i18n
+// keys) consumed by every binding's own thin context-menu component.
+export * from './presentation-context-menu';
+// Presenter-console inventory + geometry: which controls the presenter view
+// carries, in what order, under which label keys, and at what measurements.
+// The `present-chrome` counterpart for the console rather than the show bar.
+export * from './presenter-chrome';
+export * from './presenter-chrome-metrics';
+// Presenter-view lifecycle: the one-shot latch that stops the audience popup's
+// fullscreen bounce being mistaken for the presenter ending the show.
+export * from './presenter-show-lifecycle';
 // Slide-show keyboard map: PowerPoint's published shortcut set (navigation,
 // slide-number jump, blank screens, pointer tools) as one shared mapping so no
 // binding invents its own bindings.
+export * from './anchored-popup-position';
 export * from './presentation-keymap';
+// PowerPoint's Reading View: the deck at full window size with the editor
+// chrome reduced to a nav bar, deliberately NOT the fullscreen slide show.
+export * from './reading-view';
+// PowerPoint's Outline view: the deck as an editable indented text document,
+// one row per (element, paragraph) pair. `outline-view` reads the deck,
+// `outline-view-edit` turns a keystroke into a new deck.
+export * from './outline-view';
+export * from './outline-view-edit';
+// Editor keyboard map: the editing shortcut set (clipboard, history, nudge,
+// group, select-all, slide paging, help) as one shared mapping, so the five
+// bindings cannot disagree about what Ctrl+D or an arrow key does.
+export * from './editor-keymap';
+// Start-a-show keys (F5 / Shift+F5): kept apart from the editor keymap because
+// they must fire on a read-only host and from inside a text field, which the
+// editor gates forbid.
+export * from './slide-show-start-keymap';
+// Slide-sorter keyboard map: the sorter overlay is a second editing surface
+// with its own keys (slide clipboard, duplicate, delete, thumbnail zoom, and an
+// Escape that collapses a multi-selection before it closes).
+export * from './slide-sorter-keymap';
+// Focus repair for bindings whose canvas gesture preventDefault()s the click,
+// which would otherwise park focus on document.body and kill their keymap.
+export * from './editor-keyboard-focus';
+// What a Selection Pane rename commit means, including the empty commit that
+// has to reach the file as `name=""` rather than as "no opinion".
+export * from './selection-pane-rename';
+// Context-menu target resolution, including the right-click that lands inside
+// an inline text editor mounted as a sibling overlay of the element it edits.
+export * from './context-menu-target';
+// Canvas context-menu command set: ids, labels, order, separators and the rules
+// deciding what is offered, so the five bindings render one menu, not five.
+export * from './context-menu-commands';
 // Insert > Action: OOXML built-in action-button catalogue + element factory
 // (labelled nav buttons carrying an `actionClick` slide jump).
 export * from './action-buttons';
@@ -578,7 +1176,36 @@ export * from './accessibility-issues';
 // role-description mapping, and reduced-motion detection. Each binding's element
 // renderer applies these to its DOM nodes.
 export * from './accessibility';
+// Whether an element is a control (click/hover action, text hyperlink, zoom
+// tile). Drives the `role="button"` override above, so all five bindings agree.
+export * from './element-actionability';
+// On-canvas action affordances (amber "has action" badge + hover link tooltip):
+// the show/hide rule, the fallback text chain, and the shared CSS, so all five
+// bindings draw the same authoring chrome and never during a slide show.
+export * from './element-action-affordance';
+// The same affordances painted at a stage boundary, for the four bindings whose
+// element renderer dispatches straight to a per-type component with no wrapper.
+export * from './element-action-affordance-dom';
+// Whether an element reaches the canvas at all: the Selection Pane's hide/show
+// rule (`p:cNvPr/@hidden`), applied by every binding's element renderer.
+export * from './element-visibility';
+// Action Settings panel: the click/hover action-type catalogue + slide-number
+// clamping shared by every binding's inspector.
+export * from './element-action-options';
+// Presentation `ppt/tags/*.xml` name/value metadata: flatten + immutable edits.
+export * from './tag-collections';
 export * from './element-accessibility-dom';
+export * from './element-aria-attributes';
+// Which element kinds model an alt-text / title accessibility field
+// (`p:cNvPr/@descr` / `@title`), and a pure descriptor every binding's
+// inspector uses to decide whether to show those editors for the selected
+// element and what value to bind them to.
+export * from './element-non-visual-description';
+// `[data-element-id="..."]` selector escaping with a safe non-`CSS.escape` fallback.
+export * from './css-escape';
+// Pointer-to-element hit-test: a click on a grouped child selects the GROUP
+// (PowerPoint's rule), with the innermost id kept available for drill-in.
+export * from './element-hit-test';
 export * from './modal-focus';
 // Freehand ink: points -> SVG path `d`, completed-stroke -> `InkPptxElement`.
 export * from './ink-drawing';
@@ -587,6 +1214,30 @@ export * from './ink-drawing';
 // (stroke-dashoffset reveal) animation styles. Pure; each binding renders the
 // resulting circles/paths. React + Vue + Angular ink renderers consume this.
 export * from './ink-rendering';
+export * from './ink-tilt-nib';
+// The shared per-stroke render-mode decision (plain path / pressure circles /
+// tilt nib marks) both `content-part-strokes.ts` and `ink-group-strokes.ts`
+// build on.
+export * from './ink-stroke-view';
+// The in-progress (pointer-still-down) counterpart of `ink-stroke-view.ts`'s
+// decision: the same plain-path/pressure-circle/tilt-nib render mode for a
+// stroke's accumulated live points, so a binding's Draw overlay shows the
+// calligraphic lean/variable width DURING the gesture, not only after commit.
+export * from './ink-live-preview';
+// `p:contentPart` ink view model: per-stroke path/colour/width/opacity, the
+// pressure-circle decision, and the element viewBox. One decision function for
+// all five bindings (it used to be a Svelte-local module, while Vue and Angular
+// had no contentPart renderer at all and painted the unsupported placeholder).
+export * from './content-part-strokes';
+// Draw-tab `InkPptxElement` ink view model: the same per-stroke decision as
+// `content-part-strokes.ts`, for the element type the Draw tool itself
+// authors rather than a loaded `p:contentPart`.
+export * from './ink-group-strokes';
+// Draw-tab eraser hit-testing: which `ink`/`contentPart` element (top-most,
+// tolerance radius) a point falls on. One decision function for all five
+// bindings, which each duplicated the box+radius loop (and disagreed on the
+// radius, and on whether a reloaded `contentPart` stroke was erasable at all).
+export * from './ink-eraser-hit-test';
 // Mobile chrome sheet state machine + bottom-bar action descriptors.
 export * from './mobile-chrome';
 // Gradient-picker editor model: read `GradientState` off an element + build
@@ -600,8 +1251,14 @@ export * from './image-adjustments';
 // toggle state + merge patches, plus a uniform default-cell-padding patch
 // builder (this binding has no per-cell selection model; see module docs).
 export * from './table-inspector';
-// Active-slide comment-array transforms (add/remove/toggle-resolved).
+// Active-slide comment-array transforms (add/remove/toggle-resolved/reply).
 export * from './comments-list';
+// `@`-mention segmentation (display) + `@`-typeahead insertion (authoring)
+// for a comment body. Bindings only map `CommentTextSegment[]` onto spans.
+export * from './comment-mentions';
+// Canvas comment-marker descriptors (numbered dots + "<author>: <text>"
+// titles); each binding renders these inside its slide stage.
+export * from './comment-markers';
 // Touch-gesture state machine: pinch-to-zoom (two-finger distance ratio),
 // single-finger horizontal swipe, and long-press recognition driven purely by
 // DOM `TouchEvent`-shaped objects. Each binding owns the listener attach/detach
@@ -621,6 +1278,10 @@ export * from './insert-chart';
 // SmartArt reflow: convert algorithmic layout results back to PptxSmartArtDrawingShape[]
 // so the drawing-shape renderer handles post-edit display and shapes round-trip through save.
 export * from './smartart-reflow-to-shapes';
+// The one-call form every edit commit path uses: derives layout / palette /
+// style from the updated data itself, so a binding cannot get them wrong or
+// skip the reflow because the six-argument call looked like a chore.
+export * from './smartart-reflow-element';
 
 // Inspector preset catalogues (framework-free pure data): artistic image-effect
 // presets, text-warp gallery presets + preview-path generator, shape quick-style
@@ -630,6 +1291,16 @@ export * from './smartart-reflow-to-shapes';
 // + swallowed autoplay-blocked rejection) each binding calls when present mode
 // makes a media element's slide the live surface.
 export * from './media-playback';
+// Trim-end stop + fade in/out scheduling (G20): split out of media-playback.ts
+// (file-size cap) so every binding's presenting-mode media player can share
+// the same `p14:trim`/`p14:fade` enforcement React alone used to implement.
+export * from './media-trim-fade-scheduler';
+// Cross-slide ("play across slides") audio survives slide unmount via the
+// document-level persistent-audio manager, and a running show pauses its
+// media + auto-advance while the tab is hidden.
+export * from './media-persistent-audio';
+export * from './presentation-visibility';
+export * from './media-trim-range';
 export * from './media-trim-timeline';
 export * from './summary-zoom';
 
@@ -637,12 +1308,17 @@ export * from './image-artistic-presets';
 export * from './text-warp-presets';
 export * from './shape-quick-styles';
 export * from './text-3d-presets';
+export * from './text-3d-fields';
+export * from './theme-editor-presets';
 
 // Element clipboard: in-memory copy/cut payload builders + paste cloning
 // (fresh template-aware ids + cascade offset) and the marked, versioned JSON
 // string codec (binary-safe) for round-tripping elements through the system
 // clipboard. Each binding's cut/copy/paste handlers are thin wrappers on this.
 export * from './element-clipboard';
+export * from './header-footer-dialog';
+export * from './media-file-type';
+export * from './template-background-rows';
 export * from './template-editing';
 // Ordered + capped element composition for slide previews / sidebar thumbnails,
 // mirroring `buildSaveSlides` (template elements first, then slide-owned).
@@ -653,26 +1329,86 @@ export * from './shape-preset-catalog';
 // Home-tab text formatting presets: font family/size dropdown lists,
 // character/line-spacing presets, and the change-case options + transforms.
 export * from './text-format-presets';
+// Home-tab font dropdown grouping (theme / embedded / custom / all) and the
+// theme-aware default family shown when the selection overrides nothing.
+export * from './font-catalog';
+// The File > Fonts "Embed fonts in the file" toggle: whether it can do
+// anything on this deck, which position describes reality, and the
+// `PptxHandlerSaveOptions` slice its position implies.
+export * from './font-embedding';
+// Opt-in custom font registration for File > Options: filename -> family and
+// weight/style axes, plus the FontFace hand-off.
+export * from './custom-fonts';
+// New Slide / Layout gallery thumbnail geometry: fit scale, inner surface
+// size, and placeholder outlines with scale-compensated border widths.
+export * from './layout-preview';
+// Which layouts the New Slide / Layout menus offer: master scoping and
+// duplicate-name collapsing, plus the active-entry test.
+export * from './layout-gallery';
 // Canonical "Office Standard Colors" 10-swatch catalogue for font-colour /
 // highlight-colour (and future fill/line-colour) pickers, shared by every
 // binding instead of each hardcoding its own copy.
 export * from './color-swatches';
+export * from './theme-color-swatches';
+export * from './theme-color-picker-state';
+export * from './theme-color-field-commit';
 
 // PowerPoint-style title bar (AutoSave toggle + quick access + file name +
 // search) and the shared IndexedDB autosave recovery store behind it. Pure
 // logic + class tokens; each binding renders its own thin view from these.
 export * from './title-bar';
+// The same chrome measurements as plain values, for the two bindings whose
+// stylesheets cannot read a Tailwind class, plus the one zoom step all five
+// share. Both exist so a hand-ported binding has something to derive from.
+export * from './chrome-metrics';
+export * from './zoom-step';
 export * from './command-search';
 export * from './autosave-store';
+export * from './autosave-tick';
+// Who wins when the host's `autosave` prop and the user's AutoSave toggle
+// disagree (the prop is a ceiling, the toggle a preference inside it), plus the
+// one cadence rule and the debounce cap that makes both engine shapes promise
+// the same thing.
+export * from './autosave-policy';
+// "Is there a recoverable snapshot for this deck, and what should the prompt
+// say?" One decision, five dialogs.
+export * from './autosave-recovery';
 export * from './backstage';
+export * from './backstage-cards';
 export * from './master-page-layout';
+export * from './master-view';
+export * from './master-view-editing';
+export * from './master-view-crud';
 export * from './virtualized-list';
 export * from './document-statistics';
 export * from './used-fonts';
 export * from './font-availability';
 export * from './password-protection';
+// One decision for all five bindings: a captured password means the deck is
+// serialised through `saveEncrypted` (OLE2 container), never `save` (ZIP).
+export * from './deck-save-encryption';
+// The one `PptxHandlerSaveOptions` assembler for every binding's main save
+// path, so the five hand-rolled option objects can no longer drift apart.
+export * from './deck-save-options';
 export * from './viewer-preferences';
 export * from './presentation-setup';
+// PowerPoint's precedence for a click during a running show: an on-slide
+// Action Setting first, then live content that owns its own click, then
+// click-to-advance.
+export * from './presentation-action';
+// `ppaction://ole?verb=N` can only open the recovered embedding in a browser.
+export * from './presentation-ole-verb';
+// Only action shapes, media transport and links take the pointer while a show
+// runs; the rest of the slide is scenery the click passes through.
+export * from './presentation-hit-test';
+export * from './presentation-show-order';
+// The slide a show opens on: the active slide when the show includes it, else
+// the first show slide after it. Entering on an excluded slide is a parity bug.
+export * from './presentation-entry-slide';
+// The rail / sorter cue for a slide `presentation-show-order` will skip: the
+// neutral marker attribute, the shared slash mark, and the description id that
+// announces the state without touching the tile's accessible name.
+export * from './hidden-slide-cue';
 export * from './presentation-subtitles';
 export * from './account';
 export * from './viewer-prefs-storage';
@@ -682,3 +1418,114 @@ export * from './toolbar-actions';
 // File > Options parity: schema, store, persistence, and behavior helpers
 // behind the PowerPoint-style Options dialog in every binding.
 export * from './options';
+
+// small helper extractions (wave 2)
+// OLE placeholder icon SVG-fragment primitives (rect/line/text builders +
+// the per-type shape table), shared by every binding's OLE renderer.
+// (`buildSmartArtPreviewElement` + its constants, and `buildQueryLinkUrl` /
+// `buildShareUrl`, are new exports of the already-star-exported
+// `preview-elements` / `broadcast-helpers` above; `modelDataToBlobUrl` /
+// `DEFAULT_MODEL_MIME` likewise ride the existing `model3d-scene` export.)
+export * from './ole-icon-primitives';
+// The one `hexToRgbUnit` for render/'s SVG duotone `<filter>` builders.
+export * from './color-units';
+// Cross-slide ("play across slides") audio registration, split out of
+// `media-playback.ts` purely to stay under the file-size cap.
+export * from './cross-slide-audio';
+// Slide-transition sound playback (`p:sndAc/p:stSnd`/`p:endSnd`), distinct
+// from `slide-transition-sound.ts`'s authoring picker.
+export * from './slide-transition-sound-playback';
+// Presentation ink-annotation overlay pure helpers (stroke path + cursor).
+export * from './annotation-overlay';
+
+// editor + playback engines (wave 2)
+// Click-group step application / staged-build RAF reveal / auto-advance chain
+// that drives a running slide show, extracted from four near-identical
+// per-binding copies (Vue/Angular/Svelte/Vanilla `*animation-playback-helpers`).
+export * from './animation-playback-engine';
+// `p:seq/@nextAc="seek"`: a click during a mid-flight group fast-forwards it
+// instead of starting the next one; `advanceMainSequence` is every binding's
+// single "next click" entry point.
+export * from './animation-playback-seek';
+// Shift-to-lock-aspect resize + arrow-key nudge math for the editing overlay.
+export * from './editor-geometry';
+// Pure, immutable PptxSlide[] mutations (CRUD/z-order/notes) the editor
+// composables/services commit through.
+export * from './editor-mutations';
+// Pointer move/resize/rotate gesture state machine for the editing overlay.
+export * from './editor-gestures';
+// Read a contenteditable inline-edit surface's plain text back out.
+export * from './inline-text-extract';
+// No-op detection plus rich-run preservation for committed inline text.
+export * from './inline-text-commit';
+
+// inspector option lists (wave 2)
+// Stroke/dash pattern picker: the 12 ST_PresetLineDashVal values.
+export * from './stroke-dash-options';
+// Compound-line / line-join / line-cap picker option lists.
+export * from './stroke-line-style-options';
+// Ribbon Arrange group shape-level extras gating (Group/Ungroup/stroke width).
+export * from './arrange-extras';
+// "Show Gridlines" checkbox: toggles the value axis's majorGridlines, not the
+// dead style.hasGridlines field.
+export * from './chart-gridlines-toggle';
+// Series "use secondary axis" checkbox: axisId resolution against chartData.axes.
+export * from './chart-secondary-axis';
+
+// presentation parity descriptors (wave 2)
+// Placeholder prompt text ("Click to add title"): edit-only, never Present/export/thumbnail.
+export * from './placeholder-prompt';
+// Slide-size Maximize/Ensure Fit rescale (x/y/width/height + font sizes).
+export * from './slide-size-rescale';
+// Write-protection recommendation (p:modifyVerifier / docProps _MarkAsFinal).
+export * from './read-only-recommendation';
+// Password check against p:modifyVerifier for the read-only banner's unlock prompt.
+export * from './modify-password-check';
+// getCompatibilityWarnings() -> toast descriptors, deduped by code.
+export * from './compatibility-warning-toasts';
+// Picture "Crop to Shape" clip-path (reuses the shared shape-geometry cascade).
+export * from './crop-shape-clip';
+// ActiveX control overlay geometry/label/fallback-image.
+export * from './activex-overlay-view';
+// a14 Corrections/Color panel CSS + SVG sharpen filter (sharpenSoften/brightnessContrast/colorTemperature/colorSaturation).
+export * from './image-effect-corrections';
+
+// chart subtypes (wave 2)
+// bar3D column/bar shape geometry (box/cylinder/cone[ToMax]/pyramid[ToMax])
+// for the interactive three.js bar3D scene.
+export * from './bar-chart-3d-geometry';
+// Pure per-face `c:pictureOptions` fill resolution (picture vs derived
+// colour) for one bar3D box's six `BoxGeometry` faces; no `three` import.
+export * from './bar-chart-3d-face-fill';
+// Turns the above into actual `THREE.Material`(s) + async texture loading for
+// one bar3D box mesh, plus the scene-scoped texture manager/cache.
+export * from './bar-chart-3d-materials';
+// Async first-pixel colour sampling (+ cache/subscribe) for an untargeted
+// bar3D extrusion face whose fill is picture-only; a binding subscribes once
+// per mounted chart and re-renders when a sample lands (C2-G9 face-targeting
+// gap: PowerPoint paints a flat colour sampled from the picture itself).
+export * from './chart-bar3d-face-picture-sample';
+// Inspector option lists + pure patch builders for bar3D shape, radar style,
+// and surface wireframe.
+export * from './chart-subtype-options';
+
+// comment threading, extended hyperlink verbs, MRU colours (wave 4)
+// Recent-colours seed/push/patch for every colour picker's "Recent colours" row.
+export * from './recent-colors';
+
+// Table style (a:tblStyleLst) DEFINITION editor: the 14-part picker list
+// (13 CT_TableStyle sections + the synthetic background part), the pure
+// describe/apply decision functions every binding's "Edit style..." panel maps
+// onto its own template.
+export * from './table-style-editor-parts';
+export * from './table-style-editor-descriptor';
+export * from './table-style-editor-edit';
+// W4-E2: pure state-transition helpers threading the table style editor's
+// edits into a binding's mutable viewer state, plus the save-options picker
+// every `handler.save(...)` call site uses to forward them.
+export * from './table-style-map-edits';
+
+// W4-D: chart title rich-text per-run render spans + the flat-text-edit
+// collapse rule every binding's title inspector field uses.
+export * from './chart-title-runs';
+export * from './collaboration-websocket';

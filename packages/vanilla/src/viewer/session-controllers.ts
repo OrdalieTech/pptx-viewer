@@ -1,9 +1,14 @@
-import type { PptxHandler } from 'pptx-viewer-core';
-import type { CollaborationConfig, ConnectionStatus } from 'pptx-viewer-shared';
+import type { PptxHandler, PptxHandlerSaveOptions } from 'pptx-viewer-core';
+import type {
+	AutosaveActivation,
+	CollabLoadOrigin,
+	CollaborationConfig,
+	ConnectionStatus,
+} from 'pptx-viewer-shared';
 import { publishLiveInlineText } from 'pptx-viewer-shared';
 
-import type { AutosaveStatus } from './autosave/autosave-controller';
-import { createAutosaveController } from './autosave/autosave-controller';
+import type { AutosaveStatus } from './autosave';
+import { createAutosaveSession } from './autosave';
 import type { CollabUiController } from './collab/collab-ui';
 import { createCollabUi } from './collab/collab-ui';
 import { createCollaborationController } from './collab/collaboration-controller';
@@ -13,8 +18,6 @@ import type { Store, ViewerState } from './state';
 import type { PptxViewerOptions } from './types';
 import type { ViewerChrome } from './ui';
 
-/** Default debounce (ms) between an edit and a persisted autosave snapshot. */
-const DEFAULT_AUTOSAVE_INTERVAL_MS = 2_000;
 /** Default IndexedDB recovery key when the host does not supply one. */
 const DEFAULT_AUTOSAVE_FILE_PATH = 'presentation.pptx';
 
@@ -23,12 +26,23 @@ export interface SessionControllersDeps {
 	store: Store<ViewerState>;
 	options: PptxViewerOptions;
 	getHandler: () => PptxHandler | null;
+	/**
+	 * Session-level save options (view properties, table styles, tags, deck
+	 * properties, ...), built the same way as the Save/Export path
+	 * (`buildDeckSaveOptions`). Without this the elected-writer write-back
+	 * dropped every session-level edit outside `slides`.
+	 */
+	getSaveOptions?: () => PptxHandlerSaveOptions;
 	getChrome: () => ViewerChrome;
 	getTranslator: () => Translator;
 	getScale: () => number;
 	setEditable: (editable: boolean) => void;
 	/** Navigate to a slide (follow-mode target). */
 	goToSlide: (index: number) => void;
+	/** Load bytes through the viewer's normal pipeline (recovery restore). */
+	loadFile: (bytes: Uint8Array) => Promise<void>;
+	/** Options > General > "Initials" override for the Share dialog's local-user avatar. */
+	getUserInitials?: () => string | undefined;
 }
 
 /**
@@ -57,17 +71,29 @@ export interface SessionControllers {
 	 * The load pipeline is about to commit a parsed deck: suppress collaboration
 	 * slide publishing until {@link notifyCollaborationContentLoaded} runs.
 	 */
-	beginCollaborationContentLoad(): void;
+	beginCollaborationContentLoad(origin: CollabLoadOrigin): void;
 	/**
-	 * A content load finished; when the shared doc already has slides, they are
-	 * re-adopted over the just-loaded deck (late-joiner bootstrap protection).
+	 * A content load finished. A BOOTSTRAP deck yields to a room that already
+	 * holds slides (late-joiner protection); a deck the user opened during the
+	 * session is published to the room instead of being thrown away.
 	 */
-	notifyCollaborationContentLoaded(): void;
+	notifyCollaborationContentLoaded(origin: CollabLoadOrigin): void;
 	/** Force an immediate autosave (no-op when autosave is disabled). */
 	autosaveNow(): Promise<void>;
-	/** Enable/disable recovery autosave for the active viewer session. */
+	/**
+	 * Apply the user's AutoSave preference. INERT when the host passed
+	 * `autosave: false`: that option is a policy ceiling, and a preference can
+	 * never exceed a policy (see `pptx-viewer-shared/render/autosave-policy`).
+	 */
 	setAutosaveEnabled(enabled: boolean): void;
+	/** Whether recovery snapshots are actually being written right now. */
 	isAutosaveEnabled(): boolean;
+	/** The user's AutoSave preference, i.e. what the title-bar switch shows. */
+	isAutosavePreferred(): boolean;
+	/** The full shared activation verdict (drives the title-bar switch state). */
+	getAutosaveActivation(): AutosaveActivation;
+	/** File > Options > Save > AutoRecover cadence, in milliseconds. */
+	setAutosaveIntervalMs(ms: number | undefined): void;
 	/** Open the viewer's built-in broadcast dialog. */
 	openBroadcast(): void;
 	/** Open the viewer's built-in collaboration sharing dialog. */
@@ -92,11 +118,23 @@ function autosaveLabel(status: AutosaveStatus, t: Translator): string {
 export function createSessionControllers(deps: SessionControllersDeps): SessionControllers {
 	const { options } = deps;
 
-	const autosave = createAutosaveController({
+	// Activation, cadence and the crash-recovery prompt all live in the shared
+	// policy modules; this only supplies the host's options and the viewer's own
+	// load path (see `autosave/autosave-session`).
+	const autosave = createAutosaveSession({
+		doc: deps.doc,
 		store: deps.store,
 		getHandler: deps.getHandler,
+		getTranslator: deps.getTranslator,
+		hostAutosave: options.autosave,
+		hostIntervalMs: options.autosaveIntervalMs,
 		filePath: options.autosaveFilePath ?? DEFAULT_AUTOSAVE_FILE_PATH,
-		intervalMs: options.autosaveIntervalMs ?? DEFAULT_AUTOSAVE_INTERVAL_MS,
+		// Threaded through only so the snapshot uses the shared save decision;
+		// a recovery snapshot stays plaintext whatever the protection state is.
+		getSaveIntent: () => ({
+			password: deps.store.get().presentationPassword,
+			passwordProtected: deps.store.get().isPasswordProtected,
+		}),
 		onStatus: (status) => {
 			deps
 				.getChrome()
@@ -105,7 +143,7 @@ export function createSessionControllers(deps: SessionControllersDeps): SessionC
 			options.onAutosaveStatus?.(status);
 		},
 		onRecovery: (record) => options.onAutosaveRecovery?.(record),
-		enabled: options.autosave ?? false,
+		loadFile: (bytes) => deps.loadFile(bytes),
 	});
 
 	// Set once `collabUi` is constructed below (it needs the controller's
@@ -116,6 +154,7 @@ export function createSessionControllers(deps: SessionControllersDeps): SessionC
 	const collaboration: CollaborationController = createCollaborationController({
 		store: deps.store,
 		getHandler: deps.getHandler,
+		getSaveOptions: deps.getSaveOptions,
 		setEditable: deps.setEditable,
 		onStatusChange: (status) => {
 			options.onCollaborationStatus?.(status);
@@ -164,6 +203,7 @@ export function createSessionControllers(deps: SessionControllersDeps): SessionC
 		followUser: (clientId) => collaboration.followUser(clientId),
 		shareDefaults: options.shareDefaults,
 		hiddenActions: options.hiddenActions,
+		getUserInitials: deps.getUserInitials,
 	});
 	notifyCollabUi = (status) => collabUi.onStatusChange(status);
 
@@ -183,14 +223,21 @@ export function createSessionControllers(deps: SessionControllersDeps): SessionC
 		},
 		flushCollaborationLivePatch: () => collaboration.livePatcher.flush(),
 		followCollaborationUser: (clientId) => collaboration.followUser(clientId),
-		beginCollaborationContentLoad: () => collaboration.beginContentLoad(),
-		notifyCollaborationContentLoaded: () => collaboration.notifyContentLoaded(),
+		beginCollaborationContentLoad: (origin) => collaboration.beginContentLoad(origin),
+		notifyCollaborationContentLoaded: (origin) => collaboration.notifyContentLoaded(origin),
 		autosaveNow: () => autosave.saveNow(),
 		setAutosaveEnabled(enabled) {
-			autosave.setEnabled(enabled);
-			options.onToggleAutosave?.(enabled);
+			// `setEnabled` reports whether the preference was applied at all; a
+			// host that passed `autosave: false` makes the toggle inert, and a
+			// callback fired for a change that never happened is a lie.
+			if (autosave.setEnabled(enabled)) {
+				options.onToggleAutosave?.(enabled);
+			}
 		},
 		isAutosaveEnabled: () => autosave.isEnabled(),
+		isAutosavePreferred: () => autosave.isPreferred(),
+		getAutosaveActivation: () => autosave.getActivation(),
+		setAutosaveIntervalMs: (ms) => autosave.setOptionsIntervalMs(ms),
 		openBroadcast: () => collabUi.openBroadcast(),
 		openShare: () => collabUi.openShare(),
 		destroy() {

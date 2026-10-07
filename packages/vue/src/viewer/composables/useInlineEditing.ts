@@ -1,7 +1,14 @@
 import { hasTextProperties } from 'pptx-viewer-core';
-import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
+import type { PptxElement, PptxSlide, TextStyle } from 'pptx-viewer-core';
 import type { CollaborationLivePatcher, ViewerProofingOptions } from 'pptx-viewer-shared';
-import { applyAutoCorrect, publishLiveInlineText, setCellText } from 'pptx-viewer-shared';
+import {
+	applyAutoCorrect,
+	canInteractWithElement,
+	publishLiveInlineText,
+	resolveInlineEditAutoFitHeight,
+	resolveInlineEditNormAutofitShrink,
+	setCellText,
+} from 'pptx-viewer-shared';
 import { computed, ref } from 'vue';
 import type { ComputedRef, Ref } from 'vue';
 
@@ -83,11 +90,12 @@ export function useInlineEditing(input: UseInlineEditingInput): UseInlineEditing
 	function enterInlineEdit(id: string): void {
 		const el = findActiveElement(id);
 		// Only elements that carry text (text boxes / shapes) get the element-level
-		// inline text editor, and only when text editing is not locked. Mirrors
-		// React's gate (useCanvasInteractions: `hasTextProperties(el) &&
-		// !el.locks?.noTextEdit`). Without this, tapping a selected table opened the
-		// whole-table text editor and masked the per-cell <td> editor.
-		if (!el || !hasTextProperties(el) || el.locks?.noTextEdit) {
+		// inline text editor, and only when text editing is not locked. The lock
+		// composition (`noSelect` subsumes `noTextEdit`) is decided once, in shared
+		// `element-locks`, rather than re-read flag by flag here. Without the text
+		// gate, tapping a selected table opened the whole-table text editor and
+		// masked the per-cell <td> editor.
+		if (!el || !hasTextProperties(el) || !canInteractWithElement(el, 'textEdit')) {
 			return;
 		}
 		// Equation elements never enter inline text editing: the editor only
@@ -112,12 +120,66 @@ export function useInlineEditing(input: UseInlineEditingInput): UseInlineEditing
 		const text = autoCorrect(inlineEditingText.value);
 		inlineEditingElementId.value = null;
 		if (el) {
+			// Clicking into a text box and clicking straight back out is not an
+			// edit, and PowerPoint does not offer to undo it. Committing anyway
+			// recorded a snapshot identical to the live deck, and because this
+			// path fires on every blur - including the blur caused by pressing
+			// the ribbon's own Undo button - the stack gained a fresh no-op entry
+			// faster than Undo could drain it. Two real edits later, Undo popped
+			// only the no-op it had just created and the deck never moved: the
+			// button stayed lit forever and the earlier edits became unreachable.
+			//
+			// Comparing the committed text also protects the segments: an element
+			// carrying rich `textSegments` but no plain `text` seeded the editor
+			// with '', so a no-op commit remapped its runs from an empty string
+			// and erased them.
+			const currentText = (el as { text?: string }).text ?? '';
+			if (text === currentText) {
+				return;
+			}
 			const segments = remapTextToSegments(
 				text,
 				(el.textSegments as Parameters<typeof remapTextToSegments>[1]) ?? undefined,
 				(el.textStyle as Parameters<typeof remapTextToSegments>[2]) ?? undefined,
 			);
-			ops.updateElement(id, { text, textSegments: segments } as Partial<PptxElement>);
+			// `a:spAutoFit` ("Resize shape to fit text"): grow/shrink the shape to
+			// the text's natural content height, the way PowerPoint does. Vue has
+			// not yet applied the `null` that unmounts the editor's DOM node at
+			// this point (that happens on the next render, when the reactive
+			// `inlineEditingElementId` update flushes), so `[data-inline-editor]`
+			// still resolves to the live, just-blurred node.
+			const editorEl =
+				typeof document !== 'undefined'
+					? document.querySelector<HTMLElement>('[data-inline-editor]')
+					: null;
+			const newHeight = resolveInlineEditAutoFitHeight(
+				el.textStyle as TextStyle | undefined,
+				(el as { height?: number }).height ?? 0,
+				editorEl,
+			);
+			// `a:normAutofit` ("Shrink text on overflow"): recompute the font
+			// scale/line-spacing reduction so the (possibly now longer or
+			// shorter) text still fits the shape, the way PowerPoint does.
+			// Mutually exclusive with the `spAutoFit` resize above.
+			const shrink = resolveInlineEditNormAutofitShrink(
+				el.textStyle as TextStyle | undefined,
+				(el as { height?: number }).height ?? 0,
+				editorEl,
+			);
+			ops.updateElement(id, {
+				text,
+				textSegments: segments,
+				...(newHeight !== undefined ? { height: newHeight } : {}),
+				...(shrink !== 'unchanged'
+					? {
+							textStyle: {
+								...(el.textStyle as TextStyle | undefined),
+								autoFitFontScale: shrink.fontScale,
+								autoFitLineSpacingReduction: shrink.lnSpcReduction,
+							},
+						}
+					: {}),
+			} as Partial<PptxElement>);
 		}
 	}
 	function cancelInlineEdit(): void {

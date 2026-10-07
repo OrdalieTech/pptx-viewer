@@ -16,9 +16,10 @@
  */
 
 import { DestroyRef, Injectable, computed, inject, signal } from '@angular/core';
-import type { PptxSlide } from 'pptx-viewer-core';
+import type { PptxHandlerSaveOptions, PptxSlide } from 'pptx-viewer-core';
 
 import type {
+	CollabLoadOrigin,
 	CollaborationConfig,
 	CollaborationLivePatcher,
 	CollaborationRole,
@@ -26,10 +27,11 @@ import type {
 } from '../internal/shared';
 import {
 	createCollaborationLivePatcher,
-	derivePresenceList,
+	createPresenceProjector,
 	isMixedContentBlocked,
 	presenceToCursors,
 	registerCollaborationTeardown,
+	registerCollaborationSource,
 	resolveTransportForServerUrl,
 	validateRoomId,
 } from '../internal/shared';
@@ -97,6 +99,7 @@ export class CollaborationService {
 	private canvasHeight = DEFAULT_CANVAS_BOUND;
 	private getSourceBytes: (() => Uint8Array | null) | null = null;
 	private getTemplateElements: (() => TemplateElementsBySlideId) | null = null;
+	private getSaveOptions: (() => PptxHandlerSaveOptions) | null = null;
 	private currentConfig: CollaborationConfig | null = null;
 	private lastConfig: CollaborationConfig | null = null;
 	private lastOptions: ConnectOptions = {};
@@ -109,15 +112,31 @@ export class CollaborationService {
 	 */
 	private connectToken = 0;
 
+	/** Memoises the awareness -> presence projection so idle heartbeats are dropped. */
+	private readonly projector = createPresenceProjector();
+
 	private readonly refreshPresence = (): void => {
 		const s = this.session;
 		if (!s) {
+			// Leaving the room clears the memo, so a re-join is never mistaken for
+			// "nothing changed" against the previous session's peers.
+			this.projector.reset();
 			this.presence.set([]);
 			return;
 		}
-		this.presence.set(
-			derivePresenceList(s.awareness.getStates(), s.selfId, this.canvasWidth, this.canvasHeight),
+		// A signal notifies on every `set` with a fresh array, and awareness fires
+		// on each peer heartbeat as well as on our own writes, so this used to
+		// re-run the collaboration overlay's computeds on a timer. The shared
+		// projector reports whether anything visible actually moved (issue #145).
+		const { list, changed } = this.projector.project(
+			s.awareness.getStates(),
+			s.selfId,
+			this.canvasWidth,
+			this.canvasHeight,
 		);
+		if (changed) {
+			this.presence.set(list);
+		}
 	};
 
 	constructor() {
@@ -144,6 +163,7 @@ export class CollaborationService {
 			validateRoomId(config.roomId);
 		} catch {
 			this.status.set('error');
+			config.onstatus?.('error', new Error('Invalid collaboration room'));
 			return;
 		}
 
@@ -157,6 +177,7 @@ export class CollaborationService {
 		// ws:// socket, so surface the error rather than hanging until the timeout.
 		if (transport !== 'webrtc' && isMixedContentBlocked(config.serverUrl)) {
 			this.status.set('error');
+			config.onstatus?.('error', new Error('Insecure collaboration connection'));
 			return;
 		}
 
@@ -165,6 +186,7 @@ export class CollaborationService {
 		this.canvasHeight = options.canvasHeight ?? DEFAULT_CANVAS_BOUND;
 		this.getSourceBytes = options.getSourceBytes ?? null;
 		this.getTemplateElements = options.getTemplateElements ?? null;
+		this.getSaveOptions = options.getSaveOptions ?? null;
 		this.currentConfig = config;
 		this.activeRole.set(config.role);
 
@@ -184,7 +206,15 @@ export class CollaborationService {
 				bundle.doc.destroy();
 				return;
 			}
+			registerCollaborationSource(bundle.doc, options.getSourceSlides?.() ?? []);
 			this.session = activateSession(bundle, config, transport, {
+				onError: (error) => {
+					bundle.provider.destroy();
+					bundle.doc.destroy();
+					this.disconnect();
+					this.status.set('error');
+					config.onstatus?.('error', error instanceof Error ? error : new Error(String(error)));
+				},
 				slideSync: this.slideSync,
 				livePatcher: this.livePatcher,
 				onRemoteSlides: this.onRemoteSlides,
@@ -194,20 +224,29 @@ export class CollaborationService {
 				getStatus: () => this.status(),
 				isActive: () => this.active(),
 				failConnection: () => {
-					this.disconnect();
 					this.status.set('error');
+					config.onstatus?.('error', new Error('Collaboration unavailable'));
 				},
 			});
 
+			if (token !== this.connectToken) {
+				teardownSession(this.session, this.refreshPresence);
+				this.session = null;
+				return;
+			}
 			this.active.set(true);
 			this.refreshPresence();
-		} catch {
+		} catch (error) {
 			if (token !== this.connectToken) {
 				// A newer connect() owns the service state; do not tear it down.
 				return;
 			}
 			this.disconnect();
 			this.status.set('error');
+			config.onstatus?.(
+				'error',
+				error instanceof Error ? error : new Error('Collaboration unavailable'),
+			);
 		}
 	}
 
@@ -252,8 +291,11 @@ export class CollaborationService {
 	 * a parsed deck to viewer state (see {@link SlideSyncEngine.adoptDocAfterLoad}).
 	 * Returns true when the room's slides were adopted over the loaded deck.
 	 */
-	adoptDocSlidesAfterLoad(): boolean {
-		return this.connected() ? this.slideSync.adoptDocAfterLoad() : false;
+	adoptDocSlidesAfterLoad(origin: CollabLoadOrigin = 'user'): boolean {
+		if (this.session) {
+			registerCollaborationSource(this.session.ydoc, this.lastOptions?.getSourceSlides?.() ?? []);
+		}
+		return this.connected() ? this.slideSync.adoptDocAfterLoad(origin) : false;
 	}
 
 	/**
@@ -262,6 +304,9 @@ export class CollaborationService {
 	 * is shut the deck is held pending until the initial sync confirms.
 	 */
 	broadcastSlides(slides: readonly PptxSlide[]): void {
+		if (this.currentConfig?.role === 'viewer') {
+			return;
+		}
 		this.slideSync.broadcast(slides);
 	}
 
@@ -289,6 +334,7 @@ export class CollaborationService {
 			this.session?.ydoc ?? null,
 			this.getSourceBytes,
 			this.getTemplateElements,
+			this.getSaveOptions,
 		);
 	}
 }

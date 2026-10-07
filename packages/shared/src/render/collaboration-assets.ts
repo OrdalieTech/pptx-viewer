@@ -16,6 +16,7 @@
  * pass; correct GC across concurrent/offline peers is a separate problem.
  */
 
+import { resolveSourceAsset, sourceAssetReference } from './collaboration-source';
 import type { YDocLike, YMapLike } from './collaboration-sync';
 
 export const YDOC_ASSETS_KEY = 'pptx:assets';
@@ -25,14 +26,24 @@ export const YDOC_ASSETS_KEY = 'pptx:assets';
  * of being embedded inline as a scalar or complex JSON-blob field.
  */
 export const ASSET_ELEMENT_FIELDS: ReadonlySet<string> = new Set([
+	'imageData',
+	'svgData',
+	'previewImage',
+	'posterImage',
 	'mediaData',
 	'posterFrameData',
 	'oleEmbeddedData',
 	'previewImageData',
 	'modelData',
 ]);
+const ASSET_FIELDS = new Set([...ASSET_ELEMENT_FIELDS, 'backgroundImage']);
 
 const ASSET_REF_KEYS: Readonly<Record<string, string>> = {
+	imageData: '_imgRef',
+	svgData: '_svgRef',
+	previewImage: '_previewRef',
+	posterImage: '_posterRef',
+	backgroundImage: '_bgRef',
 	mediaData: '_mdRef',
 	posterFrameData: '_pfdRef',
 	oleEmbeddedData: '_oedRef',
@@ -64,7 +75,7 @@ export function isAssetVersionKey(key: string): boolean {
 	if (!key.endsWith(ASSET_VERSION_SUFFIX)) {
 		return false;
 	}
-	return ASSET_ELEMENT_FIELDS.has(key.slice(0, -ASSET_VERSION_SUFFIX.length));
+	return ASSET_FIELDS.has(key.slice(0, -ASSET_VERSION_SUFFIX.length));
 }
 
 export function assetKey(elementId: string, fieldName: string): string {
@@ -94,9 +105,14 @@ export function writeAssetFields(
 	ymap: YMapLike,
 	assets: YMapLike,
 ): void {
-	for (const field of ASSET_ELEMENT_FIELDS) {
+	for (const field of ASSET_FIELDS) {
 		const value = rec[field];
 		if (typeof value === 'string' && value.length > 0) {
+			const source = sourceAssetReference(assets, value);
+			if (source) {
+				ymap.set(ASSET_REF_KEYS[field], source);
+				continue;
+			}
 			const key = assetKey(elementId, field);
 			if (assets.get(key) !== value) {
 				assets.set(key, value);
@@ -118,10 +134,17 @@ export function reconcileAssetFields(
 	ymap: YMapLike,
 	assets: YMapLike,
 ): void {
-	for (const field of ASSET_ELEMENT_FIELDS) {
+	for (const field of ASSET_FIELDS) {
 		const refKey = ASSET_REF_KEYS[field];
 		const value = rec[field];
 		if (typeof value === 'string' && value.length > 0) {
+			const source = sourceAssetReference(assets, value);
+			if (source) {
+				if (ymap.get(refKey) !== source) {
+					ymap.set(refKey, source);
+				}
+				continue;
+			}
 			const key = assetKey(elementId, field);
 			if (assets.get(key) !== value) {
 				assets.set(key, value);
@@ -155,6 +178,10 @@ export function readAssetFields(
 	for (const [refKey, field] of Object.entries(REV_ASSET_REF_KEYS)) {
 		const ref = ymap.get(refKey);
 		if (typeof ref === 'string') {
+			if (sourceAssetReference(assets, ref)) {
+				element[field] = resolveSourceAsset(assets, ref);
+				continue;
+			}
 			const value = assets.get(ref);
 			if (typeof value === 'string') {
 				element[field] = value;

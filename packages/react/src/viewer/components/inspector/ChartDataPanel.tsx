@@ -11,12 +11,6 @@ import type {
 	PptxChartType,
 } from 'pptx-viewer-core';
 import {
-	chartDataAddSeries,
-	chartDataRemoveSeries,
-	chartDataUpdatePoint,
-	chartDataChangeType,
-	chartDataAddCategory,
-	chartDataRemoveCategory,
 	setChartAxisLogScale,
 	setChartAxisTitleStyle,
 	setChartAxisGridlineStyle,
@@ -27,9 +21,23 @@ import {
 	setChartDataPointMarker,
 	setChartDataPointLabel,
 } from 'pptx-viewer-core';
+import {
+	addChartCategory,
+	addChartSeries,
+	chartGridlinesPatch,
+	chartGridlinesState,
+	collapseChartTitleRunsForEdit,
+	patchChartData,
+	removeChartCategory,
+	removeChartSeries,
+	seriesSecondaryAxisPatch,
+	setChartCategoryLabel,
+	setChartCellValue,
+} from 'pptx-viewer-shared';
 import { useCallback } from 'react';
 
 import { useChartPartSelection } from '../chart-part-selection';
+import { useViewerOptionsContext } from '../viewer-options-context';
 import { ChartAxisOptions } from './ChartAxisOptions';
 import { ChartAxisStyleOptions } from './ChartAxisStyleOptions';
 import { ChartComboTypeOptions } from './ChartComboTypeOptions';
@@ -41,8 +49,10 @@ import { ChartDisplayOptions } from './ChartDisplayOptions';
 import { ChartErrorBarOptions } from './ChartErrorBarOptions';
 import { ChartMarkerOptions } from './ChartMarkerOptions';
 import { ChartSeriesColorOptions } from './ChartSeriesColorOptions';
+import { ChartSubtypeOptions } from './ChartSubtypeOptions';
 import { ChartTrendlineOptions } from './ChartTrendlineOptions';
 import { ChartTypeSelector } from './ChartTypeSelector';
+import { ChartUserShapeOptions } from './ChartUserShapeOptions';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -58,6 +68,10 @@ export interface ChartDataPanelProps {
 // ---------------------------------------------------------------------------
 export function ChartDataPanel({ selectedElement, canEdit, onUpdateElement }: ChartDataPanelProps) {
 	const chartData = selectedElement.chartData;
+	// File > Options > Advanced > "Properties follow chart data point for
+	// current workbook": whether per-point manual formatting re-indexes with
+	// the underlying data (default) or stays pinned to its old position.
+	const followDataPoint = useViewerOptionsContext().advanced.chartPropertiesFollowDataPoint;
 	// Part selected by clicking a mark on the canvas chart, if it is this chart's.
 	const { selection: partSelection } = useChartPartSelection();
 	const canvasPart = partSelection?.elementId === selectedElement.id ? partSelection.part : null;
@@ -85,20 +99,22 @@ export function ChartDataPanel({ selectedElement, canEdit, onUpdateElement }: Ch
 			if (!chartData) {
 				return;
 			}
-			// For chart type changes, use the smart utility that handles
-			// grouping cleanup and category format adaptation.
-			if (patch.chartType && patch.chartType !== chartData.chartType) {
-				const adapted = chartDataChangeType(chartData, patch.chartType as PptxChartType);
-				// Merge any other fields from the patch (e.g. title changes)
-				const { chartType: _ct, ...rest } = patch;
-				replaceChartData({ ...adapted, ...rest });
+			replaceChartData(patchChartData(chartData, patch));
+		},
+		[chartData, replaceChartData],
+	);
+
+	// A multi-run title collapses to one run in its dominant style so an edit
+	// does not leave another, now-stale run's text trailing the new title; see
+	// `collapseChartTitleRunsForEdit`'s doc.
+	const updateTitle = useCallback(
+		(text: string) => {
+			if (!chartData) {
 				return;
 			}
-			onUpdateElement({
-				chartData: { ...chartData, ...patch },
-			} as Partial<PptxElement>);
+			updateChartData(collapseChartTitleRunsForEdit(chartData, text));
 		},
-		[chartData, onUpdateElement, replaceChartData],
+		[chartData, updateChartData],
 	);
 
 	const updateStyle = useCallback(
@@ -114,6 +130,27 @@ export function ChartDataPanel({ selectedElement, canEdit, onUpdateElement }: Ch
 			} as Partial<PptxElement>);
 		},
 		[chartData, style, onUpdateElement],
+	);
+
+	const hasGridlines = chartData ? chartGridlinesState(chartData) : false;
+	const toggleGridlines = useCallback(
+		(show: boolean) => {
+			if (!chartData) {
+				return;
+			}
+			updateChartData(chartGridlinesPatch(chartData, show));
+		},
+		[chartData, updateChartData],
+	);
+
+	const toggleSecondaryAxis = useCallback(
+		(seriesIndex: number, useSecondary: boolean) => {
+			if (!chartData) {
+				return;
+			}
+			updateChartData(seriesSecondaryAxisPatch(chartData, seriesIndex, useSecondary));
+		},
+		[chartData, updateChartData],
 	);
 
 	const updateAxis = useCallback(
@@ -178,69 +215,61 @@ export function ChartDataPanel({ selectedElement, canEdit, onUpdateElement }: Ch
 		[updateSeries],
 	);
 
+	// ── Data-grid edits ─────────────────────────────────────────
+	// The guards (auto-naming, keep-at-least-one, reject non-numeric cells) live
+	// in `pptx-viewer-shared`'s `chart-data-grid-ops` so every binding's grid
+	// behaves identically; `null` means the edit must not be applied.
 	const updateCategoryLabel = useCallback(
 		(catIndex: number, value: string) => {
-			if (!categories) {
-				return;
+			const next = chartData && setChartCategoryLabel(chartData, catIndex, value);
+			if (next) {
+				replaceChartData(next);
 			}
-			const updated = categories.map((c, i) => (i === catIndex ? value : c));
-			updateChartData({ categories: updated });
 		},
-		[categories, updateChartData],
+		[chartData, replaceChartData],
 	);
 
 	const updateValue = useCallback(
 		(seriesIndex: number, catIndex: number, raw: string) => {
-			if (!chartData) {
-				return;
+			const next = chartData && setChartCellValue(chartData, seriesIndex, catIndex, raw);
+			if (next) {
+				replaceChartData(next);
 			}
-			const num = Number.parseFloat(raw);
-			if (!Number.isFinite(num)) {
-				return;
-			}
-			replaceChartData(chartDataUpdatePoint(chartData, seriesIndex, catIndex, num));
 		},
 		[chartData, replaceChartData],
 	);
 
 	// ── Add / Remove helpers ────────────────────────────────────
 	const addCategory = useCallback(() => {
-		if (!chartData || !categories) {
-			return;
+		if (chartData) {
+			replaceChartData(addChartCategory(chartData));
 		}
-		replaceChartData(chartDataAddCategory(chartData, `Cat ${categories.length + 1}`));
-	}, [chartData, categories, replaceChartData]);
+	}, [chartData, replaceChartData]);
 
 	const removeCategory = useCallback(
 		(catIndex: number) => {
-			if (!chartData || !categories || categories.length <= 1) {
-				return;
+			const next = chartData && removeChartCategory(chartData, catIndex, followDataPoint);
+			if (next) {
+				replaceChartData(next);
 			}
-			replaceChartData(chartDataRemoveCategory(chartData, catIndex));
 		},
-		[chartData, categories, replaceChartData],
+		[chartData, followDataPoint, replaceChartData],
 	);
 
 	const addSeries = useCallback(() => {
-		if (!chartData || !categories || !series) {
-			return;
+		if (chartData) {
+			replaceChartData(addChartSeries(chartData));
 		}
-		replaceChartData(
-			chartDataAddSeries(chartData, {
-				name: `Series ${series.length + 1}`,
-				values: categories.map(() => 0),
-			}),
-		);
-	}, [chartData, categories, series, replaceChartData]);
+	}, [chartData, replaceChartData]);
 
 	const removeSeries = useCallback(
 		(seriesIndex: number) => {
-			if (!chartData || !series || series.length <= 1) {
-				return;
+			const next = chartData && removeChartSeries(chartData, seriesIndex);
+			if (next) {
+				replaceChartData(next);
 			}
-			replaceChartData(chartDataRemoveSeries(chartData, seriesIndex));
 		},
-		[chartData, series, replaceChartData],
+		[chartData, replaceChartData],
 	);
 
 	// ── SDK-op helpers (clone, mutate via core op, emit) ────────
@@ -342,14 +371,28 @@ export function ChartDataPanel({ selectedElement, canEdit, onUpdateElement }: Ch
 			<ChartTypeSelector
 				title={title}
 				chartType={chartType!}
+				chartData={chartData}
 				grouping={grouping}
 				seriesCount={series.length}
 				categoryCount={categories.length}
 				canEdit={canEdit}
 				onUpdateChartData={updateChartData}
+				onTitleChange={updateTitle}
 			/>
 
-			<ChartDisplayOptions style={style} canEdit={canEdit} onUpdateStyle={updateStyle} />
+			<ChartDisplayOptions
+				style={style}
+				canEdit={canEdit}
+				onUpdateStyle={updateStyle}
+				hasGridlines={hasGridlines}
+				onToggleGridlines={toggleGridlines}
+			/>
+
+			<ChartSubtypeOptions
+				chartData={chartData}
+				canEdit={canEdit}
+				onUpdateChartData={updateChartData}
+			/>
 
 			<ChartDataLabelOptions style={style} canEdit={canEdit} onUpdateStyle={updateStyle} />
 
@@ -415,7 +458,18 @@ export function ChartDataPanel({ selectedElement, canEdit, onUpdateElement }: Ch
 			/>
 
 			{/* ── Series colour picker (delimited block; keep merge-friendly) ── */}
-			<ChartSeriesColorOptions series={series} canEdit={canEdit} onSetColor={setSeriesColor} />
+			<ChartSeriesColorOptions
+				chartData={chartData}
+				canEdit={canEdit}
+				onSetColor={setSeriesColor}
+				onToggleSecondaryAxis={toggleSecondaryAxis}
+			/>
+
+			<ChartUserShapeOptions
+				chartData={chartData}
+				canEdit={canEdit}
+				onUpdateChartData={updateChartData}
+			/>
 
 			<ChartDataGrid
 				categories={categories}

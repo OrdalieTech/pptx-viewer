@@ -6,6 +6,7 @@ import type {
 	PptxChartSeries,
 	PptxChartView3D,
 	PptxTableData,
+	TextSegment,
 } from '../../types';
 import { applyChartAxisDisplayUnitsToXml } from '../../utils/chart-axis-dispunits-serializer';
 import { applyChartAxisGridlinesToXml } from '../../utils/chart-axis-gridlines-serializer';
@@ -15,29 +16,78 @@ import {
 	applyChartAxisTitleToXml,
 	applyChartAxisTitleStyleToXml,
 } from '../../utils/chart-axis-title-serializer';
+import { applyChartBandFmts } from '../../utils/chart-band-fmts';
 import { applyBubbleChartOptions } from '../../utils/chart-bubble-options';
+import { applyChartColorMapOverride } from '../../utils/chart-color-map-override';
 import { applyChartColorStyleXml } from '../../utils/chart-color-style-writer';
 import {
 	applyComboSeriesTypesToXml,
 	consolidateComboContainersInXml,
 } from '../../utils/chart-combo-serializer';
+import {
+	chartContainerAllows,
+	chartTypeToContainerLocalName,
+	isKnownChartContainer,
+	normalizeChartContainerChildren,
+	normalizeChartGroupingValue,
+	orderChartContainerChildren,
+	reconcileChartPlotAreaAxes,
+	renameXmlKeyInPlace,
+} from '../../utils/chart-container-schema';
+import { isLineDrawnChartType } from '../../utils/chart-container-type-map';
+import { buildChartExSpaceXml, canGenerateChartEx } from '../../utils/chart-cx-generator';
 import { applyChartDataLabelsToXml } from '../../utils/chart-data-labels-serializer';
 import { applyChartDataTable } from '../../utils/chart-data-table';
-import { applySeriesDataPointsToXml } from '../../utils/chart-datapoint-serializer';
+import {
+	applySeriesDataPointsToXml,
+	applySeriesPictureOptionsToXml,
+} from '../../utils/chart-datapoint-serializer';
 import { applyChartDateAxisUnits } from '../../utils/chart-date-axis';
 import { applySeriesErrBarsToXml } from '../../utils/chart-errbars-serializer';
+import { findChartExtByUri, findChildByLocalName } from '../../utils/chart-ext-lookup';
+import {
+	assignSeriesIndices,
+	collectFilteredSeriesIndices,
+} from '../../utils/chart-filtered-series';
 import { applyChartLayouts } from '../../utils/chart-layout';
 import { applyChartLegendToXml } from '../../utils/chart-legend-serializer';
+import { applyChartLineStyle } from '../../utils/chart-line-style-serializer';
 import { applySeriesMarkerToXml } from '../../utils/chart-marker-serializer';
 import { applyChartPivotFormats } from '../../utils/chart-pivot-formats';
 import { applyChartPivotSource } from '../../utils/chart-pivot-source';
 import { applyChartPrintSettings } from '../../utils/chart-print-settings';
 import { applyChartProtection } from '../../utils/chart-protection';
+import { writeSeriesColorToSpPr } from '../../utils/chart-series-color-serializer';
 import { applySeriesDataLabelsToXml } from '../../utils/chart-series-datalabel-serializer';
+import {
+	buildChartUniqueIdExtLst,
+	generateChartUniqueId,
+	regenerateClonedUniqueId,
+} from '../../utils/chart-series-identity';
+import {
+	applyBar3DShapeToXml,
+	applyGapDepthToXml,
+	applyRadarStyleToXml,
+	applySeriesBar3DShapeToXml,
+	applySurfaceWireframeToXml,
+} from '../../utils/chart-subtype-serializer';
+import { applyChartTitleToXml } from '../../utils/chart-title-serializer';
+import { applyChartTitleStyleToXml } from '../../utils/chart-title-style-serializer';
 import { applySeriesTrendlinesToXml } from '../../utils/chart-trendline-serializer';
 import { applyChartUpDownBars } from '../../utils/chart-up-down-bars';
+import type { PptxChartWorkbookWrite } from '../../utils/chart-xlsx-writer';
+import { collectChartWorkbookWrite } from '../../utils/chart-xlsx-writer';
 import { xmlChild, xmlPath } from '../../utils/xml-access';
-import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveTableStyles';
+import { applyChartExUpdate, chartExLayoutChanged } from './chart-cx-update';
+import { saveChartExternalWorkbookUpdates } from './chart-external-workbook-save';
+import {
+	detectChartPartFamily,
+	switchChartPartFamily,
+	targetChartPartFamily,
+} from './chart-part-family-switch';
+import { forkSharedChartPart } from './chart-part-ownership';
+import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeChartUserShapes';
+import type { SaveSlideContext } from './PptxHandlerRuntimeSaveElementEmbedding';
 import {
 	buildChartPoints,
 	replaceFirstTextValueInTree,
@@ -46,6 +96,14 @@ import {
 	serializeTablePropertyFlags,
 } from './save-table-merge-helpers';
 import { rebuildTableXmlFromData } from './table-structural-ops';
+import { writeTablePropertiesOwnFillAndEffects } from './table-tblpr-save';
+
+/**
+ * `c:ext/@uri` for the Office 2017 (`c16r3:`) "show #N/A as an empty cell"
+ * chart extension. See `PptxChartChrome.dispNaAsBlank` and the matching
+ * constant in `PptxHandlerRuntimeChartParsingHelpers.ts`.
+ */
+const CHART_DATA_DISPLAY_OPTIONS_EXT_URI = '{56B9EC1D-385E-4148-901F-78D8002777C0}';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	/**
@@ -57,7 +115,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 * `<a:tr>` elements are rebuilt from scratch. Otherwise, the method
 	 * updates cells in place, preserving the original XML structure.
 	 */
-	protected serializeTableDataToXml(shape: XmlObject, tableData: PptxTableData): void {
+	protected serializeTableDataToXml(
+		shape: XmlObject,
+		tableData: PptxTableData,
+		width: number,
+		textContext?: SaveSlideContext,
+	): void {
 		try {
 			const graphicData = xmlPath(shape, 'a:graphic', 'a:graphicData');
 			const tbl = xmlChild(graphicData, 'a:tbl');
@@ -67,6 +130,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 			// ── Serialize table-level properties (tblPr) ──────────────
 			serializeTablePropertyFlags(tbl, tableData);
+			// a:tblPr's OWN fill/effectLst (issue G6 write-side): parsed by
+			// PptxTableDataParser into tableFill/tableEffects but otherwise
+			// never re-emitted, so an in-memory edit to either field was
+			// silently dropped on save.
+			writeTablePropertiesOwnFillAndEffects((tbl as XmlObject)['a:tblPr'] as XmlObject, tableData);
 
 			// ── Detect structural changes (row/column count mismatch) ──
 			const xmlRows = this.ensureArray(tbl['a:tr']);
@@ -75,6 +143,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const dataColCount = tableData.columnWidths.length;
 
 			const structureChanged = dataRowCount !== xmlRows.length || dataColCount !== xmlColCount;
+			// PowerPoint sizes tables from the column grid, not only the frame.
+			const grid = (tbl['a:tblGrid'] ??= {}) as XmlObject;
+			const columns = this.ensureArray(grid['a:gridCol']);
+			const total = tableData.columnWidths.reduce((sum, value) => sum + value, 0);
+			if (Number.isFinite(width) && width > 0 && total > 0) {
+				grid['a:gridCol'] = tableData.columnWidths.map((value, index) => ({
+					...(columns[index] as XmlObject | undefined),
+					'@_w': String(Math.round((value / total) * width * PptxHandlerRuntime.EMU_PER_PX)),
+				}));
+			}
 
 			if (structureChanged) {
 				// Rebuild the entire table grid and rows from PptxTableData
@@ -103,7 +181,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 						}
 
 						if (cell.text !== undefined) {
-							this.writeTableCellText(xmlCell, cell.text);
+							this.writeTableCellSegments(xmlCell, cell.text, cell.textSegments, textContext);
 						}
 						if (cell.style) {
 							this.writeTableCellStyle(xmlCell, cell.style);
@@ -134,7 +212,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 					// Update text
 					if (cell.text !== undefined) {
-						this.writeTableCellText(xmlCell, cell.text);
+						this.writeTableCellSegments(xmlCell, cell.text, cell.textSegments, textContext);
 					}
 
 					// Update cell style
@@ -152,6 +230,45 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		} catch (e) {
 			console.warn('Failed to serialize table data:', e);
 		}
+	}
+
+	protected writeTableCellSegments(
+		xmlCell: XmlObject,
+		text: string,
+		segments: TextSegment[] | undefined,
+		textContext?: SaveSlideContext,
+	): void {
+		if (!Array.isArray(segments)) {
+			this.writeTableCellText(xmlCell, text);
+			return;
+		}
+		const body = (xmlCell['a:txBody'] ?? { 'a:bodyPr': {}, 'a:lstStyle': {} }) as XmlObject;
+		const original = (
+			this as unknown as {
+				parseTableCellSegments(
+					body: XmlObject,
+					slidePath?: string,
+					rels?: Map<string, string>,
+				): TextSegment[];
+			}
+		).parseTableCellSegments(body, textContext?.slide.id, textContext?.getSlideRelationshipMap());
+		if (JSON.stringify(original) === JSON.stringify(segments)) {
+			const originalText = original
+				.map((segment) => (segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text))
+				.join('');
+			if (text !== originalText) {
+				this.writeTableCellText(xmlCell, text);
+			}
+			return;
+		}
+		body['a:p'] = this.createParagraphsFromTextContent(
+			text,
+			undefined,
+			segments,
+			textContext?.resolveHyperlinkRelationshipId,
+			original,
+		);
+		xmlCell['a:txBody'] = body;
 	}
 
 	/** Pending chart data updates to process in the async save method. */
@@ -181,7 +298,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			return;
 		}
 
-		for (const { chartData } of this.pendingChartUpdates) {
+		for (const { chartData, slidePath } of this.pendingChartUpdates) {
+			await forkSharedChartPart(
+				{
+					zip: this.zip,
+					parser: this.parser,
+					builder: this.builder,
+					getLocalName: (key) => key.split(':').pop() ?? key,
+				},
+				chartData,
+				slidePath,
+			);
 			if (chartData.colorPalette && chartData.colorStylePartPath) {
 				const paletteChanged =
 					JSON.stringify(chartData.colorPalette) !==
@@ -209,9 +336,20 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			try {
 				const chartXmlStr = await chartFile.async('string');
 				const chartXmlData = this.parser.parse(chartXmlStr) as XmlObject;
+				// Collected alongside the cache rewrite below and, once the chart
+				// XML is written back, handed to the embedded-workbook writer so
+				// "Edit Data in Excel" reflects the same edit; see
+				// `saveChartExternalWorkbookUpdates`.
+				const workbookWrites: PptxChartWorkbookWrite[] = [];
 
 				const chartSpace = this.xmlLookupService.getChildByLocalName(chartXmlData, 'chartSpace');
 				if (!chartSpace) {
+					continue;
+				}
+
+				// A 2006 `c:chartSpace` and a 2016+ `cx:chartSpace` are different
+				// part families; see `chart-part-family-switch` / `chart-cx-update`.
+				if (await this.saveChartAcrossFamilies(chartXmlData, chartSpace, chartData, slidePath)) {
 					continue;
 				}
 
@@ -229,7 +367,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				// series flatten into one index-aligned model list. Consolidate them
 				// back into a single container so the generic per-series update runs
 				// over the full list; the combo split below re-emits per type.
-				consolidateComboContainersInXml(plotArea, (key) =>
+				const consolidation = consolidateComboContainersInXml(plotArea, (key) =>
 					this.compatibilityService.getXmlLocalName(key),
 				);
 
@@ -247,26 +385,43 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				}
 
 				// ── Handle chart type change ──────────────────────────────
+				// Renaming the container is not enough: `CT_PieChart` allows none of
+				// `c:barDir` / `c:gapWidth` / `c:overlap` / `c:axId`, and the axes the
+				// old type referenced are left orphaned under `c:plotArea`. Rebuild the
+				// container against the new content model, keeping what is legal.
 				const expectedXmlTag = this.chartTypeToXmlTag(chartData.chartType);
 				const currentLocalName = this.compatibilityService.getXmlLocalName(chartTypeKey);
+				let containerLocalName = currentLocalName;
 				if (expectedXmlTag && currentLocalName !== expectedXmlTag) {
-					// Move the container to a new key under plotArea
 					const newKey = `c:${expectedXmlTag}`;
-					(plotArea as XmlObject)[newKey] = chartTypeContainer;
-					delete (plotArea as XmlObject)[chartTypeKey];
+					// Rename in place: `CT_PlotArea` sequences chart groups BEFORE axes,
+					// so re-adding the key would push the chart behind `c:catAx`.
+					renameXmlKeyInPlace(plotArea, chartTypeKey, newKey);
 					chartTypeKey = newKey;
+					containerLocalName = expectedXmlTag;
+					normalizeChartContainerChildren(chartTypeContainer, expectedXmlTag, (key) =>
+						this.compatibilityService.getXmlLocalName(key),
+					);
+					reconcileChartPlotAreaAxes(plotArea, (key) =>
+						this.compatibilityService.getXmlLocalName(key),
+					);
 				}
 
-				// Update grouping mode
+				// Update grouping mode (only where the container's CT_* permits it)
 				const groupingKey = Object.keys(chartTypeContainer).find(
 					(key) => this.compatibilityService.getXmlLocalName(key) === 'grouping',
 				);
-				if (chartData.grouping) {
+				const groupingAllowed =
+					!isKnownChartContainer(containerLocalName) ||
+					chartContainerAllows(containerLocalName, 'grouping');
+				if (chartData.grouping && groupingAllowed) {
+					// `clustered` is a member of ST_BarGrouping only; line/area demote it.
+					const grouping = normalizeChartGroupingValue(containerLocalName, chartData.grouping);
 					if (groupingKey) {
-						(chartTypeContainer[groupingKey] as XmlObject)['@_val'] = chartData.grouping;
+						(chartTypeContainer[groupingKey] as XmlObject)['@_val'] = grouping;
 					} else {
 						// Insert grouping element if the chart type supports it
-						chartTypeContainer['c:grouping'] = { '@_val': chartData.grouping };
+						chartTypeContainer['c:grouping'] = { '@_val': grouping };
 					}
 				} else if (groupingKey) {
 					// Remove grouping if it was cleared (e.g. switching to pie)
@@ -285,26 +440,42 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 						(key) => this.compatibilityService.getXmlLocalName(key) === 'ser',
 					) ?? 'c:ser';
 
+				// A series PowerPoint's "Chart Filters" feature hid still occupies its
+				// own `c:idx` inside this container's `c15:filtered*Series` extension
+				// (see chart-filtered-series.ts). Every idx/order assigned to a VISIBLE
+				// series below must skip those, or a renumbered visible series and the
+				// still-untouched filtered one end up sharing one index.
+				const reservedSeriesIndices = collectFilteredSeriesIndices(
+					chartTypeContainer,
+					this.xmlLookupService,
+				);
+				const seriesIndexAssignment = assignSeriesIndices(
+					chartData.series.length,
+					reservedSeriesIndices,
+				);
+
 				// Update existing series that are present in both XML and data
 				const commonCount = Math.min(seriesNodes.length, chartData.series.length);
 				for (let si = 0; si < commonCount; si++) {
 					const seriesNode = seriesNodes[si];
 					const seriesData = chartData.series[si];
+					const assignedIndex = seriesIndexAssignment[si];
 
 					// Update series index
 					const idxNode = this.xmlLookupService.getChildByLocalName(seriesNode, 'idx');
 					if (idxNode) {
-						idxNode['@_val'] = String(si);
+						idxNode['@_val'] = String(assignedIndex);
 					}
 					const orderNode = this.xmlLookupService.getChildByLocalName(seriesNode, 'order');
 					if (orderNode) {
-						orderNode['@_val'] = String(si);
+						orderNode['@_val'] = String(assignedIndex);
 					}
 
 					// Update series name
 					const txNode = this.xmlLookupService.getChildByLocalName(seriesNode, 'tx');
 					if (txNode) {
 						this.updateChartCacheValues(txNode, false, [seriesData.name]);
+						this.pushChartWorkbookWrite(workbookWrites, txNode, false, [seriesData.name]);
 					}
 
 					// Update category labels on every series (not just the first)
@@ -313,11 +484,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 						this.xmlLookupService.getChildByLocalName(seriesNode, 'xVal');
 					if (catNode) {
 						const dateValues = chartData.dateCategories?.values.map(String);
-						this.updateChartCacheValues(
-							catNode,
-							Boolean(dateValues),
-							dateValues ?? chartData.categories,
-						);
+						const catValues = dateValues ?? chartData.categories;
+						const catIsNumeric = Boolean(dateValues);
+						this.updateChartCacheValues(catNode, catIsNumeric, catValues);
+						this.pushChartWorkbookWrite(workbookWrites, catNode, catIsNumeric, catValues);
 					}
 
 					// Update values
@@ -325,58 +495,100 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 						this.xmlLookupService.getChildByLocalName(seriesNode, 'val') ||
 						this.xmlLookupService.getChildByLocalName(seriesNode, 'yVal');
 					if (valNode) {
-						this.updateChartCacheValues(valNode, true, seriesData.values.map(String));
+						const values = seriesData.values.map(String);
+						this.updateChartCacheValues(valNode, true, values);
+						this.pushChartWorkbookWrite(workbookWrites, valNode, true, values);
 					}
 
-					// Update series colour. Create `c:spPr`/`a:solidFill` when the
-					// loaded series has none so an inspector-edited colour always
-					// round-trips, not just when an original fill was present.
+					// Update series colour. Create `c:spPr` when the loaded series has
+					// none so an inspector-edited colour always round-trips, not just
+					// when an original fill was present.
+					//
+					// `PptxChartSeries.color` is a RESOLVED hex: the parse ran the
+					// authored `<a:schemeClr val="accent1"><a:lumMod val="60000"/>`
+					// through the theme and kept only the answer. Writing that
+					// answer back unconditionally severed every themed series from
+					// its theme on every save, for charts nobody had touched -
+					// measured on `issue-132-hr-deck.pptx` as `a:schemeClr 12 -> 5`
+					// with `accent5` lost outright. `writeSeriesColorToSpPr` compares
+					// against the authored node (still right here, re-parsed from the
+					// archive) via `serializeColorChoice` so an untouched colour is
+					// left exactly as authored.
+					//
+					// Line-drawn families (line/line3D/scatter/radar/stock) have no
+					// fillable area: OOXML authors their colour on the outline
+					// (`a:ln/a:solidFill`), not a direct `a:solidFill`. Writing the
+					// direct slot unconditionally both missed the property PowerPoint
+					// actually reads for those families AND could insert a new
+					// `a:solidFill` sibling AFTER an existing `a:ln`, which
+					// `CT_ShapeProperties` never allows (the fill group must precede
+					// `a:ln`).
 					if (seriesData.color) {
-						const hex = seriesData.color.replace('#', '');
-						const spPr = this.xmlLookupService.getChildByLocalName(seriesNode, 'spPr') as
-							| XmlObject
-							| undefined;
-						if (spPr) {
-							const solidFillKey =
-								Object.keys(spPr).find(
-									(k) => this.compatibilityService.getXmlLocalName(k) === 'solidFill',
-								) ?? 'a:solidFill';
-							spPr[solidFillKey] = { 'a:srgbClr': { '@_val': hex } };
-						} else {
-							const spPrKey =
-								Object.keys(seriesNode).find(
-									(k) => this.compatibilityService.getXmlLocalName(k) === 'spPr',
-								) ?? 'c:spPr';
-							(seriesNode as XmlObject)[spPrKey] = {
-								'a:solidFill': { 'a:srgbClr': { '@_val': hex } },
-							};
+						const isLineFamily = isLineDrawnChartType(
+							seriesData.seriesChartType ?? chartData.chartType,
+						);
+						const spPrKey =
+							Object.keys(seriesNode).find(
+								(k) => this.compatibilityService.getXmlLocalName(k) === 'spPr',
+							) ?? 'c:spPr';
+						let spPr = (seriesNode as XmlObject)[spPrKey] as XmlObject | undefined;
+						if (!spPr) {
+							spPr = {};
+							(seriesNode as XmlObject)[spPrKey] = spPr;
 						}
+						writeSeriesColorToSpPr(
+							spPr,
+							seriesData.color,
+							isLineFamily,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+							(node) => this.parseColor(node),
+						);
 					}
 
 					// Trendlines (per-series). Undefined = no edit / passthrough.
 					if (seriesData.trendlines !== undefined) {
-						applySeriesTrendlinesToXml(seriesNode, seriesData.trendlines, (key) =>
-							this.compatibilityService.getXmlLocalName(key),
+						applySeriesTrendlinesToXml(
+							seriesNode,
+							seriesData.trendlines,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+							(node) => this.parseColor(node),
 						);
 					}
 
 					// Error bars (per-series). Undefined = no edit / passthrough.
 					if (seriesData.errBars !== undefined) {
-						applySeriesErrBarsToXml(seriesNode, seriesData.errBars, (key) =>
-							this.compatibilityService.getXmlLocalName(key),
+						applySeriesErrBarsToXml(
+							seriesNode,
+							seriesData.errBars,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+							(node) => this.parseColor(node),
 						);
 					}
 
 					// Marker (per-series, line/scatter/bubble/radar). Undefined = passthrough.
 					if (seriesData.marker !== undefined) {
-						applySeriesMarkerToXml(seriesNode, seriesData.marker, (key) =>
-							this.compatibilityService.getXmlLocalName(key),
+						applySeriesMarkerToXml(
+							seriesNode,
+							seriesData.marker,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+							(node) => this.parseColor(node),
 						);
 					}
 
 					// Per-data-point overrides (c:dPt). Undefined = passthrough.
 					if (seriesData.dataPoints !== undefined) {
-						applySeriesDataPointsToXml(seriesNode, seriesData.dataPoints, (key) =>
+						applySeriesDataPointsToXml(
+							seriesNode,
+							seriesData.dataPoints,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+							(node) => this.parseColor(node),
+						);
+					}
+
+					// Series-level picture-fill flags (c:ser/c:pictureOptions).
+					// Undefined = passthrough.
+					if (seriesData.picture !== undefined) {
+						applySeriesPictureOptionsToXml(seriesNode, seriesData.picture, (key) =>
 							this.compatibilityService.getXmlLocalName(key),
 						);
 					}
@@ -384,7 +596,18 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					// Per-data-point label overrides (c:dLbl inside c:ser's c:dLbls).
 					// Undefined = passthrough.
 					if (seriesData.dataLabels !== undefined) {
-						applySeriesDataLabelsToXml(seriesNode, seriesData.dataLabels, (key) =>
+						applySeriesDataLabelsToXml(
+							seriesNode,
+							seriesData.dataLabels,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+							(node) => this.parseColor(node),
+						);
+					}
+
+					// Per-series 3-D bar/column shape override (c:ser/c:shape), legal
+					// only inside a bar3D container. Undefined = passthrough.
+					if (seriesData.shape !== undefined && chartData.chartType === 'bar3D') {
+						applySeriesBar3DShapeToXml(seriesNode, seriesData.shape, (key) =>
 							this.compatibilityService.getXmlLocalName(key),
 						);
 					}
@@ -400,11 +623,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					for (let si = seriesNodes.length; si < chartData.series.length; si++) {
 						const seriesData = chartData.series[si];
 						const newNode = this.buildNewSeriesXml(
-							si,
+							seriesIndexAssignment[si],
 							seriesData,
 							chartData.categories,
 							templateSeries,
 							chartData.dateCategories,
+							isLineDrawnChartType(seriesData.seriesChartType ?? chartData.chartType),
 						);
 						newSeriesXmlNodes.push(newNode);
 					}
@@ -445,15 +669,8 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 						chartData.chartType,
 						(key) => this.compatibilityService.getXmlLocalName(key),
 						chartData.axes,
+						consolidation?.containerChildren,
 					);
-				}
-
-				// Update chart title
-				if (chartData.title !== undefined) {
-					const titleNode = this.xmlLookupService.getChildByLocalName(chartRoot, 'title');
-					if (titleNode) {
-						this.replaceFirstTextValue(titleNode, 't', chartData.title);
-					}
 				}
 
 				// Update external data autoUpdate attribute (c:externalData / c:autoUpdate)
@@ -480,6 +697,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 				if (chartData.pivotSource !== undefined) {
 					applyChartPivotSource(chartSpace, chartData.pivotSource, (key) =>
+						this.compatibilityService.getXmlLocalName(key),
+					);
+				}
+
+				// Colour-map override (c:clrMapOvr): previously parsed but never
+				// written back on save (see openxml-coverage-chart-labels-
+				// supplement.ts's `edit: unassessed` note).
+				if (chartData.clrMapOvr !== undefined) {
+					applyChartColorMapOverride(chartSpace, chartData.clrMapOvr, (key) =>
 						this.compatibilityService.getXmlLocalName(key),
 					);
 				}
@@ -514,8 +740,83 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 						chartData.chartType === 'stock' ||
 						chartData.chartType === 'combo')
 				) {
-					applyChartUpDownBars(chartTypeContainer, chartData.upDownBars, (key) =>
+					applyChartUpDownBars(
+						chartTypeContainer,
+						chartData.upDownBars,
+						(key) => this.compatibilityService.getXmlLocalName(key),
+						(node) => this.parseColor(node),
+					);
+				}
+
+				// Drop lines / hi-low lines (c:dropLines, c:hiLowLines): legal on
+				// line and stock chart-type containers. Previously parsed
+				// (parseLineStyle) but never written back on save (see
+				// openxml-coverage-chart-supplement.ts's `edit: unassessed` note).
+				if (
+					(chartData.dropLines !== undefined || chartData.hiLowLines !== undefined) &&
+					(chartData.chartType === 'line' ||
+						chartData.chartType === 'stock' ||
+						chartData.chartType === 'combo')
+				) {
+					if (chartData.dropLines !== undefined) {
+						applyChartLineStyle(
+							chartTypeContainer,
+							'dropLines',
+							chartData.dropLines,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+							(node) => this.parseColor(node),
+						);
+					}
+					if (chartData.hiLowLines !== undefined) {
+						applyChartLineStyle(
+							chartTypeContainer,
+							'hiLowLines',
+							chartData.hiLowLines,
+							(key) => this.compatibilityService.getXmlLocalName(key),
+							(node) => this.parseColor(node),
+						);
+					}
+				}
+
+				if (chartData.bandFmts !== undefined && chartData.chartType === 'surface') {
+					applyChartBandFmts(
+						chartTypeContainer,
+						chartData.bandFmts,
+						(key) => this.compatibilityService.getXmlLocalName(key),
+						(node) => this.parseColor(node),
+					);
+				}
+
+				// ── bar3D shape / radar style / surface wireframe round-trip ──
+				if (chartData.barShape !== undefined && chartData.chartType === 'bar3D') {
+					applyBar3DShapeToXml(chartTypeContainer, containerLocalName, chartData.barShape, (key) =>
 						this.compatibilityService.getXmlLocalName(key),
+					);
+				}
+				if (
+					chartData.gapDepth !== undefined &&
+					(chartData.chartType === 'bar3D' ||
+						chartData.chartType === 'area3D' ||
+						chartData.chartType === 'line3D')
+				) {
+					applyGapDepthToXml(chartTypeContainer, containerLocalName, chartData.gapDepth, (key) =>
+						this.compatibilityService.getXmlLocalName(key),
+					);
+				}
+				if (chartData.radarStyle !== undefined && chartData.chartType === 'radar') {
+					applyRadarStyleToXml(
+						chartTypeContainer,
+						containerLocalName,
+						chartData.radarStyle,
+						(key) => this.compatibilityService.getXmlLocalName(key),
+					);
+				}
+				if (chartData.wireframe !== undefined && chartData.chartType === 'surface') {
+					applySurfaceWireframeToXml(
+						chartTypeContainer,
+						containerLocalName,
+						chartData.wireframe,
+						(key) => this.compatibilityService.getXmlLocalName(key),
 					);
 				}
 
@@ -529,16 +830,51 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					this.applyChartChrome(chartRoot, chartData.chartChrome);
 				}
 
+				// ── Title (c:title / c:autoTitleDeleted) ──────────────────
+				// After the chrome flags: a loaded chart carries the parsed
+				// `autoTitleDeleted`, which must not clobber the value a newly
+				// added or removed title decides.
+				applyChartTitleToXml(
+					chartRoot,
+					{
+						title: chartData.title,
+						hasTitle: chartData.style?.hasTitle,
+						titleRuns: chartData.titleRuns,
+					},
+					(key) => this.compatibilityService.getXmlLocalName(key),
+				);
+				if (chartData.style) {
+					applyChartTitleStyleToXml(
+						chartRoot,
+						{
+							fontFamily: chartData.style.titleFontFamily,
+							fontSize: chartData.style.titleFontSize,
+							fontBold: chartData.style.titleFontBold,
+							fontColor: chartData.style.titleFontColor,
+							spPr: chartData.style.titleSpPr,
+						},
+						(key) => this.compatibilityService.getXmlLocalName(key),
+						{ prefix: 'c' },
+						(node) => this.parseColor(node),
+					);
+				}
+
 				if (chartData.pivotFormats !== undefined) {
-					applyChartPivotFormats(chartRoot, chartData.pivotFormats, (key) =>
-						this.compatibilityService.getXmlLocalName(key),
+					applyChartPivotFormats(
+						chartRoot,
+						chartData.pivotFormats,
+						(key) => this.compatibilityService.getXmlLocalName(key),
+						{ parseColor: (node) => this.parseColor(node) },
 					);
 				}
 
 				// ── Legend round-trip (c:legend / c:legendPos) ────────────
 				if (chartData.style) {
-					applyChartLegendToXml(chartRoot, chartData.style, (key) =>
-						this.compatibilityService.getXmlLocalName(key),
+					applyChartLegendToXml(
+						chartRoot,
+						chartData.style,
+						(key) => this.compatibilityService.getXmlLocalName(key),
+						(node) => this.parseColor(node),
 					);
 				}
 
@@ -567,18 +903,21 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					);
 				}
 
-				applyChartDataTable(plotArea, chartData.dataTable, (key) =>
-					this.compatibilityService.getXmlLocalName(key),
+				applyChartDataTable(
+					plotArea,
+					chartData.dataTable,
+					(key) => this.compatibilityService.getXmlLocalName(key),
+					(node) => this.parseColor(node),
 				);
 
 				// Update axis fields (Phase 5 Stream A item 4).
 				// Currently writes back: scaling.min/max, scaling.logBase,
 				// numFmt, majorUnit, minorUnit, tickLblPos. Other parsed-but-not-
-				// written chart fields (surfaces/dataTable/dropLines/hiLowLines/
+				// written chart fields (surfaces/dropLines/hiLowLines/
 				// marker/per-point dataLabels/explosion/smooth/
 				// colorPalette/colorMethod, axis txPr/axPos) are
 				// preserved via the original XML passthrough but lose any edits
-				// — see OPENXML_PARITY.md M-tier.
+				// (see OPENXML_PARITY.md M-tier).
 				if (chartData.axes) {
 					const axisTypeNames = ['valAx', 'catAx', 'dateAx', 'serAx'] as const;
 					for (const axisTypeName of axisTypeNames) {
@@ -655,31 +994,126 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 									fontColor: matchingAxis.fontColor,
 								},
 								(key) => this.compatibilityService.getXmlLocalName(key),
+								(node) => this.parseColor(node),
 							);
 
 							// Major/minor gridlines (undefined = no edit)
-							applyChartAxisGridlinesToXml(axisNode, matchingAxis, (key) =>
-								this.compatibilityService.getXmlLocalName(key),
+							applyChartAxisGridlinesToXml(
+								axisNode,
+								matchingAxis,
+								(key) => this.compatibilityService.getXmlLocalName(key),
+								(node) => this.parseColor(node),
 							);
 
 							// Display units (value/date axes only; reconciled from the model)
 							if (axisTypeName === 'valAx' || axisTypeName === 'dateAx') {
-								applyChartAxisDisplayUnitsToXml(axisNode, matchingAxis, (key) =>
-									this.compatibilityService.getXmlLocalName(key),
+								applyChartAxisDisplayUnitsToXml(
+									axisNode,
+									matchingAxis,
+									(key) => this.compatibilityService.getXmlLocalName(key),
+									(node) => this.parseColor(node),
 								);
 							}
 						}
 					}
 				}
 
+				// Every chart-group container is a CT_* SEQUENCE, and the mutations
+				// above (new series appended, grouping inserted, ofPie options added)
+				// can land a child out of position. Re-emit each container in schema
+				// order as the last step.
+				for (const key of Object.keys(plotArea)) {
+					const local = this.compatibilityService.getXmlLocalName(key);
+					if (!local.endsWith('Chart')) {
+						continue;
+					}
+					const container = plotArea[key] as XmlObject | undefined;
+					if (container) {
+						orderChartContainerChildren(container, local, (k) =>
+							this.compatibilityService.getXmlLocalName(k),
+						);
+					}
+				}
+
+				// Drawing-overlay shapes (c:userShapes): reconciled against disk
+				// only when `chartData.userShapes` carries an actual edit signal;
+				// see `PptxHandlerRuntimeChartUserShapes` for the dirty contract.
+				await this.syncChartUserShapesToXml(chartSpace, chartData, chartPartPath);
+
 				// Write updated chart XML back
 				this.zip.file(chartPartPath, this.builder.build(chartXmlData));
+
+				// Mirror the same edit into the embedded workbook (`ppt/embeddings/*.xlsx`)
+				// so "Edit Data in Excel" and any Excel recalculation see the new
+				// values too, instead of silently reverting them. Degrades to a
+				// compatibility warning, never throws; see
+				// `saveChartExternalWorkbookUpdates`.
+				await saveChartExternalWorkbookUpdates(
+					{
+						zip: this.zip,
+						resolveImagePath: (basePath, target) => this.resolveImagePath(basePath, target),
+						reportWarning: (warning) => this.compatibilityService.reportWarning(warning),
+					},
+					chartPartPath,
+					slidePath,
+					chartData.externalData,
+					workbookWrites,
+				);
 			} catch (e) {
 				console.warn(`[pptx-save] Failed to serialize chart data for ${chartPartPath}:`, e);
 			}
 		}
 
 		this.pendingChartUpdates = undefined;
+	}
+
+	/**
+	 * Route a chart save that the 2006 `c:*Chart` update loop cannot handle:
+	 * a part-family change (regenerated into a fresh part of the right
+	 * family), a ChartEx type change (regenerated in place), or an edited
+	 * ChartEx chart (updated in place). Returns `true` when the part was
+	 * written here and the caller must skip the legacy update.
+	 */
+	protected async saveChartAcrossFamilies(
+		chartXmlData: XmlObject,
+		chartSpace: XmlObject,
+		chartData: PptxChartData,
+		slidePath: string,
+	): Promise<boolean> {
+		const getLocalName = (key: string) => this.compatibilityService.getXmlLocalName(key);
+		const deps = { zip: this.zip, parser: this.parser, builder: this.builder, getLocalName };
+		const existingFamily = detectChartPartFamily(chartSpace, getLocalName);
+		const targetFamily = targetChartPartFamily(chartData);
+		if (targetFamily && targetFamily !== existingFamily) {
+			return (await switchChartPartFamily(deps, chartData, slidePath, targetFamily)) !== undefined;
+		}
+		if (existingFamily !== 'chartEx' || !chartData.chartPartPath) {
+			return false;
+		}
+		if (
+			canGenerateChartEx(chartData) &&
+			chartExLayoutChanged(chartSpace, chartData, getLocalName)
+		) {
+			// The regenerated tree carries the preserved `c:userShapes` reference
+			// (`chartData.userShapesXml`); syncing against it as well lets an
+			// overlay edit made in the SAME save as the type change land too.
+			const regenerated = buildChartExSpaceXml(chartData);
+			const regeneratedSpace = regenerated['cx:chartSpace'] as XmlObject | undefined;
+			if (regeneratedSpace) {
+				await this.syncChartUserShapesToXml(regeneratedSpace, chartData, chartData.chartPartPath);
+			}
+			this.zip.file(chartData.chartPartPath, this.builder.build(regenerated));
+			return true;
+		}
+		if (applyChartExUpdate(chartSpace, chartData, getLocalName)) {
+			// ChartEx's drawing-overlay part is the same `cdr:`-namespaced part
+			// classic charts use, referenced the same way (`c:userShapes/@_r:id`
+			// on the chart space); this in-place update path mutates the existing
+			// `chartSpace` object, so the same sync used by classic charts works.
+			await this.syncChartUserShapesToXml(chartSpace, chartData, chartData.chartPartPath);
+			this.zip.file(chartData.chartPartPath, this.builder.build(chartXmlData));
+		}
+		return true;
 	}
 
 	/**
@@ -694,6 +1128,27 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		upsertChartAxisChild(parent, localName, value, (key) =>
 			this.compatibilityService.getXmlLocalName(key),
 		);
+	}
+
+	/**
+	 * Collect a workbook write-back entry for one chart cache container (a
+	 * series' `c:tx`, `c:cat`/`c:xVal`, or `c:val`/`c:yVal`), pushing it onto
+	 * `workbookWrites` when the container names a `c:f` formula reference.
+	 * Call alongside {@link updateChartCacheValues} with the SAME arguments
+	 * so the embedded workbook and the chart cache always agree. A no-op
+	 * when the container has no formula reference (e.g. a brand-new series
+	 * built without one), so it is always safe to call.
+	 */
+	protected pushChartWorkbookWrite(
+		workbookWrites: PptxChartWorkbookWrite[],
+		container: XmlObject | undefined,
+		isNumeric: boolean,
+		values: string[],
+	): void {
+		const write = collectChartWorkbookWrite(this.xmlLookupService, container, isNumeric, values);
+		if (write) {
+			workbookWrites.push(write);
+		}
 	}
 
 	/**
@@ -713,6 +1168,14 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			this.xmlLookupService.getChildByLocalName(container, refName) ||
 			this.xmlLookupService.getChildByLocalName(container, litName);
 		if (!refNode) {
+			// `CT_SerTx` is a choice of `c:strRef` or a bare `c:v` (the shape the
+			// SDK generator emits for series names): update the literal in place.
+			const literalKey = Object.keys(container).find(
+				(key) => this.compatibilityService.getXmlLocalName(key) === 'v',
+			);
+			if (literalKey && values.length === 1) {
+				container[literalKey] = values[0];
+			}
 			return;
 		}
 
@@ -874,6 +1337,65 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		if (chrome.showDLblsOverMax !== undefined) {
 			this.upsertValChild(chartRoot, 'showDLblsOverMax', chrome.showDLblsOverMax ? '1' : '0');
 		}
+		if (chrome.dispNaAsBlank !== undefined) {
+			this.applyChartDispNaAsBlank(chartRoot, chrome.dispNaAsBlank);
+		}
+	}
+
+	/**
+	 * Write `c16r3:dataDisplayOptions16/c16r3:dispNaAsBlank` ("Show #N/A as an
+	 * empty cell", see `PptxChartChrome.dispNaAsBlank`) into `c:chart/c:extLst`.
+	 * Updates an existing extension node's `@val` in place when present
+	 * (preserving anything else on the `c:ext`/`c:extLst`); otherwise creates
+	 * the minimal `extLst`/`ext`/`dataDisplayOptions16` wrapper, appended as
+	 * `c:chart`'s trailing child, matching CT_Chart's schema order.
+	 */
+	private applyChartDispNaAsBlank(chartRoot: XmlObject, value: boolean): void {
+		const localName = (key: string) => this.compatibilityService.getXmlLocalName(key);
+		const val = value ? '1' : '0';
+
+		const ext = findChartExtByUri(chartRoot, localName, CHART_DATA_DISPLAY_OPTIONS_EXT_URI);
+		const extLstKey = Object.keys(chartRoot).find((k) => localName(k) === 'extLst');
+		const extLst = extLstKey ? (chartRoot[extLstKey] as XmlObject) : undefined;
+		const dataDisplayOptions = ext
+			? findChildByLocalName(ext, 'dataDisplayOptions16', localName)
+			: undefined;
+		const dispNaAsBlankNode = dataDisplayOptions
+			? findChildByLocalName(dataDisplayOptions, 'dispNaAsBlank', localName)
+			: undefined;
+
+		if (dispNaAsBlankNode) {
+			dispNaAsBlankNode['@_val'] = val;
+			return;
+		}
+		if (dataDisplayOptions) {
+			dataDisplayOptions['c16r3:dispNaAsBlank'] = { '@_val': val };
+			return;
+		}
+		const newExt: XmlObject = {
+			'@_uri': CHART_DATA_DISPLAY_OPTIONS_EXT_URI,
+			'c16r3:dataDisplayOptions16': {
+				'@_xmlns:c16r3': 'http://schemas.microsoft.com/office/drawing/2017/03/chart',
+				'c16r3:dispNaAsBlank': { '@_val': val },
+			},
+		};
+		if (ext) {
+			// An ext with this uri exists but had no dataDisplayOptions16 child
+			// (unexpected, but handle it rather than duplicate the c:ext).
+			ext['c16r3:dataDisplayOptions16'] = newExt['c16r3:dataDisplayOptions16'];
+			return;
+		}
+		if (extLst) {
+			const existingExtKey = Object.keys(extLst).find((k) => localName(k) === 'ext');
+			if (existingExtKey) {
+				const current = extLst[existingExtKey] as XmlObject | XmlObject[];
+				extLst[existingExtKey] = Array.isArray(current) ? [...current, newExt] : [current, newExt];
+			} else {
+				extLst['c:ext'] = newExt;
+			}
+			return;
+		}
+		chartRoot['c:extLst'] = { 'c:ext': newExt };
 	}
 
 	/**
@@ -884,24 +1406,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 * `c:*Chart` element (e.g. Office 2016+ cx: chart types).
 	 */
 	protected chartTypeToXmlTag(chartType: PptxChartData['chartType']): string | undefined {
-		const map: Partial<Record<PptxChartData['chartType'], string>> = {
-			bar: 'barChart',
-			bar3D: 'bar3DChart',
-			line: 'lineChart',
-			line3D: 'line3DChart',
-			pie: 'pieChart',
-			pie3D: 'pie3DChart',
-			ofPie: 'ofPieChart',
-			doughnut: 'doughnutChart',
-			area: 'areaChart',
-			area3D: 'area3DChart',
-			scatter: 'scatterChart',
-			bubble: 'bubbleChart',
-			radar: 'radarChart',
-			stock: 'stockChart',
-			surface: 'surfaceChart',
-		};
-		return map[chartType];
+		return chartTypeToContainerLocalName(chartType);
 	}
 
 	/**
@@ -910,6 +1415,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 * If a `templateSeries` is provided, it is deep-cloned and its data is
 	 * replaced with the new series data. Otherwise, a minimal structure is
 	 * built from scratch.
+	 *
+	 * @param isLineFamily - Whether the target chart family reads/writes its
+	 *   series colour from `a:ln/a:solidFill` (line/line3D/scatter/radar/stock)
+	 *   rather than a direct `a:solidFill`. See `isLineDrawnChartType`.
 	 */
 	protected buildNewSeriesXml(
 		seriesIndex: number,
@@ -917,10 +1426,20 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		categories: string[],
 		templateSeries?: XmlObject,
 		dateCategories?: PptxChartData['dateCategories'],
+		isLineFamily = false,
 	): XmlObject {
 		if (templateSeries) {
 			// Deep-clone the template
 			const clone = JSON.parse(JSON.stringify(templateSeries)) as XmlObject;
+
+			// A cloned series carries the template's OWN `c16:uniqueId`
+			// (c:extLst/c:ext/c16:uniqueId, see chart-series-identity.ts)
+			// verbatim, since it was copied wholesale before any field below is
+			// touched. PowerPoint uses that GUID to track a series' identity
+			// independent of its idx/order, so leaving it would give the new
+			// series the SAME identity as the one it was templated from.
+			// Replace it with a fresh id before anything else.
+			regenerateClonedUniqueId(clone, (key) => this.compatibilityService.getXmlLocalName(key));
 
 			// Update idx / order
 			const idxNode = this.xmlLookupService.getChildByLocalName(clone, 'idx');
@@ -955,26 +1474,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				this.updateChartCacheValues(valNode, true, seriesData.values.map(String));
 			}
 
-			// Update colour
+			// Update colour. Line-drawn families (line/line3D/scatter/radar/stock)
+			// author it on `a:ln/a:solidFill`, not a direct fill; see
+			// `writeSeriesColorToSpPr`.
 			if (seriesData.color) {
 				const spPr = this.xmlLookupService.getChildByLocalName(clone, 'spPr');
 				if (spPr) {
-					const solidFillKey = Object.keys(spPr).find(
-						(k) => this.compatibilityService.getXmlLocalName(k) === 'solidFill',
+					writeSeriesColorToSpPr(
+						spPr,
+						seriesData.color,
+						isLineFamily,
+						(key) => this.compatibilityService.getXmlLocalName(key),
+						(node) => this.parseColor(node),
 					);
-					if (solidFillKey) {
-						(spPr as XmlObject)[solidFillKey] = {
-							'a:srgbClr': {
-								'@_val': seriesData.color.replace('#', ''),
-							},
-						};
-					} else {
-						spPr['a:solidFill'] = {
-							'a:srgbClr': {
-								'@_val': seriesData.color.replace('#', ''),
-							},
-						};
-					}
 				}
 			}
 
@@ -994,11 +1506,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					},
 				},
 			},
-			'c:spPr': {
-				'a:solidFill': {
-					'a:srgbClr': { '@_val': colorHex },
-				},
-			},
+			'c:spPr': isLineFamily
+				? { 'a:ln': { 'a:solidFill': { 'a:srgbClr': { '@_val': colorHex } } } }
+				: { 'a:solidFill': { 'a:srgbClr': { '@_val': colorHex } } },
 			'c:cat': dateCategories
 				? {
 						'c:numRef': {
@@ -1027,6 +1537,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				},
 			},
 		};
+
+		// Give a wholly new series its own identity (`c16:uniqueId`, see
+		// chart-series-identity.ts), matching what PowerPoint itself writes for
+		// a freshly authored series. `c:extLst` is the trailing child in
+		// schema order.
+		ser['c:extLst'] = buildChartUniqueIdExtLst(generateChartUniqueId());
 
 		return ser;
 	}

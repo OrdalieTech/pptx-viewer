@@ -8,6 +8,7 @@
 
 import type { PptxAnimationPreset, PptxNativeAnimation } from 'pptx-viewer-core';
 
+import { maskEdgeInitialStyle, maskShapeInitialStyle } from './animation-mask-reveal';
 import { resolveEffect } from './animation-timeline-helpers';
 import type { AnimationStyle, EffectName } from './animation-timeline-types';
 
@@ -30,6 +31,7 @@ const ENTRANCE_EFFECTS: ReadonlySet<EffectName> = new Set<EffectName>([
 	'wheelIn',
 	'blindsIn',
 	'boxIn',
+	'circleIn',
 	'floatIn',
 	'riseUp',
 	'swivel',
@@ -40,12 +42,35 @@ const ENTRANCE_EFFECTS: ReadonlySet<EffectName> = new Set<EffectName>([
 	'randomBarsIn',
 	'spinnerIn',
 	'growTurnIn',
+	'stretchInLeft',
+	'stretchInRight',
+	'stretchInTop',
+	'stretchInBottom',
+	'newsflashIn',
+	'spiralIn',
+	'boomerangIn',
+	'creditsIn',
+	'floatUpIn',
+	'pinwheelIn',
+	'whipIn',
+	'curveUpIn',
+	'foldIn',
+	'lightSpeedIn',
+	'flipIn',
+	'glideIn',
+	'compressIn',
+	'unfoldIn',
+	'rotateIn',
+	'centerRevolveIn',
+	'dropIn',
 ]);
 
 /**
  * Returns the initial CSS styles for an element before its entrance animation
- * plays. For clip-path-based animations the element is visible but fully
- * clipped; for all other entrances it starts fully transparent.
+ * plays. For mask-reveal animations the element is visible but fully masked
+ * out (a mask composites with the element's own geometry `clip-path`, which a
+ * `clip-path` keyframe would clobber); for all other entrances it starts fully
+ * transparent.
  */
 export function getInitialStyleForEffect(effect: EffectName): AnimationStyle {
 	switch (effect) {
@@ -78,17 +103,69 @@ export function getInitialStyleForEffect(effect: EffectName): AnimationStyle {
 		case 'dissolveIn':
 			return { opacity: 0, filter: 'blur(8px)' };
 		case 'wipeIn':
-			return { clipPath: 'inset(0 100% 0 0)', opacity: 1 };
+			return maskEdgeInitialStyle('left');
 		case 'splitIn':
-			return { clipPath: 'inset(50% 0 50% 0)', opacity: 1 };
+			return maskShapeInitialStyle('splitHorizontalOut');
 		case 'blindsIn':
-			return { clipPath: 'inset(0 0 100% 0)', opacity: 1 };
+			return maskEdgeInitialStyle('top');
 		case 'boxIn':
-			return { clipPath: 'inset(50% 50% 50% 50%)', opacity: 1 };
+			return maskShapeInitialStyle('boxOut');
+		case 'circleIn':
+			return maskShapeInitialStyle('circleOut');
 		case 'peekIn':
-			return { clipPath: 'inset(100% 0 0 0)', opacity: 1 };
+			return maskEdgeInitialStyle('bottom');
 		case 'randomBarsIn':
-			return { clipPath: 'inset(0 100% 0 0)', opacity: 1 };
+			return maskEdgeInitialStyle('left');
+		case 'stretchInLeft':
+			return { opacity: 0, transform: 'scaleX(0.02)', transformOrigin: 'left center' };
+		case 'stretchInRight':
+			return { opacity: 0, transform: 'scaleX(0.02)', transformOrigin: 'right center' };
+		case 'stretchInTop':
+			return { opacity: 0, transform: 'scaleY(0.02)', transformOrigin: 'center top' };
+		case 'stretchInBottom':
+			return { opacity: 0, transform: 'scaleY(0.02)', transformOrigin: 'center bottom' };
+		case 'newsflashIn':
+			return { opacity: 0, transform: 'rotate(-180deg) scale(0.05)' };
+		case 'spiralIn':
+			return { opacity: 0, transform: 'rotate(-1080deg) scale(0.1)' };
+		case 'boomerangIn':
+			return { opacity: 0, transform: 'translateX(120%) scale(0.7)' };
+		case 'creditsIn':
+			return { opacity: 0, transform: 'translateY(100%)' };
+		case 'floatUpIn':
+			return { opacity: 0, transform: 'translateY(80px)' };
+		case 'pinwheelIn':
+			return { opacity: 0, transform: 'rotate(-360deg) scale(0.2)' };
+		case 'whipIn':
+			return { opacity: 0, transform: 'translate(40%, -20%) rotate(-15deg) scale(0.6)' };
+		case 'curveUpIn':
+			return { opacity: 0, transform: 'translate(-20%, 60px)' };
+		case 'foldIn':
+			return {
+				opacity: 0,
+				transform: 'perspective(800px) rotateX(-90deg)',
+				transformOrigin: 'top center',
+			};
+		case 'lightSpeedIn':
+			return { opacity: 0, transform: 'translateX(60%) skewX(-30deg)' };
+		case 'flipIn':
+			return { opacity: 0, transform: 'perspective(800px) rotateY(-180deg)' };
+		case 'glideIn':
+			return { opacity: 0, transform: 'translate(-30%, 30%) scale(0.9)' };
+		case 'compressIn':
+			return { opacity: 0, transform: 'scaleX(1.8)' };
+		case 'unfoldIn':
+			return {
+				opacity: 0,
+				transform: 'perspective(800px) rotateX(90deg)',
+				transformOrigin: 'bottom center',
+			};
+		case 'rotateIn':
+			return { opacity: 0, transform: 'rotate(-180deg)' };
+		case 'centerRevolveIn':
+			return { opacity: 0, transform: 'rotate(-540deg) scale(0.3)' };
+		case 'dropIn':
+			return { opacity: 0, transform: 'translateY(-120%)' };
 		case 'appear':
 		case 'fadeIn':
 		case 'checkerboardIn':

@@ -103,6 +103,40 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 		transformCommittedText,
 	} = input;
 
+	// View > Slide Master edits a part that is not in `slides`, so element
+	// writes have to be routed to the master/layout/notes/handout model while
+	// the view is open. `null` outside master mode keeps the slide path.
+	const masterView = useMemo(
+		() => ({
+			target:
+				mode === 'master'
+					? {
+							tab: state.masterViewTab,
+							masterIndex: state.activeMasterIndex,
+							layoutIndex: state.activeLayoutIndex,
+						}
+					: null,
+			slideMasters: state.slideMasters,
+			notesMaster: state.notesMaster,
+			handoutMaster: state.handoutMaster,
+			setSlideMasters: state.setSlideMasters,
+			setNotesMaster: state.setNotesMaster,
+			setHandoutMaster: state.setHandoutMaster,
+		}),
+		[
+			mode,
+			state.masterViewTab,
+			state.activeMasterIndex,
+			state.activeLayoutIndex,
+			state.slideMasters,
+			state.notesMaster,
+			state.handoutMaster,
+			state.setSlideMasters,
+			state.setNotesMaster,
+			state.setHandoutMaster,
+		],
+	);
+
 	const ops = useElementOperations({
 		slides,
 		activeSlide,
@@ -111,6 +145,7 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 		selectedElementId,
 		editTemplateMode: state.editTemplateMode,
 		templateElements: state.templateElements,
+		masterView,
 		history,
 		setSlides: state.setSlides,
 		setTemplateElementsBySlideId: state.setTemplateElementsBySlideId,
@@ -118,6 +153,8 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 		setSelectedElementIds: state.setSelectedElementIds,
 		setInlineEditingElementId: state.setInlineEditingElementId,
 		setContextMenuState: state.setContextMenuState,
+		inlineEditingElementId: state.inlineEditingElementId,
+		inlineEditingText: state.inlineEditingText,
 	});
 
 	const sectionOps = useSectionOperations({
@@ -166,6 +203,7 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 		resizeStateRef: state.resizeStateRef,
 		shapeAdjustmentDragStateRef: state.shapeAdjustmentDragStateRef,
 		marqueeStateRef: state.marqueeStateRef,
+		justInteractedRef: state.justInteractedRef,
 		setInlineEditingElementId: state.setInlineEditingElementId,
 		setInlineEditingText: state.setInlineEditingText,
 		setContextMenuState: state.setContextMenuState,
@@ -218,6 +256,8 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 		ops,
 		history,
 		handlerRef,
+		canvasSize,
+		theme: state.theme,
 	});
 
 	const tableOps = useTableOperations({
@@ -227,6 +267,7 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 		setTableEditorState: state.setTableEditorState,
 		ops,
 		history,
+		transformCommittedText,
 	});
 
 	// Combined text style updater: if a table cell is active, apply formatting

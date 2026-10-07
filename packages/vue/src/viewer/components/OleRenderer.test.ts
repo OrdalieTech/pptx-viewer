@@ -1,5 +1,6 @@
 import { mount } from '@vue/test-utils';
 import type { PptxElement } from 'pptx-viewer-core';
+import { getOleTypeColor } from 'pptx-viewer-shared';
 import { describe, expect, it, vi } from 'vitest';
 
 import OleRenderer from './OleRenderer.vue';
@@ -119,6 +120,38 @@ describe('oleRenderer', () => {
 		expect(title).toContain('report.xlsx');
 		expect(title).toContain('2 KB');
 		expect(title).toContain('Excel.Sheet.12');
+	});
+
+	it('prefers the author-assigned oleName over the file name in the placeholder and aria-label', () => {
+		const wrapper = mount(OleRenderer, {
+			props: { element: ole({ oleName: 'Q3 Budget' }), zIndex: 0 },
+		});
+		expect(wrapper.text()).toContain('Q3 Budget');
+		expect(wrapper.text()).not.toContain('budget.xlsx');
+		expect(wrapper.get('[role="group"]').attributes('aria-label')).toBe(
+			'Excel Spreadsheet: Q3 Budget',
+		);
+	});
+
+	it('renders the shared excel icon primitives (rect grid + 4 dividing lines)', () => {
+		const wrapper = mount(OleRenderer, {
+			props: { element: ole({ oleObjectType: 'excel' }), zIndex: 0 },
+		});
+		const svg = wrapper.get('.pptx-vue-ole-placeholder svg');
+		expect(svg.findAll('rect')).toHaveLength(1);
+		expect(svg.findAll('line')).toHaveLength(4);
+		expect(svg.findAll('rect')[0]?.attributes('stroke')).toBe(getOleTypeColor('excel'));
+	});
+
+	it('renders the shared pdf icon primitives (rect + "PDF" text)', () => {
+		const wrapper = mount(OleRenderer, {
+			props: { element: ole({ oleObjectType: 'pdf', fileName: 'spec.pdf' }), zIndex: 0 },
+		});
+		const svg = wrapper.get('.pptx-vue-ole-placeholder svg');
+		expect(svg.findAll('rect')).toHaveLength(1);
+		const text = svg.get('text');
+		expect(text.text()).toBe('PDF');
+		expect(text.attributes('fill')).toBe(getOleTypeColor('pdf'));
 	});
 
 	it('stops pointer/click interactions on the action bar from bubbling', async () => {

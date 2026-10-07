@@ -56,6 +56,20 @@ export const GENERAL_TAB: ViewerOptionsTabDefinition = {
 			controls: [],
 		},
 		{
+			id: 'fonts',
+			titleKey: 'pptx.options.general.fonts',
+			descriptionKey: 'pptx.options.general.fontsDescription',
+			// The upload control itself is a bespoke block: it needs a file
+			// picker, a list of what the session has registered, and an error
+			// line, none of which the declarative control kinds cover.
+			special: 'customFonts',
+			controls: [
+				toggle('general', 'enableCustomFontUpload', 'pptx.options.general.enableCustomFonts', {
+					infoKey: 'pptx.options.general.enableCustomFontsInfo',
+				}),
+			],
+		},
+		{
 			id: 'startup',
 			titleKey: 'pptx.options.general.startup',
 			controls: [toggle('general', 'showStartScreen', 'pptx.options.general.showStartScreen')],
@@ -160,18 +174,11 @@ export const SAVE_TAB: ViewerOptionsTabDefinition = {
 				}),
 			],
 		},
-		{
-			id: 'fidelity',
-			titleKey: 'pptx.options.save.fidelity',
-			controls: [
-				toggle('save', 'embedFonts', 'pptx.options.save.embedFonts', {
-					infoKey: 'pptx.options.save.embedFontsInfo',
-				}),
-				toggle('save', 'embedAllFontCharacters', 'pptx.options.save.embedAllCharacters', {
-					indent: true,
-				}),
-			],
-		},
+		// No "Preserve fidelity when sharing this presentation" section: the only
+		// control PowerPoint puts there is "Embed fonts in the file", and this
+		// viewer already owns that in the File > Fonts panel, which is the copy the
+		// save path actually reads (`render/font-embedding`). The section here was
+		// a second, unwired switch for the same setting.
 		{
 			id: 'cache',
 			titleKey: 'pptx.options.save.cache',

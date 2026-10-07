@@ -1,12 +1,15 @@
 import type {
 	ContentPartPptxElement,
 	InkPptxElement,
-	OlePptxElement,
 	PptxElement,
 	ShapeStyle,
 } from 'pptx-viewer-core';
 import {
+	filterRenderedElements,
+	getGroupChildParentFill,
+	getOleAriaLabel,
 	getOleBadgeLabel,
+	getOleDisplayName,
 	getOleTypeColor,
 	getOleTypeLabel,
 	resolveGroupChildFill,
@@ -18,8 +21,8 @@ import { translationsEn } from 'pptx-viewer-shared/i18n';
 import { DEFAULT_TEXT_COLOR, MIN_ELEMENT_SIZE } from '../../constants';
 import {
 	getElementTransform,
-	getCropShapeClipPath,
 	getImageRenderStyle,
+	getImageSurfaceStyle,
 	getImageTilingStyle,
 	getShapeVisualStyle,
 	getTextStyleForElement,
@@ -29,24 +32,24 @@ import {
 	renderVectorShape,
 } from '../../utils';
 import {
-	extractPathPoints,
-	generatePressureCircles,
-	hasPressureVariation,
-	pressuresToWidths,
+	buildContentPartStrokes,
+	buildInkGroupStrokes,
 	getInkReplayStyles,
 	getContentPartReplayStyles,
-	resolveInkColor,
-	resolveInkWidth,
-	resolveInkOpacity,
 	INK_REPLAY_KEYFRAMES,
 } from '../../utils/ink-rendering';
-import type { InkReplayConfig } from '../../utils/ink-rendering';
+import type {
+	InkReplayConfig,
+	InkStrokeView,
+	NibMark,
+	PressureCircle,
+} from '../../utils/ink-rendering';
 import { shapeParams } from '../ElementRenderer';
 import { ShapeEffectOverlay } from './ShapeEffectOverlay';
 
 // Re-export the shared OLE type-resolution helpers so existing consumers (and
 // the colocated tests) keep importing them from this module.
-export { getOleTypeColor, getOleTypeLabel, resolveOleType };
+export { getOleAriaLabel, getOleDisplayName, getOleTypeColor, getOleTypeLabel, resolveOleType };
 export type { ResolvedOleType };
 
 /**
@@ -62,25 +65,16 @@ export interface InkRenderOptions {
 }
 
 /**
- * Render pressure-sensitive circles for a single ink stroke.
+ * Render pressure-sensitive circles for a single (already-decided) stroke.
  * This produces a series of SVG `<circle>` elements with varying radii
  * to simulate pressure variation along the stroke.
  */
 function renderPressureStroke(
-	pathD: string,
-	widths: number[],
-	baseWidth: number,
+	circles: PressureCircle[],
 	color: string,
 	opacity: number,
 	keyPrefix: string,
 ) {
-	const points = extractPathPoints(pathD);
-	const circles = generatePressureCircles(points, widths, {
-		baseWidth,
-		minRadius: 0.5,
-		maxRadius: baseWidth * 1.5,
-	});
-
 	return (
 		<g opacity={opacity}>
 			{circles.map((c, j) => (
@@ -90,16 +84,88 @@ function renderPressureStroke(
 	);
 }
 
+/**
+ * Render calligraphic nib marks for a single (already-decided) stroke: an
+ * ellipse per point, widened perpendicular to the pen's tilt-lean direction
+ * (a chisel-tip look). The tilt counterpart of {@link renderPressureStroke}.
+ */
+function renderNibMarkStroke(marks: NibMark[], color: string, opacity: number, keyPrefix: string) {
+	return (
+		<g opacity={opacity}>
+			{marks.map((m, j) => (
+				<ellipse
+					key={`${keyPrefix}-nib-${j}`}
+					cx={m.cx}
+					cy={m.cy}
+					rx={m.rPerp}
+					ry={m.rTilt}
+					transform={`rotate(${m.rotationDeg} ${m.cx} ${m.cy})`}
+					fill={color}
+				/>
+			))}
+		</g>
+	);
+}
+
+/**
+ * Render one already-decided stroke view (plain path, pressure circles, or
+ * nib marks). Exported so the Draw tool's live in-progress preview
+ * (`DrawingOverlaySvg`) can paint its own `InkStrokeView` (built by the shared
+ * `buildLiveInkStrokeView`) with the exact same calligraphic-nib /
+ * pressure-circle mapping a committed stroke gets, instead of a hand-rolled
+ * plain `<path>`.
+ */
+export function renderStrokeView(
+	view: InkStrokeView,
+	pressureSensitive: boolean,
+	replayStyle:
+		| { strokeDasharray: string; strokeDashoffset: string; animation: string; pathLength: number }
+		| undefined,
+	key: string,
+) {
+	// Tilt-driven nib rendering is unconditional (matches this module's
+	// original contentPart behaviour): it degrades to a plain circle wherever
+	// tilt magnitude is 0, so it is safe even when `pressureSensitive` is
+	// explicitly disabled. Only the pressure-circle branch is gated by it.
+	if (view.nibMarks) {
+		return <g key={key}>{renderNibMarkStroke(view.nibMarks, view.color, view.opacity, key)}</g>;
+	}
+	if (pressureSensitive && view.circles) {
+		return <g key={key}>{renderPressureStroke(view.circles, view.color, view.opacity, key)}</g>;
+	}
+	return (
+		<path
+			key={key}
+			d={view.d}
+			fill='none'
+			stroke={view.color}
+			strokeWidth={view.width}
+			strokeOpacity={view.opacity}
+			strokeLinecap='round'
+			strokeLinejoin='round'
+			vectorEffect='non-scaling-stroke'
+			{...(replayStyle
+				? {
+						strokeDasharray: replayStyle.strokeDasharray,
+						strokeDashoffset: replayStyle.strokeDashoffset,
+						style: {
+							animation: replayStyle.animation,
+							'--ink-path-length': replayStyle.pathLength,
+						} as React.CSSProperties,
+					}
+				: {})}
+		/>
+	);
+}
+
 export function renderInk(el: InkPptxElement, options?: InkRenderOptions) {
 	const replay = options?.replay ?? false;
-	// Enable pressure-sensitive rendering by default when the element has
-	// per-point pressure data with actual variation, or legacy per-point
-	// width data with variation.
-	const hasPointPressures = Boolean(el.inkPointPressures) && el.inkPointPressures!.length > 0;
-	const hasLegacyPressure =
-		Boolean(el.inkWidths) && el.inkWidths!.length > 1 && hasPressureVariation(el.inkWidths!);
-	const hasPressure = hasPointPressures || hasLegacyPressure;
-	const pressureSensitive = options?.pressureSensitive ?? hasPressure;
+	const strokes = buildInkGroupStrokes(el, { color: '#000', width: 3 });
+	// Enable pressure/tilt-sensitive rendering by default when any stroke
+	// actually decided to render as circles or nib marks (per-point pressure
+	// or tilt data with real variation/lean; see `buildInkGroupStrokes`).
+	const hasVariableStroke = strokes.some((s) => s.circles || s.nibMarks);
+	const pressureSensitive = options?.pressureSensitive ?? hasVariableStroke;
 	const replayStyles = replay ? getInkReplayStyles(el, options?.replayConfig) : null;
 
 	return (
@@ -109,69 +175,29 @@ export function renderInk(el: InkPptxElement, options?: InkRenderOptions) {
 			preserveAspectRatio='none'
 		>
 			{replay && <style>{INK_REPLAY_KEYFRAMES}</style>}
-			{el.inkPaths.map((d, i) => {
-				const color = resolveInkColor(el.inkColors, i);
-				const width = resolveInkWidth(el.inkWidths, i);
-				const opacity = resolveInkOpacity(el.inkOpacities, i);
-
-				// Pressure-sensitive rendering using per-point pressure data.
-				if (pressureSensitive) {
-					// Prefer inkPointPressures (per-point pressure from stylus).
-					const pointPressures = el.inkPointPressures?.[i];
-					if (pointPressures && pointPressures.length > 1 && hasPressureVariation(pointPressures)) {
-						const pointWidths = pressuresToWidths(pointPressures, width);
-						return (
-							<g key={`${el.id}-ink-${i}`}>
-								{renderPressureStroke(d, pointWidths, width, color, opacity, `${el.id}-ink-${i}`)}
-							</g>
-						);
-					}
-
-					// Legacy fallback: use inkWidths array as per-point widths
-					// (when it has more entries than paths and shows variation).
-					if (el.inkWidths && el.inkWidths.length > 1 && hasPressureVariation(el.inkWidths)) {
-						return (
-							<g key={`${el.id}-ink-${i}`}>
-								{renderPressureStroke(d, el.inkWidths, width, color, opacity, `${el.id}-ink-${i}`)}
-							</g>
-						);
-					}
-				}
-
-				// Standard or replay-animated path rendering.
-				const replayStyle = replayStyles?.[i];
-				return (
-					<path
-						key={`${el.id}-ink-${i}`}
-						d={d}
-						fill='none'
-						stroke={color}
-						strokeWidth={width}
-						strokeOpacity={opacity}
-						strokeLinecap='round'
-						strokeLinejoin='round'
-						vectorEffect='non-scaling-stroke'
-						{...(replayStyle
-							? {
-									strokeDasharray: replayStyle.strokeDasharray,
-									strokeDashoffset: replayStyle.strokeDashoffset,
-									style: {
-										animation: replayStyle.animation,
-										'--ink-path-length': replayStyle.pathLength,
-									} as React.CSSProperties,
-								}
-							: {})}
-					/>
-				);
-			})}
+			{strokes.map((s, i) =>
+				renderStrokeView(s, pressureSensitive, replayStyles?.[i], `${el.id}-ink-${i}`),
+			)}
 		</svg>
 	);
 }
 
+/**
+ * Fallback painter for a group's children, used when `renderBody` is called
+ * without a `renderGroupChild` dispatcher (the prop is optional, so this is the
+ * behaviour any such caller gets; both viewer renderers supply one).
+ *
+ * It builds its own boxes rather than delegating to `ElementRenderer`, so every
+ * rule the main path gets for free has to be restated here: the Selection Pane
+ * hide filter, document-order z-indexing, and `a:grpFill` inheritance. It also
+ * has to recurse, because a `p:grpSp` inside a `p:grpSp` now loads as a nested
+ * group rather than being flattened into the parent's child list; painting a
+ * group child as a leaf drew an empty box where the whole sub-group belonged.
+ */
 export function renderGroup(children: PptxElement[], parentGroupFill?: ShapeStyle) {
 	return (
 		<div className='relative w-full h-full pointer-events-none'>
-			{children.map((c, childIndex) => {
+			{filterRenderedElements(children).map((c, childIndex) => {
 				const { hf, fc, sw, sc } = shapeParams(c);
 				const baseSs = getShapeVisualStyle(c, hf, fc, sw, sc);
 				// `a:grpFill` child: inherit the enclosing group's resolved fill,
@@ -187,13 +213,18 @@ export function renderGroup(children: PptxElement[], parentGroupFill?: ShapeStyl
 							backgroundPosition: inheritedFill.backgroundPosition,
 						}
 					: baseSs;
-				const vs = renderVectorShape(c, hf, fc, sw, sc);
+				const isI = c.type === 'picture' || c.type === 'image';
+				const vs = renderVectorShape(c, isI ? false : hf, fc, sw, sc);
 				const ts = getTextStyleForElement(c, DEFAULT_TEXT_COLOR);
 				const isTxt = isEditableTextElement(c);
-				const isI = c.type === 'picture' || c.type === 'image';
 				return (
 					<div
 						key={c.id}
+						// A morph can pair a `!!`-named shape ACROSS a grouping boundary
+						// (see shared `morph-flatten`), and its animation is keyed by
+						// this child's own id, so the child has to be addressable in the
+						// DOM rather than hidden inside the group's node.
+						data-element-id={c.id}
 						className='absolute'
 						style={{
 							left: c.x,
@@ -202,9 +233,19 @@ export function renderGroup(children: PptxElement[], parentGroupFill?: ShapeStyl
 							height: Math.max(c.height, MIN_ELEMENT_SIZE),
 							transform: getElementTransform(c),
 							transformOrigin: 'center',
-							overflow: isI ? 'hidden' : undefined,
-							clipPath: isI ? getCropShapeClipPath(c) : undefined,
 							...ss,
+							...(isI
+								? {
+										backgroundColor: 'transparent',
+										backgroundImage: undefined,
+										backgroundRepeat: undefined,
+										backgroundSize: undefined,
+										backgroundPosition: undefined,
+										borderRadius: undefined,
+										clipPath: undefined,
+										overflow: 'visible',
+									}
+								: {}),
 							// Explicit z-index preserves document order stacking within the
 							// group: later children in the array (= later in p:grpSp XML)
 							// render on top, matching PowerPoint's painter's algorithm.
@@ -215,21 +256,28 @@ export function renderGroup(children: PptxElement[], parentGroupFill?: ShapeStyl
 						{/* Soft-edge <filter> defs + DAG fill-overlay tint layer. Required so
 						    a soft-edged child's `filter: url(#soft-edge-<id>)` resolves. */}
 						<ShapeEffectOverlay element={c} />
-						{isI && (('svgData' in c && c.svgData) || ('imageData' in c && c.imageData)) ? (
-							isImageTiled(c) ? (
-								<div
-									className='pointer-events-none select-none w-full h-full'
-									style={getImageTilingStyle(c)}
-								/>
-							) : (
-								<img
-									src={('svgData' in c && c.svgData ? c.svgData : c.imageData) as string}
-									alt={translationsEn['pptx.ink.groupChildAlt']}
-									className='pointer-events-none select-none'
-									style={getImageRenderStyle(c)}
-									draggable={false}
-								/>
-							)
+						{c.type === 'group' ? (
+							// A nested group: recurse, chaining the inherited fill so a
+							// `grpFill` shape under a fill-less sub-group still paints.
+							renderGroup(c.children, getGroupChildParentFill(c, parentGroupFill))
+						) : isI && (('svgData' in c && c.svgData) || ('imageData' in c && c.imageData)) ? (
+							<div className='absolute inset-0 pointer-events-none' style={getImageSurfaceStyle(c)}>
+								{isImageTiled(c) ? (
+									<div
+										className='pointer-events-none select-none w-full h-full'
+										style={getImageTilingStyle(c)}
+									/>
+								) : (
+									<img
+										src={('svgData' in c && c.svgData ? c.svgData : c.imageData) as string}
+										alt={translationsEn['pptx.ink.groupChildAlt']}
+										className='pointer-events-none select-none'
+										style={getImageRenderStyle(c)}
+										draggable={false}
+									/>
+								)}
+								{vs ? <div className='pointer-events-none absolute inset-0'>{vs}</div> : null}
+							</div>
 						) : (
 							<>
 								{vs}
@@ -254,6 +302,7 @@ export function renderContentPart(el: ContentPartPptxElement, options?: InkRende
 	if (el.inkStrokes && el.inkStrokes.length > 0) {
 		const replay = options?.replay ?? false;
 		const pressureSensitive = options?.pressureSensitive ?? true;
+		const strokes = buildContentPartStrokes(el);
 		const replayStyles = replay
 			? getContentPartReplayStyles(el.inkStrokes, options?.replayConfig)
 			: null;
@@ -265,54 +314,9 @@ export function renderContentPart(el: ContentPartPptxElement, options?: InkRende
 				preserveAspectRatio='none'
 			>
 				{replay && <style>{INK_REPLAY_KEYFRAMES}</style>}
-				{el.inkStrokes.map((stroke, i) => {
-					// Pressure-sensitive rendering for content part strokes
-					if (
-						pressureSensitive &&
-						stroke.pressures &&
-						stroke.pressures.length > 1 &&
-						hasPressureVariation(stroke.pressures)
-					) {
-						const pointWidths = pressuresToWidths(stroke.pressures, stroke.width);
-						return (
-							<g key={`${el.id}-cp-ink-${i}`}>
-								{renderPressureStroke(
-									stroke.path,
-									pointWidths,
-									stroke.width,
-									stroke.color,
-									stroke.opacity,
-									`${el.id}-cp-ink-${i}`,
-								)}
-							</g>
-						);
-					}
-
-					const replayStyle = replayStyles?.[i];
-					return (
-						<path
-							key={`${el.id}-cp-ink-${i}`}
-							d={stroke.path}
-							fill='none'
-							stroke={stroke.color}
-							strokeWidth={stroke.width}
-							strokeOpacity={stroke.opacity}
-							strokeLinecap='round'
-							strokeLinejoin='round'
-							vectorEffect='non-scaling-stroke'
-							{...(replayStyle
-								? {
-										strokeDasharray: replayStyle.strokeDasharray,
-										strokeDashoffset: replayStyle.strokeDashoffset,
-										style: {
-											animation: replayStyle.animation,
-											'--ink-path-length': replayStyle.pathLength,
-										} as React.CSSProperties,
-									}
-								: {})}
-						/>
-					);
-				})}
+				{strokes.map((s, i) =>
+					renderStrokeView(s, pressureSensitive, replayStyles?.[i], `${el.id}-cp-ink-${i}`),
+				)}
 			</svg>
 		);
 	}
@@ -515,18 +519,6 @@ export function getOleIcon(type: ResolvedOleType, color: string, size = 32) {
 		default:
 			return GenericOleIcon(color, size);
 	}
-}
-
-/**
- * Build an accessible aria-label for the OLE element.
- */
-export function getOleAriaLabel(el: OlePptxElement): string {
-	const oleType = resolveOleType(el);
-	const typeLabel = getOleTypeLabel(oleType);
-	if (el.fileName) {
-		return `${typeLabel}: ${el.fileName}`;
-	}
-	return typeLabel;
 }
 
 /**

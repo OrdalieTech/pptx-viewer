@@ -63,7 +63,7 @@ export const RIBBON_CSS = `
 .pptxv-ribbon-tab-content {
 	display: flex;
 	flex-wrap: nowrap;
-	align-items: stretch;
+	align-items: center;
 	gap: 0;
 	min-height: 82px;
 	padding: 2px 4px;
@@ -76,6 +76,21 @@ export const RIBBON_CSS = `
    to fit a swatch preview + label without overlapping its neighbours. */
 .pptxv-theme-gallery { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 8px; }
 .pptxv-theme-gallery .pptxv-btn { width: auto; height: auto; gap: 6px; padding: 4px 10px 4px 4px; white-space: nowrap; }
+.pptxv-theme-gallery-host { position: relative; display: inline-flex; }
+/* The galleries are popovers hung off Browse Themes / Edit Theme, so they must
+   float above the ribbon rather than widen it. */
+.pptxv-theme-gallery-host > .pptxv-theme-gallery {
+	position: absolute;
+	top: calc(100% + 4px);
+	left: 0;
+	z-index: 30;
+	max-width: 320px;
+	border: 1px solid var(--pptx-border);
+	border-radius: var(--pptx-radius);
+	background: var(--pptx-card);
+	box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
+}
+.pptxv-theme-gallery[hidden] { display: none; }
 .pptxv-theme-swatch-preview { display: block; width: 20px; height: 20px; flex: none; border: 1px solid var(--pptx-border); border-radius: 4px; }
 .pptxv-record-dot { width: 12px; height: 12px; margin: 7px; border-radius: 50%; background: #ef4444; }
 .pptxv-shortcut-help { align-self: center; padding: 5px 8px; color: var(--pptx-muted-foreground); font-size: 11px; }
@@ -113,6 +128,45 @@ export const RIBBON_CSS = `
 	white-space: nowrap;
 }
 .pptxv-btn-label { font-size: 12px; }
+/* Home > Arrange: group / ungroup / outline width. The spinner reuses the
+   inspector's field styling but is narrower, since the ribbon row has no
+   caption beside it. */
+.pptxv-arrange-extras { display: inline-flex; align-items: center; gap: 2px; }
+.pptxv-arrange-extras .pptxv-arrange-stroke { width: 52px; text-align: center; }
+
+/* ── Transitions > Advance Slide ────────────────────────────────────────
+   The group shipped with no rules at all, so its caption and both rows ran
+   together as inline text ("On Mouse ClickAfter:00:00.00") and the duration
+   box stretched to whatever width the row left it. React lays it out as a
+   caption over two checkbox rows, with a 64px centred time box. */
+.pptxv-transition-advance {
+	display: inline-flex;
+	flex: none;
+	flex-direction: column;
+	gap: 3px;
+	font-size: 12px;
+	color: var(--pptx-muted-foreground);
+}
+.pptxv-transition-advance-row {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+.pptxv-transition-advance-seconds {
+	width: 64px;
+	padding: 1px 4px;
+	border: 1px solid var(--pptx-border);
+	border-radius: var(--pptx-radius);
+	background: var(--pptx-muted);
+	color: var(--pptx-foreground);
+	font: inherit;
+	font-size: 11px;
+	text-align: center;
+}
+.pptxv-transition-advance-seconds:focus-visible { outline: 2px solid var(--pptx-ring); outline-offset: -1px; }
+.pptxv-transition-advance-seconds:disabled { opacity: 0.5; }
 
 /* ── Home > Slides split button (New Slide + layout caret) ──────────────*/
 .pptxv-slides-split { position: relative; display: inline-flex; align-items: stretch; }
@@ -134,15 +188,75 @@ export const RIBBON_CSS = `
 .pptxv-slides-menu-host { position: relative; display: inline-flex; }
 /* Layout menus anchor to the left of their host (unlike the right-aligned
    primary-row menus, which the shared .pptxv-primary-menu rule right-aligns). */
-.pptxv-layout-menu { right: auto; left: 0; }
-
-/* ── Shape insert grid ───────────────────────────────────────────────── */
-.pptxv-shape-grid {
+.pptxv-layout-menu {
+	right: auto;
+	left: 0;
 	display: grid;
-	grid-template-columns: repeat(10, 28px);
-	gap: 2px;
-	max-width: 320px;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 8px;
+	width: 620px;
+	max-height: 520px;
+	overflow-y: auto;
+	padding: 12px;
 }
+.pptxv-layout-menu[hidden] { display: none; }
+.pptxv-layout-tile {
+	display: flex;
+	min-width: 0;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	border: 2px solid transparent;
+	border-radius: var(--pptx-radius, 6px);
+	background: transparent;
+	color: inherit;
+	padding: 4px;
+	font: inherit;
+	font-size: 11px;
+	cursor: pointer;
+}
+.pptxv-layout-tile:hover { background: var(--pptx-accent); }
+.pptxv-layout-tile-current {
+	border-color: var(--pptx-primary, #2563eb);
+	background: color-mix(in srgb, var(--pptx-primary, #2563eb) 12%, transparent);
+}
+.pptxv-layout-tile-thumb {
+	position: relative;
+	flex: none;
+	overflow: hidden;
+	border: 1px solid var(--pptx-border);
+	border-radius: 2px;
+}
+/* The artwork is drawn at full slide size and the whole surface is scaled, so
+   element positions need no conversion. */
+.pptxv-layout-tile-surface { position: absolute; left: 0; top: 0; transform-origin: top left; }
+.pptxv-layout-tile-frame {
+	position: absolute;
+	border-style: dashed;
+	border-color: color-mix(in srgb, var(--pptx-muted-foreground) 70%, transparent);
+	background: color-mix(in srgb, var(--pptx-background) 20%, transparent);
+}
+.pptxv-layout-tile-name {
+	width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	text-align: center;
+}
+
+/* ── Select + commit picker (Insert > Shape / Chart) ──────────────────── */
+.pptxv-select-button { display: inline-flex; align-items: center; gap: 0; }
+.pptxv-select-button-select {
+	max-width: 132px;
+	padding: 5px 4px 5px 6px;
+	border: 1px solid var(--pptx-border);
+	border-right: none;
+	border-radius: var(--pptx-radius) 0 0 var(--pptx-radius);
+	background: var(--pptx-muted);
+	color: var(--pptx-foreground);
+	font-size: 11px;
+}
+.pptxv-select-button-commit { border-radius: 0 var(--pptx-radius) var(--pptx-radius) 0; }
 
 /* ── Dropdown popover (font/size/spacing/case/line-spacing) ─────────────*/
 .pptxv-dropdown { position: relative; display: inline-flex; }
@@ -168,9 +282,8 @@ export const RIBBON_CSS = `
 .pptxv-font-family-dd .pptxv-dropdown-text { max-width: 120px; }
 .pptxv-font-size-dd .pptxv-dropdown-trigger { min-width: 44px; justify-content: space-between; }
 .pptxv-dropdown-menu {
-	position: absolute;
-	top: calc(100% + 4px);
-	left: 0;
+	/* Positioned by attachAnchoredPopup (position: fixed + inline top/left),
+	   which escapes the ribbon row's overflow-x clip (issue #183). */
 	z-index: 30;
 	min-width: 140px;
 	max-height: 240px;
@@ -183,6 +296,22 @@ export const RIBBON_CSS = `
 	box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
 }
 .pptxv-dropdown-menu[hidden] { display: none; }
+/* Non-selectable heading starting a dropdown group (the font list's theme /
+   embedded / added-this-session / all sections). */
+.pptxv-dropdown-group {
+	padding: 6px 10px 2px;
+	color: var(--pptx-muted-foreground);
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+.pptxv-dropdown-item-hint {
+	margin-left: auto;
+	padding-left: 8px;
+	color: var(--pptx-muted-foreground);
+	font-size: 10px;
+}
 .pptxv-dropdown-item {
 	display: block;
 	width: 100%;
@@ -203,9 +332,8 @@ export const RIBBON_CSS = `
 .pptxv-swatch-trigger { flex-direction: column; height: 28px; padding: 2px 6px; gap: 0; }
 .pptxv-swatch-swab { display: block; width: 16px; height: 3px; border-radius: 1px; margin-top: 1px; }
 .pptxv-swatch-menu {
-	position: absolute;
-	top: calc(100% + 4px);
-	left: 0;
+	/* Positioned by attachAnchoredPopup (position: fixed + inline top/left),
+	   which escapes the ribbon row's overflow-x clip (issue #183). */
 	z-index: 30;
 	padding: 8px;
 	border: 1px solid var(--pptx-border);
@@ -215,6 +343,23 @@ export const RIBBON_CSS = `
 	box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
 }
 .pptxv-swatch-menu[hidden] { display: none; }
+/* B6: "Recent colours" row (ui/recent-colors-row.ts), shared by the swatch
+   picker's popup menu and the property inspector's colour inputs. */
+.pptxv-recent-colors[hidden] { display: none; }
+.pptxv-recent-colors-label {
+	margin-bottom: 4px;
+	color: var(--pptx-muted-foreground);
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+.pptxv-swatch-standard-label {
+	margin-bottom: 4px;
+	color: var(--pptx-muted-foreground);
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
 .pptxv-swatch-grid { display: grid; grid-template-columns: repeat(5, 20px); gap: 4px; margin-bottom: 6px; }
 .pptxv-swatch {
 	width: 20px;

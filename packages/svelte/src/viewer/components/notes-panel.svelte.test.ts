@@ -2,6 +2,7 @@ import type { PptxSlide } from 'pptx-viewer-core';
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { translate } from '../../i18n/translator';
 import NotesPanel from './NotesPanel.svelte';
 import type { NotesPanelProps } from './props';
 
@@ -173,5 +174,38 @@ describe('notesPanel', () => {
 		expect(target.querySelector('.pptx-svelte-notes-header')?.getAttribute('aria-expanded')).toBe(
 			'true',
 		);
+	});
+
+	it('does not show a print action in the notes toolbar', () => {
+		const { target } = mountPanel({ slide: slide(), expanded: true, onupdate: () => {} });
+		const printLabel = translate('en', 'pptx.notes.printNotes');
+		expect(target.querySelector(`[aria-label="${printLabel}"]`)).toBeNull();
+		expect(target.querySelector('.pptx-svelte-notes-toolbar button:last-child')).not.toBeNull();
+	});
+
+	it('applies the notes master fontSize default to a plain segment with no explicit size', () => {
+		const target = document.createElement('div');
+		document.body.appendChild(target);
+		const props = $state<NotesPanelProps>({
+			slide: slide({ notes: 'Remember to mention quarterly goals.' }),
+			expanded: true,
+			// The rich contentEditable surface (which carries the resolved inline
+			// styles) only renders on an editable panel, i.e. with an `onupdate`.
+			onupdate: () => {},
+			notesStyle: { 0: { fontSize: 32 } },
+		});
+		const instance = mount(NotesPanel, { target, props });
+		flushSync();
+		try {
+			const rich = target.querySelector<HTMLDivElement>('.pptx-svelte-notes-rich');
+			expect(rich).not.toBeNull();
+			// notesStyle level-0 fontSize is in CSS px (32); resolveNotesLevelStyle
+			// converts to points (32 * 0.75 = 24) and segmentsToEditorHtml renders
+			// that as a `font-size:24pt` inline style on the seeded span.
+			expect(rich?.innerHTML).toContain('font-size:24pt');
+		} finally {
+			unmount(instance);
+			target.remove();
+		}
 	});
 });

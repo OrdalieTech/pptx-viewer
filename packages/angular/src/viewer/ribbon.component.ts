@@ -65,6 +65,14 @@ import type { RibbonTab } from './ribbon-types';
 				(info)="info.emit()"
 				(a11y)="a11y.emit()"
 				(save)="save.emit()"
+				(savePpsx)="savePpsx.emit()"
+				(savePptm)="savePptm.emit()"
+				(copySlideAsImage)="copySlideAsImage.emit()"
+				(shortcuts)="shortcuts.emit()"
+				(versionHistory)="versionHistory.emit()"
+				(passwordProtection)="passwordProtection.emit()"
+				(fontEmbedding)="fontEmbedding.emit()"
+				(digitalSignatures)="signatures.emit()"
 			/>
 
 			<pptx-ribbon-tab-list
@@ -81,7 +89,7 @@ import type { RibbonTab } from './ribbon-types';
 			/>
 
 			<div
-				class="flex min-h-[82px] flex-nowrap items-stretch gap-0 overflow-x-auto px-1 py-0.5 [&>*]:shrink-0"
+				class="flex min-h-[82px] flex-nowrap items-center gap-0 overflow-x-auto px-1 py-0.5 [&>*]:shrink-0"
 				[style.display]="ribbonExpanded() ? null : 'none'"
 			>
 				<pptx-ribbon-content
@@ -105,7 +113,6 @@ import type { RibbonTab } from './ribbon-types';
 					(save)="save.emit()"
 					(savePpsx)="savePpsx.emit()"
 					(savePptm)="savePptm.emit()"
-					(packageForSharing)="packageForSharing.emit()"
 					(signatures)="signatures.emit()"
 					(info)="info.emit()"
 					(print)="print.emit()"
@@ -114,13 +121,16 @@ import type { RibbonTab } from './ribbon-types';
 					(exportPdf)="exportPdf.emit()"
 					(exportGif)="exportGif.emit()"
 					(exportVideo)="exportVideo.emit()"
+					(exportJson)="exportJson.emit()"
 					(copySlideAsImage)="copySlideAsImage.emit()"
 					(replace)="replace.emit()"
 					(openSmartArtDialog)="openSmartArtDialog.emit()"
 					(openEquationDialog)="openEquationDialog.emit()"
+					(openTemplateGallery)="openTemplateGallery.emit()"
 					(openPassword)="openPassword.emit()"
 					(openFontEmbedding)="openFontEmbedding.emit()"
 					(openVersionHistory)="openVersionHistory.emit()"
+					(link)="link.emit()"
 					(openSettings)="requestSettings()"
 				/>
 				<pptx-ribbon-content-secondary
@@ -150,17 +160,20 @@ import type { RibbonTab } from './ribbon-types';
 					(recordFromCurrent)="recordFromCurrent.emit()"
 					(spellCheckChange)="setSpellCheck($event)"
 					(broadcast)="broadcast.emit()"
-					(info)="info.emit()"
 					(print)="print.emit()"
 					(comments)="comments.emit()"
 					(a11y)="a11y.emit()"
 					(link)="link.emit()"
 					(openSorter)="openSorter.emit()"
+					(openReadingView)="openReadingView.emit()"
+					(openOutlineView)="openOutlineView.emit()"
 					(openMasterView)="openMasterView.emit()"
 					(toggleNotes)="toggleNotes.emit()"
 					(toggleInspector)="toggleInspector.emit()"
 					(drawToolChange)="drawToolChange.emit($event)"
 					(toggleThemeGallery)="toggleThemeGallery.emit()"
+					(editTheme)="editTheme.emit()"
+					(openSlideSize)="openSlideSize.emit()"
 					(toggleGrid)="toggleGrid.emit()"
 					(toggleRulers)="toggleRulers.emit()"
 					(toggleGuides)="toggleGuides.emit()"
@@ -172,6 +185,8 @@ import type { RibbonTab } from './ribbon-types';
 					(zoomToFit)="zoomToFit.emit()"
 					(toggleEyedropper)="toggleEyedropper.emit()"
 					(openSetUpSlideShow)="openSetUpSlideShow.emit()"
+					[activeSlideHidden]="activeSlideHidden()"
+					(toggleHideSlide)="toggleHideSlide.emit()"
 					(openCompare)="openCompare.emit()"
 					(openShortcuts)="openShortcuts.emit()"
 					(openSettings)="requestSettings()"
@@ -256,7 +271,6 @@ export class RibbonComponent {
 	readonly save = output<void>();
 	readonly savePpsx = output<void>();
 	readonly savePptm = output<void>();
-	readonly packageForSharing = output<void>();
 	/** Emitted when the user toggles the slides panel from the top bar. */
 	readonly toggleSidebar = output<void>();
 	/** Emitted when the user clicks the AI assistant Sparkles toggle. */
@@ -267,8 +281,19 @@ export class RibbonComponent {
 	readonly print = output<void>();
 	readonly comments = output<void>();
 	readonly a11y = output<void>();
+	/** Overflow menu: opens the keyboard-shortcuts dialog. */
+	readonly shortcuts = output<void>();
+	/** Overflow menu: opens the version-history panel. */
+	readonly versionHistory = output<void>();
+	/** Overflow menu: opens the password-protection dialog. */
+	readonly passwordProtection = output<void>();
+	/** Overflow menu: opens the font-embedding dialog. */
+	readonly fontEmbedding = output<void>();
 	readonly link = output<void>();
 	readonly openSorter = output<void>();
+	/** View tab > Reading View: the deck full-window, not the slide show. */
+	readonly openReadingView = output<void>();
+	readonly openOutlineView = output<void>();
 	readonly openMasterView = output<void>();
 	readonly toggleNotes = output<void>();
 	readonly toggleFormatPainter = output<void>();
@@ -276,6 +301,7 @@ export class RibbonComponent {
 	readonly exportPdf = output<void>();
 	readonly exportGif = output<void>();
 	readonly exportVideo = output<void>();
+	readonly exportJson = output<void>();
 	readonly copySlideAsImage = output<void>();
 	readonly replace = output<void>();
 	/** Design/Transitions/Animations tabs want the right-docked Inspector panel opened. */
@@ -284,6 +310,16 @@ export class RibbonComponent {
 	readonly drawToolChange = output<DrawToolState>();
 	/** Emitted when the user clicks "Browse Themes" in the Design tab. */
 	readonly toggleThemeGallery = output<void>();
+	/**
+	 * Emitted when the user clicks "Edit Theme" in the Design tab. The host
+	 * opens the theme gallery straight in its theme-editor (customise) mode.
+	 */
+	readonly editTheme = output<void>();
+	/**
+	 * Emitted when the user clicks "Slide Size" in the Design tab. The host
+	 * surfaces the inspector's deck panel, which owns the slide-size card.
+	 */
+	readonly openSlideSize = output<void>();
 	/** Emitted when the user toggles the grid overlay in the View tab. */
 	readonly toggleGrid = output<void>();
 	/** Emitted when the user toggles rulers in the View tab. */
@@ -303,10 +339,16 @@ export class RibbonComponent {
 	readonly toggleEyedropper = output<void>();
 	/** "SmartArt" in the Insert tab; the host opens the gallery dialog and does the insert. */
 	readonly openSmartArtDialog = output<void>();
+	/** "Slide Templates" in the Home tab; the host opens the gallery dialog and does the insert. */
+	readonly openTemplateGallery = output<void>();
 	/** Emitted when the user clicks "Equation" in the Insert tab (opens the editor). */
 	readonly openEquationDialog = output<void>();
 	/** Emitted when the user clicks "Set Up Show" in the Slide Show tab. */
 	readonly openSetUpSlideShow = output<void>();
+	/** Emitted when the user clicks "Hide Slide" in the Slide Show tab. */
+	readonly toggleHideSlide = output<void>();
+	/** Whether the active slide is hidden, for Hide Slide's pressed state. */
+	readonly activeSlideHidden = input<boolean>(false);
 	/** Emitted when the user clicks "Compare" in the Review tab. */
 	readonly openCompare = output<void>();
 	/** Emitted when the user clicks "Password" in the Review tab. */

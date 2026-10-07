@@ -12,6 +12,7 @@ import {
 	deleteTableRow,
 	insertTableColumn,
 	deleteTableColumn,
+	setCellText,
 } from 'pptx-viewer-shared';
 
 import type { TableCellEditorState } from '../types';
@@ -39,6 +40,7 @@ export function createTableStructHandlers(input: UseTableOperationsInput): Table
 		setTableEditorState,
 		ops,
 		history,
+		transformCommittedText,
 	} = input;
 
 	// ── Cell text editing ─────────────────────────────────────────────────
@@ -47,27 +49,23 @@ export function createTableStructHandlers(input: UseTableOperationsInput): Table
 		elementId: string,
 		rowIndex: number,
 		colIndex: number,
-		text: string,
+		rawText: string,
 	) => {
 		const el = elementLookup.get(elementId);
 		if (!el || el.type !== 'table') {
 			return;
 		}
 
+		const text = transformCommittedText ? transformCommittedText(rawText) : rawText;
 		const updates: Record<string, unknown> = {};
 
-		// Always update tableData if it exists
+		// Always update tableData if it exists. Through shared `setCellText`, not
+		// a local `{ ...cell, text }`: the cell also carries `textRuns`, the
+		// per-run model the renderer prefers over the flat string, and a
+		// hand-rolled spread keeps the runs describing the OLD wording - which is
+		// exactly what the canvas then keeps painting.
 		if (el.tableData) {
-			const newRows = el.tableData.rows.map((row, ri) => {
-				if (ri !== rowIndex) {
-					return row;
-				}
-				return {
-					...row,
-					cells: row.cells.map((cell, ci) => (ci !== colIndex ? cell : { ...cell, text })),
-				};
-			});
-			updates.tableData = { ...el.tableData, rows: newRows };
+			updates.tableData = setCellText(el, rowIndex, colIndex, text).tableData;
 		}
 
 		// Always update rawXml if it exists (rendering reads from rawXml

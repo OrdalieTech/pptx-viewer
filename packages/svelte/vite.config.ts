@@ -59,6 +59,7 @@ export default defineConfig({
 				index: resolve(__dirname, 'src/index.ts'),
 				'viewer/index': resolve(__dirname, 'src/viewer/index.ts'),
 				i18n: resolve(__dirname, 'src/i18n.ts'),
+				'i18n/fr': resolve(__dirname, 'src/i18n/fr.ts'),
 			},
 			formats: ['es'],
 			fileName: (_format, entryName) => `${entryName}.js`,
@@ -76,6 +77,9 @@ export default defineConfig({
 			external: [
 				'svelte',
 				/^svelte\//u,
+				// Yjs relies on constructor identity across the host and collaboration
+				// provider. Bundling a private copy breaks Y.Map/Y.Text checks.
+				'yjs',
 				'jszip',
 				'fast-xml-parser',
 				// PNG/PDF export libraries: both are dynamically `import()`-ed only

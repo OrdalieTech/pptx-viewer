@@ -1,3 +1,6 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per function, several separated by
+   comments or guard clauses); merging them isn't a style choice here. */
 /**
  * Pure, framework-agnostic helpers for table rendering (view-model projection).
  *
@@ -14,47 +17,31 @@
 import type { PptxElement, PptxTableCell, TablePptxElement } from 'pptx-viewer-core';
 
 import type { DiagonalBorderInfo, TableStyleContext } from '../internal/shared';
-import { getCellDiagonalBorders, getTableCellBandStyle } from '../internal/shared';
+import { getCellDiagonalBorders, tableCellCss } from '../internal/shared';
 import type { StyleMap } from './element-style';
 import type { CellParagraph } from './table-cell-style';
 import {
 	buildCellParagraphs,
-	cellStyleToStyleMap,
 	columnWidthStyle,
+	cssObjectToStyleMap,
 	rowStyle,
 } from './table-cell-style';
 
 // Re-export the extracted style helpers so existing importers/tests are stable.
+// `cssObjectToStyleMap` now lives beside `cellStyleToStyleMap` (which is built
+// on it) so this module can keep importing from that one and not the reverse.
 export {
 	buildCellParagraphs,
 	cellRunStyle,
 	cellStyleToStyleMap,
 	cellTdStyle,
 	columnWidthStyle,
+	cssObjectToStyleMap,
 	ooxmlDashToCssBorderStyle,
 	rowStyle,
 } from './table-cell-style';
 export type { CellParagraph, CellTextRun } from './table-cell-style';
 export type { DiagonalBorderInfo };
-
-// ==========================================================================
-// camelCase CSS → kebab-case StyleMap
-// ==========================================================================
-
-/**
- * Convert a shared `TableCellCss` object (camelCase keys, e.g. from
- * {@link getTableCellBandStyle}) into an `[ngStyle]`-compatible kebab-case
- * {@link StyleMap}. Values are stringified so numbers (e.g. `fontWeight: 700`)
- * apply correctly.
- */
-export function cssObjectToStyleMap(css: Record<string, string | number>): StyleMap {
-	const map: StyleMap = {};
-	for (const [key, value] of Object.entries(css)) {
-		const kebab = key.replace(/[A-Z]/gu, (m) => `-${m.toLowerCase()}`);
-		map[kebab] = String(value);
-	}
-	return map;
-}
 
 // ==========================================================================
 // View-model types
@@ -119,23 +106,25 @@ export function buildTableViewModel(
 					cell.gridSpan !== undefined && cell.gridSpan > 1 ? cell.gridSpan : undefined;
 				const rowSpan = cell.rowSpan !== undefined && cell.rowSpan > 1 ? cell.rowSpan : undefined;
 
-				// Banding is a lower-priority layer beneath the explicit cell style.
-				const band = getTableCellBandStyle(
-					tableData,
-					rowIndex,
-					colIndex,
-					rowCount,
-					columnCount,
-					styleCtx,
-				);
+				// Band beneath the explicit cell style, then the text-colour floor.
+				// The floor is why this goes through shared rather than composing the
+				// two layers here: Angular was the one binding without it, so a cell
+				// with no authored colour inherited the viewer chrome's `foreground`
+				// (#f0efec on the dark preset) and painted near-white on a light cell.
 				const tdStyle: StyleMap = {
 					'padding-left': '4px',
 					'padding-right': '4px',
 					'padding-top': '2px',
 					'padding-bottom': '2px',
 					'vertical-align': 'top',
-					...(band ? cssObjectToStyleMap(band) : {}),
-					...cellStyleToStyleMap(cell.style),
+					...cssObjectToStyleMap(
+						tableCellCss(
+							tableData,
+							cell,
+							{ rowIndex, cellIndex: colIndex, rowCount, columnCount },
+							styleCtx,
+						),
+					),
 				};
 
 				return {
@@ -146,8 +135,8 @@ export function buildTableViewModel(
 					rowSpan,
 					tdStyle,
 					// Non-breaking space (U+00A0) keeps an empty cell from collapsing;
-					// mirrors React's `cell.text || ' '` in table-render-data.tsx.
-					displayText: cell.text || ' ',
+					// mirrors React's `cell.text || '\u00a0'` in table-render-data.tsx.
+					displayText: cell.text || '\u00a0',
 					paragraphs: buildCellParagraphs(cell),
 					// Combine per-cell explicit diagonals with any inherited from the
 					// applicable table-style sections (per-cell still takes precedence).

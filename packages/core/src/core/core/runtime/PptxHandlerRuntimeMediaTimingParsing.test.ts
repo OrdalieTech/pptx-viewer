@@ -4,7 +4,7 @@ import type { XmlObject } from '../../types';
 import type { MediaTimingData } from './PptxHandlerRuntimeImageEffects';
 import {
 	parseCtnMediaTiming,
-	parseMediaExtensionData,
+	resolvePlayAcrossSlides,
 } from './PptxHandlerRuntimeMediaParsingUtils';
 
 // ---------------------------------------------------------------------------
@@ -23,6 +23,11 @@ function ensureArray(value: unknown): XmlObject[] {
  * Extracted from PptxHandlerRuntimeMediaTimingParsing.walkMediaTimingTree.
  * Simplified: does not call resolveRelationshipTarget (poster frame is
  * left as the raw rId value when present).
+ *
+ * G18: does NOT read `p14:media` (trim/fade/bookmarks/embed) off the timing
+ * tree's own `p:extLst` - real PowerPoint never writes that extension there,
+ * only under the picture's `p:nvPr/p:extLst` (parsed by `parsePicture`
+ * instead). This map carries only the genuine `p:cMediaNode`/`p:cTn` flags.
  */
 function walkMediaTimingTree(node: XmlObject, result: Map<string, MediaTimingData>): void {
 	if (!node) {
@@ -67,27 +72,15 @@ function walkMediaTimingTree(node: XmlObject, result: Map<string, MediaTimingDat
 				posterFramePath = String(posterRId); // simplified stub
 			}
 
-			const extData = parseMediaExtensionData(mediaNode, cMediaNode, shapeId, (v: unknown) =>
-				ensureArray(v),
-			);
-
-			const trimStartMs = timing.trimStartMs ?? extData.trimStartMs;
-			const trimEndMs = timing.trimEndMs ?? extData.trimEndMs;
-
 			result.set(shapeId, {
-				trimStartMs: trimStartMs !== undefined && !isNaN(trimStartMs) ? trimStartMs : undefined,
-				trimEndMs: trimEndMs !== undefined && !isNaN(trimEndMs) ? trimEndMs : undefined,
 				fullScreen: fullScreen || undefined,
 				loop: timing.loop || undefined,
 				posterFramePath,
 				volume,
-				fadeInDuration: extData.fadeInDuration,
-				fadeOutDuration: extData.fadeOutDuration,
 				autoPlay: timing.autoPlay || undefined,
-				playAcrossSlides: timing.playAcrossSlides || undefined,
+				playAcrossSlides:
+					resolvePlayAcrossSlides(cMediaNode, timing.playAcrossSlides, mediaTag) || undefined,
 				hideWhenNotPlaying: hideWhenNotPlaying || undefined,
-				bookmarks: extData.bookmarks.length > 0 ? extData.bookmarks : undefined,
-				playbackSpeed: extData.playbackSpeed,
 			});
 		}
 	}
@@ -133,18 +126,31 @@ describe('walkMediaTimingTree', () => {
 					'p:tgtEl': {
 						'p:spTgt': { '@_spid': '42' },
 					},
-					'p:cTn': {
-						'@_st': '1000',
-						'@_end': '5000',
-					},
+					'p:cTn': {},
 				},
 			},
 		};
 		walkMediaTimingTree(node, result);
 		expect(result.size).toBe(1);
 		expect(result.get('42')).toBeDefined();
-		expect(result.get('42')!.trimStartMs).toBe(1000);
-		expect(result.get('42')!.trimEndMs).toBe(5000);
+	});
+
+	// G18: `p:cTn/@_st`/`@_end` are not real CT_TLCommonTimeNodeData
+	// attributes and are never read as trim overrides here; the genuine
+	// `p14:trim` lives under the picture's own `p:nvPr/p:extLst`.
+	it('should not surface trim fields from cTn @_st/@_end', () => {
+		const result = new Map<string, MediaTimingData>();
+		const node: XmlObject = {
+			'p:video': {
+				'p:cMediaNode': {
+					'p:tgtEl': { 'p:spTgt': { '@_spid': '42' } },
+					'p:cTn': { '@_st': '1000', '@_end': '5000' },
+				},
+			},
+		};
+		walkMediaTimingTree(node, result);
+		expect(result.get('42')!.trimStartMs).toBeUndefined();
+		expect(result.get('42')!.trimEndMs).toBeUndefined();
 	});
 
 	it('should extract audio timing data', () => {
@@ -168,6 +174,41 @@ describe('walkMediaTimingTree', () => {
 		expect(data.loop).toBeTruthy();
 		expect(data.autoPlay).toBeTruthy();
 		expect(data.playAcrossSlides).toBeTruthy();
+	});
+
+	it('marks audio with cMediaNode/@numSld > 1 as playAcrossSlides (issue #132 deck form)', () => {
+		const result = new Map<string, MediaTimingData>();
+		// Background music stored ONLY via numSld: no dur="indefinite" on the cTn.
+		const node: XmlObject = {
+			'p:audio': {
+				'p:cMediaNode': {
+					'@_vol': '80000',
+					'@_numSld': '999',
+					'@_showWhenStopped': '0',
+					'p:tgtEl': { 'p:spTgt': { '@_spid': '3' } },
+					'p:cTn': { '@_repeatCount': 'indefinite', '@_fill': 'hold' },
+				},
+			},
+		};
+		walkMediaTimingTree(node, result);
+		const data = result.get('3')!;
+		expect(data.playAcrossSlides).toBeTruthy();
+		expect(data.loop).toBeTruthy();
+	});
+
+	it('does not mark video as playAcrossSlides from numSld', () => {
+		const result = new Map<string, MediaTimingData>();
+		const node: XmlObject = {
+			'p:video': {
+				'p:cMediaNode': {
+					'@_numSld': '999',
+					'p:tgtEl': { 'p:spTgt': { '@_spid': '7' } },
+					'p:cTn': {},
+				},
+			},
+		};
+		walkMediaTimingTree(node, result);
+		expect(result.get('7')!.playAcrossSlides).toBeUndefined();
 	});
 
 	it('should parse fullScreen flag', () => {
@@ -313,7 +354,10 @@ describe('walkMediaTimingTree', () => {
 		expect(result.has('v2')).toBeTruthy();
 	});
 
-	it('should handle extension list data (fade, speed)', () => {
+	// G18: a `p14:media` extension attached to the TIMING tree's own
+	// `p:video`/`p:extLst` (not the picture's `p:nvPr/p:extLst`) is not a
+	// location real PowerPoint writes to, so it must NOT surface fade/speed.
+	it('should ignore a p14:media extension attached to the timing-tree node itself', () => {
 		const result = new Map<string, MediaTimingData>();
 		const node: XmlObject = {
 			'p:video': {
@@ -332,8 +376,8 @@ describe('walkMediaTimingTree', () => {
 		};
 		walkMediaTimingTree(node, result);
 		const data = result.get('ext1')!;
-		expect(data.fadeInDuration).toBe(2);
-		expect(data.fadeOutDuration).toBe(3);
-		expect(data.playbackSpeed).toBe(1.5);
+		expect(data.fadeInDuration).toBeUndefined();
+		expect(data.fadeOutDuration).toBeUndefined();
+		expect(data.playbackSpeed).toBeUndefined();
 	});
 });

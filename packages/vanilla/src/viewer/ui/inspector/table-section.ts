@@ -1,6 +1,12 @@
+import type { PptxTableData } from 'pptx-viewer-core';
+import { applyTableStylePreset, TABLE_STYLE_PRESETS } from 'pptx-viewer-shared';
+
 import type { Translator } from '../../i18n';
+import { createEl } from '../../render';
 import type { NumberFieldHandle } from '../controls';
 import { makeNumberField } from '../controls';
+import type { TableStyleEditorDeps } from '../table-style-editor';
+import { createTableStyleEditor } from '../table-style-editor';
 import type { CheckboxFieldHandle } from './controls-extra';
 import { makeCheckboxField } from './controls-extra';
 import { createTableCellFillControls } from './table-cell-fill-controls';
@@ -16,12 +22,17 @@ export interface TableSection {
 /**
  * The Table section: table-level flags (header row / banded rows) and a
  * uniform cell styling, and formatting for the active table cell.
+ *
+ * `styleEditorDeps` is optional: when the host has not wired the
+ * table-style-DEFINITION-editor feature through (see `table-style-editor.ts`'s
+ * docblock), the "Edit style..." button simply is not rendered.
  */
 export function createTableSection(
 	doc: Document,
 	t: Translator,
 	section: (label: string) => HTMLElement,
 	handlers: InspectorHandlers,
+	styleEditorDeps?: TableStyleEditorDeps,
 ): TableSection {
 	const el = section(t('pptx.inspector.table'));
 
@@ -63,6 +74,36 @@ export function createTableSection(
 		rtl.el,
 	);
 
+	// Shared decides which cell fills/borders each preset writes, so the
+	// gallery here can never drift from React/Vue/Angular's version.
+	let latestTableData: PptxTableData | undefined;
+	const presetsLabel = createEl(doc, 'span', 'pptxv-table-presets-label');
+	presetsLabel.textContent = t('pptx.table.stylePresets');
+	const applyPreset = (preset: (typeof TABLE_STYLE_PRESETS)[number]): void => {
+		if (latestTableData) {
+			handlers.setTableOptions({ rows: applyTableStylePreset(latestTableData, preset) });
+		}
+	};
+	const presetsGrid = createEl(doc, 'div', 'pptxv-table-presets-grid');
+	presetsGrid.append(
+		...TABLE_STYLE_PRESETS.map((preset) => {
+			const swatch = createEl(doc, 'button', 'pptxv-table-preset-swatch');
+			swatch.type = 'button';
+			swatch.title = preset.label;
+			swatch.setAttribute('aria-label', preset.label);
+			const header = createEl(doc, 'span');
+			header.style.background = preset.headerBg;
+			const band = createEl(doc, 'span');
+			band.style.background = preset.bandBg;
+			const border = createEl(doc, 'span');
+			border.style.borderTopColor = preset.borderColor;
+			swatch.append(header, band, border);
+			swatch.addEventListener('click', () => applyPreset(preset));
+			return swatch;
+		}),
+	);
+	el.append(presetsLabel, presetsGrid);
+
 	const cellPadding = makeNumberField(doc, {
 		label: t('pptx.table.cellPadding'),
 		min: 0,
@@ -79,12 +120,19 @@ export function createTableSection(
 	background.addEventListener('input', () =>
 		handlers.setTableOptions({}, { backgroundColor: background.value }),
 	);
+	// B6: push into the "Recent colours" MRU list once each picker commits.
+	background.addEventListener('change', () => handlers.pushRecentColor(background.value));
 	const border = doc.createElement('input');
 	border.type = 'color';
 	border.addEventListener('input', () =>
 		handlers.setTableOptions({}, { borderColor: border.value }),
 	);
+	border.addEventListener('change', () => handlers.pushRecentColor(border.value));
 	el.append(styleId, background, border);
+	const styleEditor = styleEditorDeps ? createTableStyleEditor(doc, t, styleEditorDeps) : undefined;
+	if (styleEditor) {
+		el.appendChild(styleEditor.el);
+	}
 	const cellFormatting = createTableCellFormatting(doc, t, handlers);
 	const cellFill = createTableCellFillControls(doc, t, handlers);
 	const structure = createTableStructureControls(doc, t, handlers);
@@ -105,6 +153,10 @@ export function createTableSection(
 		el,
 		update(state) {
 			el.hidden = !state.hasSelection || !state.isTable;
+			latestTableData = state.tableElement?.tableData;
+			for (const swatch of presetsGrid.children) {
+				(swatch as HTMLButtonElement).disabled = !state.isTable;
+			}
 			headerRow.setValue(state.tableHeaderRow);
 			bandedRows.setValue(state.tableBandedRows);
 			bandedColumns.setValue(state.tableBandedColumns);
@@ -125,6 +177,7 @@ export function createTableSection(
 			styleId.disabled = !state.isTable;
 			background.disabled = !state.isTable;
 			border.disabled = !state.isTable;
+			styleEditor?.update(state.isTable ? state.tableStyleId : undefined, state.isTable);
 			for (const c of numberFields) {
 				c.setDisabled(!state.isTable);
 			}

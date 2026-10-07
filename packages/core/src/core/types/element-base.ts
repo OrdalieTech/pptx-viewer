@@ -53,10 +53,60 @@ export interface PptxElementBase {
 	shapeId?: string;
 	/** Element name from `cNvPr/@name`. Used for morph transition matching via the `!!` naming convention. */
 	name?: string;
+	/**
+	 * `p:nvSpPr/p:nvPr/p:ph/@type` (lower-cased) when the shape is a placeholder:
+	 * `title`, `ctrtitle`, `body`, `subtitle`, `ftr`, `dt`, `sldnum`, ...
+	 *
+	 * Captured on load so consumers can tell a footer placeholder from a text box
+	 * without re-walking `rawXml`. Absent on non-placeholder shapes and on
+	 * SDK-created elements.
+	 */
+	placeholderType?: string;
+	/**
+	 * `p:nvSpPr/p:nvPr/p:ph/@sz` (lower-cased): `"full"`, `"half"`, or
+	 * `"quarter"`. Captured on load for round-trip completeness. Per
+	 * ECMA-376 §19.3.1.36 (CT_Placeholder) this size hint is only meaningful
+	 * when NO `a:xfrm` exists anywhere in the placeholder's inheritance
+	 * chain (slide -> layout -> master); every real-world corpus placeholder
+	 * that carries `@sz` already has an explicit `a:xfrm` at the master
+	 * level, so no renderer currently derives a size from this field.
+	 */
+	placeholderSz?: string;
+	/**
+	 * `p:nvSpPr/p:nvPr/p:ph/@orient` (only `"vert"` is meaningful per
+	 * `ST_Direction`). Captured on load for round-trip completeness. In
+	 * practice every placeholder observed with `orient="vert"` also carries
+	 * an explicit `a:bodyPr/@vert`, which already drives vertical-text
+	 * rendering, so this field is not currently read by any renderer.
+	 */
+	placeholderOrient?: 'vert';
 	x: number;
 	y: number;
 	width: number;
 	height: number;
+	/**
+	 * The exact EMU integer `x` was parsed from (the `a:off/@_x` this
+	 * element's own `a:xfrm` carried on load), when the parser could resolve
+	 * one. `x` itself is always `Math.round(xEmu / EMU_PER_PX)` at parse
+	 * time, but that rounding is lossy: re-deriving EMU from `x` on save
+	 * (`Math.round(x * EMU_PER_PX)`) can drift from the original value by up
+	 * to half a pixel's worth of EMU on every load/save cycle even when
+	 * nothing touched this element. Kept alongside `x` (not instead of it) so
+	 * every consumer that only cares about on-screen position is unaffected;
+	 * only the save-side xfrm writer (`resolveXfrmEmu` in
+	 * `xfrm-emu-resolution.ts`) reads this, and only when `x` still equals
+	 * `Math.round(xEmu / EMU_PER_PX)` (i.e. nothing moved this element since
+	 * load) does it re-emit `xEmu` verbatim instead of re-quantizing `x`.
+	 * `undefined` for an SDK-created element or one whose transform could not
+	 * be resolved to a usable `a:off` on load.
+	 */
+	xEmu?: number;
+	/** The exact EMU integer `y` was parsed from (`a:off/@_y`). See {@link xEmu}. */
+	yEmu?: number;
+	/** The exact EMU integer `width` was parsed from (`a:ext/@_cx`). See {@link xEmu}. */
+	widthEmu?: number;
+	/** The exact EMU integer `height` was parsed from (`a:ext/@_cy`). See {@link xEmu}. */
+	heightEmu?: number;
 	rotation?: number;
 	/** Skew along the X axis in degrees (parsed from `@_skewX` in 1/60000ths of a degree). */
 	skewX?: number;
@@ -111,6 +161,19 @@ export interface PptxTextProperties {
 	paragraphIndents?: Array<{ marginLeft?: number; indent?: number }>;
 	/** Placeholder prompt text inherited from layout/master (e.g. "Click to add title"). Shown as a greyed-out hint when the shape has no user-entered text. */
 	promptText?: string;
+	/**
+	 * The string {@link text} was INHERITED from, when this is a header / footer /
+	 * date / slide-number placeholder whose own body the file leaves empty.
+	 *
+	 * PowerPoint keeps the footer string on the slide master and writes each
+	 * slide's copy of the `ftr` placeholder empty, so the empty body means
+	 * "render the master's footer here". Rendering needs the resolved string, but
+	 * SAVING it into the slide would pin that slide to today's master text and
+	 * silently detach it from the Header & Footer dialog. The save writer
+	 * therefore leaves the authored empty body alone while `text` still equals
+	 * this value, and writes a genuine per-slide override once it does not.
+	 */
+	inheritedPlaceholderText?: string;
 	/** Linked text box chain ID from `a:bodyPr > a:linkedTxbx/@id` or `a:txbx > a:linkedTxbx/@id`. Text overflows from one linked frame to the next. */
 	linkedTxbxId?: number;
 	/** Sequence number within a linked text box chain (0-based). */
@@ -167,23 +230,63 @@ export interface PlaceholderTextLevelStyle {
 	bold?: boolean;
 	italic?: boolean;
 	color?: string;
+	/**
+	 * The `a:defRPr/a:solidFill` node this level's {@link color} came from.
+	 *
+	 * Master and layout text styles are parsed and cached before any slide is,
+	 * so a scheme alias such as `tx1` was resolved through the map that was
+	 * active then. A slide carrying `p:clrMapOvr` routes the same alias
+	 * somewhere else, so the alias has to be resolved again against the slide
+	 * that is inheriting it; {@link color} is only the reading taken at parse
+	 * time. Absent when the level declares no colour, or declares a literal one.
+	 */
+	colorChoiceXml?: XmlObject;
 	bulletChar?: string;
 	bulletAutoNumType?: string;
 	bulletFontFamily?: string;
 	bulletSizePercent?: number;
 	/** Bullet colour from `a:buClr` as hex string. */
 	bulletColor?: string;
+	/**
+	 * The colour-choice node inside `a:buClr` this level's {@link bulletColor}
+	 * resolved from (`a:schemeClr` / `a:sysClr` / `a:prstClr` / `a:srgbClr`,
+	 * transforms included), mirroring `BulletInfo.colorXml`. Re-emitted
+	 * verbatim on save so a themed bullet is not downgraded to a literal
+	 * `a:srgbClr`. Absent when the level declares no bullet colour.
+	 */
+	bulletColorXml?: XmlObject;
 	/** Bullet size in points from `a:buSzPts`. */
 	bulletSizePts?: number;
 	/** True when `a:buNone` is present at this level. */
 	bulletNone?: boolean;
 	marginLeft?: number; // indent in px (from `@_marL` EMU)
+	/** Paragraph right margin in px (from `@_marR` EMU). */
+	marginRight?: number;
 	indent?: number; // first-line indent in px (from `@_indent` EMU)
+	/**
+	 * Paragraph alignment as a `TextStyle['align']` token (`left`, `center`,
+	 * `right`, `justify`, `justLow`, `dist`, `thaiDist`), never the raw OOXML
+	 * `@algn` value.
+	 */
 	alignment?: string;
+	/** Right-to-left paragraph direction (`@rtl`). */
+	rtl?: boolean;
+	/** Tab stops from `a:tabLst/a:tab` (positions in px). */
+	tabStops?: TextStyle['tabStops'];
 	lineSpacing?: number;
 	lineSpacingExactPt?: number;
 	spaceBefore?: number;
 	spaceAfter?: number;
+	/** Default tab interval in CSS pixels (`a:lvlXpPr/@defTabSz`). */
+	defaultTabSize?: number;
+	/** Whether East Asian line-breaking rules are enabled. */
+	eaLineBreak?: boolean;
+	/** Whether Latin line-breaking rules are enabled. */
+	latinLineBreak?: boolean;
+	/** Font vertical alignment within the text line. */
+	fontAlignment?: string;
+	/** Whether end punctuation may hang outside the text frame. */
+	hangingPunctuation?: boolean;
 }
 
 /**

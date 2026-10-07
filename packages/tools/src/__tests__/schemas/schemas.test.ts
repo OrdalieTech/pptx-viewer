@@ -7,6 +7,7 @@ import {
 	GroupElementsSchema,
 	BatchUpdateElementsSchema,
 } from '../../schemas/element-schemas.js';
+import { ExportToJsonSchema, ImportFromJsonSchema } from '../../schemas/json-schemas.js';
 import {
 	GetSlideSchema,
 	AddSlideSchema,
@@ -253,6 +254,17 @@ describe('element schemas', () => {
 			});
 			expect(result.success).toBeFalsy();
 		});
+
+		it('accepts altText and title', () => {
+			const result = UpdateElementSchema.safeParse({
+				filePath: '/test.pptx',
+				slideIndex: 0,
+				elementId: 'el-0',
+				altText: 'A shape description',
+				title: 'A shape title',
+			});
+			expect(result.success).toBeTruthy();
+		});
 	});
 
 	describe('deleteElementsSchema', () => {
@@ -416,6 +428,17 @@ describe('table and style schemas', () => {
 			});
 			expect(result.success).toBeTruthy();
 		});
+
+		it('accepts altText and title together', () => {
+			const result = UpdateElementStyleSchema.safeParse({
+				filePath: '/test.pptx',
+				slideIndex: 0,
+				elementId: 'shape-0',
+				altText: 'A red rounded rectangle',
+				title: 'Callout box',
+			});
+			expect(result.success).toBeTruthy();
+		});
 	});
 });
 
@@ -530,6 +553,38 @@ describe('content schemas', () => {
 				semanticMode: true,
 			});
 			expect(result.success).toBeTruthy();
+		});
+	});
+
+	describe('exportToJsonSchema', () => {
+		it('accepts minimal input', () => {
+			const result = ExportToJsonSchema.safeParse({ filePath: '/test.pptx' });
+			expect(result.success).toBeTruthy();
+		});
+
+		it('accepts the pretty flag', () => {
+			const result = ExportToJsonSchema.safeParse({ filePath: '/test.pptx', pretty: false });
+			expect(result.success).toBeTruthy();
+		});
+
+		it('rejects missing filePath', () => {
+			const result = ExportToJsonSchema.safeParse({});
+			expect(result.success).toBeFalsy();
+		});
+	});
+
+	describe('importFromJsonSchema', () => {
+		it('accepts valid input', () => {
+			const result = ImportFromJsonSchema.safeParse({
+				filePath: '/test.pptx',
+				json: '{"format":"pptx-viewer-json"}',
+			});
+			expect(result.success).toBeTruthy();
+		});
+
+		it('rejects missing json text', () => {
+			const result = ImportFromJsonSchema.safeParse({ filePath: '/test.pptx' });
+			expect(result.success).toBeFalsy();
 		});
 	});
 });

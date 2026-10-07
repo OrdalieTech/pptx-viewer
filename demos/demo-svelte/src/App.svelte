@@ -7,10 +7,18 @@
 	 * session so two tabs on the same URL edit the same deck live.
 	 */
 	import type { CollaborationConfig, PptxAiConfig } from 'pptx-svelte-viewer';
+	// The openable-file allow list comes from the binding's public surface, not
+	// a local regex: a hand-rolled `.pptx|.ppt|.json` refused a `.pptm` on drop
+	// that the viewer's own File > Open accepted.
 	import {
+		forgetSessionDeck,
+		isSupportedPresentationFile,
 		loadPresentationDeck,
+		PPTX_OPEN_ACCEPT,
 		parsePresentationSessionId,
 		PowerPointViewer,
+		rememberSessionDeck,
+		restoreSessionDeck,
 		themeToCssVars,
 	} from 'pptx-svelte-viewer';
 	import { PptxHandler } from 'pptx-viewer-core';
@@ -33,6 +41,21 @@
 	// (mirrors demo-vue/src/App.vue).
 	const params = new URLSearchParams(window.location.search);
 	const smartArt3D = params.get('smartArt3D') === '1';
+	// Opt in to the experimental Three.js interactive surface-chart renderer
+	// (camera orbit/zoom + raycast hover tooltip) via `?surfaceChart3D=1`.
+	const surfaceChart3D = params.get('surfaceChart3D') === '1';
+	// Opt in to the experimental Three.js interactive bar3D-chart renderer via
+	// `?barChart3D=1`.
+	const barChart3D = params.get('barChart3D') === '1';
+	// Opt in to the experimental Three.js interactive line3D-chart renderer via
+	// `?lineChart3D=1`.
+	const lineChart3D = params.get('lineChart3D') === '1';
+	// Opt in to the experimental Three.js interactive area3D-chart renderer via
+	// `?areaChart3D=1`.
+	const areaChart3D = params.get('areaChart3D') === '1';
+	// Opt in to the experimental Three.js interactive pie3D-chart renderer via
+	// `?pieChart3D=1`.
+	const pieChart3D = params.get('pieChart3D') === '1';
 	const audienceSession = parsePresentationSessionId(window.location.hash);
 	if (audienceSession) {
 		void loadPresentationDeck(audienceSession).then((content) => {
@@ -118,6 +141,7 @@
 	});
 
 	function openFile(file: File): void {
+		dropSampleParam();
 		errorMessage = '';
 		aiConfig = buildViewerAiConfig();
 		fileName = file.name;
@@ -131,6 +155,7 @@
 	let creating = $state(false);
 
 	async function newPresentation(): Promise<void> {
+		dropSampleParam();
 		creating = true;
 		aiConfig = buildViewerAiConfig();
 		try {
@@ -170,17 +195,71 @@
 		}
 	}
 
+	// ── Refresh survival ────────────────────────────────────────────────────
+	// Remember the open deck for THIS tab, and reopen it on the next load. A
+	// refresh used to drop the presentation and land the user back on the file
+	// picker; now it comes back, with any autosaved edits (restoreSessionDeck
+	// prefers the newer of the two). An audience tab is fed by the presenter
+	// window, so it neither remembers nor restores.
+	$effect(() => {
+		const current = bytes;
+		if (!current || audienceSession) {
+			return;
+		}
+		void rememberSessionDeck(fileName, current);
+	});
+
+	/**
+	 * Reopen the deck this tab had before a refresh, falling back to the
+	 * `?sample=1` deck. A restored deck beats the sample: this tab has moved on
+	 * from it (the user opened a deck of their own, possibly through the viewer's
+	 * own File > Open), so the flag is retired rather than seeding it again.
+	 */
+	async function restoreSession(): Promise<void> {
+		const deck = await restoreSessionDeck();
+		if (!deck || bytes) {
+			if (urlSample && !bytes) {
+				await loadSampleDeck();
+			}
+			return;
+		}
+		dropSampleParam();
+		aiConfig = buildViewerAiConfig();
+		bytes = deck.data;
+		fileName = deck.fileName;
+		document.title = `${deck.fileName} - PPTX Viewer`;
+	}
+
+	/**
+	 * Drop `?sample=1` from the address bar.
+	 *
+	 * The docs landing page embeds the demo with `?sample=1` so it opens
+	 * pre-populated. Once the user opens a deck of their own that param is stale:
+	 * left in place it would re-seed the bundled sample on the next refresh and
+	 * throw away what they were looking at.
+	 */
+	function dropSampleParam(): void {
+		const url = new URL(window.location.href);
+		if (!url.searchParams.has('sample')) {
+			return;
+		}
+		url.searchParams.delete('sample');
+		window.history.replaceState(null, '', url.toString());
+	}
+
 	if (urlRoom) {
 		joinRoom(urlRoom);
 		void (urlSample ? loadSampleDeck() : newPresentation());
-	} else if (urlSample) {
-		void loadSampleDeck();
+	} else if (!audienceSession) {
+		// The audience branch above owns its tab; everything else reopens this
+		// tab's deck, falling back to the sample and then to the dropzone.
+		void restoreSession();
 	}
 
 	function onDrop(e: DragEvent): void {
 		e.preventDefault();
 		const file = e.dataTransfer?.files?.[0];
-		if (file?.name.endsWith('.pptx')) {
+		if (file && isSupportedPresentationFile(file.name)) {
 			openFile(file);
 		}
 	}
@@ -192,10 +271,34 @@
 		}
 	}
 
+	// eslint-disable-next-line prefer-const -- `fileInput` is reassigned by Svelte bind:this.
+	let fileInput: HTMLInputElement | null = $state(null);
+
+	/** Open the native picker from the explicit Browse control. */
+	function openFilePicker(): void {
+		fileInput?.click();
+	}
+
+	/**
+	 * The dashed zone paints `cursor: pointer` over its whole area and the copy
+	 * says "click to browse", so the whole area has to open the picker, not just
+	 * the one text line that happens to be a <label>. Clicks that originate on a
+	 * button, on the label, or on the input itself are already handled by those
+	 * elements; re-opening from here would double-fire or loop.
+	 */
+	function onZoneClick(e: MouseEvent): void {
+		if ((e.target as HTMLElement).closest('button, label[for="file-input"], #file-input')) {
+			return;
+		}
+		openFilePicker();
+	}
+
 	function onViewerError(message: string): void {
 		errorMessage = message || t('demo.viewer.loadError');
 		bytes = null;
 		document.title = 'pptx-svelte-viewer demo';
+		// A deck the viewer cannot load must not be reopened on every refresh.
+		void forgetSessionDeck();
 	}
 </script>
 
@@ -207,8 +310,14 @@
 			source={bytes}
 			locale={language.current}
 			{smartArt3D}
+			{surfaceChart3D}
+			{barChart3D}
+			{lineChart3D}
+			{areaChart3D}
+			{pieChart3D}
 			editable
 			autosave
+			autosaveIntervalMs={2000}
 			fileName={fileName || undefined}
 			filePath={fileName || (collaborationConfig ? `room-${collaborationConfig.roomId}.pptx` : undefined)}
 			collaboration={collaborationConfig ?? undefined}
@@ -225,15 +334,27 @@
 		<div
 			class="demo-dropzone"
 			role="group"
+			data-testid="dropzone"
 			aria-label={t('demo.dropzone.uploadAriaLabel')}
+			onclick={onZoneClick}
 			ondrop={onDrop}
 			ondragover={(e) => e.preventDefault()}
 		>
 			<label class="demo-hint" for="file-input">{t('demo.dropzone.hint')}</label>
 			<p class="demo-sub">{t('demo.dropzone.processed')}</p>
-			<button type="button" onclick={(e) => (e.stopPropagation(), newPresentation())} disabled={creating}>
-				{creating ? t('demo.dropzone.creating') : t('demo.dropzone.newPresentation')}
-			</button>
+			<div class="demo-actions">
+				<button
+					type="button"
+					class="demo-browse"
+					data-testid="browse-files"
+					onclick={(e) => (e.stopPropagation(), openFilePicker())}
+				>
+					{t('demo.dropzone.browse')}
+				</button>
+				<button type="button" onclick={(e) => (e.stopPropagation(), newPresentation())} disabled={creating}>
+					{creating ? t('demo.dropzone.creating') : t('demo.dropzone.newPresentation')}
+				</button>
+			</div>
 			{#if errorMessage}
 				<p class="demo-error">{errorMessage}</p>
 			{/if}
@@ -241,8 +362,9 @@
 			     zone's onclick and re-open the file chooser in a loop -->
 			<input
 				id="file-input"
+				bind:this={fileInput}
 				type="file"
-				accept=".pptx"
+				accept={PPTX_OPEN_ACCEPT}
 				aria-label={t('demo.dropzone.uploadAriaLabel')}
 				class="sr-only"
 				onclick={(e) => e.stopPropagation()}

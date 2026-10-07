@@ -1,4 +1,6 @@
 import type { Model3DPptxElement, XmlObject } from '../../types';
+import { resolveXfrmEmu } from '../../utils/xfrm-emu-resolution';
+import { ensureXmlChildOrCreate } from '../../utils/xml-access';
 import type { SaveSlideContext } from './PptxHandlerRuntimeSaveElementEmbedding';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveSummaryZoom';
 
@@ -58,12 +60,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			return shape;
 		}
 
-		(shape['p16:model3Drel'] ??= {}) as XmlObject;
-		(shape['p16:model3Drel'] as XmlObject)['@_r:id'] = modelRelationshipId;
-		const spPr = (shape['p16:spPr'] ??= {}) as XmlObject;
+		ensureXmlChildOrCreate(shape, 'p16:model3Drel')['@_r:id'] = modelRelationshipId;
+		const spPr = ensureXmlChildOrCreate(shape, 'p16:spPr');
 		this.applyModel3DTransform(spPr, el);
 		if (poster.relationshipId) {
-			const posterNode = (shape['p16:posterImage'] ??= {}) as XmlObject;
+			const posterNode = ensureXmlChildOrCreate(shape, 'p16:posterImage');
 			posterNode['@_r:embed'] = poster.relationshipId;
 			this.updateModel3DFallback(shape, el, poster.relationshipId);
 		}
@@ -140,15 +141,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	}
 
 	private applyModel3DTransform(spPr: XmlObject, el: Model3DPptxElement): void {
-		const transform = (spPr['a:xfrm'] ??= {}) as XmlObject;
+		const transform = ensureXmlChildOrCreate(spPr, 'a:xfrm');
 		const emu = PptxHandlerRuntime.EMU_PER_PX;
+		const width = Math.max(el.width, 1);
+		const height = Math.max(el.height, 1);
 		transform['a:off'] = {
-			'@_x': String(Math.round(el.x * emu)),
-			'@_y': String(Math.round(el.y * emu)),
+			'@_x': String(resolveXfrmEmu(el.x, el.xEmu, emu)),
+			'@_y': String(resolveXfrmEmu(el.y, el.yEmu, emu)),
 		};
 		transform['a:ext'] = {
-			'@_cx': String(Math.round(Math.max(el.width, 1) * emu)),
-			'@_cy': String(Math.round(Math.max(el.height, 1) * emu)),
+			'@_cx': String(resolveXfrmEmu(width, el.widthEmu, emu)),
+			'@_cy': String(resolveXfrmEmu(height, el.heightEmu, emu)),
 		};
 		this.applyModel3DTransformFlags(transform, el);
 	}
@@ -206,9 +209,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		if (!picture) {
 			return;
 		}
-		this.applyModel3DTransform((picture['p:spPr'] ??= {}) as XmlObject, el);
-		const fill = (picture['p:blipFill'] ??= {}) as XmlObject;
-		const blip = (fill['a:blip'] ??= {}) as XmlObject;
+		this.applyModel3DTransform(ensureXmlChildOrCreate(picture, 'p:spPr'), el);
+		const fill = ensureXmlChildOrCreate(picture, 'p:blipFill');
+		const blip = ensureXmlChildOrCreate(fill, 'a:blip');
 		blip['@_r:embed'] = posterRelationshipId;
 	}
 }

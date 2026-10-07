@@ -111,6 +111,73 @@ describe('fillStrokeSection', () => {
 		expect(editor.canUndo).toBeTruthy();
 	});
 
+	it('pushes fill and stroke commits into the recent-colours list, and applies a swatch pick', () => {
+		const editor = makeEditor(shapeEl());
+		const { target, setProps } = mountSection(editor, currentEl(editor));
+		const [fill] = colorInputs(target);
+		if (!fill) {
+			throw new Error('fill input not found');
+		}
+		fill.value = '#00ff00';
+		fill.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		// The shared MRU list normalises hex to upper-case (`normalizeRecentColor`);
+		// the element's own colour field is left exactly as the picker submitted it.
+		expect(editor.mruColors).toStrictEqual(['#00FF00']);
+		setProps({ el: currentEl(editor) });
+
+		const [, stroke] = colorInputs(target);
+		if (!stroke) {
+			throw new Error('stroke input not found');
+		}
+		stroke.value = '#123456';
+		stroke.dispatchEvent(new Event('change', { bubbles: true }));
+		flushSync();
+		expect(editor.mruColors).toStrictEqual(['#123456', '#00FF00']);
+		setProps({ el: currentEl(editor) });
+
+		const row = target.querySelector('[data-testid="pptx-color-recent"]');
+		expect(row).not.toBeNull();
+		const swatch = row!.querySelector<HTMLButtonElement>('.pptx-svelte-recent-colors-swatch');
+		swatch?.click();
+		flushSync();
+
+		const el = currentEl(editor) as { shapeStyle?: { fillColor?: string } };
+		expect(el.shapeStyle?.fillColor).toBe('#123456');
+	});
+
+	it('clicking a theme colour swatch commits both the hex and the ref (W3-G2)', () => {
+		const editor = makeEditor(shapeEl());
+		editor.theme = {
+			colorScheme: {
+				dk1: '#000000',
+				lt1: '#ffffff',
+				dk2: '#44546a',
+				lt2: '#e7e6e6',
+				accent1: '#4472c4',
+				accent2: '#ed7d31',
+				accent3: '#a5a5a5',
+				accent4: '#ffc000',
+				accent5: '#5b9bd5',
+				accent6: '#70ad47',
+				hlink: '#0563c1',
+				folHlink: '#954f72',
+			},
+		};
+		const { target } = mountSection(editor, currentEl(editor));
+
+		const fillSwatch = target.querySelector<HTMLButtonElement>('button[title="Accent 2"]');
+		expect(fillSwatch).not.toBeNull();
+		fillSwatch?.click();
+		flushSync();
+
+		const el = currentEl(editor) as {
+			shapeStyle?: { fillColor?: string; fillColorRef?: { scheme: string } };
+		};
+		expect(el.shapeStyle?.fillColor).toBe('#ed7d31');
+		expect(el.shapeStyle?.fillColorRef).toStrictEqual({ scheme: 'accent2' });
+	});
+
 	it('sets fill/stroke opacity via the sliders', () => {
 		const editor = makeEditor(shapeEl());
 		const { target, setProps } = mountSection(editor, currentEl(editor));
@@ -152,5 +219,56 @@ describe('fillStrokeSection', () => {
 		const el = currentEl(editor) as { shapeStyle?: { fillMode?: string } };
 		expect(el.shapeStyle?.fillMode).toBe('gradient');
 		expect(target.querySelector('.pptx-svelte-gradient')).not.toBeNull();
+	});
+
+	it('shows the pattern sub-panel only while the pattern toggle is on, defaulting a preset', () => {
+		const editor = makeEditor(shapeEl());
+		const { target, setProps } = mountSection(editor, currentEl(editor));
+		expect(target.querySelector('.pptx-svelte-pattern')).toBeNull();
+
+		const checkboxes = target.querySelectorAll<HTMLInputElement>(
+			'.pptx-svelte-field-checkbox input[type="checkbox"]',
+		);
+		const patternToggle = checkboxes[1];
+		if (!patternToggle) {
+			throw new Error('pattern toggle not found');
+		}
+		patternToggle.click();
+		flushSync();
+		setProps({ el: currentEl(editor) });
+
+		const el = currentEl(editor) as {
+			shapeStyle?: { fillMode?: string; fillPatternPreset?: string };
+		};
+		expect(el.shapeStyle?.fillMode).toBe('pattern');
+		expect(el.shapeStyle?.fillPatternPreset).toBe('pct20');
+		expect(target.querySelector('.pptx-svelte-pattern')).not.toBeNull();
+		// 56 preset swatches from the shared PATTERN_PRESET_OPTIONS catalogue.
+		expect(target.querySelectorAll('.pptx-svelte-pattern-swatch')).toHaveLength(56);
+	});
+
+	it('turns pattern fill back to solid when the toggle is switched off', () => {
+		const editor = makeEditor(
+			shapeEl({
+				shapeStyle: { fillMode: 'pattern', fillColor: '#ff0000', fillPatternPreset: 'cross' },
+			}),
+		);
+		const { target, setProps } = mountSection(editor, currentEl(editor));
+		const checkboxes = target.querySelectorAll<HTMLInputElement>(
+			'.pptx-svelte-field-checkbox input[type="checkbox"]',
+		);
+		const patternToggle = checkboxes[1];
+		if (!patternToggle) {
+			throw new Error('pattern toggle not found');
+		}
+		expect(patternToggle.checked).toBeTruthy();
+
+		patternToggle.click();
+		flushSync();
+		setProps({ el: currentEl(editor) });
+
+		const el = currentEl(editor) as { shapeStyle?: { fillMode?: string } };
+		expect(el.shapeStyle?.fillMode).toBe('solid');
+		expect(target.querySelector('.pptx-svelte-pattern')).toBeNull();
 	});
 });

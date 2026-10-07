@@ -7,23 +7,21 @@
  * keep/discard-annotations prompt shown when a slideshow with ink on it exits.
  *
  * Extracted from {@link PowerPointViewerComponent}: the component binds the few
- * accessors it alone owns (active-slide-index get/set, the editing-id clear,
- * the source bytes for the audience hand-off, canEdit, and the keep-annotations
- * prompt trigger) via {@link bind}; the template reads the signals / invokes the
- * handlers off the injected instance directly (same pattern as `session`/`xport`).
+ * accessors it alone owns via {@link bind}; the template reads the signals /
+ * invokes the handlers off the injected instance directly.
  *
- * This service owns no DOM node, so the real browser Fullscreen API request/exit
- * (mirroring React's `usePresentationMode` / Vue's `PresentationMode.vue`) is
- * driven by `PresentationOverlayComponent` itself off this `presenting` signal's
- * mount/unmount, not from here; see that component for the fullscreen wiring.
+ * This service owns no DOM node, so the real browser Fullscreen API
+ * request/exit is driven by `PresentationOverlayComponent` itself off this
+ * `presenting` signal's mount/unmount, not from here.
  *
  * Provide it once on the viewer component (`providers: [ViewerPresentationModeService]`).
  */
 
 import { inject, Injectable, signal } from '@angular/core';
 
-import { LoadContentService } from './load-content.service';
+import type { AuthoredSlideRange } from '../internal/shared';
 import type { SlideAnnotationMap } from './presentation-annotations-helpers';
+import { endShowMediaCleanup } from './presentation-overlay-helpers';
 import { PresenterWindowService } from './presenter-window.service';
 import { ViewerCustomShowsService } from './viewer-custom-shows.service';
 
@@ -38,6 +36,8 @@ interface PresentationModeHost {
 	readonly canEdit: () => boolean;
 	readonly promptKeepAnnotations: (map: SlideAnnotationMap) => void;
 	readonly applyRehearsalTimings: (timings: Record<number, number>) => void;
+	/** The deck's authored `p:showPr/p:sldRg` range, or null for the whole deck. */
+	readonly authoredRange: () => AuthoredSlideRange | null;
 }
 
 export type RehearsalStart = 'beginning' | 'current';
@@ -56,7 +56,6 @@ export function resolveRehearsalStartIndex(
 
 @Injectable()
 export class ViewerPresentationModeService {
-	private readonly loader = inject(LoadContentService);
 	private readonly presenterWindow = inject(PresenterWindowService);
 	private readonly customShowsCtl = inject(ViewerCustomShowsService);
 
@@ -92,27 +91,44 @@ export class ViewerPresentationModeService {
 	}
 
 	/**
-	 * Open the presentation overlay from the current slide. The overlay itself
+	 * Open the presentation overlay at `startIndex`, deselecting first so no
+	 * edit chrome (selection outline / resize + rotate "Adjust shape" handles)
+	 * leaks over the slideshow. The overlay itself
 	 * (`PresentationOverlayComponent`) requests real browser fullscreen once it
 	 * mounts as a result of `presenting` flipping true.
 	 */
-	present(): void {
+	private openShow(startIndex: number): void {
 		const host = this.requireHost();
 		if (host.slideCount() > 0) {
-			// Deselect first so no edit chrome (selection outline / resize + rotate
-			// "Adjust shape" handles) leaks over the slideshow.
 			host.clearSelection();
 			host.clearEditing();
+			// Seeded here, once, rather than derived by the overlay's `startIndex`
+			// input: that input is live, and a value permanently pinned to a fixed
+			// slide re-adopted itself over every advance the show made.
+			host.setActiveSlideIndex(startIndex);
 			this.presenting.set(true);
 		}
 	}
 
+	/**
+	 * Open the presentation overlay from the current slide ("From Current
+	 * Slide", the status-bar "Slide show" button, `setMode('present')`). Opens
+	 * on the active slide when the show (active custom show + the deck's
+	 * authored `p:showPr/p:sldRg` range) includes it, else the closest show
+	 * slide at or after it, else the show's own first slide.
+	 */
+	present(): void {
+		const host = this.requireHost();
+		this.openShow(this.customShowsCtl.showEntryIndex(host.authoredRange()));
+	}
+
+	/**
+	 * "From Beginning" / F5: always opens the show's own first slide, ignoring
+	 * where the editor is currently parked.
+	 */
 	presentFromBeginning(): void {
 		const host = this.requireHost();
-		if (host.slideCount() > 0) {
-			host.setActiveSlideIndex(0);
-			this.present();
-		}
+		this.openShow(this.customShowsCtl.showFirstIndex(host.authoredRange()));
 	}
 
 	presentFromCurrent(): void {
@@ -152,24 +168,26 @@ export class ViewerPresentationModeService {
 	}
 
 	/**
-	 * Map a presentation-overlay index back to the full-deck `activeSlideIndex`.
-	 * The overlay's index is relative to the (possibly custom-show-filtered)
-	 * presentation slides, so resolve by slide id to keep the editor selection
-	 * correct when the show closes.
+	 * Adopt a presentation-overlay index as the editor's `activeSlideIndex`.
+	 *
+	 * No remap is needed (and none may be done): the overlay is handed the WHOLE
+	 * live deck and applies custom-show membership as a navigation rule, so its
+	 * index is already a deck index. The id-lookup this used to perform existed
+	 * only because Angular pre-filtered the slide array to the show's members,
+	 * and it resolved against the PRISTINE loaded deck, so it mislanded whenever
+	 * the session had inserted or deleted a slide.
 	 */
 	onPresentationIndexChange(index: number): void {
 		const host = this.requireHost();
-		const target = this.customShowsCtl.presentationSlides()[index];
-		if (!target) {
+		if (index < 0 || index >= this.customShowsCtl.presentationSlides().length) {
 			return;
 		}
-		const fullIndex = this.loader.slides().findIndex((s) => s.id === target.id);
-		if (this.rehearsing() && fullIndex !== host.activeSlideIndex()) {
+		if (this.rehearsing() && index !== host.activeSlideIndex()) {
 			this.recordCurrentSlide();
 			this.slideStartedAt.set(Date.now());
 			this.pausedOnSlideMs = 0;
 		}
-		host.setActiveSlideIndex(fullIndex >= 0 ? fullIndex : index);
+		host.setActiveSlideIndex(index);
 	}
 
 	toggleRehearsalPause(): void {
@@ -186,6 +204,10 @@ export class ViewerPresentationModeService {
 
 	closePresentation(): void {
 		this.presenting.set(false);
+		// The show has ended (this path never runs on a slide change), so its
+		// cross-slide "play across slides" audio ends with it. The presenter-view
+		// swap goes through togglePresenterView instead, which keeps it playing.
+		endShowMediaCleanup();
 		if (this.rehearsing()) {
 			this.recordCurrentSlide();
 			this.rehearsing.set(false);
@@ -232,11 +254,38 @@ export class ViewerPresentationModeService {
 		}
 	}
 
+	/**
+	 * Swap between the fullscreen show and the presenter (speaker) console, the
+	 * show toolbar's presenter-view toggle and PowerPoint's `N`. Mirrors React's
+	 * `togglePresenterView`.
+	 *
+	 * The two are mutually exclusive rather than stacked: the show overlay is
+	 * `position: fixed; z-index: 10000` while the console sits inside the viewer
+	 * at `z-index: 50`, so leaving both up would paint the show straight over the
+	 * console and the toggle would look inert. The full-deck `activeSlideIndex`
+	 * is what both read, so the swap keeps the presenter on the same slide.
+	 */
+	togglePresenterView(): void {
+		if (this.presentingPresenter()) {
+			this.presentingPresenter.set(false);
+			this.presenting.set(true);
+			return;
+		}
+		if (this.presenterStartTime() === null) {
+			this.presenterStartTime.set(Date.now());
+		}
+		this.presentingPresenter.set(true);
+		this.presenting.set(false);
+	}
+
 	/** Close the presenter view (and any audience overlay/window it opened). */
 	exitPresenter(): void {
 		this.presentingPresenter.set(false);
 		this.presenting.set(false);
 		this.presenterWindow.closeAudienceWindow();
+		// Leaving the presenter console ends the whole show, and with it any
+		// cross-slide "play across slides" audio.
+		endShowMediaCleanup();
 	}
 
 	/** Presentation exited with ink on it: offer the keep/discard prompt. */

@@ -1,3 +1,5 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file:
+   independent handler-local `const`s, not one statement */
 /**
  * Tests for direct on-canvas chart editing (Angular port of the React
  * `ElementRenderer.chart.test.tsx` contract).
@@ -13,20 +15,26 @@ import type { ChartPptxElement, PptxChartData, PptxElement, PptxSlide } from 'pp
 import { describe, expect, it } from 'vitest';
 
 import {
+	advanceChartMarkDrag,
+	advanceChartValueDrag,
+	applyChartPartHighlight,
+	beginChartMarkDrag,
+	beginChartValueDrag,
+	buildChartMarkDragGeometry,
+	CHART_PART_SELECTED_CLASS,
 	chartPartToAttrs,
 	findChartPartTarget,
 	isSameChartPart,
+	resolveRevealedChartData,
 	withChartTitle,
 } from '../internal/shared';
 import {
-	applyChartPartHighlight,
-	beginChartValueDrag,
-	CHART_PART_SELECTED_CLASS,
+	chart3DPointValueUpdate,
+	chartCanEditParts,
 	chartDragCommitData,
-	chartPartSelector,
+	chartMarkDragCommitData,
 	commitChartElementData,
 	ensureChartInteractionStyles,
-	moveChartValueDrag,
 } from './chart-element-view-helpers';
 import type { ChartCommitTarget } from './chart-element-view-helpers';
 import { buildChartViewModel } from './chart-renderer-helpers';
@@ -120,15 +128,15 @@ describe('value drag', () => {
 	it('commits an increased value after an upward drag, others untouched', () => {
 		const element = makeChartElement();
 		const vm = buildChartViewModel(element);
-		const session = beginChartValueDrag(
-			{ role: 'dataPoint', seriesIndex: 0, pointIndex: 1 },
-			vm,
-			element.chartData!,
-			200,
-		);
+		const session = beginChartValueDrag({
+			part: { role: 'dataPoint', seriesIndex: 0, pointIndex: 1 },
+			viewModel: vm,
+			chartData: element.chartData!,
+			clientY: 200,
+		});
 		expect(session).not.toBeNull();
 		// 1:1 pointer-to-view-box mapping: rendered height equals vm.svgHeight.
-		const move = moveChartValueDrag(session!, 100, vm.svgHeight);
+		const move = advanceChartValueDrag(session!, 100, vm.svgHeight);
 		expect(move).not.toBeNull();
 		const committed = chartDragCommitData(session, true);
 		expect(committed).not.toBeNull();
@@ -144,27 +152,27 @@ describe('value drag', () => {
 	it('treats a press without movement as a click, not a value change', () => {
 		const element = makeChartElement();
 		const vm = buildChartViewModel(element);
-		const session = beginChartValueDrag(
-			{ role: 'dataPoint', seriesIndex: 1, pointIndex: 2 },
-			vm,
-			element.chartData!,
-			200,
-		);
+		const session = beginChartValueDrag({
+			part: { role: 'dataPoint', seriesIndex: 1, pointIndex: 2 },
+			viewModel: vm,
+			chartData: element.chartData!,
+			clientY: 200,
+		});
 		// Below the 3px threshold: no preview, and nothing to commit.
-		expect(moveChartValueDrag(session!, 201, vm.svgHeight)).toBeNull();
+		expect(advanceChartValueDrag(session!, 201, vm.svgHeight)).toBeNull();
 		expect(chartDragCommitData(session, true)).toBeNull();
 	});
 
 	it('commits nothing when the drag is cancelled (Escape)', () => {
 		const element = makeChartElement();
 		const vm = buildChartViewModel(element);
-		const session = beginChartValueDrag(
-			{ role: 'dataPoint', seriesIndex: 0, pointIndex: 0 },
-			vm,
-			element.chartData!,
-			200,
-		);
-		expect(moveChartValueDrag(session!, 120, vm.svgHeight)).not.toBeNull();
+		const session = beginChartValueDrag({
+			part: { role: 'dataPoint', seriesIndex: 0, pointIndex: 0 },
+			viewModel: vm,
+			chartData: element.chartData!,
+			clientY: 200,
+		});
+		expect(advanceChartValueDrag(session!, 120, vm.svgHeight)).not.toBeNull();
 		expect(chartDragCommitData(session, false)).toBeNull();
 	});
 
@@ -172,7 +180,12 @@ describe('value drag', () => {
 		const element = makeChartElement();
 		const vm = buildChartViewModel(element);
 		expect(
-			beginChartValueDrag({ role: 'series', seriesIndex: 0 }, vm, element.chartData!, 0),
+			beginChartValueDrag({
+				part: { role: 'series', seriesIndex: 0 },
+				viewModel: vm,
+				chartData: element.chartData!,
+				clientY: 0,
+			}),
 		).toBeNull();
 		// Pie charts expose no valueDrag context: marks select but never drag.
 		const pie: ChartPptxElement = {
@@ -181,12 +194,142 @@ describe('value drag', () => {
 		};
 		const pieVm = buildChartViewModel(pie);
 		expect(
-			beginChartValueDrag(
-				{ role: 'dataPoint', seriesIndex: 0, pointIndex: 1 },
-				pieVm,
-				pie.chartData!,
-				0,
-			),
+			beginChartValueDrag({
+				part: { role: 'dataPoint', seriesIndex: 0, pointIndex: 1 },
+				viewModel: pieVm,
+				chartData: pie.chartData!,
+				clientY: 0,
+			}),
+		).toBeNull();
+	});
+});
+
+// ==========================================================================
+// Mark drag (pie/doughnut, radar, stacked segment: W4-H)
+// ==========================================================================
+
+describe('mark drag', () => {
+	function makePieChartElement(): ChartPptxElement {
+		return {
+			id: 'ch_pie',
+			type: 'chart',
+			x: 0,
+			y: 0,
+			width: 300,
+			height: 300,
+			chartData: {
+				chartType: 'pie',
+				categories: ['A', 'B', 'C', 'D'],
+				series: [{ name: 'S', values: [25, 25, 25, 25] }],
+			},
+		} as ChartPptxElement;
+	}
+
+	it('drags a pie slice to a renormalised value and commits it', () => {
+		const element = makePieChartElement(),
+			chartData = element.chartData!,
+			vm = buildChartViewModel(element),
+			geometry = buildChartMarkDragGeometry({
+				kind: 'pie',
+				element,
+				chartData,
+				categoryLabels: chartData.categories,
+				seriesIndex: 0,
+				pointIndex: 1,
+			}),
+			session = beginChartMarkDrag({
+				part: { role: 'dataPoint', seriesIndex: 0, pointIndex: 1 },
+				geometry,
+				chartData,
+				svgWidth: vm.svgWidth,
+				svgHeight: vm.svgHeight,
+				clientX: 150,
+				clientY: 150,
+			});
+		expect(session).not.toBeNull();
+		// Square 1:1 client-to-view-box rect: sweep the trailing edge halfway
+		// around the circle (see chart-interaction-pie.test.ts for the geometry).
+		const rect = { left: 0, top: 0, width: 300, height: 300 },
+			move = advanceChartMarkDrag(session!, 100, 150, rect);
+		expect(move).not.toBeNull();
+		expect(move!.value).toBeCloseTo(75, 0);
+		const committed = chartMarkDragCommitData(session, true);
+		expect(committed).not.toBeNull();
+		expect(committed!.series[0].values[1]).toBeCloseTo(75, 0);
+		expect(committed!.series[0].values[0]).toBe(25);
+	});
+
+	it('treats a press without movement as a click, not a value change', () => {
+		const element = makePieChartElement(),
+			chartData = element.chartData!,
+			vm = buildChartViewModel(element),
+			geometry = buildChartMarkDragGeometry({
+				kind: 'pie',
+				element,
+				chartData,
+				categoryLabels: chartData.categories,
+				seriesIndex: 0,
+				pointIndex: 1,
+			}),
+			session = beginChartMarkDrag({
+				part: { role: 'dataPoint', seriesIndex: 0, pointIndex: 1 },
+				geometry,
+				chartData,
+				svgWidth: vm.svgWidth,
+				svgHeight: vm.svgHeight,
+				clientX: 150,
+				clientY: 150,
+			}),
+			rect = { left: 0, top: 0, width: 300, height: 300 };
+		expect(advanceChartMarkDrag(session!, 151, 150, rect)).toBeNull();
+		expect(chartMarkDragCommitData(session, true)).toBeNull();
+	});
+
+	it('returns null geometry for a bar chart with no stacking (clustered)', () => {
+		const element = makeChartElement(),
+			chartData = element.chartData!;
+		expect(
+			buildChartMarkDragGeometry({
+				kind: 'bar',
+				element,
+				chartData,
+				categoryLabels: chartData.categories,
+				seriesIndex: 0,
+				pointIndex: 0,
+			}),
+		).toBeNull();
+	});
+});
+
+// ==========================================================================
+// 3D value-drag commit data (bar3D/line3D/area3D scenes report a live/final
+// value directly, with no drag state machine of their own to advance)
+// ==========================================================================
+
+describe('chart3DPointValueUpdate', () => {
+	it('applies the dragged value to the targeted point, others untouched', () => {
+		const chartData = makeChartData();
+		const next = chart3DPointValueUpdate(
+			chartData,
+			{ role: 'dataPoint', seriesIndex: 0, pointIndex: 1 },
+			999,
+		);
+		expect(next).not.toBeNull();
+		expect(next!.series[0].values).toStrictEqual([100, 999, 120]);
+		expect(next!.series[1].values).toStrictEqual([80, 90, 100]);
+		// The base data is never mutated.
+		expect(chartData.series[0].values[1]).toBe(150);
+	});
+
+	it('returns null for a series-level part (no point index)', () => {
+		expect(
+			chart3DPointValueUpdate(makeChartData(), { role: 'series', seriesIndex: 0 }, 42),
+		).toBeNull();
+	});
+
+	it('returns null when there is no chart data yet', () => {
+		expect(
+			chart3DPointValueUpdate(undefined, { role: 'dataPoint', seriesIndex: 0, pointIndex: 0 }, 1),
 		).toBeNull();
 	});
 });
@@ -280,9 +423,6 @@ describe('selected-part highlight', () => {
 	});
 
 	it('series-level selection never matches point-level marks', () => {
-		expect(chartPartSelector({ role: 'series', seriesIndex: 2 })).toBe(
-			"[data-chart-part='series'][data-chart-series='2']:not([data-chart-point])",
-		);
 		const root = renderMarks(makeChartElement());
 		applyChartPartHighlight(root, { role: 'series', seriesIndex: 0 });
 		// The fixture only renders point-level bars, so nothing may match.
@@ -295,12 +435,89 @@ describe('selected-part highlight', () => {
 // ==========================================================================
 
 describe('ensureChartInteractionStyles', () => {
-	it('injects the stylesheet into the document head exactly once', () => {
+	it('injects both stylesheets into the document head exactly once each', () => {
 		ensureChartInteractionStyles();
 		ensureChartInteractionStyles();
-		const styles = document.head.querySelectorAll('#pptx-ng-chart-interaction-styles');
-		expect(styles).toHaveLength(1);
-		expect(styles[0].textContent).toContain('[data-chart-part]');
-		expect(styles[0].textContent).toContain(CHART_PART_SELECTED_CLASS);
+		// The shared base rules (data-mark hit targets + selected-part highlight),
+		// singleton across all five bindings.
+		const sharedStyles = document.head.querySelectorAll('#pptx-chart-interaction-styles');
+		expect(sharedStyles).toHaveLength(1);
+		expect(sharedStyles[0].textContent).toContain('[data-chart-part]');
+		expect(sharedStyles[0].textContent).toContain(CHART_PART_SELECTED_CLASS);
+		// Angular's own badge / inline title editor CSS.
+		const ngStyles = document.head.querySelectorAll('#pptx-ng-chart-interaction-styles');
+		expect(ngStyles).toHaveLength(1);
+		expect(ngStyles[0].textContent).toContain('pptx-ng-chart-drag-badge');
+	});
+});
+
+// ==========================================================================
+// Direct part-editing gate (G8, OpenXML parity audit D3)
+// ==========================================================================
+
+describe('chartCanEditParts', () => {
+	it('is false when a:graphicFrameLocks/@noDrilldown is set, even selected + editable', () => {
+		const locked = { ...makeChartElement(), locks: { noDrilldown: true } } as ChartPptxElement;
+		expect(chartCanEditParts(true, true, true, locked)).toBeFalsy();
+	});
+
+	it('is true for a selected, editable, unlocked chart with a commit channel', () => {
+		expect(chartCanEditParts(true, true, true, makeChartElement())).toBeTruthy();
+	});
+
+	it('still requires selected + editable + an editor, unlocked or not', () => {
+		const chart = makeChartElement();
+		expect(chartCanEditParts(false, true, true, chart)).toBeFalsy();
+		expect(chartCanEditParts(true, false, true, chart)).toBeFalsy();
+		expect(chartCanEditParts(true, true, false, chart)).toBeFalsy();
+	});
+});
+
+// ==========================================================================
+// Chart-build reveal (`resolveRevealedChartData`, via the vendored shared
+// barrel `ChartElementViewComponent.renderedElement` calls directly).
+//
+// No Angular TestBed here either (see the file header), so this exercises the
+// SAME pure decision function the component delegates to, proving the
+// vendored copy carries the authored-index reveal fix (see
+// `packages/shared/src/render/chart-reveal-descriptor.ts`) rather than
+// re-testing DOM output only React/Vue/Svelte/Vanilla can assert here.
+// ==========================================================================
+
+describe('resolveRevealedChartData (chart-build reveal)', () => {
+	function twoSeriesChartData(): PptxChartData {
+		return {
+			chartType: 'bar',
+			categories: ['Q1', 'Q2'],
+			series: [
+				{ name: 'North', values: [10, 20] },
+				{ name: 'South', values: [15, 25] },
+			],
+		};
+	}
+
+	it('prefers the authored-index chartReveal over a count-based build (reverse-order series)', () => {
+		const data = twoSeriesChartData();
+		const revealed = resolveRevealedChartData(data, {
+			build: { kind: 'chart', mode: 'bySeries', progress: 1 },
+			chartReveal: {
+				mode: 'bySeries',
+				descriptor: { background: true, series: new Set([1]), categories: new Set(), points: [] },
+			},
+		});
+		expect(revealed.series.map((s) => s.name)).toStrictEqual(['South']);
+	});
+
+	it('falls back to the count-based build when chartReveal is absent', () => {
+		const data = twoSeriesChartData();
+		const revealed = resolveRevealedChartData(data, {
+			build: { kind: 'chart', mode: 'bySeries', progress: 0.1 },
+		});
+		expect(revealed.series).toHaveLength(1);
+	});
+
+	it('returns chartData unchanged with no animation state', () => {
+		const data = twoSeriesChartData();
+		expect(resolveRevealedChartData(data, undefined)).toBe(data);
 	});
 });

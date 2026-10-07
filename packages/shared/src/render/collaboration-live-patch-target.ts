@@ -62,9 +62,7 @@ const asArray = (value: unknown): YArrayLike | undefined =>
  * (pptx:slides -> slide Y.Map -> `elements` Y.Array -> element Y.Map).
  * When `slideId` is undefined every slide is searched.
  *
- * Only top-level `elements` are walked, so a group's children are not
- * reachable. No binding drags a group child directly today; if one starts to,
- * this walk needs to recurse into `groupElements`.
+ * Groups are traversed recursively through their shared children arrays.
  */
 export function findElementYMap(
 	doc: YDocLike,
@@ -81,11 +79,23 @@ export function findElementYMap(
 		if (!elements) {
 			continue;
 		}
-		for (let j = 0; j < elements.length; j++) {
-			const elementMap = asMap(elements.get(j));
-			if (elementMap && elementMap.get('id') === elementId) {
-				return elementMap;
+		const find = (entries: YArrayLike): YMapLike | undefined => {
+			for (const entry of entries.toArray()) {
+				const element = asMap(entry);
+				if (element?.get('id') === elementId) {
+					return element;
+				}
+				const children = asArray(element?.get('children'));
+				const nested = children && find(children);
+				if (nested) {
+					return nested;
+				}
 			}
+			return undefined;
+		};
+		const found = find(elements);
+		if (found) {
+			return found;
 		}
 	}
 	return undefined;

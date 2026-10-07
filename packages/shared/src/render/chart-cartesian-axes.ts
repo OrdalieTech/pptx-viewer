@@ -3,6 +3,7 @@ import type { PptxChartData } from 'pptx-viewer-core';
 import { getSecondaryValueAxis } from './chart-axis';
 import { verticalAxisX } from './chart-axis-crossing';
 import { buildPrimaryAxis, buildSecondaryAxis } from './chart-axis-render';
+import { shouldRenderMajorGridlines } from './chart-gridlines-toggle';
 import type { PlotLayout, SvgLine, SvgText, ValueRange } from './chart-view-model';
 import { buildGridlinesAndLabels } from './chart-view-model';
 
@@ -25,6 +26,11 @@ function hasRicherAxisFeatures(chartData: PptxChartData): boolean {
 					Boolean(
 						axis.logScale ||
 						axis.displayUnits ||
+						// A `c:numFmt` is only honoured on the `buildPrimaryAxis`
+						// path; the fast path has no axis to read it from. The two
+						// agree tick-for-tick when no log scale or display unit is
+						// in play, so routing a formatted axis here costs nothing.
+						axis.numFmt?.formatCode ||
 						axis.axPos === 'r' ||
 						axis.orientation === 'maxMin' ||
 						axis.majorUnit !== undefined ||
@@ -46,8 +52,15 @@ export function buildCartesianAxes(
 	secondaryRange: ValueRange | undefined,
 	categoryCount: number,
 ): CartesianAxesResult {
+	// `c:majorGridlines` absent on a parsed value axis means PowerPoint draws
+	// none; the same decision feeds the inspector's "Show Gridlines" checkbox.
+	const showMajorGridlines = shouldRenderMajorGridlines(chartData);
 	if (!hasRicherAxisFeatures(chartData)) {
-		const { gridlines, axisLabels } = buildGridlinesAndLabels(primaryRange, layout);
+		const { gridlines, axisLabels } = buildGridlinesAndLabels(
+			primaryRange,
+			layout,
+			showMajorGridlines,
+		);
 		return { gridlines, axisLabels, secondaryGridlines: undefined, secondaryAxisLabels: undefined };
 	}
 	const primaryAxis =
@@ -70,6 +83,7 @@ export function buildCartesianAxes(
 		layout,
 		primaryAxis,
 		axisX(primaryAxis?.crossAxisId, 'left'),
+		showMajorGridlines,
 	);
 	if (!secondaryRange) {
 		return { ...primary, secondaryGridlines: undefined, secondaryAxisLabels: undefined };

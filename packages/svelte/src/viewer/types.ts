@@ -1,8 +1,9 @@
-import type { PptxSaveFormat } from 'pptx-viewer-core';
+import type { PptxCompatibilityWarning, PptxSaveFormat } from 'pptx-viewer-core';
 import type {
 	AccountAuthConfig,
 	CanvasSize,
 	CollaborationConfig,
+	CollaborationError,
 	CollaborationRole,
 	CollaborationTransport,
 	PowerPointViewerAPI,
@@ -13,6 +14,7 @@ import type {
 } from 'pptx-viewer-shared';
 import type { PptxAiConfig } from 'pptx-viewer-shared/ai';
 import type { LocaleCatalogEntry } from 'pptx-viewer-shared/i18n';
+import type { Snippet } from 'svelte';
 
 import type {
 	ExportGifOptions,
@@ -34,6 +36,7 @@ import type {
 export type {
 	CanvasSize,
 	CollaborationConfig,
+	CollaborationError,
 	CollaborationRole,
 	CollaborationTransport,
 	ToolbarActionId,
@@ -47,14 +50,20 @@ export interface ViewerLoadDetail {
 	slideCount: number;
 	/** Slide canvas size in pixels. */
 	canvasSize: CanvasSize;
+	/** Compatibility warnings for the loaded presentation and its slides. */
+	compatibilityWarnings: PptxCompatibilityWarning[];
 }
 
 /** Props for `<PowerPointViewer>`. */
 export interface PowerPointViewerProps {
+	/** Optional host avatar for comment authors. */
+	commentAvatar?: Snippet<[author: string]>;
 	/** PowerPoint content as `Uint8Array` (or `ArrayBuffer`). */
 	source: Uint8Array | ArrayBuffer | null | undefined;
 	/** Licensed font sources supplied by the host application. */
 	fonts?: ViewerFontSource[];
+	/** Load missing deck fonts from Google Fonts. Defaults to true. */
+	remoteFonts?: boolean;
 	/**
 	 * Theme configuration for customising the viewer's appearance. Accepts
 	 * partial color overrides, a custom border-radius, and arbitrary CSS
@@ -112,6 +121,8 @@ export interface PowerPointViewerProps {
 	showThumbnails?: boolean;
 	/** Show the navigation/zoom toolbar. Default true. */
 	showToolbar?: boolean;
+	/** Hide the Properties inspector tab in simplified host interfaces. */
+	hideInspectorProperties?: boolean;
 	/**
 	 * Toolbar buttons and/or ribbon tabs to hide, e.g. `['share', 'broadcast']`
 	 * to remove the collaboration entry points from a read-only embed, or
@@ -135,6 +146,60 @@ export interface PowerPointViewerProps {
 	 * false.
 	 */
 	smartArt3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js surface-chart renderer. When `true`,
+	 * `surface`/`surface3D` charts render as a camera-orbitable WebGL mesh
+	 * (drag to rotate, scroll to zoom) instead of the static SVG isometric
+	 * projection. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable grid), the viewer transparently falls back
+	 * to the SVG surface renderer. Default `false`.
+	 */
+	surfaceChart3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js bar3D-chart renderer. When `true`,
+	 * `bar3D` charts render as camera-orbitable real box meshes (drag to
+	 * rotate, scroll to zoom) instead of the flat SVG oblique-projection
+	 * illusion. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable grid, or it is a horizontal 3-D Bar), the
+	 * viewer transparently falls back to the flat SVG bar3D renderer. Default
+	 * `false`.
+	 */
+	barChart3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js line3D-chart renderer. When `true`,
+	 * `line3D` charts render as a camera-orbitable real tube-path mesh per
+	 * series, one per depth ("series") plane (drag to rotate, scroll to zoom),
+	 * instead of the flat SVG oblique-projection illusion. Chart marks are not
+	 * selectable/draggable in this mode. Requires the optional `three` peer
+	 * dependency; when it is not installed (or the chart has no plottable
+	 * grid), the viewer transparently falls back to the flat SVG line3D
+	 * renderer. Default `false`.
+	 */
+	lineChart3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js area3D-chart renderer. When `true`,
+	 * `area3D` charts render as a camera-orbitable real tube path + filled
+	 * ribbon mesh per series, one per depth ("series") plane (drag to rotate,
+	 * scroll to zoom), instead of the flat SVG oblique-projection illusion.
+	 * Chart marks are not selectable/draggable in this mode. Requires the
+	 * optional `three` peer dependency; when it is not installed (or the chart
+	 * has no plottable grid), the viewer transparently falls back to the flat
+	 * SVG area3D renderer. Default `false`.
+	 */
+	areaChart3D?: boolean;
+
+	/**
+	 * Opt in to the interactive Three.js pie3D-chart renderer. When `true`,
+	 * `pie3D` charts render as camera-orbitable real wedge meshes (drag to
+	 * rotate, scroll to zoom) instead of the flat SVG oblique-projection
+	 * illusion. Chart marks are not selectable/draggable in this mode.
+	 * Requires the optional `three` peer dependency; when it is not installed
+	 * (or the chart has no plottable series), the viewer transparently falls
+	 * back to the flat SVG pie3D renderer. Default `false`.
+	 */
+	pieChart3D?: boolean;
 	/**
 	 * Enable in-place editing: click to select an element, drag to move, use the
 	 * 8 handles to resize (Shift locks aspect) and the rotate handle to rotate,
@@ -177,13 +242,28 @@ export interface PowerPointViewerProps {
 	/** Host override for the File > Open action. */
 	onopenfile?: () => void;
 	/**
-	 * Enable debounced crash-recovery autosave. On each edit (when `editable`)
-	 * the current slides are serialized to `.pptx` bytes and written to the
-	 * shared IndexedDB recovery store (keyed by {@link filePath}), and
-	 * `onautosave` is fired with the bytes. Requires `filePath`; without one the
-	 * autosave indicator reads "disabled". This binding does not auto-restore on
-	 * load; recovery is a host concern (see the re-exported `getAutosaveSnapshot`
-	 * / `listAutosaveSnapshots` helpers). Default false.
+	 * POLICY CEILING for crash-recovery autosave. Not a switch the host flips on
+	 * the user's behalf: it states what this application permits, and the
+	 * title-bar AutoSave toggle (and File > Options > Save > AutoSave) is the
+	 * user's preference inside it.
+	 *
+	 *  - `false` turns autosave off AND renders the toggle off and inert; a user
+	 *    cannot switch on what the application forbade.
+	 *  - `true`, or omitted, PERMITS autosave and lets the toggle decide.
+	 *
+	 * While active, each edit serializes the current slides to `.pptx` bytes,
+	 * writes them to the shared IndexedDB recovery store (keyed by
+	 * {@link filePath}) and fires `onautosave`. A snapshot lands no later than
+	 * one interval after the first unsaved edit, and no more often than once per
+	 * interval. Requires `filePath`; without one the indicator reads "disabled".
+	 *
+	 * On the next load of the same `filePath` the viewer OFFERS the snapshot back
+	 * in a "Recover unsaved changes?" dialog (Restore loads it in place, Discard
+	 * deletes it), unless this prop is `false`. The store is also reachable
+	 * directly through the re-exported `getAutosaveSnapshot` /
+	 * `listAutosaveSnapshots` helpers.
+	 *
+	 * @default true
 	 */
 	autosave?: boolean;
 	/** Fired when the desktop title bar toggles AutoSave for this viewer instance. */
@@ -193,7 +273,16 @@ export interface PowerPointViewerProps {
 	 * Autosave is inert until this is set.
 	 */
 	filePath?: string;
-	/** Autosave debounce window in milliseconds. Default 2000. */
+	/**
+	 * Autosave cadence in milliseconds: the debounce window, and the ceiling on
+	 * how long an unbroken stream of edits may defer a snapshot.
+	 *
+	 * Optional, and a policy like {@link autosave}: pass it and it wins. Leave it
+	 * out and the cadence is the user's own File > Options > Save > "Save
+	 * AutoRecover information every N minutes", which defaults to two minutes.
+	 *
+	 * @default 120000 (Options > Save, "every 2 minutes")
+	 */
 	autosaveIntervalMs?: number;
 	/** Fired with the serialized `.pptx` bytes after each successful autosave. */
 	onautosave?: (bytes: Uint8Array) => void;
@@ -234,6 +323,11 @@ export interface PowerPointViewerProps {
  * surface subset the host drives directly.
  */
 export interface PowerPointViewerApi extends PowerPointViewerAPI {
+	/** Return the live collaboration document, or null when collaboration is stopped. */
+	getCollaborationDoc(): import('yjs').Doc | null;
+	executeRibbonCommand(command: import('./editor/host-ribbon-api').HostRibbonCommand): void;
+	/** Insert an element on the active slide and select it. Returns its generated ID. */
+	insertElement(element: import('pptx-viewer-core').PptxElement): string | null;
 	/** Undo the last committed edit. */
 	undo(): void;
 	/** Redo the last undone edit. */
@@ -249,7 +343,6 @@ export interface PowerPointViewerApi extends PowerPointViewerAPI {
 	/** Serialize the edited slides to `.pptx` bytes via the core handler. */
 	save(format?: PptxSaveFormat): Promise<Uint8Array>;
 	downloadAs(format: PptxSaveFormat, fileName?: string): Promise<void>;
-	packageForSharing(fileName?: string): Promise<void>;
 	/** Save + trigger a browser download of the `.pptx` (default name). */
 	downloadPptx(fileName?: string): Promise<void>;
 	/**
@@ -257,6 +350,7 @@ export interface PowerPointViewerApi extends PowerPointViewerAPI {
 	 * the slide off-screen at scale 1 and rasterises it with `html2canvas-pro`
 	 * (dynamically imported), so the first call pays a one-time load cost.
 	 */
+	renderSlidePng(index: number): Promise<string>;
 	exportSlidePng(index?: number): Promise<void>;
 	/** Copy a slide to the system clipboard as a PNG image. */
 	copySlideAsImage(index?: number): Promise<void>;

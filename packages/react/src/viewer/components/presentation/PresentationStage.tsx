@@ -1,4 +1,5 @@
 import type { PptxAction, PptxElement, PptxSlide } from 'pptx-viewer-core';
+import { PRESENTATION_HIT_TEST_CSS, PRESENTATION_STAGE_ATTRIBUTE } from 'pptx-viewer-shared';
 /**
  * PresentationStage: the slide show surface.
  *
@@ -27,6 +28,7 @@ import { getReactSlideBackgroundStyle } from '../../utils/slide-background-style
 import type { TableStyleContext } from '../../utils/table-parse';
 import type { FieldSubstitutionContext } from '../../utils/text-field-substitution';
 import { ElementRenderer } from '../ElementRenderer';
+import { SlideBackgroundImageLayer } from '../SlideBackgroundImageLayer';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -49,6 +51,13 @@ export interface PresentationStageProps {
 	sourceSlideIndex?: number;
 	fieldContext?: FieldSubstitutionContext;
 	tableStyleContext?: TableStyleContext;
+	/**
+	 * PowerPoint's "On Mouse Click" advance. A click anywhere on the show
+	 * surface - the slide and the letterbox bars alike - steps the show on.
+	 * Without it the stage is a dead surface that only the keyboard can drive,
+	 * which is exactly how a presenter experiences a broken show.
+	 */
+	onStageClick?: (event: React.MouseEvent) => void;
 	/** Overlays drawn inside the scaled slide box, given the live scale. */
 	children?: (scale: number) => React.ReactNode;
 	/**
@@ -77,6 +86,7 @@ export function PresentationStage({
 	sourceSlideIndex,
 	fieldContext,
 	tableStyleContext,
+	onStageClick,
 	children,
 	screenOverlay,
 }: PresentationStageProps) {
@@ -124,10 +134,12 @@ export function PresentationStage({
 	const scaledHeight = safeHeight * scale;
 
 	return (
+		// oxlint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events -- the show surface is not a control; it carries PowerPoint's click-to-advance, whose keyboard equivalent (Space / arrows / PageDown) is bound globally by usePresentationKeyboard
 		<div
 			ref={containerRef}
 			data-pptx-presentation-stage
 			className='relative flex-1 min-h-0 overflow-hidden bg-black select-none'
+			onClick={onStageClick}
 		>
 			<div
 				className='absolute'
@@ -144,15 +156,39 @@ export function PresentationStage({
 					role='region'
 					aria-roledescription='slide'
 					aria-label={`Slide ${(sourceSlideIndex ?? 0) + 1}`}
+					// The shared running-show marker every binding's show stage carries
+					// (`applyRenderedElementAccessibility` stamps it elsewhere; React
+					// renders accessibility per element in JSX, so the stage stamps it
+					// directly). e2e reads the visible slide through this attribute.
+					{...{ [PRESENTATION_STAGE_ATTRIBUTE]: 'true' }}
 					className='absolute top-0 left-0 overflow-hidden'
-					style={{
-						width: safeWidth,
-						height: safeHeight,
-						transform: `scale(${scale})`,
-						transformOrigin: 'top left',
-						...getReactSlideBackgroundStyle(activeSlide),
-					}}
+					style={
+						{
+							width: safeWidth,
+							height: safeHeight,
+							transform: `scale(${scale})`,
+							transformOrigin: 'top left',
+							// Motion-path keyframes translate by a fraction of the SLIDE, so
+							// the stage publishes its own size for those calc() offsets.
+							'--pptx-slide-w': `${safeWidth}px`,
+							'--pptx-slide-h': `${safeHeight}px`,
+							...getReactSlideBackgroundStyle(activeSlide, {
+								widthPx: canvasSize.width,
+								heightPx: canvasSize.height,
+							}),
+						} as React.CSSProperties
+					}
 				>
+					<SlideBackgroundImageLayer slide={activeSlide} />
+					{/*
+					 * Which elements a running show accepts a pointer on. It has to be a
+					 * STYLESHEET, not a per-element `pointer-events: none`: an actionable
+					 * shape nested inside an inert group re-enables itself here, which an
+					 * inline rule written onto the group never could. React wrote the
+					 * inline form and was the only binding whose show could not click a
+					 * nested action shape at all.
+					 */}
+					<style>{PRESENTATION_HIT_TEST_CSS}</style>
 					{presentationKeyframesCss && <style>{presentationKeyframesCss}</style>}
 
 					{templateElements.map((element, index) => (
@@ -164,6 +200,9 @@ export function PresentationStage({
 							isInlineEditing={false}
 							inlineEditingText=''
 							canInteract={false}
+							// A running show: hit-testing is owned by the shared stylesheet
+							// above, never by an inline `pointer-events` on the element.
+							presenting
 							spellCheckEnabled={false}
 							mediaDataUrls={mediaDataUrls}
 							selectionColorClass='blue-400'
@@ -173,7 +212,7 @@ export function PresentationStage({
 							showResizeHandles={false}
 							renderInk={false}
 							renderGroups
-							adjustmentHandleDescriptor={null}
+							adjustmentHandles={[]}
 							onResizePointerDown={noop}
 							onAdjustmentPointerDown={noop}
 							onInlineEditChange={noop}
@@ -200,6 +239,9 @@ export function PresentationStage({
 							isInlineEditing={false}
 							inlineEditingText=''
 							canInteract={false}
+							// A running show: hit-testing is owned by the shared stylesheet
+							// above, never by an inline `pointer-events` on the element.
+							presenting
 							spellCheckEnabled={false}
 							mediaDataUrls={mediaDataUrls}
 							selectionColorClass='blue-500'
@@ -209,7 +251,7 @@ export function PresentationStage({
 							showResizeHandles={false}
 							renderInk
 							renderGroups
-							adjustmentHandleDescriptor={null}
+							adjustmentHandles={[]}
 							onResizePointerDown={noop}
 							onAdjustmentPointerDown={noop}
 							onInlineEditChange={noop}

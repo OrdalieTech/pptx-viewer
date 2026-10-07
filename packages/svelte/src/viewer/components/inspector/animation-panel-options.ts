@@ -17,7 +17,12 @@ import type {
  */
 
 /** Entrance presets offered by the docked panel (React parity subset). */
-export const PANEL_ENTRANCE_PRESETS: readonly PptxAnimationPreset[] = ['fadeIn', 'flyIn', 'zoomIn'];
+export const PANEL_ENTRANCE_PRESETS: readonly PptxAnimationPreset[] = [
+	'appear',
+	'fadeIn',
+	'flyIn',
+	'zoomIn',
+];
 
 /** Exit presets offered by the docked panel (React parity subset). */
 export const PANEL_EXIT_PRESETS: readonly PptxAnimationPreset[] = ['fadeOut', 'flyOut', 'zoomOut'];

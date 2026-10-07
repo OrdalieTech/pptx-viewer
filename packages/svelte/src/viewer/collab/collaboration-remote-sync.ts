@@ -5,15 +5,23 @@
  * holds no state of its own, only callbacks into the controller's fields.
  */
 import type { PptxSlide } from 'pptx-viewer-core';
-import type { CollaborationConfig, YDocLike, YjsFactories } from 'pptx-viewer-shared';
+import type {
+	CollabLoadOrigin,
+	CollaborationConfig,
+	YDocLike,
+	YjsFactories,
+} from 'pptx-viewer-shared';
 import {
 	LOCAL_SYNC_ORIGIN,
+	isTemplateElement,
 	observeYDocSlides,
 	readSlidesFromYDoc,
 	reconcileSlidesInYDoc,
+	shouldRoomSlidesReplaceLoad,
 } from 'pptx-viewer-shared';
 
 export interface ObserveRemoteDeps {
+	onError?: (error: unknown) => void;
 	isApplyingRemote: () => boolean;
 	setApplyingRemote: (value: boolean) => void;
 	setLastSynced: (value: string) => void;
@@ -24,8 +32,20 @@ export interface ObserveRemoteDeps {
 /** The subset of {@link ObserveRemoteDeps} needed by {@link adoptDocSlidesAfterLoad}. */
 export type AdoptDocSlidesDeps = Pick<
 	ObserveRemoteDeps,
-	'setApplyingRemote' | 'setLastSynced' | 'applyRemoteSlides'
+	'setApplyingRemote' | 'setLastSynced' | 'applyRemoteSlides' | 'onError'
 >;
+
+function readRemoteSlides(ydoc: YDocLike, deps: AdoptDocSlidesDeps): PptxSlide[] {
+	try {
+		return readSlidesFromYDoc(ydoc);
+	} catch (error) {
+		if (!deps.onError) {
+			throw error;
+		}
+		deps.onError(error);
+		return [];
+	}
+}
 
 /**
  * Re-adopt the shared doc's slides after a local content load. The load
@@ -37,9 +57,13 @@ export type AdoptDocSlidesDeps = Pick<
  * win; an empty room means this client is the seeder and its loaded deck
  * stands (written into the doc by the normal gated publish path).
  */
-export function adoptDocSlidesAfterLoad(ydoc: YDocLike, deps: AdoptDocSlidesDeps): void {
-	const docSlides = readSlidesFromYDoc(ydoc);
-	if (docSlides.length === 0) {
+export function adoptDocSlidesAfterLoad(
+	ydoc: YDocLike,
+	deps: AdoptDocSlidesDeps,
+	origin: CollabLoadOrigin = 'user',
+): void {
+	const docSlides = readRemoteSlides(ydoc, deps);
+	if (!shouldRoomSlidesReplaceLoad(origin, docSlides.length)) {
 		return;
 	}
 	// Bypass the JSON dedupe: point it at the doc content so the publish flush
@@ -62,7 +86,7 @@ export function observeRemoteSlides(
 		if (transaction?.origin === LOCAL_SYNC_ORIGIN || deps.isApplyingRemote()) {
 			return;
 		}
-		const remote = readSlidesFromYDoc(ydoc);
+		const remote = readRemoteSlides(ydoc, deps);
 		if (remote.length === 0) {
 			return;
 		}
@@ -108,4 +132,56 @@ export function publishLocalSlides(input: PublishLocalSlidesInput): string | nul
 	}
 	reconcileSlidesInYDoc(slides, ydoc, factories);
 	return serialized;
+}
+
+/** Restore inherited layout content missing from a persisted collaboration snapshot. */
+export function restoreMissingSlideLayout(
+	ydoc: YDocLike,
+	sourceSlides: readonly PptxSlide[],
+	factories: YjsFactories,
+): boolean {
+	const sourceById = new Map(sourceSlides.map((slide) => [slide.id, slide]));
+	const sourceByLayout = new Map(
+		sourceSlides.filter((slide) => slide.layoutPath).map((slide) => [slide.layoutPath, slide]),
+	);
+	let changed = false;
+	const repaired = readSlidesFromYDoc(ydoc).map((slide) => {
+		// Slides created before layout inheritance was fixed have no source ID;
+		// the old writer attached layout1 to them on export.
+		const source =
+			sourceById.get(slide.id) ??
+			sourceByLayout.get(slide.layoutPath ?? 'ppt/slideLayouts/slideLayout1.xml');
+		if (!source) return slide;
+		const missingBackground =
+			!slide.backgroundColor &&
+			!slide.backgroundGradient &&
+			!slide.backgroundImage &&
+			!slide.backgroundPattern &&
+			!!(
+				source.backgroundColor ||
+				source.backgroundGradient ||
+				source.backgroundImage ||
+				source.backgroundPattern
+			);
+		const presentIds = new Set(slide.elements.map((element) => element.id));
+		const missingTemplateElements = source.elements.filter(
+			(element) => isTemplateElement(element) && !presentIds.has(element.id),
+		);
+		if (!missingBackground && missingTemplateElements.length === 0) return slide;
+		changed = true;
+		return {
+			...slide,
+			...(missingBackground && {
+				layoutPath: source.layoutPath,
+				backgroundColor: source.backgroundColor,
+				backgroundGradient: source.backgroundGradient,
+				backgroundImage: source.backgroundImage,
+				backgroundImageProperties: source.backgroundImageProperties,
+				backgroundPattern: source.backgroundPattern,
+			}),
+			elements: [...missingTemplateElements, ...slide.elements],
+		};
+	});
+	if (changed) reconcileSlidesInYDoc(repaired, ydoc, factories);
+	return changed;
 }

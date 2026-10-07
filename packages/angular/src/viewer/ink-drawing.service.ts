@@ -16,8 +16,14 @@
 import { Injectable, signal } from '@angular/core';
 import type { InkPptxElement, PptxElement } from 'pptx-viewer-core';
 
-import { pointsToSvgPathD, strokeToInkElement } from './ink-drawing-helpers';
-import type { InkPoint } from './ink-drawing-helpers';
+import { findEraserHitElementId } from '../internal/shared';
+import {
+	buildLiveInkStrokeView,
+	pointFromPointerEvent,
+	pointsToSvgPathD,
+	strokeToInkElement,
+} from './ink-drawing-helpers';
+import type { InkPoint, InkStrokeView } from './ink-drawing-helpers';
 
 /** The draw tools `SlideCanvasComponent` forwards from the ribbon Draw tab. */
 export type DrawTool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'freeform';
@@ -34,15 +40,20 @@ interface InkDrawingHost {
 	readonly emitEraserHit: (id: string) => void;
 }
 
-/** Bounding-box hit-test radius (px, stage coords) for the eraser tool. */
-const ERASER_HIT_RADIUS = 15;
-
 @Injectable()
 export class InkDrawingService {
 	/** Whether a freehand stroke is in progress. Signal for template reactivity. */
 	readonly active = signal(false);
 	/** SVG path `d` for the live stroke preview (updated on every pointer move). */
 	readonly liveInkPath = signal<string>('');
+	/**
+	 * The in-progress stroke's render view (plain path, pressure circles, or
+	 * tilt nib marks), from the shared `buildLiveInkStrokeView`: the same
+	 * decision `InkRendererComponent` makes for a committed stroke, fed the
+	 * SAME accumulated `points` {@link handlePointerUp} hands to
+	 * `strokeToInkElement`. `null` while idle.
+	 */
+	readonly liveStrokeView = signal<InkStrokeView | null>(null);
 	/** Accumulated points for the stroke currently being drawn. */
 	private points: InkPoint[] = [];
 
@@ -65,6 +76,30 @@ export class InkDrawingService {
 		return this.requireHost().drawTool() !== 'select';
 	}
 
+	/** Narrow the ribbon's `DrawTool` to the pen/highlighter/freeform union `strokeToInkElement`/`buildLiveInkStrokeView` accept. */
+	private resolveTool(tool: DrawTool): 'pen' | 'highlighter' | 'freeform' {
+		return tool === 'highlighter' ? 'highlighter' : tool === 'freeform' ? 'freeform' : 'pen';
+	}
+
+	/**
+	 * Recompute `liveInkPath`/`liveStrokeView` from the currently accumulated
+	 * points. Called after every pointerdown/pointermove so the preview shows
+	 * the same calligraphic-nib / pressure-circle decision a committed stroke
+	 * gets, while the pointer is still down.
+	 */
+	private syncLivePreview(): void {
+		const host = this.requireHost();
+		this.liveInkPath.set(pointsToSvgPathD(this.points));
+		this.liveStrokeView.set(
+			buildLiveInkStrokeView({
+				points: this.points,
+				color: host.drawColor(),
+				width: host.drawWidth(),
+				tool: this.resolveTool(host.drawTool()),
+			}),
+		);
+	}
+
 	/**
 	 * Handle a stage pointerdown while a draw tool is active: eraser hit-tests
 	 * against ink elements (topmost wins); pen/highlighter/freeform begin a new
@@ -78,29 +113,20 @@ export class InkDrawingService {
 		}
 		const rect = stage.getBoundingClientRect();
 		const zoom = host.effectiveScale() || 1;
-		const pt: InkPoint = {
-			x: (event.clientX - rect.left) / zoom,
-			y: (event.clientY - rect.top) / zoom,
-		};
+		const pt: InkPoint = pointFromPointerEvent(
+			(event.clientX - rect.left) / zoom,
+			(event.clientY - rect.top) / zoom,
+			event,
+		);
 
 		if (host.drawTool() === 'eraser') {
-			// Find ink elements whose bounding box (+ hit radius) contains the
-			// pointer. Iterate in reverse so the topmost element wins.
-			const allElements = host.elements();
-			for (let i = allElements.length - 1; i >= 0; i--) {
-				const el = allElements[i];
-				if (el.type !== 'ink') {
-					continue;
-				}
-				if (
-					pt.x >= el.x - ERASER_HIT_RADIUS &&
-					pt.x <= el.x + el.width + ERASER_HIT_RADIUS &&
-					pt.y >= el.y - ERASER_HIT_RADIUS &&
-					pt.y <= el.y + el.height + ERASER_HIT_RADIUS
-				) {
-					host.emitEraserHit(el.id);
-					break;
-				}
+			// Find the top-most ink/contentPart element under the pointer (+ hit
+			// radius). `contentPart` is included because ink saved via the Draw
+			// tab reloads in that shape, so it must stay erasable after a
+			// save/reload round-trip.
+			const hitId = findEraserHitElementId(host.elements(), pt);
+			if (hitId) {
+				host.emitEraserHit(hitId);
 			}
 			return;
 		}
@@ -110,7 +136,7 @@ export class InkDrawingService {
 		(event.target as Element | null)?.setPointerCapture?.(event.pointerId);
 		this.points = [pt];
 		this.active.set(true);
-		this.liveInkPath.set(pointsToSvgPathD(this.points));
+		this.syncLivePreview();
 	}
 
 	/** Append a point to the in-progress stroke. Returns false when no stroke is active (caller should fall through). */
@@ -125,12 +151,13 @@ export class InkDrawingService {
 		}
 		const rect = stage.getBoundingClientRect();
 		const zoom = host.effectiveScale() || 1;
-		const pt: InkPoint = {
-			x: (event.clientX - rect.left) / zoom,
-			y: (event.clientY - rect.top) / zoom,
-		};
+		const pt: InkPoint = pointFromPointerEvent(
+			(event.clientX - rect.left) / zoom,
+			(event.clientY - rect.top) / zoom,
+			event,
+		);
 		this.points.push(pt);
-		this.liveInkPath.set(pointsToSvgPathD(this.points));
+		this.syncLivePreview();
 		return true;
 	}
 
@@ -141,20 +168,18 @@ export class InkDrawingService {
 		}
 		const host = this.requireHost();
 		this.active.set(false);
-		const tool = host.drawTool();
-		const resolvedTool: 'pen' | 'highlighter' | 'freeform' =
-			tool === 'highlighter' ? 'highlighter' : tool === 'freeform' ? 'freeform' : 'pen';
 		const ink = strokeToInkElement({
 			points: this.points,
 			color: host.drawColor(),
 			width: host.drawWidth(),
-			tool: resolvedTool,
+			tool: this.resolveTool(host.drawTool()),
 		});
 		if (ink) {
 			host.emitInkStrokeComplete(ink);
 		}
 		this.points = [];
 		this.liveInkPath.set('');
+		this.liveStrokeView.set(null);
 		return true;
 	}
 }

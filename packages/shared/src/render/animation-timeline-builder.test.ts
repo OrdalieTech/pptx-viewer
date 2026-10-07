@@ -38,9 +38,174 @@ describe('buildTimeline', () => {
 		expect(result.clickGroups[0].steps[0].elementId).toBe('el1');
 	});
 
+	it('prefers authored sibling transforms over the approximate preset', () => {
+		const keyframes = (from: number | string, to: number | string) => [
+			{
+				tm: 0,
+				value: from,
+				valueType: typeof from === 'number' ? ('flt' as const) : ('str' as const),
+			},
+			{
+				tm: 100000,
+				value: to,
+				valueType: typeof to === 'number' ? ('flt' as const) : ('str' as const),
+			},
+		];
+		const result = buildTimeline([
+			makeAnim({
+				durationMs: 1000,
+				presetId: 31,
+				attributeAnimations: [
+					{ attrName: 'ppt_w', durationMs: 1000, keyframes: keyframes(0, '#ppt_w') },
+					{ attrName: 'ppt_h', durationMs: 1000, keyframes: keyframes(0, '#ppt_h') },
+					{
+						attrName: 'style.rotation',
+						durationMs: 1000,
+						keyframes: keyframes(90, 0),
+					},
+				],
+			}),
+		]);
+
+		expect(result.clickGroups[0].steps[0].keyframeName).toContain('pptx-tl-transform');
+		expect(result.keyframesCss).toContain('rotate(90deg) scale(0, 0)');
+		expect(result.keyframesCss).not.toContain('@keyframes pptx-expandIn');
+	});
+
+	it('keeps a directional fly preset when its sibling position formula is not representable', () => {
+		const keyframes = (from: string, to: string) => [
+			{ tm: 0, value: from, valueType: 'str' as const },
+			{ tm: 100000, value: to, valueType: 'str' as const },
+		];
+		const result = buildTimeline([
+			makeAnim({
+				durationMs: 500,
+				presetId: 2,
+				presetSubtype: 8,
+				attributeAnimations: [
+					{ attrName: 'ppt_x', durationMs: 500, keyframes: keyframes('0-#ppt_w/2', '#ppt_x') },
+					{ attrName: 'ppt_y', durationMs: 500, keyframes: keyframes('#ppt_y', '#ppt_y') },
+				],
+			}),
+		]);
+
+		expect(result.clickGroups[0].steps[0].keyframeName).toBe('pptx-flyInLeft');
+		expect(result.keyframesCss).toContain('@keyframes pptx-flyInLeft');
+	});
+
+	// -------------------------------------------------------------------
+	// ppt_x/ppt_y/ppt_w/ppt_h formula ground truth (real PowerPoint COM
+	// output, see pptx-viewer-shared's animation-ppt-formula-ground-truth.md
+	// and packages/core/src/__tests__/fixtures/animation-ppt-formula-ground-truth.pptx)
+	// -------------------------------------------------------------------
+
+	it('grow and turn: falls back to the preset when ppt_x mixes with ppt_w (real geometry needed)', () => {
+		// Real markup has no p:tavLst at all for this behaviour: a bare
+		// `p:anim from="(-#ppt_w/2)" to="(#ppt_x)"`.
+		const result = buildTimeline([
+			makeAnim({
+				durationMs: 600,
+				presetClass: 'entr',
+				presetId: 34,
+				attributeAnimations: [
+					{
+						attrName: 'ppt_x',
+						durationMs: 600,
+						from: '(-#ppt_w/2)',
+						keyframes: [],
+						to: '(#ppt_x)',
+					},
+				],
+			}),
+		]);
+
+		// presetId 34 is not in PRESET_ID_TO_EFFECT, so this exercises the
+		// unmapped-preset safety net (a neutral fade), not a specific name;
+		// the point of this test is that it does NOT produce a dynamic
+		// ppt_x transform keyframe (which would need the real box).
+		expect(result.keyframesCss).not.toContain('translate(');
+	});
+
+	it('bounce: plays the real ppt_x/ppt_y offsets, including a p:tav/@fmla sine ramp', () => {
+		const result = buildTimeline([
+			makeAnim({
+				durationMs: 1822,
+				presetClass: 'entr',
+				presetId: 26,
+				attributeAnimations: [
+					{
+						attrName: 'ppt_x',
+						durationMs: 1822,
+						keyframes: [
+							{ tm: 0, value: '#ppt_x-0.25', valueType: 'str' },
+							{ tm: 100000, value: '#ppt_x', valueType: 'str' },
+						],
+					},
+					{
+						attrName: 'ppt_y',
+						durationMs: 1822,
+						keyframes: [
+							{ fmla: '#ppt_y-sin(pi*$)/3', tm: 0, value: 0.5, valueType: 'flt' },
+							{ tm: 100000, value: 1, valueType: 'flt' },
+						],
+					},
+				],
+			}),
+		]);
+
+		expect(result.clickGroups[0].steps[0].keyframeName).toContain('pptx-tl-transform');
+		// x: delta -0.25 slide-widths at t=0, settling to 0 at t=100%.
+		expect(result.keyframesCss).toContain('calc(var(--pptx-slide-w, 1280px) * -0.2500)');
+		// y: $ = 0.5 at the fmla stop -> -sin(pi*0.5)/3 = -1/3 slide-heights.
+		expect(result.keyframesCss).toMatch(/calc\(var\(--pptx-slide-h, 720px\) \* -0\.3333\)/);
+	});
+
+	it('float: grows ppt_w/ppt_h from a literal 0 to full scale', () => {
+		const result = buildTimeline([
+			makeAnim({
+				durationMs: 1000,
+				presetClass: 'entr',
+				presetId: 31,
+				attributeAnimations: [
+					{
+						attrName: 'ppt_w',
+						durationMs: 1000,
+						keyframes: [
+							{ tm: 0, value: 0, valueType: 'flt' },
+							{ tm: 100000, value: '#ppt_w', valueType: 'str' },
+						],
+					},
+					{
+						attrName: 'ppt_h',
+						durationMs: 1000,
+						keyframes: [
+							{ tm: 0, value: 0, valueType: 'flt' },
+							{ tm: 100000, value: '#ppt_h', valueType: 'str' },
+						],
+					},
+				],
+			}),
+		]);
+
+		expect(result.clickGroups[0].steps[0].keyframeName).toContain('pptx-tl-transform');
+		expect(result.keyframesCss).toContain('scale(0, 0)');
+		expect(result.keyframesCss).toContain('scale(1, 1)');
+	});
+
 	it('tracks entrance element IDs', () => {
 		const result = buildTimeline([makeAnim({ presetClass: 'entr' })]);
 		expect(result.entranceElementIds.has('el1')).toBeTruthy();
+	});
+
+	it('routes a p:bg animation to an independent background target', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				target: { type: 'shape', shapeId: 'el1', backgroundOnly: true },
+			}),
+		]);
+		expect(result.clickGroups[0].steps[0].elementId).toBe('el1::pptx-bg');
+		expect(result.entranceElementIds).toStrictEqual(new Set(['el1::pptx-bg']));
 	});
 
 	it('does not track exit elements as entrance', () => {
@@ -121,6 +286,34 @@ describe('buildTimeline', () => {
 	});
 
 	// -------------------------------------------------------------------
+	// G13: p:cond/@tn dependency on a SPECIFIC, non-adjacent earlier node
+	// -------------------------------------------------------------------
+	it('schedules a p:cond/@tn dependency off the referenced node, not the positionally-previous step', () => {
+		const result = buildTimeline([
+			makeAnim({ targetId: 'el1', trigger: 'onClick', nodeId: 1, delayMs: 0, durationMs: 1000 }),
+			// A short "withPrevious" sibling that finishes long before el1: without
+			// the fix, el3 (below) would incorrectly chain off THIS step instead of
+			// the el1 node its own `p:cond/@tn` actually names.
+			makeAnim({
+				targetId: 'el2',
+				trigger: 'withPrevious',
+				nodeId: 2,
+				delayMs: 0,
+				durationMs: 200,
+			}),
+			makeAnim({
+				targetId: 'el3',
+				nodeId: 3,
+				startConditions: [{ event: 'onEnd', targetTimeNodeId: 1 }],
+			}),
+		]);
+		const steps = result.clickGroups[0].steps;
+		expect(steps).toHaveLength(3);
+		// Correct: el1 ends at 0 + 1000 = 1000, NOT el2's 0 + 200 = 200.
+		expect(steps[2].delayMs).toBe(1000);
+	});
+
+	// -------------------------------------------------------------------
 	// First animation starts implicit click-group regardless of trigger
 	// -------------------------------------------------------------------
 	it('creates implicit click-group for first withPrevious animation', () => {
@@ -185,8 +378,79 @@ describe('buildTimeline', () => {
 			} as PptxNativeAnimation),
 		]);
 		const step = result.clickGroups[0].steps[0];
-		expect(step.cssAnimation).toContain('3');
-		expect(step.cssAnimation).toContain('alternate');
+		expect(step.cssAnimation).toContain(' 6 alternate ');
+	});
+
+	it('keeps an auto-reverse step active through its backward pass', () => {
+		const result = buildTimeline([
+			makeAnim({
+				presetClass: 'emph',
+				presetId: 26,
+				durationMs: 250,
+				autoReverse: true,
+			}),
+		]);
+		const step = result.clickGroups[0].steps[0];
+		expect(step.cssAnimation).toContain('250ms');
+		expect(step.cssAnimation).toContain(' 2 alternate ');
+		expect(step.durationMs).toBe(500);
+		expect(result.clickGroups[0].totalDurationMs).toBe(500);
+	});
+
+	it('composes parallel transform and colour behaviours on the same target', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'picture1',
+				presetClass: 'emph',
+				presetId: 6,
+				durationMs: 1000,
+				fill: 'hold',
+				scaleByX: 1.2,
+				scaleByY: 1.2,
+				parGroupIndex: 3,
+			}),
+			makeAnim({
+				targetId: 'picture1',
+				trigger: 'withPrevious',
+				presetClass: 'emph',
+				presetId: 7,
+				durationMs: 1000,
+				fill: 'hold',
+				colorAnimation: {
+					colorSpace: 'rgb',
+					toColor: '#7f7f7f',
+					targetAttribute: 'stroke.color',
+				},
+				parGroupIndex: 3,
+			}),
+		]);
+		const group = result.clickGroups[0];
+		expect(group.steps).toHaveLength(1);
+		expect(group.steps[0].cssAnimation).toContain('pptx-tl-scale-');
+		expect(group.steps[0].cssAnimation).toContain('pptx-tl-color-');
+		expect(group.steps[0].colorTargets).toStrictEqual(['stroke']);
+	});
+
+	it('does not compose parallel transform behaviours that animate the same CSS property', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'picture1',
+				presetClass: 'emph',
+				durationMs: 1000,
+				rotationBy: 45,
+				parGroupIndex: 3,
+			}),
+			makeAnim({
+				targetId: 'picture1',
+				trigger: 'withPrevious',
+				presetClass: 'emph',
+				durationMs: 1000,
+				scaleByX: 1.2,
+				scaleByY: 1.2,
+				parGroupIndex: 3,
+			}),
+		]);
+		expect(result.clickGroups[0].steps).toHaveLength(2);
 	});
 
 	it("uses 'infinite' for infinite repeat count", () => {
@@ -292,6 +556,28 @@ describe('buildTimeline', () => {
 		expect(totalSteps).toBe(2);
 	});
 
+	it('preserves within-sequence timing and marks endSync replay', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				trigger: 'onShapeClick',
+				triggerShapeId: 'btn1',
+				interactiveSequence: true,
+				interactiveRestart: true,
+			}),
+			makeAnim({
+				targetId: 'el2',
+				trigger: 'withPrevious',
+				triggerShapeId: 'btn1',
+				interactiveSequence: true,
+			}),
+		]);
+		const groups = result.interactiveSequences.get('btn1');
+		expect(groups).toHaveLength(1);
+		expect(groups?.[0].steps.map((step) => step.elementId)).toStrictEqual(['el1', 'el2']);
+		expect(result.restartableInteractiveSequences).toStrictEqual(new Set(['btn1']));
+	});
+
 	// -------------------------------------------------------------------
 	// Dynamic keyframes (motion path)
 	// -------------------------------------------------------------------
@@ -321,6 +607,159 @@ describe('buildTimeline', () => {
 		]);
 		expect(result.keyframesCss).toContain('@keyframes pptx-tl-rotate-');
 		expect(result.keyframesCss).toContain('rotate(360deg)');
+	});
+
+	it('prefers authored compound transforms over the canned preset', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				trigger: 'onClick',
+				presetClass: 'entr',
+				presetId: 52,
+				motionPath: 'M 0 0 L 0.2 0.1',
+				rotationFrom: 30,
+				rotationTo: 0,
+				scaleFromX: 2.5,
+				scaleFromY: 2,
+				scaleToX: 1,
+				scaleToY: 1,
+			} as PptxNativeAnimation),
+		]);
+
+		expect(result.keyframesCss).toContain('@keyframes pptx-tl-transform-');
+		expect(result.keyframesCss).toContain('rotate(30deg)');
+		expect(result.keyframesCss).toContain('scale(2.5, 2)');
+		expect(result.keyframesCss).toContain('opacity: 0');
+		expect(result.clickGroups[0].steps[0].keyframeName).toContain('pptx-tl-transform-');
+	});
+
+	it('generates dynamic keyframes for an absolute p:animRot (from/to, no @by)', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				trigger: 'onClick',
+				presetClass: undefined,
+				presetId: undefined,
+				rotationFrom: 0,
+				rotationTo: 180,
+			} as PptxNativeAnimation),
+		]);
+		expect(result.keyframesCss).toContain('@keyframes pptx-tl-rotateAbs-');
+		expect(result.keyframesCss).toContain('rotate(0deg)');
+		expect(result.keyframesCss).toContain('rotate(180deg)');
+		expect(result.clickGroups[0].steps[0].cssAnimation).toContain('pptx-tl-rotateAbs-');
+	});
+
+	it('generates dynamic keyframes for an absolute p:animScale (from/to, no @by)', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				trigger: 'onClick',
+				presetClass: undefined,
+				presetId: undefined,
+				scaleFromX: 0.5,
+				scaleFromY: 0.5,
+				scaleToX: 2,
+				scaleToY: 2,
+			} as PptxNativeAnimation),
+		]);
+		expect(result.keyframesCss).toContain('@keyframes pptx-tl-scaleAbs-');
+		expect(result.keyframesCss).toContain('scale(0.5, 0.5)');
+		expect(result.keyframesCss).toContain('scale(2, 2)');
+	});
+
+	it('honours a real p:tavLst opacity ramp on a Transparency emphasis instead of the canned 2-stop default', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				trigger: 'onClick',
+				presetClass: 'emph',
+				presetId: 9, // Transparency
+				keyframes: [
+					{ tm: 0, value: 1, valueType: 'flt' },
+					{ tm: 30000, value: 0.1, valueType: 'flt' },
+					{ tm: 100000, value: 1, valueType: 'flt' },
+				],
+			} as PptxNativeAnimation),
+		]);
+		expect(result.keyframesCss).toContain('@keyframes pptx-tl-tav-');
+		expect(result.keyframesCss).toContain('30% { opacity: 0.1; }');
+		expect(result.keyframesCss).not.toContain('pptx-transparency');
+	});
+
+	it('falls back to the canned Transparency keyframes when there is no p:tavLst', () => {
+		const result = buildTimeline([
+			makeAnim({ targetId: 'el1', trigger: 'onClick', presetClass: 'emph', presetId: 9 }),
+		]);
+		expect(result.keyframesCss).toContain('@keyframes pptx-transparency');
+	});
+
+	it('rejects a numeric [0, 1] ramp explicitly named for a non-opacity attribute, falling back to canned timing', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				trigger: 'onClick',
+				presetClass: 'emph',
+				presetId: 9, // Transparency
+				attrName: 'ppt_w',
+				keyframes: [
+					{ tm: 0, value: 0.5, valueType: 'flt' },
+					{ tm: 100000, value: 1, valueType: 'flt' },
+				],
+			} as PptxNativeAnimation),
+		]);
+		expect(result.keyframesCss).toContain('@keyframes pptx-transparency');
+		expect(result.keyframesCss).not.toContain('pptx-tl-tav-');
+	});
+
+	it('honours a p:tavLst colour ramp on a generic p:anim naming fillcolor', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				trigger: 'onClick',
+				presetClass: 'emph',
+				presetId: undefined,
+				attrName: 'fillcolor',
+				keyframes: [
+					{ tm: 0, value: '#ff0000', valueType: 'clr' },
+					{ tm: 100000, value: '#0000ff', valueType: 'clr' },
+				],
+			} as PptxNativeAnimation),
+		]);
+		expect(result.keyframesCss).toContain('@keyframes pptx-tl-tavclr-');
+		expect(result.keyframesCss).toContain('fill: #ff0000;');
+		expect(result.keyframesCss).toContain('fill: #0000ff;');
+		expect(result.clickGroups[0].steps[0].colorTargets).toStrictEqual(['fill']);
+	});
+
+	it('does not flag colorTargets when the colour attrName is present but the ramp could not be resolved', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				trigger: 'onClick',
+				presetClass: 'emph',
+				presetId: undefined,
+				attrName: 'fillcolor',
+				// Scheme-colour tokens can't resolve to a CSS colour without theme
+				// context, so buildColorTavKeyframe bails and this step falls back
+				// to the neutral emphasis pulse instead.
+				keyframes: [
+					{ tm: 0, value: 'accent1', valueType: 'clr' },
+					{ tm: 100000, value: 'accent2', valueType: 'clr' },
+				],
+			} as PptxNativeAnimation),
+		]);
+		expect(result.clickGroups[0].steps[0].colorTargets).toBeUndefined();
+	});
+
+	// -------------------------------------------------------------------
+	// p:excl exclusivity (exclGroupId) reaches the timeline step
+	// -------------------------------------------------------------------
+	it('carries exclGroupId from the native animation onto its timeline step', () => {
+		const result = buildTimeline([
+			makeAnim({ targetId: 'el1', trigger: 'onClick', exclusive: true, exclGroupId: 7 }),
+		]);
+		expect(result.clickGroups[0].steps[0].exclGroupId).toBe(7);
 	});
 
 	// -------------------------------------------------------------------
@@ -414,11 +853,14 @@ describe('buildTimeline', () => {
 		expect(result.entranceElementIds.has('el1')).toBeFalsy();
 	});
 
-	it('plays a filter-based emphasis (darken) for a mapped emphasis preset', () => {
+	it('falls back to the neutral emphasis for emph.4 (Change Font Size, not a filter-based darken preset)', () => {
+		// emph.4 used to be mislabelled 'darken'; it is really Change Font
+		// Size, which has no dynamic keyframe support yet and must fall back
+		// to the neutral emphasis animation instead of a fabricated filter.
 		const result = buildTimeline([makeAnim({ targetId: 'el1', presetClass: 'emph', presetId: 4 })]);
 		expect(result.clickGroups).toHaveLength(1);
-		expect(result.keyframesCss).toContain('@keyframes pptx-tl-emph-');
-		expect(result.keyframesCss).toContain('brightness(0.55)');
+		const step = result.clickGroups[0].steps[0];
+		expect(step.keyframeName).toBe('pptx-pulse');
 	});
 
 	// -------------------------------------------------------------------
@@ -467,7 +909,9 @@ describe('buildTimeline', () => {
 		expect(result.clickGroups).toHaveLength(1);
 		const step = result.clickGroups[0].steps[0];
 		expect(step.keyframeName).toMatch(/^pptx-tl-dir-/u);
-		expect(result.keyframesCss).toContain('clip-path: inset(0 0 100% 0)');
+		// Directional wipes are mask sweeps, never clip-path keyframes.
+		expect(result.keyframesCss).toContain('mask-image');
+		expect(result.keyframesCss).not.toContain('clip-path');
 		// Still registered as an entrance (initially hidden).
 		expect(result.entranceElementIds.has('el1')).toBeTruthy();
 	});
@@ -497,6 +941,7 @@ describe('buildTimeline', () => {
 		expect(result.clickGroups[0].steps[0].build).toStrictEqual({
 			kind: 'chart',
 			mode: 'bySeries',
+			animateBackground: true,
 		});
 	});
 
@@ -513,6 +958,158 @@ describe('buildTimeline', () => {
 		expect(result.clickGroups[0].steps[0].build).toBeUndefined();
 	});
 
+	it('attaches p:spTgt/p:graphicEl seriesIdx/categoryIdx/bldStep to the step', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'chart1',
+				target: {
+					type: 'shape',
+					shapeId: 'chart1',
+					graphicElement: { kind: 'chart', seriesIdx: 2, bldStep: 'series' },
+				},
+			}),
+		]);
+		expect(result.clickGroups[0].steps[0].graphicElement).toStrictEqual({
+			seriesIdx: 2,
+			categoryIdx: undefined,
+			bldStep: 'series',
+		});
+	});
+
+	it('leaves graphicElement undefined when the target carries none', () => {
+		const result = buildTimeline([makeAnim({ targetId: 'chart1' })]);
+		expect(result.clickGroups[0].steps[0].graphicElement).toBeUndefined();
+	});
+
+	// G13: a step's `p:cond/@tn` dependency reaches the step so a binding can
+	// gate an `onStopAudio` effect on the real media element's `ended` event
+	// (see `animation-media-end-gating`) instead of only the computed delay.
+	it('attaches dependsOnTimeNodeId/dependsOnEvent for an onStopAudio(@tn) condition', () => {
+		const result = buildTimeline([
+			makeAnim({ nodeId: 1, targetId: 'audio1', kind: 'media' }),
+			makeAnim({
+				targetId: 'el1',
+				startConditions: [{ event: 'onStopAudio', delay: 0, targetTimeNodeId: 1 }],
+			}),
+		]);
+		const dependentStep = result.clickGroups[0].steps.find((s) => s.elementId === 'el1');
+		expect(dependentStep?.dependsOnTimeNodeId).toBe(1);
+		expect(dependentStep?.dependsOnEvent).toBe('onStopAudio');
+	});
+
+	// A `p:cond` may name its onStopAudio dependency by SHAPE
+	// (`p:tgtEl/p:spTgt`) instead of `@_tn` (ECMA-376 CT_TLTimeCondition,
+	// S19.5.31 allows either as an alternative). No `dependsOnTimeNodeId`
+	// lookup is needed for this form: the shape id resolves directly.
+	it('attaches dependsOnShapeId/dependsOnEvent for an onStopAudio(p:tgtEl/p:spTgt) condition', () => {
+		const result = buildTimeline([
+			makeAnim({
+				targetId: 'el1',
+				startConditions: [{ event: 'onStopAudio', delay: 0, targetShapeId: 'audio-shape-1' }],
+			}),
+		]);
+		const dependentStep = result.clickGroups[0].steps.find((s) => s.elementId === 'el1');
+		expect(dependentStep?.dependsOnShapeId).toBe('audio-shape-1');
+		expect(dependentStep?.dependsOnTimeNodeId).toBeUndefined();
+		expect(dependentStep?.dependsOnEvent).toBe('onStopAudio');
+	});
+
+	// -------------------------------------------------------------------
+	// Click-step auto-start + effect-wrapper grouping (issue #106)
+	// -------------------------------------------------------------------
+	describe('auto-starting click steps', () => {
+		it('marks the first group auto-advance when the deck says it starts on entry', () => {
+			const result = buildTimeline([
+				makeAnim({ trigger: 'afterDelay', delayMs: 1000, groupAutoStart: true, parGroupIndex: 0 }),
+			]);
+			expect(result.clickGroups[0].autoAdvance).toBeTruthy();
+			expect(result.clickGroups[0].autoAdvanceDelayMs).toBe(0);
+		});
+
+		it('leaves the first group click-gated by default', () => {
+			const result = buildTimeline([makeAnim({ trigger: 'afterDelay', delayMs: 1000 })]);
+			expect(result.clickGroups[0].autoAdvance).toBeUndefined();
+		});
+
+		it('does not auto-start a group opened by an explicit click', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'a', groupAutoStart: true }),
+				makeAnim({ targetId: 'b', trigger: 'onClick', groupAutoStart: true }),
+			]);
+			expect(result.clickGroups).toHaveLength(2);
+			expect(result.clickGroups[1].autoAdvance).toBeUndefined();
+		});
+	});
+
+	describe('effect-wrapper (p:par) siblings', () => {
+		it('preserves authored absolute starts across sibling wrappers', () => {
+			const starts = [0, 1250, 3100, 4200];
+			const result = buildTimeline(
+				starts.map((parGroupDelayMs, index) =>
+					makeAnim({
+						targetId: `shape-${index}`,
+						trigger: index === 0 ? 'onClick' : 'afterPrevious',
+						delayMs: 0,
+						parGroupIndex: index,
+						parGroupDelayMs,
+					}),
+				),
+			);
+			expect(result.clickGroups[0].steps.map((step) => step.delayMs)).toStrictEqual(starts);
+		});
+
+		it('preserves authored wrapper starts in interactive sequences', () => {
+			const starts = [0, 1250, 3100, 4200];
+			const result = buildTimeline(
+				starts.map((parGroupDelayMs, index) =>
+					makeAnim({
+						targetId: `shape-${index}`,
+						trigger: 'onShapeClick',
+						triggerShapeId: 'button',
+						delayMs: 0,
+						parGroupIndex: index,
+						parGroupDelayMs,
+					}),
+				),
+			);
+			const steps = result.interactiveSequences.get('button')?.[0].steps;
+			expect(steps?.map((step) => step.delayMs)).toStrictEqual(starts);
+		});
+
+		it('measures each sibling delay from the wrapper, not the effect before it', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'title', trigger: 'afterDelay', delayMs: 1000, parGroupIndex: 0 }),
+				makeAnim({ targetId: 'body', trigger: 'afterDelay', delayMs: 2000, parGroupIndex: 0 }),
+			]);
+			const [first, second] = result.clickGroups[0].steps;
+			expect(first.delayMs).toBe(1000);
+			expect(second.delayMs).toBe(2000);
+		});
+
+		it('chains a new wrapper off the previous step', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'title', delayMs: 0, durationMs: 500, parGroupIndex: 0 }),
+				makeAnim({
+					targetId: 'body',
+					trigger: 'afterPrevious',
+					delayMs: 250,
+					parGroupIndex: 1,
+				}),
+			]);
+			const [first, second] = result.clickGroups[0].steps;
+			expect(first.delayMs).toBe(0);
+			expect(second.delayMs).toBe(750);
+		});
+
+		it('keeps chaining animations that carry no wrapper index', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'title', delayMs: 0, durationMs: 500 }),
+				makeAnim({ targetId: 'body', trigger: 'withPrevious', delayMs: 200 }),
+			]);
+			expect(result.clickGroups[0].steps[1].delayMs).toBe(200);
+		});
+	});
+
 	it('attaches colour targets from an active fill colour animation', () => {
 		const result = buildTimeline([
 			makeAnim({
@@ -523,5 +1120,170 @@ describe('buildTimeline', () => {
 			}),
 		]);
 		expect(result.clickGroups[0].steps[0].colorTargets).toStrictEqual(['fill']);
+	});
+
+	// -------------------------------------------------------------------
+	// `p:cTn/@fill="hold"` -> TimelineStep.holdEndState
+	// -------------------------------------------------------------------
+	describe('fill / restart / repeatDur / spd (animation-fill-repeat)', () => {
+		it('sets holdEndState on an emphasis step whose fill is "hold"', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'shape1', presetClass: 'emph', presetId: 26, fill: 'hold' }),
+			]);
+			expect(result.clickGroups[0].steps[0].holdEndState).toBeTruthy();
+		});
+
+		it('does not set holdEndState on an entrance step even when fill is "hold"', () => {
+			// An entrance's resting style already IS its held frame, so holding is
+			// scoped to emph/path (see `shouldHoldEndState`).
+			const result = buildTimeline([
+				makeAnim({ targetId: 'shape1', presetClass: 'entr', fill: 'hold' }),
+			]);
+			expect(result.clickGroups[0].steps[0].holdEndState).toBeUndefined();
+		});
+
+		it('leaves holdEndState unset when fill is "remove" (the OOXML default)', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'shape1', presetClass: 'emph', presetId: 26, fill: 'remove' }),
+			]);
+			expect(result.clickGroups[0].steps[0].holdEndState).toBeUndefined();
+		});
+
+		it('shortens the step duration when speedPct is set (double speed)', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'shape1', durationMs: 1000, speedPct: 200 }),
+			]);
+			expect(result.clickGroups[0].steps[0].durationMs).toBe(500);
+		});
+
+		it('derives the CSS iteration count from repeatDurMs when repeatCount is absent', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'shape1', durationMs: 500, repeatDurMs: 1500 }),
+			]);
+			expect(result.clickGroups[0].steps[0].cssAnimation).toContain(' 3 ');
+		});
+
+		it('plays indefinitely when repeatDurMs is "indefinite" (Infinity)', () => {
+			const result = buildTimeline([
+				makeAnim({ targetId: 'shape1', durationMs: 500, repeatDurMs: Infinity }),
+			]);
+			expect(result.clickGroups[0].steps[0].cssAnimation).toContain(' infinite ');
+		});
+	});
+
+	// -------------------------------------------------------------------
+	// afterAnimationAction -> holdEndState / hideAfterEffect / pendingHideOnNextClick
+	// -------------------------------------------------------------------
+	describe('afterAnimationAction (animation-after-effect)', () => {
+		it('appends a dim keyframe and sets holdEndState for a "dimToColor" entrance', () => {
+			const result = buildTimeline([
+				makeAnim({
+					targetId: 'shape1',
+					presetClass: 'entr',
+					afterAnimationAction: 'dimToColor',
+					afterAnimationColor: '#336699',
+				}),
+			]);
+			const step = result.clickGroups[0].steps[0];
+			expect(step.holdEndState).toBeTruthy();
+			expect(step.cssAnimation).toContain('pptx-tl-dim-');
+			expect(result.keyframesCss).toContain('color: #336699');
+		});
+
+		it('sets hideAfterEffect for a "hideAfterAnimation" entrance', () => {
+			const result = buildTimeline([
+				makeAnim({
+					targetId: 'shape1',
+					presetClass: 'entr',
+					afterAnimationAction: 'hideAfterAnimation',
+				}),
+			]);
+			expect(result.clickGroups[0].steps[0].hideAfterEffect).toBeTruthy();
+		});
+
+		it('splices a synthetic exit step into the next click-group for "hideOnNextClick"', () => {
+			const result = buildTimeline([
+				makeAnim({
+					targetId: 'shape1',
+					presetClass: 'entr',
+					afterAnimationAction: 'hideOnNextClick',
+					trigger: 'onClick',
+				}),
+				makeAnim({ targetId: 'shape2', trigger: 'onClick' }),
+			]);
+			expect(result.clickGroups).toHaveLength(2);
+			const secondGroupIds = result.clickGroups[1].steps.map((s) => s.elementId);
+			expect(secondGroupIds).toContain('shape1');
+			const hideStep = result.clickGroups[1].steps.find((s) => s.elementId === 'shape1');
+			expect(hideStep?.presetClass).toBe('exit');
+		});
+
+		it('never applies afterAnimationAction to an exit effect', () => {
+			const result = buildTimeline([
+				makeAnim({
+					targetId: 'shape1',
+					presetClass: 'exit',
+					afterAnimationAction: 'hideAfterAnimation',
+				}),
+			]);
+			// `hideAfterEffect` is undefined here because `applyAfterAnimationFromEditorList`
+			// (upstream of `buildTimeline`) never merges afterAnimation onto an exit; a
+			// directly-constructed native animation that sets it anyway is still honoured
+			// by `buildTimeline` itself, since exits already hide via presetClass.
+			expect(result.clickGroups[0].steps[0].presetClass).toBe('exit');
+		});
+
+		it('honours afterAnimationAction on an onShapeClick interactive-sequence effect', () => {
+			const result = buildTimeline([
+				makeAnim({
+					targetId: 'shape1',
+					triggerShapeId: 'trigger1',
+					trigger: 'onShapeClick',
+					afterAnimationAction: 'hideAfterAnimation',
+				}),
+			]);
+			const seqGroups = result.interactiveSequences.get('trigger1');
+			expect(seqGroups?.[0].steps[0].hideAfterEffect).toBeTruthy();
+		});
+	});
+
+	// -------------------------------------------------------------------
+	// Text-style-only emphasis (Bold Reveal, Underline, Style Emphasis)
+	// -------------------------------------------------------------------
+	describe('text-style-only emphasis', () => {
+		const boldReveal = (overrides: Partial<PptxNativeAnimation> = {}) =>
+			makeAnim({
+				presetClass: 'emph',
+				presetId: 15,
+				setAnimations: [{ attrName: 'style.fontweight', value: 'bold', valueType: 'str' }],
+				...overrides,
+			});
+
+		it('holds the element still instead of playing the neutral pulse fallback', () => {
+			const result = buildTimeline([boldReveal()]);
+			const step = result.clickGroups[0].steps[0];
+			expect(step.textStyle).toStrictEqual({ bold: true });
+			expect(step.cssAnimation).not.toContain('pptx-pulse');
+			expect(step.cssAnimation).toContain('pptx-tl-textstyle-hold-');
+			expect(result.keyframesCss).toContain('@keyframes pptx-tl-textstyle-hold-');
+		});
+
+		it('keeps the mapped preset effect when the emphasis also has one', () => {
+			// emph.6 (grow/shrink) carries its own preset; the hold must not replace it.
+			const result = buildTimeline([boldReveal({ presetId: 6 })]);
+			const step = result.clickGroups[0].steps[0];
+			expect(step.textStyle).toStrictEqual({ bold: true });
+			expect(step.cssAnimation).not.toContain('pptx-tl-textstyle-hold-');
+		});
+
+		it('applies the same hold to an interactive-sequence step', () => {
+			const result = buildTimeline([
+				boldReveal({ targetId: 'shape1', triggerShapeId: 'trigger1', trigger: 'onShapeClick' }),
+			]);
+			const step = result.interactiveSequences.get('trigger1')?.[0].steps[0];
+			expect(step?.textStyle).toStrictEqual({ bold: true });
+			expect(step?.cssAnimation).not.toContain('pptx-pulse');
+			expect(step?.cssAnimation).toContain('pptx-tl-textstyle-hold-');
+		});
 	});
 });

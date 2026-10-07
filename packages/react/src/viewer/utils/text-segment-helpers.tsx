@@ -1,13 +1,18 @@
-import type { BulletInfo } from 'pptx-viewer-core';
-import { resolvePictureBullet, sanitizeMathMl } from 'pptx-viewer-shared';
+import type { RunFontSpec, RunStyle } from 'pptx-viewer-shared';
+import {
+	pieceLetterSpacing,
+	sanitizeMathMl,
+	splitRunByScriptFont,
+	splitRunForMetrics,
+} from 'pptx-viewer-shared';
 import { translationsEn } from 'pptx-viewer-shared/i18n';
 import React from 'react';
 
 import { convertOmmlToMathMl } from './omml-to-mathml';
 import type { OmmlNode } from './omml-to-mathml';
+import { makeSegmentPieceRenderer } from './text-segment-underline-words';
 import { renderTabbedLine } from './text-tab-layout';
 import type { TabRenderContext } from './text-tab-layout';
-import { segmentByScript, resolveFontForScript } from './unicode-script-detection';
 
 /* Highlight info for a single segment, used by Find & Replace */
 export interface TextSegmentHighlight {
@@ -31,8 +36,11 @@ export interface ScriptFonts {
  * Render text with per-script font spans when fonts differ across Unicode
  * script categories (latin, eastAsia, complexScript, symbol).
  *
- * When all script fonts are the same (common case), returns the plain text
- * string with zero extra DOM overhead.
+ * The segmentation + font-resolution decision is shared's `splitRunByScriptFont`
+ * (extracted from this file's former private implementation so all five
+ * bindings render the same descriptor); this is now only the JSX mapping over
+ * its pieces. When all script fonts are the same (common case), returns the
+ * plain text string with zero extra DOM overhead.
  */
 export function renderScriptAwareText(
 	text: string,
@@ -40,34 +48,84 @@ export function renderScriptAwareText(
 	scriptFonts: ScriptFonts,
 	baseFontFamily: string,
 	keyPrefix: string,
+	/** Decoration the run carries, which a nested span has to repeat (it does not inherit). */
+	nestedStyle?: React.CSSProperties,
 ): React.ReactNode {
 	if (!needsScriptFonts || !text) {
 		return text;
 	}
-
-	const runs = segmentByScript(text);
-	if (runs.length <= 1) {
-		// Single script: resolve font for that script inline
-		if (runs.length === 1) {
-			const font = resolveFontForScript(runs[0].script, scriptFonts);
-			if (font && font !== baseFontFamily) {
-				return <span style={{ fontFamily: font }}>{text}</span>;
-			}
-		}
+	const pieces = splitRunByScriptFont(
+		text,
+		scriptFonts,
+		baseFontFamily,
+		nestedStyle as RunStyle | undefined,
+	);
+	if (!pieces) {
 		return text;
 	}
-
-	return runs.map((run, i) => {
-		const font = resolveFontForScript(run.script, scriptFonts);
-		if (!font || font === baseFontFamily) {
-			return <React.Fragment key={`${keyPrefix}-r${i}`}>{run.text}</React.Fragment>;
-		}
-		return (
-			<span key={`${keyPrefix}-r${i}`} style={{ fontFamily: font }}>
-				{run.text}
+	return pieces.map((piece, i) =>
+		piece.style ? (
+			<span key={`${keyPrefix}-r${i}`} style={piece.style as React.CSSProperties}>
+				{piece.text}
 			</span>
-		);
-	});
+		) : (
+			<React.Fragment key={`${keyPrefix}-r${i}`}>{piece.text}</React.Fragment>
+		),
+	);
+}
+
+/** What a caller needs to give a run's pieces their own metric tracking. */
+export interface MetricTextContext {
+	/** The font the run paints with, for measuring each piece. */
+	font: RunFontSpec;
+	/** Authored `a:rPr/@spc` in px; each piece's tracking layers on top. */
+	authoredPx: number;
+	/**
+	 * The run's own decoration, which every span nested inside the run has to
+	 * repeat: `text-decoration-*` does not inherit, so a piece span reports
+	 * `none` of its own even while the run's underline is drawn through it.
+	 * Shared `nestedTextDecorationStyle` decides the subset.
+	 */
+	nestedStyle?: React.CSSProperties;
+}
+
+/**
+ * Wrap each word (and each whitespace gap) of `text` in its own span carrying
+ * the tracking that renders it at PowerPoint's width, so a line assembled out
+ * of whole pieces measures exactly what PowerPoint measured (issue #149).
+ *
+ * The four shared-builder bindings get this by emitting sibling runs; React
+ * builds its own spans, so it splits here, at the one place plain run text
+ * becomes nodes. `inner` keeps whatever the caller was already doing with the
+ * text (script-aware fonts) intact inside each piece.
+ *
+ * With no metric context, or nothing to split, this is the caller's own
+ * rendering unchanged - one text node, no extra DOM.
+ */
+export function renderMetricPieces(
+	text: string,
+	metric: MetricTextContext | undefined,
+	keyPrefix: string,
+	inner: (text: string, key: string) => React.ReactNode,
+): React.ReactNode {
+	if (!metric || !text) {
+		return inner(text, keyPrefix);
+	}
+	const pieces = splitRunForMetrics(text, metric.font);
+	if (pieces.length <= 1) {
+		return inner(text, keyPrefix);
+	}
+	return pieces.map((piece, i) => (
+		<span
+			key={`${keyPrefix}-w${i}`}
+			style={{
+				...metric.nestedStyle,
+				letterSpacing: pieceLetterSpacing(metric.authoredPx, piece.tracking),
+			}}
+		>
+			{inner(piece.text, `${keyPrefix}-w${i}`)}
+		</span>
+	));
 }
 
 /**
@@ -85,19 +143,42 @@ export function renderSegmentContent(
 	findHighlights: ElementFindHighlights | undefined,
 	/** When present, `\t` is laid out with real tab stops (align + leaders). */
 	tabContext?: TabRenderContext,
+	/** When present, each word gets the tracking PowerPoint measured it at. */
+	metric?: MetricTextContext,
+	/**
+	 * D2-G3: true for an `a:rPr/@u="words"` run. Every leaf render below routes
+	 * through `renderUnderlineWords` (see `text-segment-underline-words.tsx`),
+	 * which is a no-op unless this is set.
+	 */
+	isUnderlineWords = false,
+	/** The decoration a WORD piece's own span redeclares; see the module doc. */
+	wordDecoration?: React.CSSProperties,
 ): React.ReactNode {
 	const segHl = findHighlights?.get(segmentIndex);
+	const renderLeaf = makeSegmentPieceRenderer(
+		needsScriptFonts,
+		scriptFonts,
+		baseFontFamily,
+		isUnderlineWords,
+		wordDecoration,
+		metric,
+	);
 	if (!segHl || segHl.length === 0) {
 		// Fast path: no highlights, render lines with script-aware fonts.
 		return lines.map((line: string, lineIndex: number) => {
 			const lineKey = `${elementId}-seg-${segmentIndex}-line-${lineIndex}`;
-			const renderPiece = (text: string, key: string): React.ReactNode =>
-				renderScriptAwareText(text, needsScriptFonts, scriptFonts, baseFontFamily, key);
 			return (
 				<React.Fragment key={lineKey}>
 					{tabContext && line.includes('\t')
-						? renderTabbedLine(line, tabContext, lineKey, renderPiece)
-						: renderPiece(line, lineKey)}
+						? renderTabbedLine(
+								line,
+								tabContext,
+								lineKey,
+								renderLeaf,
+								metric?.nestedStyle,
+								isUnderlineWords,
+							)
+						: renderLeaf(line, lineKey)}
 					{lineIndex < lines.length - 1 ? <br /> : null}
 				</React.Fragment>
 			);
@@ -134,36 +215,24 @@ export function renderSegmentContent(
 			isCurrent: false,
 		});
 	}
-	return chunks.map((chunk, ci) =>
-		chunk.highlighted ? (
+	return chunks.map((chunk, ci) => {
+		const chunkKey = `${elementId}-seg-${segmentIndex}-hl-${ci}`;
+		return chunk.highlighted ? (
 			<mark
-				key={`${elementId}-seg-${segmentIndex}-hl-${ci}`}
+				key={chunkKey}
 				style={{
+					...metric?.nestedStyle,
 					backgroundColor: chunk.isCurrent ? '#f97316' : '#facc15',
 					color: 'inherit',
 					borderRadius: 2,
 				}}
 			>
-				{renderScriptAwareText(
-					chunk.text,
-					needsScriptFonts,
-					scriptFonts,
-					baseFontFamily,
-					`${elementId}-seg-${segmentIndex}-hl-${ci}`,
-				)}
+				{renderLeaf(chunk.text, chunkKey)}
 			</mark>
 		) : (
-			<React.Fragment key={`${elementId}-seg-${segmentIndex}-hl-${ci}`}>
-				{renderScriptAwareText(
-					chunk.text,
-					needsScriptFonts,
-					scriptFonts,
-					baseFontFamily,
-					`${elementId}-seg-${segmentIndex}-hl-${ci}`,
-				)}
-			</React.Fragment>
-		),
-	);
+			<React.Fragment key={chunkKey}>{renderLeaf(chunk.text, chunkKey)}</React.Fragment>
+		);
+	});
 }
 
 /**
@@ -228,65 +297,11 @@ export function renderEquationSegment(
 	return <span key={`${elementId}-seg-${segmentIndex}`}>{equationContent}</span>;
 }
 
-/**
- * Render a picture bullet as an `<img>` element.
- *
- * When `bulletInfo.imageDataUrl` is available, renders an `<img>` sized to
- * match the bullet/font size. When only `imageRelId` is set (image not yet
- * resolved), falls back to a default character bullet so the user never sees
- * a broken image icon.
- */
-export function renderPictureBullet(
-	elementId: string,
-	segmentIndex: number,
-	bulletInfo: BulletInfo,
-	baseFontSize: number,
-): React.ReactNode {
-	const picture = resolvePictureBullet(bulletInfo, baseFontSize) ?? {
-		sizePx: baseFontSize,
-		fallbackMarker: '•',
-		accessibleLabel: 'Bullet',
-	};
-
-	// Fallback: when no resolved image data URL is available, render a
-	// default character bullet instead of a broken <img>.
-	// Uses marginInlineEnd so that the spacing is correct in both LTR
-	// (margin appears on the right) and RTL (margin appears on the left).
-	if (!picture.src) {
-		return (
-			<span
-				key={`${elementId}-seg-${segmentIndex}-bullet-fallback`}
-				style={{
-					fontSize: picture.sizePx,
-					display: 'inline-block',
-					verticalAlign: 'middle',
-					marginInlineEnd: 4,
-					color: bulletInfo.color || undefined,
-					fontFamily: bulletInfo.fontFamily || undefined,
-				}}
-				aria-label={picture.accessibleLabel}
-			>
-				{`${picture.fallbackMarker} `}
-			</span>
-		);
-	}
-
-	return (
-		<img
-			key={`${elementId}-seg-${segmentIndex}-bullet-img`}
-			src={picture.src}
-			alt={picture.accessibleLabel}
-			style={{
-				width: picture.sizePx,
-				height: picture.sizePx,
-				display: 'inline-block',
-				verticalAlign: 'middle',
-				marginInlineEnd: 4,
-				objectFit: 'contain',
-			}}
-		/>
-	);
-}
+// Picture bullets are no longer rendered here. Shared `buildParagraphs` resolves
+// the marker (`bulletPicture`, via `resolvePictureBullet`) and React's paragraph
+// renderer emits the `<img>` or the glyph fallback from that descriptor, exactly
+// as the other four bindings do - React's private `renderPictureBullet` was a
+// fifth copy of the same decision.
 
 // Underline decoration (extracted to pptx-viewer-shared).
 // `resolveUnderlineDecorationStyle` + `UnderlineDecorationCss` now live in

@@ -1,13 +1,16 @@
 import type { PptxSlide } from 'pptx-viewer-core';
-import { PresentationAnimationController } from 'pptx-viewer-shared';
-import type { ElementAnimationState } from 'pptx-viewer-shared';
-
-import type { BuildRafHandle, PlaybackContext } from './animation-playback-helpers';
+import type { BuildRafHandle, ElementAnimationState, PlaybackContext } from 'pptx-viewer-shared';
 import {
-	cancelBuildReveal,
+	advanceMainSequence,
+	clearPlaybackTimers,
+	createActiveAnimationGroup,
 	playGroup,
+	PresentationAnimationController,
+	resolveMediaTimeNodeElementIds,
 	scheduleAutoAdvanceChain,
-} from './animation-playback-helpers';
+} from 'pptx-viewer-shared';
+
+import { playAnimationSound, stopAnimationSound } from './animation-sound';
 
 /**
  * `AnimationPlayback`: native-timing (`p:timing`) animation playback for the
@@ -24,8 +27,9 @@ import {
  *
  * The class owns the reactive per-element state map, the keyframes CSS, and the
  * interactive / hover trigger-shape id sets; the controller stays pure. The
- * clock (timers, requestAnimationFrame) + DOM effects live in
- * {@link module:presentation/animation-playback-helpers}.
+ * clock (timers, requestAnimationFrame) + DOM effects live in the shared
+ * {@link module:render/animation-playback-engine}, wired here with the local
+ * `./animation-sound` player.
  *
  * NOTE: the editor / inspector animation PREVIEW still uses the older shared
  * `buildClickGroups` model (see `AnimationsTab` / `editor-animation-controller`);
@@ -40,6 +44,15 @@ export interface AnimationPlaybackDeps {
 	onPlayActionSound?: (soundPath: string) => void;
 	/** Root element to scope media-command (`p:cmd`) target lookups to. */
 	frameRoot?: () => HTMLElement | null;
+	/**
+	 * The slide canvas size (px), in the same unit the elements' own
+	 * `x`/`y`/`width`/`height` are authored in. Lets `PresentationAnimationController
+	 * .fromSlide` resolve a `p:anim` formula that needs the animated shape's real
+	 * box (e.g. Grow And Turn's `-#ppt_w/2` fly-in) instead of falling back.
+	 */
+	getCanvasSize?(): { width: number; height: number } | undefined;
+	/** The deck's resolved theme colour map, for a scheme-colour (`a:schemeClr`) animation stop. */
+	getThemeColorMap?(): Readonly<Record<string, string>> | undefined;
 }
 
 export class AnimationPlayback {
@@ -58,6 +71,12 @@ export class AnimationPlayback {
 	#controller: PresentationAnimationController | null = null;
 	readonly #timers: number[] = [];
 	readonly #buildHandle: BuildRafHandle = { current: null };
+	/**
+	 * The click-group the last presenter click started, so a second click while
+	 * it is still mid-flight fast-forwards it (`p:seq/@nextAc="seek"`) instead
+	 * of skipping to the next group. Owned here, mutated by the shared helpers.
+	 */
+	readonly #activeGroup = createActiveAnimationGroup();
 	readonly #ctx: PlaybackContext;
 
 	constructor(deps: AnimationPlaybackDeps) {
@@ -69,6 +88,8 @@ export class AnimationPlayback {
 			timers: this.#timers,
 			buildHandle: this.#buildHandle,
 			onPlayActionSound: deps.onPlayActionSound,
+			playSound: playAnimationSound,
+			stopSound: stopAnimationSound,
 			frameRoot: deps.frameRoot,
 		};
 	}
@@ -108,11 +129,18 @@ export class AnimationPlayback {
 
 	/** Clear all pending timers + the in-flight staged-build RAF. */
 	clearTimers(): void {
-		for (const timer of this.#timers) {
-			window.clearTimeout(timer);
-		}
-		this.#timers.length = 0;
-		cancelBuildReveal(this.#buildHandle);
+		clearPlaybackTimers(this.#ctx, this.#activeGroup);
+	}
+
+	/**
+	 * True while the active slide shows its builds as already complete because
+	 * the presenter stepped BACKWARD onto it. The next back press replays it.
+	 */
+	#seededCompleted = false;
+
+	/** Whether the active slide was seeded as fully built (backward entry). */
+	get seededCompleted(): boolean {
+		return this.#seededCompleted;
 	}
 
 	/**
@@ -120,11 +148,13 @@ export class AnimationPlayback {
 	 * controller builds the timeline engine (expanding text-build animations) and
 	 * derives keyframes CSS, trigger-shape ids, and the tracked element id list.
 	 */
-	reset(): void {
+	reset(options?: { completed?: boolean }): void {
 		this.clearTimers();
+		this.#seededCompleted = false;
 		const slide = this.#deps.getSlide();
 		if (!slide || !this.#animationsEnabled()) {
 			this.#controller = null;
+			this.#ctx.mediaTimeNodeElementIds = new Map();
 			this.#states = new Map();
 			this.#keyframesCss = '';
 			this.#interactiveTriggerShapeIds = new Set();
@@ -133,13 +163,38 @@ export class AnimationPlayback {
 			return;
 		}
 
-		const controller = PresentationAnimationController.fromSlide(slide);
+		// `getCanvasSize`/`getThemeColorMap` let the controller resolve a
+		// `p:anim` formula that needs the animated shape's real box (Grow And
+		// Turn's `-#ppt_w/2` fly-in) and a scheme-colour ramp stop instead of
+		// falling back.
+		const canvasSize = this.#deps.getCanvasSize?.();
+		const controller = PresentationAnimationController.fromSlide(slide, {
+			slideHeightPx: canvasSize?.height,
+			slideWidthPx: canvasSize?.width,
+			themeColorMap: this.#deps.getThemeColorMap?.(),
+		});
 		this.#controller = controller;
+		// Lets a `p:cond/@evt="onStopAudio"`-gated step gate on the REAL media
+		// element's `ended` event instead of only its estimated `delayMs`.
+		this.#ctx.mediaTimeNodeElementIds = resolveMediaTimeNodeElementIds(
+			slide.nativeAnimations ?? [],
+		);
 		this.#keyframesCss = controller.keyframesCss;
 		this.#interactiveTriggerShapeIds = controller.interactiveTriggerShapeIds;
 		this.#hoverTriggerShapeIds = controller.hoverTriggerShapeIds;
 		this.#states = controller.computeStates();
 		this.#syncComplete();
+
+		// Stepping backward onto a slide shows it with every build already
+		// complete, the way PowerPoint does: nothing plays, nothing is scheduled,
+		// and a further back press replays the slide from the start.
+		if (options?.completed) {
+			this.#seededCompleted = controller.hasMoreSteps();
+			controller.completeAll();
+			this.#states = controller.computeStates();
+			this.#syncComplete();
+			return;
+		}
 
 		// Auto-play the first group when the slide opens with a withPrevious /
 		// afterPrevious / afterDelay build (mirrors React's entrance auto-play).
@@ -165,17 +220,14 @@ export class AnimationPlayback {
 	 * through to slide navigation).
 	 */
 	advance(): boolean {
-		if (!this.#animationsEnabled() || !this.#controller || !this.#controller.hasMoreSteps()) {
+		if (!this.#animationsEnabled()) {
 			return false;
 		}
-		const group = this.#controller.advance();
-		if (!group) {
-			return false;
-		}
-		playGroup(this.#controller, group, this.#ctx);
-		scheduleAutoAdvanceChain(this.#controller, this.#ctx);
+		// Seek-or-advance (`p:seq/@nextAc="seek"`) plus the auto-advance chain
+		// live in shared, so the branch is identical in all five bindings.
+		const consumed = advanceMainSequence(this.#controller, this.#ctx, this.#activeGroup);
 		this.#syncComplete();
-		return true;
+		return consumed;
 	}
 
 	/** Play an interactive shape's sequence; `true` when it triggered one. */

@@ -1,3 +1,4 @@
+import { EMU_PER_PX } from '../../constants';
 import { XmlObject } from '../../types';
 import type {
 	PptxSlideMaster,
@@ -5,9 +6,12 @@ import type {
 	PptxCustomShow,
 	PptxHandoutMaster,
 	PptxNotesMaster,
+	PptxPlaceholderFrame,
 } from '../../types';
 import { parseCustomShows } from '../../utils/presentation-collections';
-import { xmlAttr, xmlChild, xmlPath } from '../../utils/xml-access';
+import { resolveSlideLayoutOrder } from '../../utils/slide-layout-order';
+import { xmlAttr, xmlAttrNumber, xmlChild, xmlPath } from '../../utils/xml-access';
+import { parseOverrideClrMapping } from './color-scheme-index';
 import { parseMasterColorMap } from './master-color-map';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeDocProperties';
 import { parseHeaderFooterFlags } from './PptxHandlerRuntimeMasterElements';
@@ -32,16 +36,18 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	}
 
 	/**
-	 * Extract placeholder type+idx from all shapes in a shape tree.
+	 * Extract placeholder type, idx and frame from all shapes in a shape tree.
+	 *
+	 * The frame is only reported when the shape carries an explicit `a:xfrm`;
+	 * placeholders that inherit their position from the master leave the
+	 * geometry undefined rather than reporting a zero-sized box at the origin.
 	 */
-	protected extractPlaceholderList(
-		spTree: XmlObject | undefined,
-	): Array<{ type: string; idx?: string }> {
+	protected extractPlaceholderList(spTree: XmlObject | undefined): PptxPlaceholderFrame[] {
 		if (!spTree) {
 			return [];
 		}
 		const shapes = this.ensureArray(spTree['p:sp']);
-		const result: Array<{ type: string; idx?: string }> = [];
+		const result: PptxPlaceholderFrame[] = [];
 		for (const sp of shapes) {
 			const ph = xmlPath(sp, 'p:nvSpPr', 'p:nvPr', 'p:ph');
 			if (!ph) {
@@ -49,7 +55,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			}
 			const type = (xmlAttr(ph, 'type') ?? 'body').trim();
 			const idx = xmlAttr(ph, 'idx');
-			result.push({ type, idx });
+			const xfrm = xmlPath(sp, 'p:spPr', 'a:xfrm');
+			const off = xmlChild(xfrm, 'a:off');
+			const ext = xmlChild(xfrm, 'a:ext');
+			result.push({
+				type,
+				idx,
+				...toPx('x', xmlAttrNumber(off, 'x')),
+				...toPx('y', xmlAttrNumber(off, 'y')),
+				...toPx('width', xmlAttrNumber(ext, 'cx')),
+				...toPx('height', xmlAttrNumber(ext, 'cy')),
+			});
 		}
 		return result;
 	}
@@ -158,6 +174,13 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					this.masterXmlMap.set(path, data);
 				}
 
+				// Name from p:cSld/@name (mirrors the layout-level parse below; a
+				// from-scratch master carries none, which is why callers fall
+				// back to a synthesised name rather than assuming one exists).
+				const masterCSldName = (
+					xmlAttr(sldMaster['p:cSld'] as XmlObject | undefined, 'name') ?? ''
+				).trim();
+
 				// Background
 				const bg = (sldMaster['p:cSld'] as XmlObject | undefined)?.['p:bg'] as
 					| XmlObject
@@ -169,6 +192,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					| XmlObject
 					| undefined;
 				const placeholders = this.extractPlaceholderList(spTree);
+
+				// `@preserve` (CT_SlideMaster, ECMA-376 §19.3.1.38): mirrors the
+				// layout-level flag that stops PowerPoint auto-deleting an
+				// otherwise-unused master.
+				let preserve: boolean | undefined;
+				const preserveRaw = sldMaster['@_preserve'];
+				if (preserveRaw !== undefined) {
+					const pVal = String(preserveRaw).trim().toLowerCase();
+					preserve = pVal === '1' || pVal === 'true';
+				}
 
 				// Theme reference (from relationship)
 				let themePath: string | undefined;
@@ -200,12 +233,14 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					const rels = this.ensureArray(
 						xmlChild(relsData, 'Relationships')?.['Relationship'],
 					) as XmlObject[];
-					for (const rel of rels) {
-						const relType = String(rel['@_Type'] || '');
-						if (relType.includes('/slideLayout')) {
-							layoutPaths.push(this.resolveImagePath(path, String(rel['@_Target'] || '')));
-						}
-					}
+					// Follow the master's own <p:sldLayoutIdLst> rather than the
+					// unordered .rels bag, so the gallery lists layouts in the
+					// order PowerPoint shows them.
+					layoutPaths.push(
+						...resolveSlideLayoutOrder(sldMaster, rels, (target) =>
+							this.resolveImagePath(path, target),
+						),
+					);
 				}
 
 				// Parse layout attributes
@@ -219,11 +254,13 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 				results.push({
 					path,
+					name: masterCSldName.length > 0 ? masterCSldName : undefined,
 					backgroundColor,
 					themePath,
 					layoutPaths: layoutPaths.length > 0 ? layoutPaths : undefined,
 					layouts: layouts.length > 0 ? layouts : undefined,
 					placeholders: placeholders.length > 0 ? placeholders : undefined,
+					preserve,
 				});
 			}
 		} catch (e) {
@@ -333,6 +370,14 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				this.layoutXmlMap.set(layoutPath, data);
 			}
 
+			// A layout's own relationship part is what ties it back to its master.
+			// Loading it here covers the layouts no slide currently uses, so a
+			// layout gallery can offer every layout of the active master rather
+			// than only the ones the deck happens to have visited.
+			if (!this.slideRelsMap.has(layoutPath)) {
+				await this.loadPartRelationships(layoutPath);
+			}
+
 			const layout: PptxSlideLayout = { path: layoutPath };
 
 			// Name from p:cSld/@name
@@ -370,37 +415,28 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				layout.headerFooter = hf;
 			}
 
-			// Colour map override (inline parse — parseClrMapOverrideNode is further in chain)
+			// `p:clrMapOvr/a:overrideClrMapping` (§20.1.6.7).
+			//
+			// This used to be a hand-rolled copy of the parse, justified by a
+			// comment claiming the real one was "further in chain". It was not:
+			// the copy lower-cased every value, and `ST_ColorSchemeIndex` has a
+			// camel-cased token (`folHlink`), so a layout override round-tripped
+			// as `folHlink="folhlink"` - outside the enumeration, which makes
+			// PowerPoint refuse the package (0x80070570). Nothing hit it while
+			// untouched layouts passed through verbatim; the master/layout
+			// editing path reaches it. The shared normaliser is the only copy.
 			const clrMapOvr = sldLayout['p:clrMapOvr'] as XmlObject | undefined;
 			if (clrMapOvr && clrMapOvr['a:masterClrMapping'] === undefined) {
 				const overrideNode = clrMapOvr['a:overrideClrMapping'] as XmlObject | undefined;
-				if (overrideNode) {
-					const aliasKeys = [
-						'bg1',
-						'tx1',
-						'bg2',
-						'tx2',
-						'accent1',
-						'accent2',
-						'accent3',
-						'accent4',
-						'accent5',
-						'accent6',
-						'hlink',
-						'folHlink',
-					];
-					const overrideMap: Record<string, string> = {};
-					for (const key of aliasKeys) {
-						const mapped = String(overrideNode[`@_${key}`] || '')
-							.trim()
-							.toLowerCase();
-						if (mapped) {
-							overrideMap[key] = mapped;
-						}
-					}
-					if (Object.keys(overrideMap).length > 0) {
-						layout.clrMapOverride = overrideMap;
-					}
+				const overrideMap = overrideNode
+					? parseOverrideClrMapping(overrideNode, (alias, rawValue) => {
+							console.warn(
+								`Slide layout ${layoutPath}: dropping clrMapOvr ${alias}="${rawValue}" (not an ST_ColorSchemeIndex token).`,
+							);
+						})
+					: null;
+				if (overrideMap) {
+					layout.clrMapOverride = overrideMap;
 				}
 			}
 
@@ -436,4 +472,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			return undefined;
 		}
 	}
+}
+
+/**
+ * Convert one EMU measurement to a CSS-pixel entry, or to nothing at all when
+ * the attribute was absent or unparseable. Spreading the result keeps the key
+ * off the object entirely rather than setting it to `undefined`, which matters
+ * because callers treat "no geometry" as "inherits from the master".
+ */
+function toPx<K extends 'x' | 'y' | 'width' | 'height'>(
+	key: K,
+	emu: number | undefined,
+): Partial<Record<K, number>> {
+	return emu === undefined ? {} : ({ [key]: emu / EMU_PER_PX } as Record<K, number>);
 }

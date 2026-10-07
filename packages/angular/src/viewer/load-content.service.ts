@@ -1,4 +1,4 @@
-import { DestroyRef, Injectable, computed, inject, signal } from '@angular/core';
+import { DestroyRef, Injectable, computed, inject, signal, untracked } from '@angular/core';
 import { XMLParser } from 'fast-xml-parser';
 import JSZip from 'jszip';
 import type {
@@ -7,30 +7,50 @@ import type {
 	PptxAppProperties,
 	PptxCoreProperties,
 	PptxCustomProperty,
-	PptxElement,
+	PptxCustomShow,
+	PptxData,
 	PptxEmbeddedFont,
 	PptxHeaderFooter,
 	PptxHandoutMaster,
+	PptxModernCommentAuthor,
 	PptxNotesMaster,
 	PptxPresentationProperties,
 	PptxSaveFormat,
 	PptxSection,
 	PptxSlide,
 	PptxSlideMaster,
+	PptxTagCollection,
 	PptxTheme,
 	PptxThemeOption,
+	PptxViewProperties,
 	ParsedTableStyleMap,
 	XmlObject,
 } from 'pptx-viewer-core';
-import { EncryptedFileError, parseSignatureXml, PptxHandler } from 'pptx-viewer-core';
+import {
+	EncryptedFileError,
+	decodeXmlEntities,
+	parseSignatureXml,
+	PptxHandler,
+} from 'pptx-viewer-core';
 
 import {
 	DEFAULT_CANVAS_HEIGHT,
 	DEFAULT_CANVAS_WIDTH,
+	applyImagePathPatches,
+	buildDeckSaveOptions,
+	collectAnimationSoundPaths,
 	collectImagePaths,
 	collectMediaElements,
+	describeFontEmbedding,
+	resolveMediaElementSource,
+	resolveSlideSizeSelection,
+	resolveTableCellImageUrls,
+	resolveTableStyleImageUrls,
+	saveDeckWithPassword,
+	slideSizeToCanvasPx,
 } from '../internal/shared';
-import type { CanvasSize } from '../internal/shared';
+import type { CanvasSize, DeckSaveIntent, SlideSizeEmu } from '../internal/shared';
+import { ViewerOptionsService } from './viewer-options.service';
 
 /**
  * `LoadContentService`: Angular port of the React `useLoadContent` hook and
@@ -53,17 +73,59 @@ import type { CanvasSize } from '../internal/shared';
 export class LoadContentService {
 	/** Parsed slides (with image Blob URLs patched in). */
 	readonly slides = signal<PptxSlide[]>([]);
+	/**
+	 * The full parsed presentation (slides patched with resolved image data
+	 * URLs), for whole-deck exports such as the `pptx-viewer-json` download.
+	 */
+	readonly parsedData = signal<PptxData | undefined>(undefined);
 	/** Slide canvas size in pixels. */
 	readonly canvasSize = signal<CanvasSize>({
 		width: DEFAULT_CANVAS_WIDTH,
 		height: DEFAULT_CANVAS_HEIGHT,
 	});
+	/**
+	 * `p:sldSz` in EMU, seeded from the loaded deck and rewritten by the SLIDE
+	 * SIZE card's preset/orientation controls.
+	 *
+	 * It is deliberately NOT derived from {@link canvasSize}: the pixel size is
+	 * an integer, and Ledger (12179300 EMU = 1278.5px) loses its
+	 * `ppSlideSizeLedgerPaper` identity the moment it round-trips through one.
+	 * The shared `resolveSlideSizeSelection` decides which of the two wins; see
+	 * {@link slideSizeSelection}.
+	 */
+	readonly slideSizeEmu = signal<SlideSizeEmu | undefined>(undefined);
+	/**
+	 * The deck's custom shows (`p:custShow`), in the package's own key space
+	 * (`slideRIds` are RELATIONSHIP ids). Seeded on load and carried through
+	 * {@link saveSlides}; {@link ViewerCustomShowsService} is the editing surface
+	 * over it. Angular used to start this list empty and never write it back, so
+	 * the dialog opened blank on a deck with shows and lost anything created in
+	 * it.
+	 */
+	readonly customShows = signal<PptxCustomShow[]>([]);
+	/**
+	 * The shared Slide Size decision for the deck as it stands: the EMU size a
+	 * save must persist, the preset it matches (if any), its orientation and the
+	 * canvas size the stage should use. Read by the SLIDE SIZE inspector card and
+	 * by {@link saveSlides}.
+	 */
+	readonly slideSizeSelection = computed(() =>
+		resolveSlideSizeSelection({ current: this.slideSizeEmu(), canvas: this.canvasSize() }),
+	);
 	/** Resolved presentation theme. */
 	readonly theme = signal<PptxTheme | undefined>(undefined);
 	/** Resolved colour map for the presentation theme (scheme key → hex). */
 	readonly themeColorMap = signal<Record<string, string> | undefined>(undefined);
 	/** Parsed table-style definitions from `ppt/tableStyles.xml` (banding/diagonals). */
 	readonly tableStyleMap = signal<ParsedTableStyleMap | undefined>(undefined);
+	/** `ppt/tableStyles.xml`'s `<a:tblStyleLst @def>` default style GUID. */
+	readonly tableStylesDefaultId = signal<string | undefined>(undefined);
+	/**
+	 * Style GUIDs deleted from `tableStyleMap` via the table style editor,
+	 * pending removal from `ppt/tableStyles.xml` on the next save. See
+	 * `tableStyleSaveOptions` / `applyTableStyleDelete` in `pptx-viewer-shared`.
+	 */
+	readonly tableStylesToDelete = signal<string[]>([]);
 	/** Slide masters (for placeholder/background resolution). */
 	readonly slideMasters = signal<PptxSlideMaster[]>([]);
 	/** Notes master, including its editable element tree. */
@@ -72,12 +134,40 @@ export class LoadContentService {
 	readonly handoutMaster = signal<PptxHandoutMaster | undefined>(undefined);
 	readonly sections = signal<PptxSection[]>([]);
 	readonly presentationProperties = signal<PptxPresentationProperties>({});
+	/**
+	 * View properties (`ppt/viewProps.xml`, `p:viewPr`): grid spacing, snap /
+	 * guide toggles, last view, splitter state, etc. `gridSpacing` lives here,
+	 * NOT on `presentationProperties` -- `p:gridSpacing` is a child of
+	 * `p:viewPr`, and a real PowerPoint file never populates it under
+	 * `p:presentationPr`.
+	 */
+	readonly viewProperties = signal<PptxViewProperties | undefined>(undefined);
 	/** Whether the loaded package contains a VBA project. */
 	readonly hasMacros = signal(false);
 	/** Archive-path → displayable URL map for media + poster frames. */
 	readonly mediaDataUrls = signal<Map<string, string>>(new Map());
 	/** Embedded font data (name + binary) extracted from the presentation. */
 	readonly embeddedFonts = signal<PptxEmbeddedFont[]>([]);
+	/**
+	 * Shared decision behind File > Fonts > "Embed fonts in the file": whether
+	 * the toggle accepts input at all, and which position describes the deck
+	 * that is loaded. Surfaced by {@link ViewerDialogsService} to the panel.
+	 */
+	readonly fontEmbedding = computed(() =>
+		describeFontEmbedding(this.embeddedFonts().map((font) => font.name)),
+	);
+	/**
+	 * The toggle's live position, read by {@link saveSlides}. `false` strips
+	 * `p:embeddedFontLst`, the `/font` relationships and the `.fntdata` parts;
+	 * `true` keeps whatever the deck arrived with (core's default).
+	 *
+	 * It lives here, next to the fonts it decides the fate of, rather than in
+	 * the dialogs service, so the value save reads is seeded by the LOAD and
+	 * cannot depend on whether the Fonts panel was ever rendered. Seeded in
+	 * {@link load}; the initial `true` covers "no deck yet", where there is
+	 * nothing to strip.
+	 */
+	readonly embedFonts = signal(true);
 	/** Core document properties from `docProps/core.xml`. */
 	readonly coreProperties = signal<PptxCoreProperties | undefined>(undefined);
 	/** Extended application properties from `docProps/app.xml`. */
@@ -88,6 +178,18 @@ export class LoadContentService {
 	readonly notesCanvasSize = signal<CanvasSize | undefined>(undefined);
 	/** Custom document properties (used for `docproperty` field substitution). */
 	readonly customProperties = signal<PptxCustomProperty[]>([]);
+	/**
+	 * `ppt/tags/*.xml` name/value metadata, editable from the inspector's TAGS
+	 * card. Tags are how add-ins and automation stamp machine-readable data onto
+	 * a deck, so they are carried through save (see {@link saveSlides}) rather
+	 * than silently dropped.
+	 */
+	readonly tagCollections = signal<PptxTagCollection[]>([]);
+	/**
+	 * Office 2021 modern comment authors (`ppt/commentAuthors/`, p188), the
+	 * candidate list the comment panel's `@`-mention typeahead matches against.
+	 */
+	readonly modernCommentAuthors = signal<PptxModernCommentAuthor[]>([]);
 	/** Header/footer settings (footer/header/date-time text + format) for field substitution. */
 	readonly headerFooter = signal<PptxHeaderFooter | undefined>(undefined);
 	/** Whether the presentation contains digital signatures. */
@@ -111,6 +213,19 @@ export class LoadContentService {
 	private renderToken = 0;
 	private activeBlobUrls: string[] = [];
 
+	/**
+	 * Optional: `inject()` needs an active injection context, which the
+	 * colocated unit tests construct this service without. Trust Center >
+	 * "Allow external content" reads through this when present.
+	 */
+	private readonly optionsService: ViewerOptionsService | null = (() => {
+		try {
+			return inject(ViewerOptionsService);
+		} catch {
+			return null;
+		}
+	})();
+
 	constructor() {
 		inject(DestroyRef).onDestroy(() => {
 			this.renderToken++;
@@ -120,9 +235,14 @@ export class LoadContentService {
 		});
 	}
 
-	/** Serialise the current (loaded) presentation back to `.pptx` bytes. */
-	async getContent(): Promise<Uint8Array> {
-		return this.saveSlides(this.slides());
+	/**
+	 * Serialise the current (loaded) presentation back to `.pptx` bytes.
+	 *
+	 * `password` carries the File > Info > Protect Presentation state; when set
+	 * the bytes are an encrypted OLE2 container rather than a plain ZIP.
+	 */
+	async getContent(password?: DeckSaveIntent | string | null): Promise<Uint8Array> {
+		return this.saveSlides(this.slides(), 'pptx', undefined, password);
 	}
 
 	/**
@@ -147,23 +267,51 @@ export class LoadContentService {
 		slides: readonly PptxSlide[],
 		outputFormat: PptxSaveFormat = 'pptx',
 		sections: readonly PptxSection[] = this.sections(),
+		password?: DeckSaveIntent | string | null,
 	): Promise<Uint8Array> {
 		if (!this.handler) {
 			throw new Error('No presentation is loaded.');
 		}
 		const customProperties = this.customProperties();
-		return this.handler.save([...slides], {
-			headerFooter: this.headerFooter(),
-			presentationProperties: this.presentationProperties(),
-			slideMasters: this.slideMasters(),
-			notesMaster: this.notesMaster(),
-			handoutMaster: this.handoutMaster(),
-			sections: sections.length > 0 ? [...sections] : undefined,
-			coreProperties: this.coreProperties(),
-			appProperties: this.appProperties(),
-			customProperties: customProperties.length > 0 ? [...customProperties] : undefined,
-			outputFormat,
-		});
+		const tags = this.tagCollections();
+		const customShows = this.customShows();
+		// Shared decision (see `deck-save-encryption` in `pptx-viewer-shared`): a
+		// password set in the protection dialog routes through `saveEncrypted`, so
+		// the produced file is a real encrypted OLE2 container.
+		return saveDeckWithPassword(
+			this.handler,
+			[...slides],
+			buildDeckSaveOptions({
+				headerFooter: this.headerFooter(),
+				presentationProperties: this.presentationProperties(),
+				slideMasters: this.slideMasters(),
+				notesMaster: this.notesMaster(),
+				handoutMaster: this.handoutMaster(),
+				sections,
+				// Without this the Custom Shows dialog was write-only: shows created
+				// in it never reached `p:custShowLst`, and a deck that arrived with
+				// shows lost them on save.
+				customShows,
+				// The only route a slide-size edit has into the saved `p:sldSz`.
+				slideSize: this.slideSizeSelection().size,
+				coreProperties: this.coreProperties(),
+				appProperties: this.appProperties(),
+				customProperties,
+				tagCollections: tags,
+				outputFormat,
+				// Without this core falls back to `viewProps.xml` as it was FIRST
+				// opened, so every View-ribbon grid/guide/snap toggle silently
+				// reverted at the file boundary.
+				viewProperties: this.viewProperties(),
+				tableStyleMap: this.tableStyleMap(),
+				tableStylesDefaultId: this.tableStylesDefaultId(),
+				tableStylesToDelete: this.tableStylesToDelete(),
+				// The Fonts panel's toggle used to move and change nothing; it now
+				// decides whether the deck's embedded font data survives the save.
+				embedFonts: this.embedFonts(),
+			}),
+			password,
+		);
 	}
 
 	/** Parse the supplied `.pptx` bytes into the reactive signals. */
@@ -198,7 +346,21 @@ export class LoadContentService {
 
 			const previousHandler = this.handler;
 			const newHandler = new PptxHandler();
-			const parsed = await newHandler.load(buffer as ArrayBuffer);
+			// Trust Center > "Allow external content": gates linked (non-embedded)
+			// http(s) image URLs. Defaults to blocked when the options service is
+			// unreachable (e.g. constructed outside DI in a unit test).
+			//
+			// Read UNTRACKED: this runs synchronously inside the viewer's load
+			// effect, before the first await, so a tracked read here made that
+			// effect depend on the whole Options store. Every preference write
+			// (the AutoSave switch, a View toggle, an Options dialog field) then
+			// re-parsed the deck from its original bytes, which re-seeded the
+			// editor and threw away unsaved edits and the undo history. The option
+			// is a load-time input, exactly as in React (`[content]` deps only).
+			const allowExternalImages = untracked(
+				() => this.optionsService?.options().trust.allowExternalContent ?? false,
+			);
+			const parsed = await newHandler.load(buffer as ArrayBuffer, { allowExternalImages });
 			if (token !== this.renderToken) {
 				newHandler.dispose();
 				return;
@@ -212,37 +374,42 @@ export class LoadContentService {
 			}
 			this.revokeBlobUrls(Array.from(this.mediaDataUrls().values()));
 			const nextMediaUrls = new Map<string, string>();
+			// Shared with the other four bindings (G17): a LINKED media
+			// element's `mediaPath` is already the verbatim external URL by the
+			// time it reaches here; `resolveMediaElementSource` hands it
+			// straight back instead of an archive lookup that can only find
+			// embedded parts.
 			await Promise.all(
 				mediaElements.map(async (mediaElement) => {
-					const mediaPath = mediaElement.mediaPath;
-					if (!mediaPath) {
+					const resolved = await resolveMediaElementSource(mediaElement, newHandler);
+					if (resolved.missing || !resolved.mediaPath || !resolved.url) {
 						mediaElement.mediaMissing = true;
 						return;
 					}
+					nextMediaUrls.set(resolved.mediaPath, resolved.url);
+					if (resolved.isBlobUrl) {
+						loadBlobUrls.push(resolved.url);
+					}
+				}),
+			);
+
+			// Native-animation `p:stSnd` sounds that back no visible media element
+			// (PowerPoint's animation sound library) have no entry above; resolve
+			// them into the same map so `onPlayActionSound`'s lookup finds them.
+			const soundPaths = collectAnimationSoundPaths(parsed.slides).filter(
+				(path) => !nextMediaUrls.has(path),
+			);
+			await Promise.all(
+				soundPaths.map(async (soundPath) => {
 					try {
-						const isAudioVideo =
-							mediaElement.mediaType === 'audio' || mediaElement.mediaType === 'video';
-						if (isAudioVideo) {
-							const arrayBuffer = await newHandler.getMediaArrayBuffer(mediaPath);
-							if (arrayBuffer) {
-								const mimeType = mediaElement.mediaMimeType || 'application/octet-stream';
-								const blob = new Blob([arrayBuffer], { type: mimeType });
-								const blobUrl = URL.createObjectURL(blob);
-								loadBlobUrls.push(blobUrl);
-								nextMediaUrls.set(mediaPath, blobUrl);
-							} else {
-								mediaElement.mediaMissing = true;
-							}
-						} else {
-							const dataUrl = await newHandler.getImageData(mediaPath);
-							if (dataUrl) {
-								nextMediaUrls.set(mediaPath, dataUrl);
-							} else {
-								mediaElement.mediaMissing = true;
-							}
+						const arrayBuffer = await newHandler.getMediaArrayBuffer(soundPath);
+						if (arrayBuffer) {
+							const blobUrl = URL.createObjectURL(new Blob([arrayBuffer]));
+							loadBlobUrls.push(blobUrl);
+							nextMediaUrls.set(soundPath, blobUrl);
 						}
 					} catch {
-						mediaElement.mediaMissing = true;
+						/* Non-critical: the sound simply will not play. */
 					}
 				}),
 			);
@@ -265,67 +432,72 @@ export class LoadContentService {
 					}),
 				);
 
-				const elementPatches = new Map<string, Record<string, string>>();
-				for (const refEntry of imageRefs) {
-					const url = resolvedMap.get(refEntry.path);
-					if (!url) {
-						continue;
-					}
-					const id = refEntry.element.id;
-					const existing = elementPatches.get(id) ?? {};
-					existing[refEntry.field] = url;
-					elementPatches.set(id, existing);
-				}
-
-				if (elementPatches.size > 0) {
-					const patchElements = (elements: PptxElement[]): PptxElement[] => {
-						let mutated = false;
-						const next = elements.map((el) => {
-							let updated = el;
-							const patch = elementPatches.get(el.id);
-							if (patch) {
-								updated = { ...el, ...patch } as PptxElement;
-							}
-							if (updated.type === 'group' && updated.children?.length) {
-								const newChildren = patchElements(updated.children);
-								if (newChildren !== updated.children) {
-									updated = { ...updated, children: newChildren };
-								}
-							}
-							if (updated !== el) {
-								mutated = true;
-							}
-							return updated;
-						});
-						return mutated ? next : elements;
-					};
-					nextSlides = parsed.slides.map((s) => {
-						const newElements = patchElements(s.elements);
-						return newElements === s.elements ? s : { ...s, elements: newElements };
-					});
-				}
+				nextSlides = parsed.slides.map((s) => {
+					const newElements = applyImagePathPatches(s.elements, resolvedMap, imageRefs);
+					return newElements === s.elements ? s : { ...s, elements: newElements };
+				});
 			}
+
+			// ── Resolve table cell image-fill Blob URLs ──
+			nextSlides = await resolveTableCellImageUrls(nextSlides, (path) =>
+				newHandler.getImageData(path),
+			);
+
+			// ── Resolve whole-table-STYLE image-fill Blob URLs ──
+			const nextTableStyleMap = await resolveTableStyleImageUrls(parsed.tableStyleMap, (path) =>
+				newHandler.getImageData(path),
+			);
 
 			// Commit reactive state.
 			this.revokeBlobUrls(this.activeBlobUrls);
 			this.activeBlobUrls = loadBlobUrls;
 			this.handler = newHandler;
 			this.slides.set(nextSlides);
+			this.parsedData.set({ ...parsed, slides: nextSlides, tableStyleMap: nextTableStyleMap });
 			this.mediaDataUrls.set(nextMediaUrls);
-			this.canvasSize.set({
-				width: parsed.width ?? DEFAULT_CANVAS_WIDTH,
-				height: parsed.height ?? DEFAULT_CANVAS_HEIGHT,
-			});
+			// `p:sldSz` in its authored EMU, which is the size a save round-trips.
+			// The px canvas is derived from it where the deck reported one, so the
+			// two agree and `resolveSlideSizeSelection` keeps the EMU (and with it
+			// the preset identity) rather than re-deriving it from integer pixels.
+			const slideSizeEmu: SlideSizeEmu | undefined =
+				typeof parsed.widthEmu === 'number' &&
+				typeof parsed.heightEmu === 'number' &&
+				parsed.widthEmu > 0 &&
+				parsed.heightEmu > 0
+					? {
+							widthEmu: parsed.widthEmu,
+							heightEmu: parsed.heightEmu,
+							type: parsed.slideSizeType ?? '',
+						}
+					: undefined;
+			this.slideSizeEmu.set(slideSizeEmu);
+			this.canvasSize.set(
+				slideSizeEmu
+					? slideSizeToCanvasPx(slideSizeEmu)
+					: {
+							width: parsed.width ?? DEFAULT_CANVAS_WIDTH,
+							height: parsed.height ?? DEFAULT_CANVAS_HEIGHT,
+						},
+			);
+			this.customShows.set(parsed.customShows ?? []);
 			this.theme.set(parsed.theme);
 			this.themeColorMap.set(parsed.themeColorMap);
-			this.tableStyleMap.set(parsed.tableStyleMap);
+			this.tableStyleMap.set(nextTableStyleMap);
+			this.tableStylesDefaultId.set(parsed.tableStylesDefaultId);
+			this.tableStylesToDelete.set([]);
 			this.slideMasters.set(parsed.slideMasters ?? []);
 			this.notesMaster.set(parsed.notesMaster);
 			this.handoutMaster.set(parsed.handoutMaster);
 			this.sections.set(parsed.sections ?? []);
 			this.presentationProperties.set(parsed.presentationProperties ?? {});
+			this.viewProperties.set(parsed.viewProperties);
 			this.hasMacros.set(parsed.hasMacros ?? false);
 			this.embeddedFonts.set(parsed.embeddedFonts ?? []);
+			// Re-seed the Fonts toggle for THIS deck: it has to start in the
+			// position that describes what save would do right now (ON when the
+			// deck carries embedded fonts, because core re-embeds them), and the
+			// previous deck's answer says nothing about this one.
+			this.embedFonts.set(this.fontEmbedding().initialEnabled);
 			this.coreProperties.set(parsed.coreProperties);
 			this.appProperties.set(parsed.appProperties);
 			this.themeOptions.set(parsed.themeOptions ?? []);
@@ -342,6 +514,8 @@ export class LoadContentService {
 					: undefined,
 			);
 			this.customProperties.set(parsed.customProperties ?? []);
+			this.tagCollections.set(parsed.tags ?? []);
+			this.modernCommentAuthors.set(parsed.modernCommentAuthors ?? []);
 			this.headerFooter.set(parsed.headerFooter);
 			this.hasDigitalSignatures.set(parsed.hasDigitalSignatures ?? false);
 			this.digitalSignatureCount.set(parsed.digitalSignatureCount ?? 0);
@@ -389,6 +563,29 @@ export class LoadContentService {
 		);
 	}
 
+	/**
+	 * Adopt a new handler + fully-resolved `PptxData` from a Slide Master view
+	 * CRUD action (`applyMasterViewCrudAction`'s insert/duplicate/delete/rename
+	 * layout or master). Unlike {@link setPresentationTheme}, those functions
+	 * perform ZIP surgery and reload through a FRESH `PptxHandler` (see
+	 * `master-layout-crud`'s module doc) rather than mutating this one in
+	 * place, so the loaded handler itself must be swapped, not just the
+	 * derived signals.
+	 *
+	 * Media Blob URLs are left untouched: the slide array's own image
+	 * references are unaffected by a master/layout CRUD action, and a newly
+	 * inserted layout carries no images at all.
+	 */
+	adoptMasterViewData(handler: PptxHandler, data: PptxData): void {
+		this.disposeHandler();
+		this.handler = handler;
+		this.slides.set(data.slides);
+		this.slideMasters.set(data.slideMasters ?? []);
+		this.notesMaster.set(data.notesMaster);
+		this.handoutMaster.set(data.handoutMaster);
+		this.parsedData.set(data);
+	}
+
 	private disposeHandler(): void {
 		if (this.handler) {
 			this.handler.dispose();
@@ -414,11 +611,36 @@ export class LoadContentService {
  * (imported above) already pulls both into the same chunk, so a dynamic import
  * here cannot move them anywhere. It only made bundlers emit
  * INEFFECTIVE_DYNAMIC_IMPORT.
+ *
+ * The parser options mirror core's loader parser rather than taking
+ * fast-xml-parser's defaults, identically to the Vue copy. fast-xml-parser
+ * decodes the five predefined entities but NOT numeric character references,
+ * so a certificate DN written `CN=M&#xFC;ller CA` was rendered verbatim in the
+ * signatures panel instead of `CN=Müller CA` - and non-ASCII signer names are
+ * exactly the ones a producer escapes that way. `processEntities: false` then
+ * takes DTD handling out of a path that reads attacker-supplied bytes (nothing
+ * was exploitable at fast-xml-parser 5.9.2, which expands no entities and
+ * rejects external ones, so this is forward-stability) and stops a package
+ * carrying a large DTD entity, which the default rejects with a size-cap
+ * throw, from collapsing every signature to "none found" via the catch below.
+ *
+ * Vue and Angular are the only bindings that read signatures at all; React,
+ * Svelte and Vanilla render no signature panel, so this pair is the whole
+ * surface. Both copies must move together until it is lifted into core.
  */
-async function parseSignaturesFromBuffer(buffer: ArrayBuffer): Promise<ParsedSignature[]> {
+export async function parseSignaturesFromBuffer(buffer: ArrayBuffer): Promise<ParsedSignature[]> {
 	try {
 		const zip = await JSZip.loadAsync(buffer);
-		const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+		const parser = new XMLParser({
+			ignoreAttributes: false,
+			attributeNamePrefix: '@_',
+			parseAttributeValue: false,
+			parseTagValue: false,
+			processEntities: false,
+			tagValueProcessor: (_tagName: string, tagValue: string) => decodeXmlEntities(tagValue),
+			attributeValueProcessor: (_attrName: string, attrValue: string) =>
+				decodeXmlEntities(attrValue),
+		});
 		const result: ParsedSignature[] = [];
 		for (const path of Object.keys(zip.files)) {
 			if (path.startsWith('_xmlsignatures/') && path.endsWith('.xml')) {

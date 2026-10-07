@@ -1,15 +1,26 @@
+import { elementIdSelector } from 'pptx-viewer-shared';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { LuRotateCw } from 'react-icons/lu';
 
 import type { ResizeHandle, ShapeAdjustmentHandleDescriptor } from '../../types';
 import { cn } from '../../utils';
+import { syncSelectionHandleOverlay } from '../../utils/selection-handle-overlay';
 
 export interface ResizeHandlesProps {
 	elementId: string;
-	adjustmentHandleDescriptor: ShapeAdjustmentHandleDescriptor | null;
+	/**
+	 * Every `a:avLst` handle the shape offers, not just the first: PowerPoint
+	 * shows one amber diamond per adjustable parameter and presets routinely
+	 * have several (`quadArrow` three, `callout3` four).
+	 */
+	adjustmentHandles: ShapeAdjustmentHandleDescriptor[];
 	onResizePointerDown: (elementId: string, e: React.MouseEvent, handle: string) => void;
-	onAdjustmentPointerDown: (elementId: string, e: React.MouseEvent) => void;
+	onAdjustmentPointerDown: (
+		elementId: string,
+		e: React.MouseEvent,
+		descriptor: ShapeAdjustmentHandleDescriptor,
+	) => void;
 	/** Whether to force pointerEvents: "auto" on buttons (needed inside pointer-events:none containers). */
 	forcePointerEvents?: boolean;
 	/** Current element rotation in degrees (the rotate-handle drag baseline). */
@@ -27,8 +38,15 @@ export interface ResizeHandlesProps {
  */
 const HANDLE_TOUCH_ACTION = { touchAction: 'none' as const };
 
-// Corner handle positions and cursors
-const CORNER_HANDLES: {
+// Corner handle positions and cursors.
+//
+// The cursor and corner of each handle are the shared `RESIZE_HANDLE_GEOMETRY`
+// contract; they are spelled out as literal Tailwind classes here rather than
+// derived from it because Tailwind extracts class names statically, so a
+// `cursor-${...}` template would be purged and the handle would show the
+// default arrow. `ResizeHandles.test.tsx` asserts these literals still agree
+// with the shared table, which is the part a refactor can silently break.
+export const CORNER_HANDLES: {
 	handle: ResizeHandle;
 	posClass: string;
 	cursor: string;
@@ -55,8 +73,9 @@ const CORNER_HANDLES: {
 	},
 ];
 
-// Edge midpoint handle positions and cursors
-const EDGE_HANDLES: {
+// Edge midpoint handle positions and cursors (see CORNER_HANDLES on why the
+// class names are literal).
+export const EDGE_HANDLES: {
 	handle: ResizeHandle;
 	posClass: string;
 	cursor: string;
@@ -90,7 +109,7 @@ const EDGE_HANDLES: {
 
 export function ResizeHandles({
 	elementId,
-	adjustmentHandleDescriptor: adjH,
+	adjustmentHandles,
 	onResizePointerDown,
 	onAdjustmentPointerDown,
 	forcePointerEvents,
@@ -122,7 +141,24 @@ export function ResizeHandles({
 	// is robust to the current rotation), preview live by mutating the wrapper
 	// transform, then commit the final degrees on release. Shift snaps to 15°.
 	const startRotate = (btn: HTMLElement, pointerId?: number): void => {
-		const wrapper = btn.closest('[data-element-id]') as HTMLElement | null;
+		// Resolve the REAL element node directly by id, not via `closest`: since
+		// selection handles now live in a stage-level overlay that is a SIBLING of
+		// `ElementRenderer` (not its parent), `data-element-id` is never an
+		// ancestor of `btn` for a regular shape, so `closest` always landed on the
+		// overlay host instead. Mutating the overlay's (invisible) transform live
+		// rotated only the handles; the shape itself stayed frozen until the
+		// `onRotate` commit on release. A connector still nests its handles
+		// inside its own element, which also carries `data-element-id`, so the
+		// direct lookup covers both cases uniformly.
+		//
+		// Scoped to this viewer's `[data-pptx-viewport]`, never `document`: two
+		// viewers of one deck on the same page (docs landing, collab demo) both
+		// render the selected id, and a page-wide lookup would spin the OTHER
+		// instance's shape. The handle button is always inside the viewport, so
+		// `closest` finds it; the `document` fallback only serves unit tests that
+		// mount the handles bare.
+		const scope = btn.closest('[data-pptx-viewport]') ?? document;
+		const wrapper = scope.querySelector<HTMLElement>(elementIdSelector(elementId));
 		if (!wrapper) {
 			return;
 		}
@@ -147,7 +183,9 @@ export function ResizeHandles({
 			}
 			deg = Math.round(((deg % 360) + 360) % 360);
 			last = deg;
-			wrapper.style.transform = `rotate(${deg}deg)${base}`;
+			const transform = `rotate(${deg}deg)${base}`;
+			wrapper.style.transform = transform;
+			syncSelectionHandleOverlay(wrapper, elementId, { transform });
 		};
 		const onPointerMove = (ev: PointerEvent): void => apply(ev.clientX, ev.clientY, ev.shiftKey);
 		const end = (): void => {
@@ -170,6 +208,7 @@ export function ResizeHandles({
 				<button
 					key={handle}
 					type='button'
+					aria-label={t('pptx.selectionOverlay.resize', { handle })}
 					className={cn('absolute z-10 group', posClass, cursor)}
 					style={peStyle}
 					onPointerDown={(e) => handleResizePointer(e, handle)}
@@ -190,6 +229,7 @@ export function ResizeHandles({
 				<button
 					key={handle}
 					type='button'
+					aria-label={t('pptx.selectionOverlay.resize', { handle })}
 					className={cn('absolute z-10', posClass, cursor)}
 					style={peStyle}
 					onPointerDown={(e) => handleResizePointer(e, handle)}
@@ -212,7 +252,7 @@ export function ResizeHandles({
 			{onRotate ? (
 				<button
 					type='button'
-					aria-label={t('pptx.resizeHandles.rotateAria')}
+					aria-label={t('pptx.selectionOverlay.rotate')}
 					data-pptx-compact
 					className='absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2 z-20 flex items-center justify-center w-5 h-5 max-md:w-7 max-md:h-7 rounded-full border border-white bg-primary text-white shadow cursor-grab active:cursor-grabbing'
 					style={peStyle}
@@ -234,16 +274,22 @@ export function ResizeHandles({
 				</button>
 			) : null}
 
-			{/* Shape adjustment handle (yellow diamond) */}
-			{adjH ? (
+			{/* Shape adjustment handles (yellow diamonds), one per `a:avLst` guide.
+			    Every one carries the SAME accessible name: `playwright.config.ts`
+			    lists `aria-label="Adjust shape"` as part of the framework-neutral
+			    contract all five viewers emit. The offsets centre the 10px diamond
+			    on the element-local point shared measured off the preset geometry. */}
+			{adjustmentHandles.map((adjH) => (
 				<button
+					key={adjH.key}
 					type='button'
 					aria-label={t('pptx.canvas.adjustShape')}
+					data-pptx-adjust-key={adjH.key}
 					data-pptx-compact
 					className='absolute h-2.5 w-2.5 max-md:h-4 max-md:w-4 rotate-45 border border-amber-700 bg-amber-300 shadow z-10'
 					style={{
 						left: adjH.left - 5,
-						top: adjH.top,
+						top: adjH.top - 5,
 						cursor: adjH.cursor,
 						...HANDLE_TOUCH_ACTION,
 						...(forcePointerEvents ? { pointerEvents: 'auto' as const } : {}),
@@ -254,14 +300,14 @@ export function ResizeHandles({
 						}
 						e.stopPropagation();
 						(e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-						onAdjustmentPointerDown(elementId, e);
+						onAdjustmentPointerDown(elementId, e, adjH);
 					}}
 					onMouseDown={(e) => {
 						e.stopPropagation();
-						onAdjustmentPointerDown(elementId, e);
+						onAdjustmentPointerDown(elementId, e, adjH);
 					}}
 				/>
-			) : null}
+			))}
 		</>
 	);
 }

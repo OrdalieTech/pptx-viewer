@@ -1,4 +1,5 @@
 import type { PptxElement } from 'pptx-viewer-core';
+import { hasPersistentAudio, stopAllPersistentAudio } from 'pptx-viewer-shared';
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -50,10 +51,14 @@ function mountEl(
 	element: PptxElement,
 	mediaDataUrls = new Map<string, string>(),
 	presenting = false,
+	// Defaults to the AUTHORING canvas, the surface these cases model. A still of
+	// a slide (thumbnail rail, presenter console pane) is `interactive: false`
+	// and is covered separately below.
+	interactive = true,
 ): MountResult {
 	const target = document.createElement('div');
 	document.body.appendChild(target);
-	const props = $state({ element, mediaDataUrls, zIndex: 2, presenting });
+	const props = $state({ element, mediaDataUrls, zIndex: 2, presenting, interactive });
 	const instance = mount(ElementRenderer, { target, props });
 	flushSync();
 	cleanup = () => {
@@ -126,6 +131,20 @@ describe('mediaBox', () => {
 		expect(target.querySelector('video')).toBeNull();
 	});
 
+	it('paints no transport on a STILL of a slide (a console pane or thumbnail)', () => {
+		// Neither interactive nor presenting: the presenter console's panes and the
+		// thumbnail rail. `!presenting` alone put Chrome's scrubber across all of
+		// them, so the console drew a control bar over a slide the speaker cannot
+		// play.
+		const { target } = mountEl(
+			mediaElement({ mediaType: 'video', mediaData: MP4_DATA_URL }),
+			new Map(),
+			false,
+			false,
+		);
+		expect(target.querySelector('video')?.hasAttribute('controls')).toBeFalsy();
+	});
+
 	it('falls back to the poster image when no playable source exists', () => {
 		const { target } = mountEl(mediaElement({ mediaType: 'video', posterFrameData: PNG_DATA_URL }));
 		expect(target.querySelector('video')).toBeNull();
@@ -138,7 +157,118 @@ describe('mediaBox', () => {
 		expect(target.querySelector('img')).toBeNull();
 		const container = target.querySelector<HTMLElement>('[data-element-id="m1"]');
 		expect(container?.classList.contains('pptx-svelte-media-fallback')).toBeTruthy();
-		expect(container?.textContent).toContain('Media');
+		// The clip type, not the flat "Media" every unplayable element used to get.
+		expect(container?.textContent).toContain('Video clip');
+		expect(target.querySelector('[data-pptx-media-chrome="typed"]')).toBeTruthy();
+	});
+
+	// Issue #147: a slide-transition overlay is a STILL of the outgoing slide, so
+	// media chrome painted there rides along inside the transition - the reporter
+	// caught a play triangle drifting through a morph out of a background video.
+	it('paints the poster frame with no play badge on a still of a slide', () => {
+		const { target } = mountEl(
+			mediaElement({ mediaType: 'video', posterFrameData: PNG_DATA_URL }),
+			new Map(),
+			false,
+			false,
+		);
+		expect(target.querySelector('img')?.getAttribute('src')).toBe(PNG_DATA_URL);
+		expect(target.querySelector('[data-pptx-media-chrome]')).toBeNull();
+	});
+
+	it('paints no labelled fallback box on a still of a slide', () => {
+		const { target } = mountEl(mediaElement({ mediaType: 'video' }), new Map(), false, false);
+		const container = target.querySelector<HTMLElement>('[data-element-id="m1"]');
+		expect(container?.classList.contains('pptx-svelte-media-fallback')).toBeFalsy();
+		expect(container?.textContent).toBe('');
+	});
+
+	it('paints the play badge over the poster on the authoring canvas', () => {
+		const { target } = mountEl(mediaElement({ mediaType: 'video', posterFrameData: PNG_DATA_URL }));
+		expect(target.querySelector('[data-pptx-media-chrome="play"]')).toBeTruthy();
+	});
+
+	// Reading a boolean `badge` as "paint a badge" drew a PLAY triangle over
+	// media the package had failed to find - the opposite of what React said.
+	it('marks missing media as not found, never with a play badge', () => {
+		const { target } = mountEl(
+			mediaElement({ mediaType: 'video', posterFrameData: PNG_DATA_URL, mediaMissing: true }),
+		);
+		expect(target.querySelector('[data-pptx-media-chrome="play"]')).toBeNull();
+		expect(target.querySelector('[data-pptx-media-chrome="missing"]')?.textContent).toContain(
+			'Media not found',
+		);
+	});
+
+	// A full-bleed background video with `controls` paints Chrome's own black
+	// transport across the bottom of the presented slide, over the show toolbar.
+	// React suppresses it (`controls={!isPresentationMode}`).
+	it('hides the native transport while presenting', () => {
+		const { target } = mountEl(
+			mediaElement({ mediaType: 'video', mediaData: MP4_DATA_URL }),
+			undefined,
+			true,
+		);
+		expect(target.querySelector('video')?.hasAttribute('controls')).toBeFalsy();
+		expect(
+			mountEl(mediaElement({ mediaType: 'audio', mediaData: MP3_DATA_URL }), undefined, true)
+				.target.querySelector('audio')
+				?.hasAttribute('controls'),
+		).toBeFalsy();
+	});
+
+	/**
+	 * Authored playback settings. Dropping `loop` is a real, user-visible bug:
+	 * `e2e/fixtures/solution-explorer.pptx` slide 2 holds a two-second background
+	 * video the deck marks `loop` with `vol="0"`, so without the flag it played
+	 * once, hit its end and froze on the last frame, which reads exactly like
+	 * "the video never started". Volume and playbackRate are IDL properties with
+	 * no attribute form, so they can only be asserted on the live node.
+	 */
+	describe('authored playback settings', () => {
+		it('loops a video the deck marked loop, and only that one', () => {
+			expect(
+				mountEl(mediaElement({ mediaType: 'video', mediaData: MP4_DATA_URL, loop: true }))
+					.target.querySelector('video')
+					?.hasAttribute('loop'),
+			).toBeTruthy();
+			cleanup?.();
+			cleanup = undefined;
+
+			expect(
+				mountEl(mediaElement({ mediaType: 'video', mediaData: MP4_DATA_URL }))
+					.target.querySelector('video')
+					?.hasAttribute('loop'),
+			).toBeFalsy();
+		});
+
+		it('loops audio the same way', () => {
+			const { target } = mountEl(
+				mediaElement({ mediaType: 'audio', mediaData: MP3_DATA_URL, loop: true }),
+			);
+			expect(target.querySelector('audio')?.hasAttribute('loop')).toBeTruthy();
+		});
+
+		it('applies the authored volume and playback speed to the live node', () => {
+			const { target } = mountEl(
+				mediaElement({
+					mediaType: 'video',
+					mediaData: MP4_DATA_URL,
+					volume: 0,
+					playbackSpeed: 1.5,
+				}),
+			);
+			const video = target.querySelector<HTMLVideoElement>('video');
+			expect(video?.volume).toBe(0);
+			expect(video?.playbackRate).toBe(1.5);
+		});
+
+		it('defaults to full volume at normal speed when the deck says nothing', () => {
+			const { target } = mountEl(mediaElement({ mediaType: 'video', mediaData: MP4_DATA_URL }));
+			const video = target.querySelector<HTMLVideoElement>('video');
+			expect(video?.volume).toBe(1);
+			expect(video?.playbackRate).toBe(1);
+		});
 	});
 
 	describe('presentation-mode autoplay', () => {
@@ -194,6 +324,98 @@ describe('mediaBox', () => {
 
 			setPresenting(false);
 			expect(video?.paused).toBeTruthy();
+		});
+	});
+
+	describe('cross-slide ("play across slides") audio', () => {
+		afterEach(() => {
+			stopAllPersistentAudio();
+		});
+
+		function crossSlideAudio(overrides: Record<string, unknown> = {}): PptxElement {
+			return mediaElement({
+				mediaType: 'audio',
+				mediaData: MP3_DATA_URL,
+				mediaMimeType: 'audio/mpeg',
+				playAcrossSlides: true,
+				loop: true,
+				volume: 0.5,
+				trimStartMs: 2000,
+				...overrides,
+			});
+		}
+
+		it('registers the track with the persistent manager while presenting and keeps the slide-local copy silent', () => {
+			const { target } = mountEl(crossSlideAudio(), undefined, true, false);
+
+			expect(hasPersistentAudio('m1')).toBeTruthy();
+			const persistent = document.querySelector<HTMLAudioElement>(
+				'[data-pptx-persistent-audio="m1"]',
+			);
+			expect(persistent?.getAttribute('src')).toBe(MP3_DATA_URL);
+			expect(persistent?.loop).toBeTruthy();
+			expect(persistent?.volume).toBe(0.5);
+
+			// The slide-local copy must stay silent, or the track doubles: the
+			// autoplay path is skipped and the node is muted.
+			expect(startMediaAutoplay).not.toHaveBeenCalled();
+			expect(target.querySelector<HTMLAudioElement>('audio')?.muted).toBeTruthy();
+		});
+
+		it('is NOT stopped by the slide-local element unmounting on slide change', () => {
+			mountEl(crossSlideAudio(), undefined, true, false);
+			expect(hasPersistentAudio('m1')).toBeTruthy();
+
+			// Advancing the show unmounts the owning slide's DOM; the persistent
+			// (document-level) track keeps playing.
+			cleanup?.();
+			cleanup = undefined;
+			expect(hasPersistentAudio('m1')).toBeTruthy();
+			expect(document.querySelector('[data-pptx-persistent-audio="m1"]')).not.toBeNull();
+		});
+
+		it('does not register outside a running show', () => {
+			mountEl(crossSlideAudio());
+			expect(hasPersistentAudio('m1')).toBeFalsy();
+		});
+
+		it('does not register cross-slide playback for video', () => {
+			mountEl(
+				mediaElement({ mediaType: 'video', mediaData: MP4_DATA_URL, playAcrossSlides: true }),
+				undefined,
+				true,
+				false,
+			);
+			expect(hasPersistentAudio('m1')).toBeFalsy();
+			expect(startMediaAutoplay).toHaveBeenCalledOnce();
+		});
+	});
+
+	// G20: trim-end stop + fade in/out, previously React-only, now shared via
+	// `scheduleMediaTrimAndFade`. The scheduling maths is covered directly in
+	// `packages/shared/src/render/media-trim-fade-scheduler.test.ts`; this
+	// proves the wiring reaches the live <video> element while presenting.
+	describe('trim-end + fade wiring (G20)', () => {
+		it('stops at duration - trimEndMs (distance from the tail), not at trimEndMs itself', async () => {
+			vi.useFakeTimers();
+			const { target } = mountEl(
+				mediaElement({ mediaType: 'video', mediaData: MP4_DATA_URL, trimEndMs: 5000 }),
+				undefined,
+				true,
+			);
+			const video = target.querySelector<HTMLVideoElement>('video')!;
+			Object.defineProperty(video, 'duration', { value: 20, configurable: true });
+			Object.defineProperty(video, 'paused', { value: false, configurable: true, writable: true });
+			const pauseSpy = vi.spyOn(video, 'pause').mockImplementation(() => {
+				Object.defineProperty(video, 'paused', { value: true, configurable: true });
+			});
+
+			video.dispatchEvent(new Event('play'));
+			await vi.advanceTimersByTimeAsync(15_000);
+
+			expect(pauseSpy).toHaveBeenCalledWith();
+			expect(video.currentTime).toBe(15);
+			vi.useRealTimers();
 		});
 	});
 });

@@ -95,14 +95,16 @@ import { ShowSlidesFieldsetComponent } from './show-slides-fieldset.component';
 
 				<!-- Advance slides -->
 				<fieldset class="pptx-ng-sss-fieldset">
-					<legend class="pptx-ng-sss-legend">{{ 'pptx.slideShow.advanceSlides' | translate }}</legend>
+					<legend class="pptx-ng-sss-legend">
+						{{ 'pptx.slideShow.advanceSlides' | translate }}
+					</legend>
 					<label class="pptx-ng-sss-option">
 						<input
 							type="radio"
 							name="advanceMode"
 							class="pptx-ng-sss-radio"
 							value="manual"
-							[checked]="(draft().advanceMode ?? 'manual') === 'manual'"
+							[checked]="draft().advanceMode === 'manual'"
 							(change)="update({ advanceMode: 'manual' })"
 						/>
 						<span>{{ 'pptx.slideShow.manually' | translate }}</span>
@@ -113,7 +115,7 @@ import { ShowSlidesFieldsetComponent } from './show-slides-fieldset.component';
 							name="advanceMode"
 							class="pptx-ng-sss-radio"
 							value="useTimings"
-							[checked]="draft().advanceMode === 'useTimings'"
+							[checked]="(draft().advanceMode ?? 'useTimings') === 'useTimings'"
 							(change)="update({ advanceMode: 'useTimings' })"
 						/>
 						<span>{{ 'pptx.slideShow.useTimings' | translate }}</span>
@@ -127,11 +129,7 @@ import { ShowSlidesFieldsetComponent } from './show-slides-fieldset.component';
 				<button type="button" class="pptx-ng-sss-btn" (click)="onClose()">
 					{{ 'pptx.common.cancel' | translate }}
 				</button>
-				<button
-					type="button"
-					class="pptx-ng-sss-btn pptx-ng-sss-btn-primary"
-					(click)="onOk()"
-				>
+				<button type="button" class="pptx-ng-sss-btn pptx-ng-sss-btn-primary" (click)="onOk()">
 					{{ 'pptx.common.ok' | translate }}
 				</button>
 			</div>

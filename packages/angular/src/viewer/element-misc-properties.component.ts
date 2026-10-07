@@ -1,23 +1,27 @@
 import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 import { TranslatePipe } from '@ngx-translate/core';
-import type {
-	ConnectorArrowType,
-	GroupPptxElement,
-	OlePptxElement,
-	PptxElement,
-	ShapeStyle,
-} from 'pptx-viewer-core';
+import type { GroupPptxElement, OlePptxElement, PptxElement, ShapeStyle } from 'pptx-viewer-core';
 import { getOleObjectTypeLabel } from 'pptx-viewer-core';
 
-const ARROWS: readonly ConnectorArrowType[] = [
-	'none',
-	'triangle',
-	'arrow',
-	'stealth',
-	'diamond',
-	'oval',
-];
-const SIZES = ['sm', 'med', 'lg'] as const;
+import type { ConnectorArrowControl } from '../internal/shared';
+import {
+	buildOleObjectNamePatch,
+	canInteractWithElement,
+	CONNECTOR_ARROW_CONTROLS,
+	CONNECTOR_ARROW_SIZE_VALUES,
+	connectorArrowPatch,
+	connectorArrowValue,
+} from '../internal/shared';
+import { schemaLabelKey } from './schema-token-labels';
+
+/**
+ * Arrowhead width / length steps, i.e. the `a:headEnd/@w` and `@len` values.
+ *
+ * Re-exported from the shared descriptor table so a unit test can pin the
+ * offered set while the labels change (the package's suite is TestBed-free, so
+ * the template is out of reach).
+ */
+export const ARROW_SIZE_VALUES = CONNECTOR_ARROW_SIZE_VALUES;
 const GEOMETRIES = [
 	['straightConnector1', 'Straight'],
 	['bentConnector2', 'Bent'],
@@ -47,37 +51,38 @@ export function connectorStylePatch(
 		@if (connector()) {
 			<section class="card" aria-label="Connector">
 				<h3>Connector</h3>
+				<!--
+					Selection is expressed with [selected] on each option rather than
+					[value] on the select: Angular applies an element's own property
+					bindings before the @for below it has produced any options, so a
+					[value] naming a token was assigned to an EMPTY select and dropped
+					back to the first entry. Every one of these dropdowns therefore read
+					"none" / "Small" no matter what the deck authored, and the card
+					silently misreported the connector it was editing.
+				-->
 				<label class="geometry">
 					<span>Geometry</span>
-					<select [value]="connectorType()" (change)="onConnectorType($event)">
+					<select aria-label="Geometry" (change)="onConnectorType($event)">
 						@for (geometry of geometries; track geometry[0]) {
-							<option [value]="geometry[0]">{{ geometry[1] }}</option>
+							<option [value]="geometry[0]" [selected]="geometry[0] === connectorType()">
+								{{ geometry[1] }}
+							</option>
 						}
 					</select>
 				</label>
 				<div class="grid">
-					@for (end of ends; track end) {
+					@for (control of arrowControls; track control.styleKey) {
 						<label>
-							<span>{{ end }} arrow</span>
-							<select [value]="arrowValue(end)" (change)="onArrow(end, $event)">
-								@for (arrow of arrows; track arrow) {
-									<option [value]="arrow">{{ arrowLabel(arrow) | translate }}</option>
-								}
-							</select>
-						</label>
-						<label>
-							<span>{{ end }} width</span>
-							<select [value]="sizeValue(end, 'Width')" (change)="onSize(end, 'Width', $event)">
-								@for (size of sizes; track size) {
-									<option [value]="size">{{ size }}</option>
-								}
-							</select>
-						</label>
-						<label>
-							<span>{{ end }} length</span>
-							<select [value]="sizeValue(end, 'Length')" (change)="onSize(end, 'Length', $event)">
-								@for (size of sizes; track size) {
-									<option [value]="size">{{ size }}</option>
+							<span>{{ control.labelKey | translate }}</span>
+							<select
+								[attr.aria-label]="control.labelKey | translate"
+								[disabled]="!arrowsChangeable()"
+								(change)="onArrow(control, $event)"
+							>
+								@for (value of control.values; track value) {
+									<option [value]="value" [selected]="value === arrowValue(control)">
+										{{ optionLabelKey(control, value) | translate }}
+									</option>
 								}
 							</select>
 						</label>
@@ -94,6 +99,17 @@ export function connectorStylePatch(
 		@if (ole(); as value) {
 			<section class="card" [attr.aria-label]="'pptx.ole.title' | translate">
 				<h3>{{ 'pptx.ole.title' | translate }}</h3>
+				<label class="ole-name">
+					<span>{{ 'pptx.ole.objectName' | translate }}</span>
+					<input
+						type="text"
+						[attr.aria-label]="'pptx.ole.objectName' | translate"
+						[placeholder]="'pptx.ole.objectNamePlaceholder' | translate"
+						[disabled]="!canEdit()"
+						[value]="value.oleName ?? ''"
+						(input)="onOleNameInput($event)"
+					/>
+				</label>
 				<dl>
 					<div>
 						<dt>{{ 'pptx.ole.type' | translate }}</dt>
@@ -138,13 +154,17 @@ export function connectorStylePatch(
 		.geometry {
 			margin-bottom: 6px;
 		}
-		select {
+		select,
+		input[type='text'] {
 			min-width: 0;
 			padding: 3px;
 			border: 1px solid var(--pptx-inspector-border, #444);
 			border-radius: 3px;
 			background: var(--pptx-inspector-input-bg, #2d2d2d);
 			color: inherit;
+		}
+		.ole-name {
+			margin-bottom: 8px;
 		}
 		p {
 			margin: 0;
@@ -173,11 +193,20 @@ export function connectorStylePatch(
 })
 export class ElementMiscPropertiesComponent {
 	readonly element = input.required<PptxElement>();
+	/**
+	 * Whether editing controls are enabled. Only gates the OLE Object Name
+	 * field for now (the connector/group sections predate this input and are
+	 * not yet gated); defaults to `true` so existing callers keep working.
+	 */
+	readonly canEdit = input<boolean>(true);
 	readonly patch = output<Partial<PptxElement>>();
-	protected readonly arrows = ARROWS;
-	protected readonly sizes = SIZES;
+	/**
+	 * The six arrowhead dropdowns, described once in shared. Angular used to
+	 * declare its own value order and interpolate sentence-case captions
+	 * ("Start arrow"), which read differently from the other four bindings.
+	 */
+	protected readonly arrowControls = CONNECTOR_ARROW_CONTROLS;
 	protected readonly geometries = GEOMETRIES;
-	protected readonly ends = ['Start', 'End'] as const;
 	protected readonly connector = computed(() => this.element().type === 'connector');
 	protected readonly connectorType = computed(
 		() => (this.element() as { shapeType?: string }).shapeType ?? 'straightConnector1',
@@ -189,36 +218,49 @@ export class ElementMiscPropertiesComponent {
 		this.element().type === 'ole' ? (this.element() as OlePptxElement) : undefined,
 	);
 	protected readonly oleType = computed(() => getOleObjectTypeLabel(this.ole()?.oleObjectType));
+	/**
+	 * G9: `arrowheadsChangeable` (`a:cxnSpLocks/@noChangeArrowheads`) already
+	 * existed on `element-locks.ts` but nothing here consulted it.
+	 */
+	protected readonly arrowsChangeable = computed(() =>
+		canInteractWithElement(this.element(), 'changeArrowheads'),
+	);
 
-	protected arrowLabel(value: ConnectorArrowType): string {
-		return `pptx.arrowhead.${value}`;
-	}
-	protected arrowValue(end: 'Start' | 'End'): ConnectorArrowType {
-		return (
-			((this.element() as { shapeStyle?: ShapeStyle }).shapeStyle?.[
-				`connector${end}Arrow`
-			] as ConnectorArrowType) ?? 'none'
+	/**
+	 * A browser cannot run the native application that owns an embedded OLE
+	 * object, so the object itself stays read-only. Its Object Name IS
+	 * editable: `p:oleObj/@name` (ECMA-376 SS13.3.4) already parses, saves,
+	 * and syncs via collaboration, and shared's `getOleDisplayName` /
+	 * `getOleAriaLabel` already read it, so this was the only piece missing
+	 * to make it a real, round-tripping edit.
+	 */
+	protected onOleNameInput(event: Event): void {
+		this.patch.emit(
+			buildOleObjectNamePatch((event.target as HTMLInputElement).value) as Partial<PptxElement>,
 		);
 	}
-	protected sizeValue(end: 'Start' | 'End', dimension: 'Width' | 'Length'): string {
-		return String(
-			(this.element() as { shapeStyle?: ShapeStyle }).shapeStyle?.[
-				`connector${end}Arrow${dimension}`
-			] ?? 'med',
-		);
+
+	/**
+	 * Spell one option. Resolving a KEY (not finished text) keeps the wording
+	 * live under `OnPush`, since `TranslatePipe` marks the view for check when
+	 * the language changes. See `schema-token-labels`.
+	 */
+	protected optionLabelKey(control: ConnectorArrowControl, value: string): string {
+		return schemaLabelKey(control.optionLabelKeys, value);
 	}
-	protected onArrow(end: 'Start' | 'End', event: Event): void {
-		this.updateStyle({ [`connector${end}Arrow`]: (event.target as HTMLSelectElement).value });
+	protected arrowValue(control: ConnectorArrowControl): string {
+		return connectorArrowValue(control, (this.element() as { shapeStyle?: ShapeStyle }).shapeStyle);
+	}
+	protected onArrow(control: ConnectorArrowControl, event: Event): void {
+		if (!this.arrowsChangeable()) {
+			return;
+		}
+		this.updateStyle(connectorArrowPatch(control, (event.target as HTMLSelectElement).value));
 	}
 	protected onConnectorType(event: Event): void {
 		this.patch.emit({
 			shapeType: (event.target as HTMLSelectElement).value,
 		} as Partial<PptxElement>);
-	}
-	protected onSize(end: 'Start' | 'End', dimension: 'Width' | 'Length', event: Event): void {
-		this.updateStyle({
-			[`connector${end}Arrow${dimension}`]: (event.target as HTMLSelectElement).value,
-		});
 	}
 	private updateStyle(update: Partial<ShapeStyle>): void {
 		this.patch.emit(connectorStylePatch(this.element(), update));

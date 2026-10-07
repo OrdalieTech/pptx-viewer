@@ -85,7 +85,16 @@ export class PptxConnectorParser implements IPptxConnectorParser {
 			const cNvConnectionShapeProperties = (connector?.['p:nvCxnSpPr'] as XmlObject | undefined)?.[
 				'p:cNvCxnSpPr'
 			] as XmlObject | undefined;
-			const shapeStyle = this.context.extractShapeStyle(shapeProperties);
+			// `p:cxnSp` carries a `<p:style>` exactly like `p:sp` does, and for a
+			// connector it is usually the ONLY place the colour lives: PowerPoint
+			// writes `<a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef>` there
+			// and leaves `spPr/a:ln` holding nothing but the arrow ends. Dropping
+			// the style node stroked every such connector in the default dark grey
+			// instead of the theme accent.
+			const shapeStyle = this.context.extractShapeStyle(
+				shapeProperties,
+				connector['p:style'] as XmlObject | undefined,
+			);
 
 			const startConnectionNode = cNvConnectionShapeProperties?.['a:stCxn'] as
 				| XmlObject
@@ -130,6 +139,12 @@ export class PptxConnectorParser implements IPptxConnectorParser {
 			// Extract element name from cNvPr/@name (used for morph !! matching)
 			const connElementName = cNvPr?.['@_name'] ? String(cNvPr['@_name']).trim() : undefined;
 
+			// Accessibility description/title from `p:cNvPr/@descr` / `@title`,
+			// the same attributes a plain shape/text box now parses (see
+			// `PptxHandlerRuntimeShapeParsing.ts`) and a graphic frame already did.
+			const connAltText = String(cNvPr?.['@_descr'] || '').trim() || undefined;
+			const connTitle = String(cNvPr?.['@_title'] || '').trim() || undefined;
+
 			const locks = this.context.parseShapeLocks(
 				(cNvConnectionShapeProperties?.['a:cxnSpLocks'] ??
 					cNvConnectionShapeProperties?.['a:spLocks']) as XmlObject | undefined,
@@ -142,11 +157,20 @@ export class PptxConnectorParser implements IPptxConnectorParser {
 			return {
 				id,
 				name: connElementName || undefined,
+				altText: connAltText,
+				title: connTitle,
 				type: 'connector',
 				x: Math.round(parseInt(String(offset['@_x'] || '0'), 10) / this.context.emuPerPx),
 				y: Math.round(parseInt(String(offset['@_y'] || '0'), 10) / this.context.emuPerPx),
 				width: Math.round(parseInt(String(extent['@_cx'] || '0'), 10) / this.context.emuPerPx),
 				height: Math.round(parseInt(String(extent['@_cy'] || '0'), 10) / this.context.emuPerPx),
+				// Exact EMU alongside the rounded pixel value; see
+				// `xfrm-emu-resolution.ts` for why the save-side writer can only
+				// re-emit these when the connector has not moved/resized.
+				xEmu: parseInt(String(offset['@_x'] || '0'), 10),
+				yEmu: parseInt(String(offset['@_y'] || '0'), 10),
+				widthEmu: parseInt(String(extent['@_cx'] || '0'), 10),
+				heightEmu: parseInt(String(extent['@_cy'] || '0'), 10),
 				shapeType,
 				shapeAdjustments,
 				rotation,

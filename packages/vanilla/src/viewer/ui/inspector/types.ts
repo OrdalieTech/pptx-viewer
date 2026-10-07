@@ -3,17 +3,28 @@ import type {
 	PptxImageEffects,
 	PptxChartData,
 	MediaPptxElement,
+	ParsedTableStyleMap,
 	PptxComment,
+	PptxCommentMention,
+	PptxCustomShow,
 	PptxElement,
+	PptxModernCommentAuthor,
 	PptxPresentationProperties,
 	PptxSlide,
+	PptxSlideMaster,
 	PptxSmartArtData,
 	PptxSmartArtNodeStyle,
 	PptxTableCellStyle,
 	PptxTableData,
+	XmlObject,
+	PptxTagCollection,
+	TablePptxElement,
+	PptxThemeColorRef,
 	PptxThemeColorScheme,
+	PptxThemeFontScheme,
 	PptxThemeOption,
 	ElementAction,
+	OleObjectType,
 	SmartArtColorScheme,
 	SmartArtLayoutType,
 	TextStyle,
@@ -23,6 +34,8 @@ import type {
 	AnimationGroup,
 	GradientState,
 	InlineTextSelection,
+	SlideSizeEmu,
+	SlideSizeRescaleMode,
 	TextAdvancedChanges,
 } from 'pptx-viewer-shared';
 
@@ -40,18 +53,62 @@ export interface InspectorHandlers {
 	selectElement(id: string): void;
 	/** Open the full Document Properties dialog from the Properties tab. */
 	openDocumentProperties(): void;
+	/**
+	 * File > Options > Advanced > "Properties follow chart data point for
+	 * current workbook", read fresh on every chart category removal.
+	 */
+	getChartFollowDataPoint(): boolean;
 	/** Merge a patch into the presentation show/print settings (PRESENTATION card). */
 	updatePresentationSettings(patch: Partial<PptxPresentationProperties>): void;
 	/** Apply a packaged theme part by archive path (THEME card). */
 	applyThemeByPath(themePath: string, allMasters: boolean): void;
+	/** Re-theme the deck from the THEME EDITOR card's staged colours/fonts/name. */
+	applyThemeEdit(payload: {
+		colorScheme: PptxThemeColorScheme;
+		fontScheme: PptxThemeFontScheme;
+		name: string;
+	}): void;
+	/** Replace the deck's `ppt/tags/*.xml` collections (TAGS card). */
+	updateTagCollections(next: PptxTagCollection[]): void;
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, for the table properties
+	 * panel's "Edit style...". `undefined` means the host has not wired the
+	 * table-style-editor feature through; the button then simply does not render.
+	 */
+	getTableStyleMap(): ParsedTableStyleMap | undefined;
+	/** The current theme colour map (scheme key -> hex), for resolving scheme-based table style colours. */
+	getThemeColorMap(): Record<string, string> | undefined;
+	/** Commit a full replacement style map (section edit, create, or delete already applied). */
+	updateTableStyleMap(nextMap: ParsedTableStyleMap): void;
+	/** Record a styleId for save-time removal from `ppt/tableStyles.xml`. */
+	deleteTableStyle(styleId: string): void;
 	/** Patch the active slide (THEME OVERRIDE card). */
 	updateActiveSlide(patch: Partial<PptxSlide>): void;
-	/** Resize the slide canvas (SLIDE SIZE card). */
+	/**
+	 * Set a layout/master's background colour (SLIDE BACKGROUND card's
+	 * template rows, shown while `editTemplateMode` is on). Master Views
+	 * covers the same ground but requires leaving the slide.
+	 */
+	setTemplateBackground(path: string, backgroundColor: string): void;
+	/** Read a layout/master's current background colour. */
+	getTemplateBackgroundColor(path: string): string | undefined;
+	/** Resize the slide canvas (the SLIDE SIZE card's raw W/H inputs). */
 	updateCanvasSize(size: { width: number; height: number }): void;
+	/**
+	 * Adopt an EMU slide size (SLIDE SIZE preset dropdown / orientation toggle).
+	 * Writes both the EMU state and the pixel canvas.
+	 */
+	updateSlideSize(size: SlideSizeEmu): void;
+	/**
+	 * Adopt an EMU slide size AND rescale every slide's content for it in one
+	 * undoable step (the "Scale content for the new slide size?" prompt shown
+	 * when the deck has content and the new size differs from the current one).
+	 */
+	applySlideSizeRescale(size: SlideSizeEmu, mode: SlideSizeRescaleMode): void;
 	/** Add a comment on the current slide (Comments tab). */
-	addComment(text: string): void;
+	addComment(text: string, mentions?: PptxCommentMention[]): void;
 	/** Append a reply under a top-level comment (Comments tab reply form). */
-	addCommentReply(parentId: string, text: string): void;
+	addCommentReply(parentId: string, text: string, mentions?: PptxCommentMention[]): void;
 	/** Replace a comment's (or reply's) text (Comments tab edit-in-place). */
 	editComment(id: string, text: string): void;
 	deleteComment(id: string): void;
@@ -59,17 +116,42 @@ export interface InspectorHandlers {
 
 	/** Set/clear one effect bucket on the selected element (docked Animation panel). */
 	setAnimationEffect(group: AnimationGroup, preset: PptxAnimationPreset | 'none'): void;
+	/** Apply/clear a catalogue motion path by preset id (`'none'` clears it). */
+	applyMotionPath(presetId: string): void;
 	/** Patch timing/effect options on one element's animation entry. */
 	setAnimationTiming(elementId: string, patch: AnimationTimingPatch): void;
+	/** Stage a picked effect sound file, or clear it entirely (`undefined`). */
+	setAnimationSound(
+		elementId: string,
+		pick: { dataUrl: string; fileName?: string } | undefined,
+	): void;
 	/** Move an element's animation one step in the slide play order. */
 	reorderAnimation(elementId: string, direction: 'up' | 'down'): void;
 
 	setGeometry(patch: GeometryPatch): void;
-	setShapeFill(color: string): void;
-	setShapeStroke(color: string): void;
+	/** Flip the selected element's lock (see elementLockTogglePatch). */
+	toggleElementLock(): void;
+	/**
+	 * Set the shape fill colour. Pass `ref` for a theme-swatch pick (wins on
+	 * save, so the fill follows a later theme change); omit it to clear a
+	 * previously-stored ref for a plain/custom/recent pick.
+	 */
+	setShapeFill(color: string, ref?: PptxThemeColorRef): void;
+	/** Same `ref` contract as {@link setShapeFill}, for the stroke colour. */
+	setShapeStroke(color: string, ref?: PptxThemeColorRef): void;
 	setShapeStrokeWidth(width: number): void;
 	setShapeStyle(patch: Partial<ShapeStyle>): void;
 	setShapeType(shapeType: string): void;
+	/**
+	 * B6: fold a colour into the deck's "Recent colours" (`p:clrMru`) MRU list,
+	 * without touching the selected element. Every inspector colour input that
+	 * has no dedicated recent-colours row of its own (chart/table/image/
+	 * SmartArt/text-effects colours, gradient stops, pattern fill) calls this
+	 * on COMMIT (native `change`, never the continuous `input` event a drag
+	 * through the OS picker fires) so the deck's MRU list still grows even
+	 * though there is nowhere on screen to show it going in.
+	 */
+	pushRecentColor(hex: string): void;
 
 	setTextVerticalAlign(vAlign: InspectorState['vAlign']): void;
 	setTextWrap(wrap: InspectorState['textWrap']): void;
@@ -92,6 +174,23 @@ export interface InspectorHandlers {
 	replaceImage(): void;
 	resetImage(): void;
 	setElementAction(trigger: 'click' | 'hover', action: ElementAction): void;
+	/** Set the selected element's accessibility description (Alt Text field). */
+	setAltText(text: string): void;
+	/**
+	 * Set the selected element's accessibility title (`p:cNvPr/@title`).
+	 * Applies to a plain shape/text box/connector and every graphic-frame
+	 * kind (table/chart/smartArt/ole/media), not a picture (which has no
+	 * title field). See {@link PptxNonVisualDescription}.
+	 */
+	setTitle(text: string): void;
+	/**
+	 * Set the selected OLE element's Object Name (`p:oleObj/@name`, ECMA-376
+	 * SS13.3.4). A browser cannot run the native application an embedded OLE
+	 * object belongs to, so the object stays read-only; this name already
+	 * parses, saves, and syncs via collaboration and only lacked an editing
+	 * surface.
+	 */
+	setOleName(name: string): void;
 	setChartData(data: PptxChartData): void;
 	setMediaProperties(patch: Partial<MediaPptxElement>): void;
 
@@ -99,6 +198,18 @@ export interface InspectorHandlers {
 	setTableBandedRows(enabled: boolean): void;
 	setTableCellPadding(padding: number): void;
 	setTableOptions(patch: Partial<PptxTableData>, cellStyle?: Partial<PptxTableCellStyle>): void;
+	/**
+	 * Replace the selected table's whole `tableData` (inspector data grid).
+	 *
+	 * `setTableOptions` cannot serve here: it re-applies the element's existing
+	 * rows after the patch, so a row/cell change made through it is discarded.
+	 */
+	/**
+	 * Replace the selected table's whole `tableData`, plus the graphic-frame
+	 * `rawXml` the renderer and save writer actually read for a table parsed from
+	 * a real deck (a `tableData`-only patch is invisible on such tables).
+	 */
+	setTableData(data: PptxTableData, rawXml?: XmlObject): void;
 	setTableCellStyle(row: number, column: number, patch: Partial<PptxTableCellStyle>): void;
 	setTableCellStyles(cells: TableCellPosition[], patch: Partial<PptxTableCellStyle>): void;
 	mutateTableStructure(cell: TableCellPosition, action: TableStructureAction): void;
@@ -113,6 +224,14 @@ export interface InspectorHandlers {
 		nodeId: string,
 		action: 'add' | 'addChild' | 'remove' | 'promote' | 'demote',
 	): void;
+	/**
+	 * Commit a whole replacement `smartArtData`, reflowed and history-integrated
+	 * like every other SmartArt mutation. Used by the text pane's Tab / Enter /
+	 * Backspace keyboard handling, which computes the next data (and, for
+	 * add/remove, the node to focus next) via the shared `smartart-node-pane-
+	 * handlers` builders before committing.
+	 */
+	replaceSmartArtData(data: PptxSmartArtData): void;
 	setSmartArtLayout(layout: SmartArtLayoutType): void;
 	setSmartArtColorScheme(scheme: SmartArtColorScheme): void;
 }
@@ -120,6 +239,11 @@ export interface InspectorHandlers {
 /** Selection-derived state the inspector reflects, computed by `buildInspectorState`. */
 export interface InspectorState {
 	hasSelection: boolean;
+	isLocked: boolean;
+	/** `a:picLocks/@noCrop`: may the selected picture's crop be adjusted? */
+	croppable: boolean;
+	/** `arrowheadsChangeable` (`element-locks.ts`): may connector arrowheads change? */
+	arrowheadsChangeable: boolean;
 	canShape: boolean;
 	canText: boolean;
 	isImage: boolean;
@@ -128,13 +252,26 @@ export interface InspectorState {
 	isTable: boolean;
 	isSmartArt: boolean;
 	smartArtData: PptxSmartArtData | undefined;
+	isGroup: boolean;
+	/** Number of children on a selected group, or undefined when not (yet) known. */
+	groupChildCount: number | undefined;
+	isOle: boolean;
+	oleObjectType: OleObjectType | undefined;
+	oleFileName: string | undefined;
+	oleIsLinked: boolean;
+	/** The OLE object's author-assigned name (`p:oleObj/@name`), if any. */
+	oleName: string | undefined;
 	x: number;
 	y: number;
 	width: number;
 	height: number;
 	rotation: number;
 	fillColor: string | undefined;
+	/** Theme ref for `fillColor`, if any (highlights the matching theme swatch). */
+	fillColorRef: PptxThemeColorRef | undefined;
 	strokeColor: string | undefined;
+	/** Theme ref for `strokeColor`, if any (highlights the matching theme swatch). */
+	strokeColorRef: PptxThemeColorRef | undefined;
 	strokeWidth: number;
 	shapeStyle: ShapeStyle | undefined;
 	shapeType: string | undefined;
@@ -143,7 +280,7 @@ export interface InspectorState {
 	strokeOpacity: number;
 	gradientEnabled: boolean;
 	gradient: GradientState;
-	vAlign: 'top' | 'middle' | 'bottom';
+	vAlign: 'top' | 'middle' | 'bottom' | 'distributed' | 'justified';
 	textWrap: 'square' | 'none';
 	autoFitMode: 'shrink' | 'normal' | 'none';
 	characterSpacing: number;
@@ -175,7 +312,27 @@ export interface InspectorState {
 	imageColorWash?: { color: string; opacity: number };
 	actionClick?: ElementAction;
 	actionHover?: ElementAction;
+	/** The selected element's alt text (accessibility description), if any. */
+	altText: string;
+	/** The selected element's accessibility title (`p:cNvPr/@title`), if any. */
+	title: string;
+	/**
+	 * Whether the Accessibility section's own alt-text/title editor should
+	 * show for the current selection: true for a plain shape, text box,
+	 * connector, and every graphic-frame kind (table/chart/smartArt/media/ole).
+	 * A picture's alt text has its own field in the Image section instead.
+	 * See shared's `shouldShowAccessibilitySection`.
+	 */
+	showAccessibilitySection: boolean;
 	chartData?: PptxChartData;
+	/**
+	 * The on-canvas chart part selection, scoped to the selected chart element:
+	 * a `pointIndex` ring-highlights one value cell in the data grid and syncs
+	 * the "Data Point Index" picker; series-only (no `pointIndex`) highlights
+	 * the series name header. `null` when nothing is selected on canvas, or the
+	 * selection belongs to a different chart.
+	 */
+	chartHighlightCell: { seriesIndex: number; pointIndex?: number } | null;
 	media?: MediaPptxElement;
 	mediaPreviewUrl?: string;
 	mediaPosterUrl?: string;
@@ -199,6 +356,19 @@ export interface InspectorState {
 	tableCellStyle: PptxTableCellStyle | undefined;
 	tableColumnWidths: number[];
 	tableRowHeights: number[];
+	/** The selected table element itself, feeding the inspector data grid. */
+	tableElement?: TablePptxElement;
+	/**
+	 * B6: the deck's `p:clrMru`, most-recent-first, feeding the "Recent
+	 * colours" row under the fill/stroke/text colour pickers.
+	 */
+	recentColors: readonly string[];
+	/**
+	 * The deck's resolved theme colour map (scheme key -> hex), feeding the
+	 * "Theme Colors" grid under the fill/stroke colour pickers. `undefined`
+	 * before a theme has loaded.
+	 */
+	themeColorMap: Record<string, string> | undefined;
 }
 
 /**
@@ -209,11 +379,23 @@ export interface InspectorDeckState {
 	slideCount: number;
 	currentSlide: number;
 	canvasSize: { width: number; height: number };
+	/** The deck's `p:sldSz` in EMU, which is what a save persists. */
+	slideSize: SlideSizeEmu | undefined;
+	/**
+	 * Whether ANY slide in the deck has at least one element (not just the
+	 * active one). Gates the SLIDE SIZE card's rescale prompt: PowerPoint only
+	 * offers Maximize/Ensure Fit when there is content to rescale.
+	 */
+	hasDeckElements: boolean;
 	elements: readonly PptxElement[];
 	selectedIds: readonly string[];
 	/** Primary selected element id (docked Animation panel target), if any. */
 	selectedElementId?: string;
 	comments: readonly PptxComment[];
+	/** Authors offered by the Comments tab's `@`-mention typeahead. */
+	commentMentionAuthors: readonly PptxModernCommentAuthor[];
+	/** Named custom shows, for the Action Settings panel's `customShow` picker. */
+	customShows: readonly PptxCustomShow[];
 	docTitle: string | undefined;
 	docAuthor: string | undefined;
 	editable: boolean;
@@ -223,8 +405,18 @@ export interface InspectorDeckState {
 	themeOptions: readonly PptxThemeOption[];
 	/** The visible slide (THEME OVERRIDE card), or undefined on an empty deck. */
 	activeSlide: PptxSlide | undefined;
+	/** Whether inherited layout/master elements are unlocked for editing. */
+	editTemplateMode: boolean;
+	/** Slide masters, resolving the active slide's layout/master (SLIDE BACKGROUND card's template rows). */
+	slideMasters: readonly PptxSlideMaster[];
 	/** Presentation theme colours used to preview override target slots. */
 	colorScheme: PptxThemeColorScheme | undefined;
+	/** Presentation theme fonts, seeding the THEME EDITOR card's font pair. */
+	fontScheme: PptxThemeFontScheme | undefined;
+	/** The loaded theme's name (THEME EDITOR card), when the package has one. */
+	themeName: string | undefined;
+	/** Tag collections parsed from `ppt/tags/*.xml` (TAGS card). */
+	tagCollections: readonly PptxTagCollection[];
 	/** Notes page size in px (NOTES & HANDOUT card), when the package has one. */
 	notesCanvasSize: { width: number; height: number } | undefined;
 	/** Notes master placeholder count, or undefined when no notes master. */

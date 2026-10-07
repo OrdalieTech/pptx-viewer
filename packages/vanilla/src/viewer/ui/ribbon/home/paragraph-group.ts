@@ -15,7 +15,26 @@ export interface ParagraphGroupHandlers {
 	decreaseIndent(): void;
 	setTextAlign(align: TextStyle['align']): void;
 	setLineSpacing(value: number): void;
+	setTextDirection(direction: NonNullable<TextStyle['textDirection']>): void;
+	setColumnCount(count: number): void;
 }
+
+/** PowerPoint's four text-flow directions, in React's Text Direction menu order. */
+const TEXT_DIRECTIONS: ReadonlyArray<{
+	value: NonNullable<TextStyle['textDirection']>;
+	labelKey: string;
+}> = [
+	{ value: 'horizontal', labelKey: 'pptx.slideInspector.horizontal' },
+	{ value: 'vertical', labelKey: 'pptx.ribbon.textDirectionRotate90' },
+	{ value: 'vertical270', labelKey: 'pptx.ribbon.textDirectionRotate270' },
+	{ value: 'wordArtVert', labelKey: 'pptx.ribbon.textDirectionStacked' },
+];
+
+const COLUMN_COUNTS: ReadonlyArray<{ count: number; labelKey: string }> = [
+	{ count: 1, labelKey: 'pptx.ribbon.columns1' },
+	{ count: 2, labelKey: 'pptx.ribbon.columns2' },
+	{ count: 3, labelKey: 'pptx.ribbon.columns3' },
+];
 
 export interface ParagraphGroupState {
 	canFormat: boolean;
@@ -88,6 +107,27 @@ export function createParagraphGroup(
 	});
 	lineSpacing.el.querySelector('.pptxv-dropdown-text')?.remove();
 
+	const textDirection = makeDropdown(doc, {
+		triggerLabel: t('pptx.paragraph.textDirection'),
+		triggerText: '',
+		icon: 'change-case',
+		items: TEXT_DIRECTIONS.map((d) => ({ label: t(d.labelKey), value: d.value })),
+		onSelect: handlers.setTextDirection,
+	});
+	textDirection.el.querySelector('.pptxv-dropdown-text')?.remove();
+
+	const columns = makeDropdown(doc, {
+		triggerLabel: t('pptx.paragraph.columns'),
+		triggerText: '',
+		icon: 'columns',
+		items: COLUMN_COUNTS.map((option) => ({
+			label: t(option.labelKey),
+			value: option.count,
+		})),
+		onSelect: handlers.setColumnCount,
+	});
+	columns.el.querySelector('.pptxv-dropdown-text')?.remove();
+
 	row.append(
 		bullets.btn,
 		numbered.btn,
@@ -95,9 +135,20 @@ export function createParagraphGroup(
 		indentInc.btn,
 		...alignButtons.map((b) => b.btn),
 		lineSpacing.el,
+		textDirection.el,
+		columns.el,
 	);
 
-	const gated = [bullets, numbered, indentDec, indentInc, ...alignButtons, lineSpacing];
+	const gated = [
+		bullets,
+		numbered,
+		indentDec,
+		indentInc,
+		...alignButtons,
+		lineSpacing,
+		textDirection,
+		columns,
+	];
 
 	return {
 		el,

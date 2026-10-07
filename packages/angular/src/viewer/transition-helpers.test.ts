@@ -1,7 +1,9 @@
-import type { PptxTransitionType } from 'pptx-viewer-core';
+import type { PptxSlideTransition, PptxTransitionType } from 'pptx-viewer-core';
 import { describe, expect, it } from 'vitest';
 
+import { DEFAULT_TRANSITION_DURATION_MS as SHARED_DEFAULT_TRANSITION_DURATION_MS } from '../internal/shared';
 import {
+	DEFAULT_MORPH_DURATION_MS,
 	DEFAULT_TRANSITION_DURATION_MS,
 	INSTANT,
 	MIN_TRANSITION_DURATION_MS,
@@ -11,6 +13,7 @@ import {
 	resolveDirection,
 	resolveDirection8,
 	resolveOrientation,
+	resolveOverlayDurationMs,
 	resolveTransitionDuration,
 	transitionSlideBoxSize,
 } from './transition-helpers';
@@ -237,7 +240,10 @@ describe('getSlideTransitionAnimations', () => {
 	it('produces wipe animations with direction', () => {
 		const result = getSlideTransitionAnimations('wipe', 800, 'u');
 		expect(result.outgoing).toBe('none');
-		expect(result.incoming).toContain('wipe-from-top');
+		// `p:wipe/@dir` is the direction of TRAVEL: PowerPoint's UI "From
+		// Bottom" is stored as dir="u", so token u reveals from the BOTTOM
+		// edge sweeping up.
+		expect(result.incoming).toContain('wipe-from-bottom');
 		expect(result.incoming).toContain('800ms');
 	});
 
@@ -416,5 +422,57 @@ describe('transitionSlideBoxSize', () => {
 			width: 1,
 			height: 1,
 		});
+	});
+});
+
+describe('resolveOverlayDurationMs', () => {
+	const transition = (overrides: Partial<PptxSlideTransition>): PptxSlideTransition =>
+		({ type: 'morph', ...overrides }) as PptxSlideTransition;
+
+	it('lets the explicit override win over everything', () => {
+		expect(resolveOverlayDurationMs(800, transition({ durationMs: 2500, speed: 'slow' }))).toBe(
+			800,
+		);
+	});
+
+	it('honours an authored p14:dur for morphs', () => {
+		expect(resolveOverlayDurationMs(undefined, transition({ durationMs: 2500 }))).toBe(2500);
+	});
+
+	it('honours the legacy spd token for morphs', () => {
+		expect(resolveOverlayDurationMs(undefined, transition({ speed: 'slow' }))).toBe(1000);
+		expect(resolveOverlayDurationMs(undefined, transition({ speed: 'fast' }))).toBe(500);
+	});
+
+	it('falls back to the un-authored morph default', () => {
+		expect(resolveOverlayDurationMs(undefined, transition({}))).toBe(DEFAULT_MORPH_DURATION_MS);
+	});
+
+	// Regression: classic transitions used a local 320ms default that ignored
+	// `spd`, so a `spd="slow"` wipe PowerPoint plays over 1s flashed past in
+	// 320ms here while the other four bindings played it at 1s.
+	it('honours the legacy spd token for classic transitions too', () => {
+		expect(resolveOverlayDurationMs(undefined, transition({ type: 'wipe', speed: 'slow' }))).toBe(
+			1000,
+		);
+		expect(resolveOverlayDurationMs(undefined, transition({ type: 'wipe', speed: 'med' }))).toBe(
+			750,
+		);
+		expect(resolveOverlayDurationMs(undefined, transition({ type: 'fade', speed: 'fast' }))).toBe(
+			500,
+		);
+	});
+
+	it('honours an authored p14:dur for classic transitions', () => {
+		expect(
+			resolveOverlayDurationMs(undefined, transition({ type: 'push', durationMs: 2500 })),
+		).toBe(2500);
+	});
+
+	it("falls back to PowerPoint's 1s for an un-authored classic transition", () => {
+		expect(resolveOverlayDurationMs(undefined, transition({ type: 'fade' }))).toBe(
+			SHARED_DEFAULT_TRANSITION_DURATION_MS,
+		);
+		expect(SHARED_DEFAULT_TRANSITION_DURATION_MS).not.toBe(DEFAULT_TRANSITION_DURATION_MS);
 	});
 });

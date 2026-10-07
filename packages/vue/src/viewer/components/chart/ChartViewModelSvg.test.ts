@@ -1,5 +1,7 @@
 import { mount } from '@vue/test-utils';
+import type { PptxChartData, PptxElement } from 'pptx-viewer-core';
 import type { ChartViewModel, SvgLine, SvgPrimitive, SvgRect, SvgText } from 'pptx-viewer-shared';
+import { buildChartViewModel } from 'pptx-viewer-shared';
 import { describe, expect, it } from 'vitest';
 
 import ChartViewModelSvg from './ChartViewModelSvg.vue';
@@ -174,5 +176,109 @@ describe('chartViewModelSvg: overlays and data table (via primitives)', () => {
 		const paths = wrapper.findAll('path').filter((p) => p.attributes('d') === 'M0,0 L50,50');
 		expect(paths).toHaveLength(1);
 		expect(paths[0].attributes('fill-opacity')).toBe('0.3');
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// End-to-end regression: c:dTable data table + c:legendEntry deletion.
+//
+// Unlike the tests above (hand-built ChartViewModel fixtures), these run a
+// real chart element through the shared `buildChartViewModel` first, so they
+// prove the whole shared pipeline (core parse -> chart-view-model ->
+// chart-data-table-render / chart-legend-entries) reaches Vue's rendered DOM,
+// not just that the component can render an arbitrary primitive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function chartElement(chartData: PptxChartData): PptxElement {
+	return {
+		id: 'el-chart',
+		type: 'chart',
+		x: 0,
+		y: 0,
+		width: 400,
+		height: 300,
+		chartData,
+	} as PptxElement;
+}
+
+describe('chartViewModelSvg: c:dTable data table (real chart pipeline)', () => {
+	it('renders the data table grid below the plot, including the series key text', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			categories: ['Q1', 'Q2'],
+			series: [{ name: 'Revenue', values: [100, 150] }],
+			dataTable: { showKeys: true, showOutline: true },
+		});
+		const wrapper = mountVm(buildChartViewModel(element));
+		expect(wrapper.text()).toContain('Revenue');
+		expect(wrapper.text()).toContain('Q1');
+	});
+});
+
+describe('chartViewModelSvg: c:legendEntry deletion (real chart pipeline)', () => {
+	it('omits a deleted series from the rendered legend', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			categories: ['Q1'],
+			series: [
+				{ name: 'Revenue', values: [100] },
+				{ name: 'Cost', values: [80] },
+			],
+			style: {
+				hasLegend: true,
+				legendPosition: 'b',
+				legendEntries: [{ index: 1, deleted: true }],
+			},
+		});
+		const wrapper = mountVm(buildChartViewModel(element));
+		// `wrapper.text()` also picks up per-mark `<title>` tooltips (which still
+		// say "Cost" for hover), so assert on `<text>` element content directly.
+		const labels = wrapper.findAll('text').map((t) => t.text());
+		expect(labels).toContain('Revenue');
+		expect(labels).not.toContain('Cost');
+	});
+});
+
+// W4-D: a chart title with typed rich-text runs (`titleRuns`) draws one
+// <tspan> per run instead of collapsing to a single flat text node.
+describe('chartViewModelSvg: chart title rich text (titleRunSpans)', () => {
+	it('renders one <tspan> per titleRunSpans entry with its own style', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			title: 'Sales Q1',
+			categories: ['Q1'],
+			series: [{ name: 'Revenue', values: [10] }],
+			style: { hasTitle: true },
+			titleRuns: [
+				{ text: 'Sales ', bold: true },
+				{ text: 'Q1', italic: true, color: '#FF0000' },
+			],
+		});
+		const vm = buildChartViewModel(element);
+		expect(vm.titleRunSpans).toHaveLength(2);
+		const wrapper = mountVm(vm);
+		const tspans = wrapper.findAll('tspan');
+		expect(tspans).toHaveLength(2);
+		expect(tspans[0].text()).toBe('Sales');
+		expect(tspans[1].text()).toBe('Q1');
+		expect(tspans[1].attributes('font-style')).toBe('italic');
+	});
+
+	it('falls back to a flat text node when the title has no typed runs', () => {
+		const element = chartElement({
+			chartType: 'bar',
+			title: 'Sales',
+			categories: ['Q1'],
+			series: [{ name: 'Revenue', values: [10] }],
+			style: { hasTitle: true },
+		});
+		const vm = buildChartViewModel(element);
+		expect(vm.titleRunSpans).toBeUndefined();
+		const wrapper = mountVm(vm);
+		expect(wrapper.findAll('tspan')).toHaveLength(0);
+		const titleText = wrapper
+			.findAll('text')
+			.find((t) => t.attributes('data-chart-part') === 'title');
+		expect(titleText?.text()).toBe('Sales');
 	});
 });

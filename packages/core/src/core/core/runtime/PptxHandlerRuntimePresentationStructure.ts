@@ -9,6 +9,7 @@ import type {
 } from '../../types';
 import { parseKinsoku as parseKinsokuUtil } from '../../utils/kinsoku-parser';
 import { extractSectionMap as parseSectionMap } from '../../utils/presentation-section-parser';
+import { readHeaderFooterFromMaster } from './header-footer-parts';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeChartParsing';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
@@ -23,20 +24,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		slidePath?: string,
 	): PptxSlideTransition | undefined {
 		const parsedTransition = this.slideTransitionService.parseSlideTransition(slideXml);
-		if (!parsedTransition || !slidePath) {
+		// `parsedTransition.soundRId` is already correctly read off `p:sndAc/p:stSnd/p:snd/@r:embed`
+		// by `PptxSlideTransitionService` (via `parseTransitionSound`), which looks at
+		// the `p:snd` CHILD element. This used to re-derive the id itself by reading
+		// `@_r:embed` directly off `p:stSnd`, one level too high (that attribute lives
+		// on its `p:snd` child), so it always read an empty string and bailed out
+		// before ever resolving `soundPath`/`soundFileName`: no loaded deck's
+		// transition sound ever showed a file name in the ribbon or inspector.
+		if (!parsedTransition || !slidePath || !parsedTransition.soundRId) {
 			return parsedTransition;
 		}
 
-		const soundAction = parsedTransition.rawSoundAction;
-		const startSound = soundAction?.['p:stSnd'] as XmlObject | undefined;
-		const soundRId = String(startSound?.['@_r:embed'] || startSound?.['@_r:link'] || '').trim();
-		if (soundRId.length === 0) {
-			return parsedTransition;
-		}
-
-		parsedTransition.soundRId = soundRId;
 		const slideRelationships = this.slideRelsMap.get(slidePath);
-		const soundTarget = slideRelationships?.get(soundRId);
+		const soundTarget = slideRelationships?.get(parsedTransition.soundRId);
 		if (soundTarget) {
 			const soundPath = this.resolveImagePath(slidePath, soundTarget);
 			parsedTransition.soundPath = soundPath;
@@ -54,61 +54,38 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	}
 
 	/**
-	 * Extract header/footer settings from the presentation XML.
-	 * OOXML stores these as p:hf on the slide master or as properties on
-	 * p:presentation > p:defaultTextStyle's parent, or on each slide.
-	 * We look for the `p:hf` element in the presentation XML.
+	 * Extract the Header & Footer dialog's state.
+	 *
+	 * This used to read `p:presentation/p:hf`, an element the OOXML schema
+	 * does not allow (CT_Presentation, §19.2.1.26) and that no real deck has
+	 * ever contained, so the dialog opened blank for every file. The flags and
+	 * the footer/date TEXT actually live on the slide master: `p:hf` for the
+	 * former, the master's `ftr` / `dt` / `hdr` placeholder shapes for the
+	 * latter. See `header-footer-parts.ts` for the COM evidence.
+	 *
+	 * The first slide master wins, matching the dialog's presentation-wide
+	 * shape. Multi-master decks can disagree; the per-master flags remain
+	 * available on `PptxData.slideMasters[n].headerFooter`.
 	 */
 	protected extractHeaderFooter(): PptxHeaderFooter | undefined {
-		const pres = this.presentationData?.['p:presentation'] as XmlObject | undefined;
-		if (!pres) {
+		const masterRoot = this.firstSlideMasterRoot();
+		if (!masterRoot) {
 			return undefined;
 		}
+		const result = readHeaderFooterFromMaster(masterRoot);
+		return Object.keys(result).length > 0 ? result : undefined;
+	}
 
-		// Check for p:hf (header-footer) in the presentation or slides
-		const hf = pres['p:hf'] as XmlObject | undefined;
-		if (!hf) {
-			return undefined;
+	/** The `p:sldMaster` node of the first master, in archive-path order. */
+	private firstSlideMasterRoot(): XmlObject | undefined {
+		const paths = Array.from(this.masterXmlMap.keys()).sort((a, b) => a.localeCompare(b));
+		for (const path of paths) {
+			const root = this.masterXmlMap.get(path)?.['p:sldMaster'];
+			if (typeof root === 'object' && root !== null) {
+				return root as XmlObject;
+			}
 		}
-
-		const result: PptxHeaderFooter = {};
-
-		// @_hdr: show header (boolean as "0"/"1")
-		if (hf['@_hdr'] !== undefined) {
-			result.hasHeader = String(hf['@_hdr']) !== '0';
-		}
-		// @_ftr: show footer
-		if (hf['@_ftr'] !== undefined) {
-			result.hasFooter = String(hf['@_ftr']) !== '0';
-		}
-		// @_dt: show date/time
-		if (hf['@_dt'] !== undefined) {
-			result.hasDateTime = String(hf['@_dt']) !== '0';
-		}
-		// @_sldNum: show slide number
-		if (hf['@_sldNum'] !== undefined) {
-			result.hasSlideNumber = String(hf['@_sldNum']) !== '0';
-		}
-
-		// Attempt to read footer text from presProps or viewPr
-		const footerText = hf['@_ftrText'] as string | undefined;
-		if (footerText) {
-			result.footerText = String(footerText);
-		}
-
-		const dtText = hf['@_dtText'] as string | undefined;
-		if (dtText) {
-			result.dateTimeText = String(dtText);
-		}
-
-		// Date format pattern (e.g. "M/d/yyyy")
-		const dtFmt = hf['@_dtFmt'] as string | undefined;
-		if (dtFmt) {
-			result.dateFormat = String(dtFmt);
-			result.dateTimeAuto = true;
-		}
-
-		return result;
+		return undefined;
 	}
 
 	/**
@@ -156,6 +133,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				result.frame = frameStr;
 				hasProps = true;
 			}
+		}
+
+		const isPhotoRaw = photoAlbum['@_isPhoto'];
+		if (isPhotoRaw !== undefined) {
+			result.isPhoto = String(isPhotoRaw) === '1' || String(isPhotoRaw) === 'true';
+			hasProps = true;
 		}
 
 		return hasProps ? result : {};
@@ -241,5 +224,20 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 */
 	protected extractKinsoku(): PptxKinsoku | undefined {
 		return parseKinsokuUtil(this.presentationData ?? undefined);
+	}
+
+	/**
+	 * Extract `p:presentation/@embedTrueTypeFonts` (ECMA-376 §19.2.1.26).
+	 * `undefined` when absent, matching the `@showMasterPhAnim` convention of
+	 * never forcing the spec default onto the typed model.
+	 */
+	protected extractEmbedTrueTypeFonts(): boolean | undefined {
+		const pres = this.presentationData?.['p:presentation'] as XmlObject | undefined;
+		const raw = pres?.['@_embedTrueTypeFonts'];
+		if (raw === undefined) {
+			return undefined;
+		}
+		const lexical = String(raw).trim().toLowerCase();
+		return lexical !== '0' && lexical !== 'false';
 	}
 }

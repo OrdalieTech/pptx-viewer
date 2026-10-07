@@ -1,41 +1,10 @@
 import type { PptxEmbeddedFont, PptxSlide } from 'pptx-viewer-core';
-import { hasTextProperties } from 'pptx-viewer-core';
+import { collectReferencedFontFamilies, resolveGoogleWebfontHref } from 'pptx-viewer-shared';
 /**
  * useFontInjection: Injects @font-face declarations for embedded PPTX fonts
- * and loads Google Fonts fallbacks for well-known font families.
+ * and loads Google Fonts fallbacks for referenced families the API serves.
  */
 import { useEffect, useMemo } from 'react';
-
-/* ------------------------------------------------------------------ */
-/*  Google Fonts fallback map                                         */
-/* ------------------------------------------------------------------ */
-
-/**
- * Map of font families known to be available on Google Fonts.
- * Values are the URL query parameter fragments for the Google Fonts CSS API.
- */
-const GOOGLE_FONTS_AVAILABLE: Record<string, string> = {
-	'Atkinson Hyperlegible': 'Atkinson+Hyperlegible:wght@400;700',
-	Roboto: 'Roboto:wght@400;700',
-	'Open Sans': 'Open+Sans:wght@400;700',
-	Lato: 'Lato:wght@400;700',
-	Montserrat: 'Montserrat:wght@400;700',
-	Poppins: 'Poppins:wght@400;700',
-	Raleway: 'Raleway:wght@400;700',
-	Nunito: 'Nunito:wght@400;700',
-	'Playfair Display': 'Playfair+Display:wght@400;700',
-	'Source Sans Pro': 'Source+Sans+Pro:wght@400;700',
-	'PT Sans': 'PT+Sans:wght@400;700',
-	Merriweather: 'Merriweather:wght@400;700',
-	Ubuntu: 'Ubuntu:wght@400;700',
-	Oswald: 'Oswald:wght@400;700',
-	'Noto Sans': 'Noto+Sans:wght@400;700',
-	'Fira Sans': 'Fira+Sans:wght@400;700',
-	Inter: 'Inter:wght@400;700',
-	'Work Sans': 'Work+Sans:wght@400;700',
-	Quicksand: 'Quicksand:wght@400;700',
-	Cabin: 'Cabin:wght@400;700',
-};
 
 /* ------------------------------------------------------------------ */
 /*  Style element ID constants                                        */
@@ -57,30 +26,6 @@ const SYMBOL_FONT_FAMILIES: readonly string[] = [
 	'Symbol',
 	'Webdings',
 ] as const;
-
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                           */
-/* ------------------------------------------------------------------ */
-
-/**
- * Collect all unique font family names referenced across all slide
- * elements' text segments.
- */
-function collectReferencedFontFamilies(slides: PptxSlide[]): Set<string> {
-	const families = new Set<string>();
-	for (const slide of slides) {
-		for (const el of slide.elements) {
-			if (hasTextProperties(el) && el.textSegments) {
-				for (const seg of el.textSegments) {
-					if (seg.style.fontFamily) {
-						families.add(seg.style.fontFamily);
-					}
-				}
-			}
-		}
-	}
-	return families;
-}
 
 /* ------------------------------------------------------------------ */
 /*  Hook                                                              */
@@ -179,40 +124,35 @@ export function useFontInjection({ embeddedFonts, slides }: UseFontInjectionInpu
 	const referencedFamilies = useMemo(() => collectReferencedFontFamilies(slides), [slides]);
 
 	useEffect(() => {
-		// Font families that were embedded in the PPTX
-		const embeddedFamilies = new Set(embeddedFonts.map((f) => f.name));
-
-		// Find font families referenced in slides that are NOT embedded
-		// but ARE available on Google Fonts
-		const googleFamilies: string[] = [];
-		for (const family of referencedFamilies) {
-			if (embeddedFamilies.has(family)) {
-				continue;
+		// Embedded fonts satisfy their own families and locally installed ones
+		// render as-is; the rest are matched against the bundled Google Fonts
+		// catalogue (no network round-trip). The shared resolver also skips the
+		// local-install check for already-resolved families, so a webfont that has loaded is
+		// not mistaken for an installed one and dropped on the next pass.
+		let cancelled = false;
+		void resolveGoogleWebfontHref(slides, embeddedFonts).then((href) => {
+			if (cancelled) {
+				return null;
 			}
-			if (GOOGLE_FONTS_AVAILABLE[family]) {
-				googleFamilies.push(family);
+			if (!href || document.getElementById(GOOGLE_FONTS_LINK_ID)) {
+				return null;
 			}
-		}
-
-		if (googleFamilies.length === 0) {
-			return;
-		}
-
-		const linkEl = document.createElement('link');
-		linkEl.id = GOOGLE_FONTS_LINK_ID;
-		linkEl.rel = 'stylesheet';
-		linkEl.href = `https://fonts.googleapis.com/css2?${googleFamilies
-			.map((f) => `family=${encodeURIComponent(GOOGLE_FONTS_AVAILABLE[f])}`)
-			.join('&')}&display=swap`;
-		document.head.appendChild(linkEl);
+			const linkEl = document.createElement('link');
+			linkEl.id = GOOGLE_FONTS_LINK_ID;
+			linkEl.rel = 'stylesheet';
+			linkEl.href = href;
+			document.head.appendChild(linkEl);
+			return href;
+		});
 
 		return () => {
+			cancelled = true;
 			const existing = document.getElementById(GOOGLE_FONTS_LINK_ID);
 			if (existing) {
 				document.head.removeChild(existing);
 			}
 		};
-	}, [embeddedFonts, referencedFamilies]);
+	}, [embeddedFonts, slides]);
 
 	// ── Wingdings and symbol font fallback ────────────────────────
 	useEffect(() => {

@@ -22,7 +22,9 @@ import type {
 	PptxSection,
 	PptxSlide,
 	PptxSlideMaster,
+	PptxSmartTagsReference,
 	PptxTagCollection,
+	PptxTextStyleLevels,
 	PptxTheme,
 	PptxThemeOption,
 	PptxViewProperties,
@@ -62,6 +64,7 @@ export class PptxLoadDataBuilder {
 	private theme: PptxTheme | undefined;
 
 	private tableStyleMap: ParsedTableStyleMap | undefined;
+	private tableStylesDefaultId: string | undefined;
 
 	private embeddedFonts: PptxEmbeddedFont[] | undefined;
 	private embeddedFontList: PptxData['embeddedFontList'];
@@ -100,6 +103,8 @@ export class PptxLoadDataBuilder {
 
 	private modifyVerifier: PptxModifyVerifier | undefined;
 
+	private smartTags: PptxSmartTagsReference | undefined;
+
 	private customerData: PptxCustomerData[] | undefined;
 
 	private slideSizeType: string | undefined;
@@ -110,6 +115,10 @@ export class PptxLoadDataBuilder {
 	private modernCommentAuthors: PptxModernCommentAuthor[] | undefined;
 
 	private conformance: 'strict' | 'transitional' | undefined;
+
+	private embedTrueTypeFonts: boolean | undefined;
+
+	private defaultTextStyle: PptxTextStyleLevels | undefined;
 
 	public withDimensions(width: number, height: number, widthEmu: number, heightEmu: number): this {
 		this.width = width;
@@ -179,6 +188,11 @@ export class PptxLoadDataBuilder {
 
 	public withTableStyleMap(tableStyleMap: ParsedTableStyleMap | undefined): this {
 		this.tableStyleMap = tableStyleMap;
+		return this;
+	}
+
+	public withTableStylesDefaultId(tableStylesDefaultId: string | undefined): this {
+		this.tableStylesDefaultId = tableStylesDefaultId;
 		return this;
 	}
 
@@ -277,6 +291,11 @@ export class PptxLoadDataBuilder {
 		return this;
 	}
 
+	public withSmartTags(smartTags: PptxSmartTagsReference | undefined): this {
+		this.smartTags = smartTags;
+		return this;
+	}
+
 	public withCustomerData(customerData: PptxCustomerData[] | undefined): this {
 		this.customerData = customerData;
 		return this;
@@ -307,6 +326,16 @@ export class PptxLoadDataBuilder {
 		return this;
 	}
 
+	public withEmbedTrueTypeFonts(embedTrueTypeFonts: boolean | undefined): this {
+		this.embedTrueTypeFonts = embedTrueTypeFonts;
+		return this;
+	}
+
+	public withDefaultTextStyle(defaultTextStyle: PptxTextStyleLevels | undefined): this {
+		this.defaultTextStyle = defaultTextStyle;
+		return this;
+	}
+
 	public build(): PptxData {
 		return {
 			width: this.width,
@@ -327,6 +356,7 @@ export class PptxLoadDataBuilder {
 			themeColorMap: this.themeColorMap,
 			theme: this.theme,
 			tableStyleMap: this.tableStyleMap,
+			tableStylesDefaultId: this.tableStylesDefaultId,
 			embeddedFonts: this.embeddedFonts,
 			embeddedFontList: this.embeddedFontList,
 			mruColors: this.mruColors,
@@ -345,12 +375,15 @@ export class PptxLoadDataBuilder {
 			photoAlbum: this.photoAlbum,
 			kinsoku: this.kinsoku,
 			modifyVerifier: this.modifyVerifier,
+			smartTags: this.smartTags,
 			customXmlParts: this.customXmlParts,
 			customerData: this.customerData,
 			thumbnailData: this.thumbnailData,
 			commentAuthors: this.commentAuthors,
 			modernCommentAuthors: this.modernCommentAuthors,
 			conformance: this.conformance,
+			embedTrueTypeFonts: this.embedTrueTypeFonts,
+			defaultTextStyle: this.defaultTextStyle,
 		};
 	}
 }

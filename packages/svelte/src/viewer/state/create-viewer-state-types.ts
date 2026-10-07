@@ -1,7 +1,9 @@
 import type { PptxSaveFormat, TextSegment } from 'pptx-viewer-core';
 import type {
+	AutosaveDisabledReason,
 	CanvasSize,
 	CollaborationConfig,
+	FieldSubstitutionContext,
 	MobileSheetKey,
 	ViewerMode,
 } from 'pptx-viewer-shared';
@@ -9,6 +11,8 @@ import type {
 import type { Translator } from '../../i18n/translator';
 import type { CollaborationController, CollaborationDialogsState } from '../collab';
 import type { ShareDefaultsInput } from '../collab/collaboration-dialogs.svelte';
+import type { StageContextMenu } from '../components/props';
+import type { DeckApi } from '../editor/deck-api';
 import type { EditingApi } from '../editor/editing-api';
 import type { EditorController } from '../editor/editor-controller.svelte';
 import type { FindReplaceState } from '../editor/editor-find-replace.svelte';
@@ -18,9 +22,14 @@ import type { ExportWiring } from '../export/export-wiring.svelte';
 import type { ExportingApi } from '../export/exporting-api';
 import type { PresentationController, PresenterSession } from '../presentation';
 import type { ViewerLoadDetail } from '../types';
+import type { AutosaveRecoveryController } from './autosave-recovery.svelte';
 import type { AutosaveController } from './autosave.svelte';
 import type { ChromeUiState } from './chrome-ui.svelte';
+import type { CompatToastsState } from './compat-toasts.svelte';
+import type { AiCluster } from './create-viewer-state-ai.svelte';
 import type { PresentationLoader } from './presentation-loader.svelte';
+import type { ReadOnlyRecommendationState } from './read-only-recommendation.svelte';
+import type { ViewerOptionsState } from './viewer-options.svelte';
 import type { ViewerParityUiState } from './viewer-parity-ui.svelte';
 import type { ViewerState } from './viewer-state.svelte';
 
@@ -38,16 +47,35 @@ export interface CreateViewerStateOptions {
 	getSource: () => Uint8Array | ArrayBuffer | null | undefined;
 	collaboration?: CollaborationConfig;
 	shareDefaults?: ShareDefaultsInput;
-	/** Host `autosave` prop (post-effect value the caller keeps in sync). */
-	getAutosave: () => boolean;
+	/**
+	 * Host `autosave` prop, verbatim. `undefined` means the host said nothing,
+	 * which PERMITS autosave (the user's toggle then decides); only an explicit
+	 * `false` vetoes it and makes the toggle inert. See
+	 * `resolveAutosaveActivation` in `pptx-viewer-shared`.
+	 */
+	getAutosave: () => boolean | undefined;
 	autosaveIntervalMs?: number;
 	getFilePath: () => string | undefined;
 	getInitialSlide: () => number;
+	getRemoteFonts: () => boolean;
 	/** Already locale-bound translator; propagated to descendants via context. */
 	t: Translator;
 	getSmartArt3D: () => boolean;
-	/** Whether in-place editing is enabled (host `editable` prop, post-effect value). */
+	getSurfaceChart3D: () => boolean;
+	getBarChart3D: () => boolean;
+	getLineChart3D: () => boolean;
+	getAreaChart3D: () => boolean;
+	getPieChart3D: () => boolean;
+	/**
+	 * The host `editable` prop. The factory mirrors it into its own
+	 * {@link ViewerStateBag.editable} flag, which the AI seam, `setMode()` and
+	 * Trust Center's Protected View can then flip without the host round-trip.
+	 */
 	getEditable: () => boolean;
+	/** Display file name, used by the AI seam as a friendly deck title. */
+	getFileName?: () => string | undefined;
+	/** Whether the host enabled the AI assistant (the `ai` prop). */
+	getAiEnabled?: () => boolean;
 
 	onload?: (detail: ViewerLoadDetail) => void;
 	onerror?: (message: string) => void;
@@ -65,6 +93,12 @@ export interface CreateViewerStateOptions {
 	onautosavetoggle?: (enabled: boolean) => void;
 	onstartcollaboration?: (config: CollaborationConfig) => void;
 	onstopcollaboration?: () => void;
+	/**
+	 * Host override for File > Open > "Browse this device". Without it
+	 * {@link ViewerStateBag.openFile} falls back to the built-in native picker
+	 * and loads the chosen deck in place, so the control is never inert.
+	 */
+	onopenfile?: () => void;
 
 	/** DOM-bound getters, supplied by the component that owns the markup. */
 	getStageHolderEl: () => HTMLDivElement | undefined;
@@ -87,20 +121,36 @@ export interface ViewerStateBag {
 	readonly editor: EditorState;
 	readonly controller: EditorController;
 	readonly parityUi: ViewerParityUiState;
+	/**
+	 * The deck's own `p:modifyVerifier` / "Mark as Final" read-only
+	 * recommendation and lock (wave 4 #2), mirroring the Protected View banner
+	 * mechanism rather than inventing a second one.
+	 */
+	readonly readOnlyRec: ReadOnlyRecommendationState;
+	/** Fidelity-loss toast stack (wave 4 #3), fed by `loader.compatibilityWarnings`. */
+	readonly compatToasts: CompatToastsState;
 	readonly chromeUi: ChromeUiState;
 	readonly findReplace: FindReplaceState;
 	readonly collab: CollaborationController;
 	readonly dialogs: CollaborationDialogsState;
 	readonly autosaveCtl: AutosaveController;
+	/** The "recover unsaved changes?" probe + prompt for the loaded deck. */
+	readonly autosaveRecovery: AutosaveRecoveryController;
 	readonly presentation: PresentationController;
 	readonly presenterSession: PresenterSession;
 	readonly exportWiring: ExportWiring;
 	readonly exportUi: ExportUiState;
+	/** The full PowerPoint File > Options model (persisted), provided via context. */
+	readonly optionsState: ViewerOptionsState;
+	/** AI assistant bridge + on-canvas focus controller + panel open flag. */
+	readonly ai: AiCluster;
 	readonly t: Translator;
 	/** Imperative undo/redo/save/download API, matching `PowerPointViewerApi`'s editing subset. */
 	readonly editingApi: EditingApi;
 	/** Imperative PNG/PDF/GIF/video/print API, matching `PowerPointViewerApi`'s export subset. */
 	readonly exportingApi: ExportingApi;
+	/** Imperative navigation/zoom/mode/slide/element API (the rest of `PowerPointViewerApi`). */
+	readonly deck: DeckApi;
 
 	/** Effective scale (fit-to-viewport x user zoom), matching the main canvas. */
 	readonly scale: number;
@@ -117,13 +167,37 @@ export interface ViewerStateBag {
 	/** True while the autosave debounce/write cycle is armed. */
 	readonly autosaveActive: boolean;
 
-	/** Read-only: mutate via {@link setAutosaveEnabled}, which also fires `onautosavetoggle`. */
+	/**
+	 * The live editable flag: seeded from the host `editable` prop, then
+	 * writable so an AI edit, `deck.setMode()` or Trust Center's Protected View
+	 * can flip it without waiting on the host.
+	 */
+	editable: boolean;
+	/**
+	 * Whether the Protected View banner should show: the host allows editing,
+	 * Trust Center > "Open presentations in Protected View" is still blocking
+	 * it, and the user hasn't lifted it via {@link enableEditing} for this
+	 * document yet.
+	 */
+	readonly protectedViewActive: boolean;
+	/** Lift Protected View's read-only lock for the current document (File > Options > Trust Center). */
+	enableEditing(): void;
+	/**
+	 * The EFFECTIVE title-bar AutoSave state: the user's preference, or false
+	 * when the host vetoed autosave (the switch renders off and inert rather
+	 * than pretending to work). Mutate via {@link setAutosaveEnabled}, which
+	 * also fires `onautosavetoggle`.
+	 */
 	readonly autosaveEnabled: boolean;
+	/** False only when the host passed `autosave={false}`; the toggle is then inert. */
+	readonly autosaveToggleAvailable: boolean;
+	/** Why autosave is not running, for a host that wants to explain it. */
+	readonly autosaveDisabledReason: AutosaveDisabledReason | undefined;
 	setAutosaveEnabled(enabled: boolean): void;
 	presenterMode: boolean;
 	/** `Date.now()` timestamp of the last `enterPresenterView()` call; the presenter view's elapsed-time display. */
 	readonly presenterStartedAt: number;
-	stageContextMenu: { x: number; y: number } | null;
+	stageContextMenu: StageContextMenu | null;
 	readonly activeMobileSheet: MobileSheetKey;
 	setActiveMobileSheet(next: MobileSheetKey): void;
 	readonly notesExpanded: boolean;
@@ -132,11 +206,23 @@ export interface ViewerStateBag {
 
 	enterPresenterView(): void;
 	closeSignatureWarning(): void;
+	/** File > Open > "Browse this device" (host override, else the native picker). */
+	openFile(): void;
+	/** Run a Quick Access Toolbar command by catalog id (unknown ids no-op). */
+	runQuickAccessCommand(id: string): void;
+	/**
+	 * Deck-level OOXML field-substitution context (date/time, header/footer,
+	 * document properties, plus the active slide's number and title), also
+	 * published to descendants via `provideFieldContext`.
+	 */
+	fieldContext(): FieldSubstitutionContext;
 	onNotesToggle(): void;
 	onNotesCommit(notes: string, segments?: TextSegment[]): void;
 	onFullscreenToggle(): void;
 	onFullscreenChange(): void;
 	onKeydown(event: KeyboardEvent): void;
+	/** PowerPoint navigates a running show on the wheel; inert while editing. */
+	onWheel(event: WheelEvent): void;
 	downloadPptx(fileName?: string): Promise<void>;
 	downloadAs(format: PptxSaveFormat, fileName?: string): Promise<void>;
 	/** Tear down every constructed controller (call from the host's `onDestroy`). */

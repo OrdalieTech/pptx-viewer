@@ -11,6 +11,37 @@
 
 import type { PlaceholderTextLevelStyle } from './element-base';
 import type { PptxElement } from './elements';
+import type { PptxImageProperties } from './image';
+
+/**
+ * A placeholder slot declared on a master or layout.
+ *
+ * The geometry fields are in CSS pixels (EMU / {@link EMU_PER_PX}) and are only
+ * present when the shape carried an explicit `a:xfrm`. Placeholders that
+ * inherit their frame from the master leave them undefined, so consumers that
+ * draw placeholder outlines (the layout gallery) must skip those entries
+ * rather than assume a zero-sized box at the origin.
+ *
+ * @example
+ * ```ts
+ * const frame: PptxPlaceholderFrame = { type: "body", idx: "1", x: 63, y: 130 };
+ * // => satisfies PptxPlaceholderFrame
+ * ```
+ */
+export interface PptxPlaceholderFrame {
+	/** `p:ph/@type`, lower-cased by the parser; defaults to `body` when omitted. */
+	type: string;
+	/** `p:ph/@idx`, when present. */
+	idx?: string;
+	/** Left offset in CSS pixels, when the shape declares `a:off`. */
+	x?: number;
+	/** Top offset in CSS pixels, when the shape declares `a:off`. */
+	y?: number;
+	/** Width in CSS pixels, when the shape declares `a:ext`. */
+	width?: number;
+	/** Height in CSS pixels, when the shape declares `a:ext`. */
+	height?: number;
+}
 
 /**
  * Parsed notes master from `ppt/notesMasters/notesMaster1.xml`.
@@ -32,17 +63,26 @@ export interface PptxNotesMaster {
 	backgroundColor?: string;
 	/** Background image data URL. */
 	backgroundImage?: string;
+	/** Crop, tiling and image effects authored on the background blip fill. */
+	backgroundImageProperties?: PptxImageProperties;
 	/** Placeholder shapes found on the notes master. */
-	placeholders?: Array<{
-		type: string;
-		idx?: string;
-	}>;
+	placeholders?: PptxPlaceholderFrame[];
 	/** Editable elements on the notes master (header, footer, date, page number, slide image, notes body). */
 	elements?: PptxElement[];
 	/** Header/footer flags from `<p:hf>` on the notes master (P-H3). */
 	headerFooter?: PptxHeaderFooterFlags;
 	/** Colour map from `<p:clrMap>` (12 alias attributes). Applied at save time. */
 	clrMap?: Record<string, string>;
+	/**
+	 * Notes text defaults from `<p:notesStyle>` (`CT_TextListStyle`, ECMA-376
+	 * §19.3.1.34): the same `a:defPPr` + `a:lvl1pPr`..`a:lvl9pPr` shape as
+	 * {@link PptxMasterTextStyles}'s per-category styles, keyed 0-8 with the
+	 * default at `-1`. Governs the notes body placeholder's font size, indent
+	 * levels, and bullet style wherever a notes slide does not override them.
+	 * Parsed read-only for the render cascade; the save side preserves the
+	 * original `<p:notesStyle>` XML verbatim rather than re-serialising this.
+	 */
+	notesStyle?: PptxTextStyleLevels;
 }
 
 /**
@@ -64,11 +104,10 @@ export interface PptxHandoutMaster {
 	backgroundColor?: string;
 	/** Background image data URL. */
 	backgroundImage?: string;
+	/** Crop, tiling and image effects authored on the background blip fill. */
+	backgroundImageProperties?: PptxImageProperties;
 	/** Placeholder shapes found on the handout master. */
-	placeholders?: Array<{
-		type: string;
-		idx?: string;
-	}>;
+	placeholders?: PptxPlaceholderFrame[];
 	/** Editable elements on the handout master (header, footer, date, page number, slide placeholders). */
 	elements?: PptxElement[];
 	/** Number of slides per page for handout print layout (1, 2, 3, 4, 6, or 9). */
@@ -117,15 +156,14 @@ export interface PptxSlideMaster {
 	backgroundColor?: string;
 	/** Background image data URL for the slide master. */
 	backgroundImage?: string;
+	/** Crop, tiling and image effects authored on the background blip fill. */
+	backgroundImageProperties?: PptxImageProperties;
 	/** Theme file path this master references. */
 	themePath?: string;
 	/** Layout paths associated with this master. */
 	layoutPaths?: string[];
 	/** Placeholder shapes on the master. */
-	placeholders?: Array<{
-		type: string;
-		idx?: string;
-	}>;
+	placeholders?: PptxPlaceholderFrame[];
 	/** Parsed element shapes on the master slide (for master view rendering). */
 	elements?: PptxElement[];
 	/** Parsed slide layout objects associated with this master. */
@@ -139,6 +177,14 @@ export interface PptxSlideMaster {
 	 * accent1-6, hlink, folHlink). Applied at save time when present.
 	 */
 	clrMap?: Record<string, string>;
+	/**
+	 * Whether the master is marked as preserved (prevent auto-deletion,
+	 * `@preserve`). Mirrors {@link PptxSlideLayout.preserve}: PowerPoint
+	 * silently drops an unused master unless this is set.
+	 *
+	 * ECMA-376 §19.3.1.38 (CT_SlideMaster).
+	 */
+	preserve?: boolean;
 }
 
 /**
@@ -198,13 +244,12 @@ export interface PptxSlideLayout {
 	backgroundColor?: string;
 	/** Background image data URL for the layout. */
 	backgroundImage?: string;
+	/** Crop, tiling and image effects authored on the background blip fill. */
+	backgroundImageProperties?: PptxImageProperties;
 	/** Parsed element shapes on the layout. */
 	elements?: PptxElement[];
 	/** Placeholder shapes on the layout. */
-	placeholders?: Array<{
-		type: string;
-		idx?: string;
-	}>;
+	placeholders?: PptxPlaceholderFrame[];
 	/** Matching name attribute for layout identification (`@matchingName`). */
 	matchingName?: string;
 	/** Whether the layout is marked as preserved (prevent deletion, `@preserve`). */
@@ -217,6 +262,45 @@ export interface PptxSlideLayout {
 	clrMapOverride?: Record<string, string>;
 	/** Header/footer flags from `<p:hf>` on this layout (P-H3). */
 	headerFooter?: PptxHeaderFooterFlags;
+}
+
+/**
+ * Rendered content of a single layout, used to draw gallery thumbnails.
+ *
+ * Produced on demand rather than during load: materialising every layout's
+ * artwork (and decoding its images) up front costs a noticeable amount of time
+ * on decks with many masters, and most sessions never open the layout gallery
+ * at all.
+ *
+ * @example
+ * ```ts
+ * const preview: PptxLayoutPreview = {
+ *   path: "ppt/slideLayouts/slideLayout2.xml",
+ *   width: 960,
+ *   height: 540,
+ *   elements: [],
+ *   placeholders: [{ type: "title" }],
+ * };
+ * // => satisfies PptxLayoutPreview
+ * ```
+ */
+export interface PptxLayoutPreview {
+	/** ZIP path of the layout this preview belongs to. */
+	path: string;
+	/** Slide width in CSS pixels, so a thumbnail can compute its own scale. */
+	width: number;
+	/** Slide height in CSS pixels. */
+	height: number;
+	/** Background resolved from the layout, falling back to its master's. */
+	backgroundColor?: string;
+	/** Background image data URL, when the layout or master declares one. */
+	backgroundImage?: string;
+	/** Crop, tiling and image effects authored on the resolved background image. */
+	backgroundImageProperties?: PptxImageProperties;
+	/** The layout's own artwork (pictures, shapes and static text). */
+	elements: PptxElement[];
+	/** Placeholder slots, drawn as outlined frames in the gallery. */
+	placeholders: PptxPlaceholderFrame[];
 }
 
 /**

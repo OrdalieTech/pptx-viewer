@@ -1,5 +1,5 @@
-import type { PptxSlide } from 'pptx-viewer-core';
-import type { CanvasSize } from 'pptx-viewer-shared';
+import type { PptxData, PptxSlide } from 'pptx-viewer-core';
+import type { CanvasSize, FieldSubstitutionContext } from 'pptx-viewer-shared';
 
 import type { Translator } from '../../i18n/translator';
 import { ExportController } from './export-controller.svelte';
@@ -20,6 +20,32 @@ export interface ExportWiringDeps {
 	getCurrent(): number;
 	getTranslator(): Translator;
 	getSmartArt3D(): boolean;
+	getSurfaceChart3D(): boolean;
+	getBarChart3D(): boolean;
+	getLineChart3D(): boolean;
+	getAreaChart3D(): boolean;
+	getPieChart3D(): boolean;
+	/**
+	 * Options > Advanced > "Default resolution" / "Do not compress images"
+	 * raster-scale multiplier (see `resolveImageResolutionScale` in
+	 * `pptx-viewer-shared`).
+	 */
+	getImageResolutionScale(): number;
+	/**
+	 * Deck-level field-substitution context, so an exported slide resolves its
+	 * slide-number / date / footer runs exactly like the on-screen stage does.
+	 * Optional: a host wiring exports without a viewer root simply exports the
+	 * authored placeholder text, as before.
+	 */
+	getFieldContext?(): FieldSubstitutionContext | undefined;
+	/** Live presentation data for the deck-JSON export; undefined before a load. */
+	getDeckData?(): PptxData | undefined;
+	/** Source file name for the deck-JSON download (`deck.pptx` -> `deck.json`). */
+	getFileName?(): string | undefined;
+	/** Options > Advanced > "Print hidden slides". Defaults to `false` (excluded). */
+	getIncludeHiddenSlides?(): boolean;
+	/** Options > Advanced > "High quality" raster scale for the print fallback path. */
+	getPrintHighQuality?(): boolean;
 }
 
 export interface ExportWiring {
@@ -50,6 +76,13 @@ export function createExportWiring(deps: ExportWiringDeps): ExportWiring {
 				getMediaDataUrls: deps.getMediaDataUrls,
 				getTranslator: deps.getTranslator,
 				smartArt3D: deps.getSmartArt3D(),
+				surfaceChart3D: deps.getSurfaceChart3D(),
+				barChart3D: deps.getBarChart3D(),
+				lineChart3D: deps.getLineChart3D(),
+				areaChart3D: deps.getAreaChart3D(),
+				pieChart3D: deps.getPieChart3D(),
+				getImageResolutionScale: deps.getImageResolutionScale,
+				getFieldContext: () => deps.getFieldContext?.(),
 			});
 		}
 		return rasterizer;
@@ -61,6 +94,10 @@ export function createExportWiring(deps: ExportWiringDeps): ExportWiring {
 		getCanvasSize: deps.getCanvasSize,
 		getSlides: deps.getSlides,
 		rasterizeSlide: (index) => getRasterizer().rasterizeSlide(index),
+		getDeckData: () => deps.getDeckData?.(),
+		getFileName: () => deps.getFileName?.(),
+		getIncludeHiddenSlides: () => deps.getIncludeHiddenSlides?.() ?? false,
+		getPrintHighQuality: () => deps.getPrintHighQuality?.() ?? false,
 	});
 
 	return {

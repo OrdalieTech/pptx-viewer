@@ -26,6 +26,18 @@ export interface EditorHistoryInput {
 	maxHistoryEntries?: number;
 	hasActivePointerInteraction: () => boolean;
 	pointerCommitNonce: number;
+	/**
+	 * Raised whenever a local edit is committed, i.e. exactly when this hook
+	 * learns the deck has diverged from what was last loaded or saved.
+	 *
+	 * This is what drives `state.isDirty`, and through it the status bar, the
+	 * host's `onDirtyChange` (the demos hang their "* filename" title marker off
+	 * it) and - critically - `useAutosave`, which short-circuits on a clean
+	 * document. Before this existed, `isDirty` was raised only by a few
+	 * master-view and document-property paths, so an element nudge, Home > New
+	 * Slide or a notes edit left the flag false and crash recovery never ran.
+	 */
+	onDirty?: () => void;
 	// Setters for applying snapshots
 	setSlides: (slides: PptxSlide[]) => void;
 	setCanvasSize: (size: CanvasSize) => void;
@@ -56,6 +68,37 @@ export interface EditorHistoryResult {
 const DEFAULT_MAX_HISTORY_ENTRIES = 120;
 
 // ---------------------------------------------------------------------------
+// Change detection
+// ---------------------------------------------------------------------------
+
+/**
+ * The part of a history snapshot that IS the document.
+ *
+ * `activeSlideIndex` is deliberately excluded. It rides along in the STORED
+ * snapshot so undo/redo return the user to the slide the edit happened on, but
+ * it must never take part in deciding whether the deck changed: clicking a
+ * thumbnail reassigns nothing but the index, and comparing the whole snapshot
+ * made that read as a document mutation. The consequences were both visible to
+ * the user - the deck was marked dirty, so autosave wrote a crash-recovery
+ * snapshot and the next visit offered to "recover unsaved changes" for a deck
+ * that had only been read, and every slide click pushed an undo entry, so
+ * Ctrl+Z walked back through navigation instead of edits. Angular and Vanilla
+ * raise dirty from explicit commit choke points and never had either symptom.
+ *
+ * Note this is only the CHANGE GATE: an edit still announces itself through
+ * `markDirty()` the moment it commits, so narrowing the comparison cannot
+ * swallow an edit made immediately after a navigation.
+ */
+function serializeDocument(snapshot: EditorHistorySnapshot): string {
+	return JSON.stringify({
+		width: snapshot.width,
+		height: snapshot.height,
+		slides: snapshot.slides,
+		templateElementsBySlideId: snapshot.templateElementsBySlideId,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 
@@ -70,6 +113,7 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 		maxHistoryEntries = DEFAULT_MAX_HISTORY_ENTRIES,
 		hasActivePointerInteraction,
 		pointerCommitNonce,
+		onDirty,
 		setSlides,
 		setCanvasSize,
 		setActiveSlideIndex,
@@ -99,10 +143,23 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 	const [canRedo, setCanRedo] = useState(false);
 	const [undoLabel, setUndoLabel] = useState<string | undefined>(undefined);
 	const [redoLabel, setRedoLabel] = useState<string | undefined>(undefined);
-	// State value intentionally unread: setter is used solely to trigger
-	// re-renders via `markDirty` when history changes.
-	// eslint-disable-next-line react/hook-use-state
-	const [_isDirty, setIsDirty] = useState(false);
+	/**
+	 * Monotonic counter bumped by every `markDirty()` call, i.e. by every local
+	 * edit-commit choke point in the editor.
+	 *
+	 * It exists because the cheap hash below is deliberately blind to an
+	 * element's CONTENT: it only sees slide / element counts. An edit that
+	 * rewrites a property in place (any inspector field, a ribbon format
+	 * command, an inline-text commit) changes no count, so without a nonce the
+	 * hash is byte-identical before and after and the effect returns before it
+	 * ever reaches the snapshot push. The edit lands on screen and is silently
+	 * absent from the undo stack.
+	 *
+	 * `markDirty` previously flipped a boolean, which changes state exactly
+	 * once in a session and so could not re-open the gate. Counting instead
+	 * makes every commit distinguishable.
+	 */
+	const [editCommitNonce, setEditCommitNonce] = useState(0);
 
 	// -- Helpers ------------------------------------------------------------
 
@@ -163,8 +220,19 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 		}, 0);
 	}, []);
 
+	/**
+	 * Held in a ref so `markDirty` can stay identity-stable: it is passed down
+	 * into dozens of memoised handlers, and a changing identity would invalidate
+	 * all of them on every render.
+	 */
+	const onDirtyRef = useRef(onDirty);
+	useEffect(() => {
+		onDirtyRef.current = onDirty;
+	}, [onDirty]);
+
 	const markDirty = useCallback(() => {
-		setIsDirty((previous) => (previous ? previous : true));
+		setEditCommitNonce((previous) => previous + 1);
+		onDirtyRef.current?.();
 	}, []);
 
 	// -- Stack navigation ---------------------------------------------------
@@ -180,7 +248,7 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 		isApplyingHistoryRef.current = true;
 		const nextSnapshot = cloneHistorySnapshot(previousSnapshot);
 		lastHistorySnapshotRef.current = cloneHistorySnapshot(nextSnapshot);
-		lastHistorySerializedRef.current = JSON.stringify(nextSnapshot);
+		lastHistorySerializedRef.current = serializeDocument(nextSnapshot);
 		applyHistorySnapshot(nextSnapshot);
 		updateHistoryAvailability();
 		unlockHistoryTracking();
@@ -204,7 +272,7 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 		isApplyingHistoryRef.current = true;
 		const targetSnapshot = cloneHistorySnapshot(nextSnapshot);
 		lastHistorySnapshotRef.current = cloneHistorySnapshot(targetSnapshot);
-		lastHistorySerializedRef.current = JSON.stringify(targetSnapshot);
+		lastHistorySerializedRef.current = serializeDocument(targetSnapshot);
 		applyHistorySnapshot(targetSnapshot);
 		updateHistoryAvailability();
 		unlockHistoryTracking();
@@ -226,7 +294,7 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 			if (initialSnapshot) {
 				const clonedInitial = cloneHistorySnapshot(initialSnapshot);
 				lastHistorySnapshotRef.current = clonedInitial;
-				lastHistorySerializedRef.current = JSON.stringify(clonedInitial);
+				lastHistorySerializedRef.current = serializeDocument(clonedInitial);
 			} else {
 				lastHistorySnapshotRef.current = null;
 				lastHistorySerializedRef.current = '';
@@ -264,11 +332,19 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 		// Skip the deep stringify when slide / element counts and ids
 		// match the previous snapshot. This catches the very common case
 		// where the effect re-runs but no real state shape changed.
-		// `pointerCommitNonce` is part of the hash so a committed pointer
-		// interaction (move / resize / adjust / on-canvas chart edit) forces
-		// the deep comparison even though it changes no counts; without it
-		// those edits never reached the snapshot push and were not undoable.
-		const cheapHash = `${pointerCommitNonce}|${slides.length}|${activeSlideIndex}|${canvasSize.width}x${canvasSize.height}|${slides
+		//
+		// Both nonces are part of the hash because the counts alone cannot see
+		// a content-only edit, and a content-only edit is still an undo step:
+		//   - `pointerCommitNonce` covers a committed pointer interaction
+		//     (move / resize / adjust / on-canvas chart edit).
+		//   - `editCommitNonce` covers every other local commit, via the
+		//     `markDirty()` that each edit choke point already calls: inspector
+		//     fields, ribbon formatting, inline-text commits, table and theme
+		//     edits. Without it none of those armed Undo.
+		// Opening the gate only costs a stringify; the serialized comparison
+		// below still rejects a commit that changed nothing, so a handler that
+		// calls `markDirty()` without touching the deck pushes no entry.
+		const cheapHash = `${pointerCommitNonce}|${editCommitNonce}|${slides.length}|${activeSlideIndex}|${canvasSize.width}x${canvasSize.height}|${slides
 			.map((s) => `${s.id}:${s.elements.length}`)
 			.join('/')}`;
 		if (cheapHash === lastCheapHashRef.current) {
@@ -276,8 +352,22 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 		}
 
 		const snapshot = buildHistorySnapshot();
-		const serialized = JSON.stringify(snapshot);
+		// Document only: see `serializeDocument`. A slide selection reaches here
+		// (the cheap hash above deliberately still lets it through, so the gate
+		// cannot swallow a same-tick edit) and stops on this comparison instead of
+		// being reported as a mutation.
+		const serialized = serializeDocument(snapshot);
 		if (serialized === lastHistorySerializedRef.current) {
+			// Nothing about the deck moved, only the view. Keep the stored
+			// snapshot's index current so a later undo returns to the slide the
+			// user was actually editing, then stop: no dirty flag, no undo entry.
+			const previous = lastHistorySnapshotRef.current;
+			if (previous && previous.activeSlideIndex !== snapshot.activeSlideIndex) {
+				lastHistorySnapshotRef.current = {
+					...previous,
+					activeSlideIndex: snapshot.activeSlideIndex,
+				};
+			}
 			lastCheapHashRef.current = cheapHash;
 			return;
 		}
@@ -291,6 +381,12 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 			return;
 		}
 
+		// Reaching here means the deck genuinely differs from the last snapshot,
+		// which is the strongest "this document is dirty" signal there is: it is
+		// true even for an edit path that forgot to call `markDirty()`. The very
+		// first snapshot after a load takes the `!previousSnapshot` branch above
+		// and so never reports dirty.
+		onDirtyRef.current?.();
 		historyPastRef.current.push(cloneHistorySnapshot(previousSnapshot));
 		while (historyPastRef.current.length > Math.max(1, maxHistoryEntries)) {
 			historyPastRef.current.shift();
@@ -305,6 +401,7 @@ export function useEditorHistory(input: EditorHistoryInput): EditorHistoryResult
 		buildHistorySnapshot,
 		canvasSize.height,
 		canvasSize.width,
+		editCommitNonce,
 		error,
 		hasActivePointerInteraction,
 		loading,

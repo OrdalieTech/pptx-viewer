@@ -1,3 +1,6 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per handler); merging them isn't a
+   style choice here. */
 import { NgStyle } from '@angular/common';
 import {
 	afterNextRender,
@@ -19,18 +22,42 @@ import { TranslatePipe, TranslateService } from '@ngx-translate/core';
 import type {
 	InkPptxElement,
 	PptxElement,
+	PptxGridSpacing,
 	PptxSlide,
 	PptxTableData,
 	TextStyle,
 } from 'pptx-viewer-core';
 import { hasTextProperties } from 'pptx-viewer-core';
 
-import { applyRenderedElementAccessibility } from '../internal/shared';
-import type { CanvasSize } from '../internal/shared';
-import type { AiChangeBatch } from '../internal/shared-ai';
+import {
+	actionAffordanceLabels,
+	applyElementActionAffordances,
+	applyRenderedElementAccessibility,
+	canInteractWithElement,
+	collectConnectorSiteCandidates,
+	editorNudgeDelta,
+	findConnectorSiteNear,
+	getConnectorEndpointHandles,
+	isTemplateElement,
+	resolveConnectorEndpointUpdate,
+	withConnectorEndpointUpdate,
+	RULER_FONT_SIZE,
+	RULER_THICKNESS,
+	visibleTemplateElements as filterVisibleTemplateElements,
+} from '../internal/shared';
+import type {
+	CanvasSize,
+	ConnectorEndpointKind,
+	ElementInteraction,
+	RulerUnit,
+	ShapeAdjustmentDragState,
+	Tick,
+} from '../internal/shared';
+import type { AiCanvasHighlight, AiChangeBatch } from '../internal/shared-ai';
+import { resolveContextMenuElementId } from '../internal/shared-src/render/context-menu-target';
+import { ActiveXControlsOverlayComponent } from './activex-controls-overlay.component';
 import { AiChangeOverlayComponent } from './ai/ai-change-overlay.component';
 import { AiFocusHighlightOverlayComponent } from './ai/ai-focus-highlight-overlay.component';
-import type { AiCanvasHighlight } from './ai/focus-targets';
 import { CanvasFitService } from './canvas-fit.service';
 import { applyMove, applyResize, marqueeHitIds } from './drag-resize';
 import type { Box, ResizeHandle } from './drag-resize';
@@ -38,24 +65,34 @@ import { ElementRendererComponent } from './element-renderer.component';
 import type { StyleMap } from './element-style';
 import { FieldContextService } from './field-context.service';
 import { InkDrawingService } from './ink-drawing.service';
-import { RulerGuidesService } from './ruler-guides.service';
-import { generateRulerTicks, RULER_THICKNESS } from './ruler-ticks';
-import type { RulerTick } from './ruler-ticks';
 import {
-	computeCornerHandle,
-	computeHandleBoxes,
+	resolveCommitTextAutoFitHeight,
+	resolveCommitTextNormAutofitShrink,
+} from './inline-edit-autofit-commit';
+import { RulerGuidesService } from './ruler-guides.service';
+import { rulerHighlight, rulerStripTicks } from './ruler-strips';
+import {
+	computeResizeHandleBoxes,
+	computeRotateHandleBox,
 	computeSelectionBoxes,
 	computeSingleSelected,
 	resolveInteractiveElementId,
 } from './selection-geometry';
+import {
+	beginShapeAdjustmentDrag,
+	computeAdjustHandles,
+	draggedAdjustments,
+} from './shape-adjust-handle';
+import type { AdjustHandleBox } from './shape-adjust-handle';
 import { getSlideBackgroundStyle } from './slide-background';
-import { isViewportBackgroundPressTarget } from './slide-canvas-helpers';
+import { affordanceElements, isViewportBackgroundPressTarget } from './slide-canvas-helpers';
 import { SLIDE_CONTEXT } from './slide-context';
 import type { SlideContext } from './slide-context';
-import { computeSnap, snapToGridStep } from './snap-guides';
+import { computeGridSpacingPx, computeSnap, snapToGridStep } from './snap-guides';
 import type { SnapGuide } from './snap-guides';
 import type { TableCellCommit } from './table-renderer.component';
 import { isElementInteractive } from './template-mode';
+import { ViewerOptionsService } from './viewer-options.service';
 
 /** Pixels (screen-space) a pointer must move before a click becomes a drag. */
 const DRAG_THRESHOLD = 3;
@@ -93,6 +130,13 @@ interface DragState {
 	startAngle?: number;
 	startRotation?: number;
 }
+
+/** Which lock governs each drag mode, for the mid-gesture lock re-check. */
+const DRAG_MODE_INTERACTION: Readonly<Record<DragState['mode'], ElementInteraction>> = {
+	move: 'move',
+	resize: 'resize',
+	rotate: 'rotate',
+};
 
 /** Best-effort plain text of a text-bearing element for inline editing. */
 function plainText(el: PptxElement): string {
@@ -135,411 +179,10 @@ function plainText(el: PptxElement): string {
 		TranslatePipe,
 		AiFocusHighlightOverlayComponent,
 		AiChangeOverlayComponent,
+		ActiveXControlsOverlayComponent,
 	],
-	styles: [
-		`
-			/*
-			 * In editor mode the stage must own all pointer gestures so touch
-			 * drag/resize/rotate/marquee aren't stolen by the browser for
-			 * panning/pinch-zooming. View-only mode keeps default behaviour so
-			 * the slide can still be scrolled.
-			 */
-			.pptx-ng-canvas-stage.is-editable {
-				touch-action: none;
-			}
-		`,
-	],
-	template: `
-		<div
-			#viewport
-			class="pptx-ng-canvas-viewport"
-			[attr.data-pptx-viewport]="interactive() ? '' : null"
-			(pointerdown)="onViewportPointerDown($event)"
-		>
-			<div class="pptx-ng-canvas-wrapper" [ngStyle]="wrapperStyle()">
-				<div
-					#stage
-					class="pptx-ng-canvas-stage"
-					[class.is-editable]="editable()"
-					role="region"
-					[attr.aria-roledescription]="interactive() ? 'slide' : null"
-					[attr.data-pptx-ai-active]="aiActive() ? 'true' : null"
-					[ngStyle]="stageStyle()"
-					(pointerdown)="onStagePointerDown($event)"
-					(contextmenu)="onContextMenu($event)"
-					(dblclick)="onDblClick($event)"
-				>
-					<!--
-						Template layer: inherited master/layout elements, rendered BEHIND
-						the slide's own elements (lower z-index). Interactive + given the
-						amber editable affordance only while editTemplateMode is on; when
-						off they render inertly with no affordance, exactly as core
-						delivered them.
-					-->
-					@for (element of templateElements(); track element.id; let i = $index) {
-						<pptx-element-renderer
-							[element]="element"
-							[mediaDataUrls]="mediaDataUrls()"
-							[zIndex]="i"
-							[obstacles]="connectorObstacles()"
-							[canvasWidth]="canvasSize().width"
-							[canvasHeight]="canvasSize().height"
-							[interactive]="interactive() && editTemplateMode()"
-							[editable]="editable() && editTemplateMode()"
-							[fieldContext]="fieldContext()"
-							[editTemplateMode]="editTemplateMode()"
-							(cellCommit)="cellCommit.emit($event)"
-							(tableChange)="tableChange.emit($event)"
-						/>
-					}
-					@for (element of elements(); track element.id; let i = $index) {
-						<pptx-element-renderer
-							[element]="element"
-							[mediaDataUrls]="mediaDataUrls()"
-							[zIndex]="templateElements().length + i"
-							[obstacles]="connectorObstacles()"
-							[canvasWidth]="canvasSize().width"
-							[canvasHeight]="canvasSize().height"
-							[interactive]="interactive()"
-							[presenting]="presenting()"
-							[editable]="editable()"
-							[fieldContext]="fieldContext()"
-							[editTemplateMode]="false"
-							(cellCommit)="cellCommit.emit($event)"
-							(tableChange)="tableChange.emit($event)"
-						/>
-					}
-					@if (aiHighlights().length > 0 || aiActive()) {
-						<pptx-ai-focus-highlight-overlay
-							[highlights]="aiHighlights()"
-							[elements]="elements()"
-							[activeSlideIndex]="aiActiveSlideIndex()"
-						/>
-					}
-					@if (aiChangeBatch(); as batch) {
-						<pptx-ai-change-overlay [batch]="batch" [activeSlideIndex]="aiActiveSlideIndex()" />
-					}
-					@for (box of selectionBoxes(); track box.id) {
-						<div
-							class="pptx-ng-selection"
-							[style.left.px]="box.x"
-							[style.top.px]="box.y"
-							[style.width.px]="box.width"
-							[style.height.px]="box.height"
-						></div>
-					}
-					@for (h of handleBoxes(); track h.handle) {
-						<button
-							type="button"
-							class="pptx-ng-handle"
-							[attr.aria-label]="'Resize element from ' + h.handle"
-							[style.left.px]="h.left"
-							[style.top.px]="h.top"
-							[style.width.px]="h.size"
-							[style.height.px]="h.size"
-							[style.cursor]="h.cursor"
-							(pointerdown)="onHandlePointerDown($event, h.handle)"
-							(keydown)="onResizeHandleKeydown($event, h.handle)"
-						></button>
-					}
-					@if (marqueeRect(); as mr) {
-						<div
-							class="pptx-ng-marquee"
-							[style.left.px]="mr.x"
-							[style.top.px]="mr.y"
-							[style.width.px]="mr.width"
-							[style.height.px]="mr.height"
-						></div>
-					}
-					@for (g of snapGuides(); track $index) {
-						<div
-							class="pptx-ng-snap-guide"
-							[style.left.px]="g.axis === 'x' ? g.pos : g.start"
-							[style.top.px]="g.axis === 'x' ? g.start : g.pos"
-							[style.width.px]="g.axis === 'x' ? 0 : g.end - g.start"
-							[style.height.px]="g.axis === 'x' ? g.end - g.start : 0"
-						></div>
-					}
-					@if (rotateHandle(); as rh) {
-						<button
-							type="button"
-							class="pptx-ng-rotate-handle"
-							[attr.aria-label]="'pptx.selectionOverlay.rotate' | translate"
-							[style.left.px]="rh.left"
-							[style.top.px]="rh.top"
-							[style.width.px]="rh.size"
-							[style.height.px]="rh.size"
-							(pointerdown)="onRotatePointerDown($event)"
-							(keydown)="onRotateHandleKeydown($event)"
-						></button>
-					}
-					@if (adjustHandle(); as ah) {
-						<!--
-							Shape-adjustment affordance (amber diamond). Mirrors React's
-							separate "Adjust shape" handle: a selection-only control that
-							appears for a selected element in editable mode and is gone in
-							presentation (the whole canvas is non-editable then). Dragging it
-							adjusts the shape via the same resize pipeline (SE corner),
-							keeping it a real, useful affordance rather than a decoy.
-						-->
-						<button
-							type="button"
-							class="pptx-ng-adjust-handle"
-							[attr.aria-label]="'pptx.canvas.adjustShape' | translate"
-							[style.left.px]="ah.left"
-							[style.top.px]="ah.top"
-							[style.width.px]="ah.size"
-							[style.height.px]="ah.size"
-							(pointerdown)="onHandlePointerDown($event, 'se')"
-							(keydown)="onResizeHandleKeydown($event, 'se')"
-						></button>
-					}
-					@if (editingBox(); as eb) {
-						<textarea
-							#textEditor
-							data-inline-editor
-							class="pptx-ng-text-editor"
-							aria-label="Edit slide text"
-							[spellcheck]="spellCheck()"
-							[style.left.px]="eb.x"
-							[style.top.px]="eb.y"
-							[style.width.px]="eb.width"
-							[style.height.px]="eb.height"
-							(pointerdown)="$event.stopPropagation()"
-							(input)="onTextInput($event, eb.id)"
-							(blur)="commitText($event, eb.id)"
-							(keydown)="onEditorKeydown($event)"
-						></textarea>
-					}
-
-					<!--
-						View overlays: editor aids only, never on thumbnails/preview/presentation.
-						All are pointer-events:none so they never break selection/drag.
-						None carry data-pptx-element / aria-roledescription / data-pptx-viewport.
-					-->
-					@if (interactive() && showGrid()) {
-						<svg
-							class="pptx-ng-overlay-grid"
-							aria-hidden="true"
-							[attr.width]="canvasSize().width"
-							[attr.height]="canvasSize().height"
-						>
-							<defs>
-								<pattern
-									[attr.id]="gridPatternId"
-									[attr.width]="gridSpacingPx()"
-									[attr.height]="gridSpacingPx()"
-									patternUnits="userSpaceOnUse"
-								>
-									<circle
-										[attr.cx]="gridSpacingPx() / 2"
-										[attr.cy]="gridSpacingPx() / 2"
-										r="0.6"
-										fill="rgba(156,163,175,0.55)"
-									/>
-								</pattern>
-							</defs>
-							<rect
-								[attr.width]="canvasSize().width"
-								[attr.height]="canvasSize().height"
-								[attr.fill]="'url(#' + gridPatternId + ')'"
-							/>
-						</svg>
-					}
-
-					@if (interactive() && showGuides()) {
-						<!--
-							Center crosshair: one horizontal line and one vertical line
-							through the midpoint of the slide. Static; draggable guides
-							are a follow-up.
-						-->
-						<svg
-							class="pptx-ng-overlay-guides"
-							aria-hidden="true"
-							[attr.width]="canvasSize().width"
-							[attr.height]="canvasSize().height"
-						>
-							<!-- Horizontal center guide -->
-							<line
-								x1="0"
-								[attr.y1]="canvasSize().height / 2"
-								[attr.x2]="canvasSize().width"
-								[attr.y2]="canvasSize().height / 2"
-								stroke="rgba(99,102,241,0.7)"
-								stroke-width="1"
-								stroke-dasharray="6 3"
-							/>
-							<!-- Vertical center guide -->
-							<line
-								[attr.x1]="canvasSize().width / 2"
-								y1="0"
-								[attr.x2]="canvasSize().width / 2"
-								[attr.y2]="canvasSize().height"
-								stroke="rgba(99,102,241,0.7)"
-								stroke-width="1"
-								stroke-dasharray="6 3"
-							/>
-						</svg>
-
-						<!--
-							User-created ruler guides.
-							Each guide has a non-interactive line body and an interactive
-							drag handle. Double-click the handle to delete the guide.
-						-->
-						@for (g of rulerGuidesSvc.rulerGuides(); track g.id) {
-							<!-- Guide line body: pointer-events:none -->
-							<div
-								class="pptx-ng-ruler-guide-line"
-								[style.left.px]="g.axis === 'x' ? g.pos : 0"
-								[style.top.px]="g.axis === 'y' ? g.pos : 0"
-								[style.width]="g.axis === 'x' ? '1px' : '100%'"
-								[style.height]="g.axis === 'y' ? '1px' : '100%'"
-							></div>
-							<!-- Drag handle: pointer-events:auto -->
-							<div
-								class="pptx-ng-ruler-guide-handle"
-								[style.left.px]="g.axis === 'x' ? g.pos - 4 : 0"
-								[style.top.px]="g.axis === 'y' ? g.pos - 4 : 0"
-								[style.width]="g.axis === 'x' ? '9px' : '100%'"
-								[style.height]="g.axis === 'y' ? '9px' : '100%'"
-								[style.cursor]="g.axis === 'x' ? 'col-resize' : 'row-resize'"
-								(pointerdown)="rulerGuidesSvc.onGuidePointerDown($event, g.id, g.axis)"
-								(dblclick)="rulerGuidesSvc.onGuideDoubleClick($event, g.id)"
-								[title]="'pptx.canvas.guideTooltip' | translate"
-							></div>
-						}
-					}
-
-					<!--
-						Live ink stroke preview: shown while the user is drawing.
-						pointer-events:none so it never intercepts element gestures.
-						No data-pptx-element / aria-roledescription / data-pptx-viewport.
-					-->
-					@if (inkDrawing.active() && inkDrawing.liveInkPath() && drawTool() !== 'select') {
-						<svg
-							class="pptx-ng-ink-preview"
-							aria-hidden="true"
-							[attr.width]="canvasSize().width"
-							[attr.height]="canvasSize().height"
-							style="position:absolute;inset:0;pointer-events:none;z-index:70"
-						>
-							<path
-								[attr.d]="inkDrawing.liveInkPath()"
-								fill="none"
-								[attr.stroke]="drawColor()"
-								[attr.stroke-width]="drawWidth()"
-								[attr.stroke-opacity]="drawTool() === 'highlighter' ? 0.4 : 1"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							/>
-						</svg>
-					}
-				</div>
-
-				<!--
-					Ruler strips: siblings to the scaled stage inside the wrapper div,
-					absolutely positioned at top:0/left:0 within the wrapper's padding area.
-					The wrapper's padding (RULER_THICKNESS px top+left) reserves space for
-					these strips so the stage content starts below/right of them.
-					pointer-events:none so they never intercept element gestures.
-				-->
-				@if (interactive() && showRulers()) {
-					<!-- Corner square at the intersection of the two ruler strips -->
-					<div class="pptx-ng-ruler-corner" aria-hidden="true"></div>
-
-					<!-- Horizontal ruler: spans the top padding row of the wrapper -->
-					<svg
-						class="pptx-ng-ruler-h"
-						aria-hidden="true"
-						[attr.width]="canvasSize().width * effectiveScalePublic()"
-						[attr.height]="20"
-						[style.cursor]="editable() ? 'crosshair' : null"
-						(pointerdown)="editable() ? rulerGuidesSvc.onHRulerPointerDown($event) : null"
-					>
-						<rect
-							[attr.width]="canvasSize().width * effectiveScalePublic()"
-							height="20"
-							fill="#1e293b"
-						/>
-						<line
-							x1="0"
-							y1="19.5"
-							[attr.x2]="canvasSize().width * effectiveScalePublic()"
-							y2="19.5"
-							stroke="rgba(255,255,255,0.15)"
-							stroke-width="1"
-						/>
-						@for (tick of hRulerTicks(); track tick.position) {
-							<line
-								[attr.x1]="tick.position"
-								y1="20"
-								[attr.x2]="tick.position"
-								[attr.y2]="tick.isMajor ? 8 : 14"
-								stroke="rgba(156,163,175,0.7)"
-								[attr.stroke-width]="tick.isMajor ? 1 : 0.5"
-							/>
-							@if (tick.label) {
-								<text
-									[attr.x]="tick.position + 2"
-									y="8"
-									font-size="7"
-									fill="rgba(156,163,175,0.9)"
-									style="font-family:system-ui,sans-serif"
-								>
-									{{ tick.label }}"
-								</text>
-							}
-						}
-					</svg>
-
-					<!-- Vertical ruler: spans the left padding column of the wrapper -->
-					<svg
-						class="pptx-ng-ruler-v"
-						aria-hidden="true"
-						[attr.width]="20"
-						[attr.height]="canvasSize().height * effectiveScalePublic()"
-						[style.cursor]="editable() ? 'crosshair' : null"
-						(pointerdown)="editable() ? rulerGuidesSvc.onVRulerPointerDown($event) : null"
-					>
-						<rect
-							width="20"
-							[attr.height]="canvasSize().height * effectiveScalePublic()"
-							fill="#1e293b"
-						/>
-						<line
-							x1="19.5"
-							y1="0"
-							x2="19.5"
-							[attr.y2]="canvasSize().height * effectiveScalePublic()"
-							stroke="rgba(255,255,255,0.15)"
-							stroke-width="1"
-						/>
-						@for (tick of vRulerTicks(); track tick.position) {
-							<line
-								x1="20"
-								[attr.y1]="tick.position"
-								[attr.x2]="tick.isMajor ? 8 : 14"
-								[attr.y2]="tick.position"
-								stroke="rgba(156,163,175,0.7)"
-								[attr.stroke-width]="tick.isMajor ? 1 : 0.5"
-							/>
-							@if (tick.label) {
-								<text
-									x="2"
-									[attr.y]="tick.position + 9"
-									font-size="7"
-									fill="rgba(156,163,175,0.9)"
-									style="font-family:system-ui,sans-serif"
-								>
-									{{ tick.label }}"
-								</text>
-							}
-						}
-					</svg>
-				}
-			</div>
-		</div>
-	`,
+	styleUrl: './slide-canvas.component.css',
+	templateUrl: './slide-canvas.component.html',
 })
 export class SlideCanvasComponent implements SlideContext {
 	readonly slide = input<PptxSlide | undefined>(undefined);
@@ -565,6 +208,12 @@ export class SlideCanvasComponent implements SlideContext {
 	 */
 	readonly showRulers = input<boolean>(false);
 	/**
+	 * Unit system for the ruler labels. Defaults to inches, as PowerPoint does;
+	 * the tick generator (shared with every other binding) also understands
+	 * centimetres, which the old Angular-only generator could not express.
+	 */
+	readonly rulerUnit = input<RulerUnit>('inches');
+	/**
 	 * When true, render a static center-crosshair guide overlay on the slide stage.
 	 * Only active on the interactive canvas.
 	 */
@@ -574,6 +223,14 @@ export class SlideCanvasComponent implements SlideContext {
 	 * Combines with edge-alignment snapping.
 	 */
 	readonly snapToGrid = input<boolean>(false);
+	/**
+	 * The deck's authored grid spacing (EMU, from `viewProperties.gridSpacing`
+	 * / `p:viewPr/p:gridSpacing` in `ppt/viewProps.xml`). `undefined` falls back
+	 * to the 8px default in {@link gridSpacingPx}. NEVER read this off
+	 * `presentationProperties` -- `p:gridSpacing` is not a child of
+	 * `p:presentationPr`, and a real PowerPoint file never populates it there.
+	 */
+	readonly gridSpacing = input<PptxGridSpacing | undefined>(undefined);
 	/** Whether moving elements snap to other element edges and centres. */
 	readonly snapToShape = input<boolean>(true);
 	/** Imperative toolbar request to add a centered user guide. */
@@ -593,6 +250,19 @@ export class SlideCanvasComponent implements SlideContext {
 	 */
 	readonly autoFit = input<boolean>(true);
 	/**
+	 * Drop the resolved slide background so the stage stays see-through.
+	 *
+	 * Only a STACKED layer sets this: the morph transition overlay paints the
+	 * departing slide's paired elements directly over the incoming stage, and a
+	 * stage always paints `getSlideBackgroundStyle`, whose colour is never
+	 * transparent (it falls back to `DEFAULT_SLIDE_BACKGROUND`, i.e. white). At
+	 * the overlay's z-index that opaque field covered the incoming slide for the
+	 * whole morph, so the morph looked like a static slab that hard-cut at the
+	 * end. A whole-slide transition (fade / wipe / push) still needs its own
+	 * background and leaves this false.
+	 */
+	readonly transparentBackground = input<boolean>(false);
+	/**
 	 * When true (default), the canvas + its elements expose the framework-neutral
 	 * contract attributes (`data-pptx-viewport`, `aria-roledescription="slide"`,
 	 * `data-pptx-element`). Thumbnail / preview / presentation instances pass
@@ -602,9 +272,26 @@ export class SlideCanvasComponent implements SlideContext {
 	 */
 	readonly interactive = input<boolean>(true);
 	/**
+	 * When true (default), this canvas's elements carry `data-element-id`.
+	 *
+	 * The miniature surfaces that paint EVERY slide at once (thumbnail rail,
+	 * mobile slide sheet, slide sorter, presenter navigator, layout gallery, diff
+	 * strip) pass `false`: they otherwise put one node per element PER SLIDE into
+	 * the document, so a `[data-element-id]` query resolved a slide that is not
+	 * on screen. It is deliberately separate from {@link interactive}, because
+	 * the presentation stage is not interactive and still needs its ids (the
+	 * morph engine generates keyframe CSS that selects on them).
+	 */
+	readonly exposeElementIds = input<boolean>(true);
+	/**
 	 * True only for the live presentation stage: slide-content media autoplays.
 	 * Left false for thumbnails, the sorter and the editor canvas so their media
 	 * stays quiet (the template layer never autoplays regardless).
+	 *
+	 * A presenting stage also carries the show contract: the shared
+	 * `data-pptx-presenting` marker (stamped by
+	 * `applyRenderedElementAccessibility`) plus `aria-roledescription="slide"`,
+	 * so a running show is discoverable the same way in all five bindings.
 	 */
 	readonly presenting = input<boolean>(false);
 	/** Ids of currently-selected elements (drawn with a selection outline). */
@@ -664,12 +351,39 @@ export class SlideCanvasComponent implements SlideContext {
 	readonly transformStart = output<{ id: string; label: string }>();
 	/** Emitted on each pointer move during a gesture with the new box. */
 	readonly transformUpdate = output<{ id: string; box: Box }>();
+	/**
+	 * Emitted once a drag/resize gesture RELEASES, carrying every element id the
+	 * gesture moved. The parent uses it to reroute the connectors bound to those
+	 * shapes; without it a connector kept pointing at where its shape used to be,
+	 * because the drag end simply discarded its state with no model write.
+	 */
+	readonly transformEnd = output<{ ids: readonly string[] }>();
+	/**
+	 * Emitted while the shape-adjustment (amber diamond) handle is dragged, with
+	 * the `a:avLst` guide name and its new 0..50000 value. Deliberately separate
+	 * from {@link transformUpdate}: an adjustment changes the shape's geometry
+	 * parameter, never its box.
+	 */
+	readonly adjustUpdate = output<{ id: string; adjustments: Record<string, number> }>();
+
+	/**
+	 * Emitted when a connector endpoint drag lands: the whole rebuilt connector,
+	 * because a DETACHED end has had its `a:stCxn` / `a:endCxn` key deleted and a
+	 * merge of the surviving keys would leave the stale one behind.
+	 */
+	readonly connectorEndpointUpdate = output<{ id: string; element: PptxElement }>();
 	/** Emitted on right-click with the element under the cursor (or null). */
 	readonly contextMenu = output<{ id: string | null; x: number; y: number }>();
 	/** Emitted on double-click of a text-bearing element to begin inline edit. */
 	readonly textEditStart = output<{ id: string }>();
 	/** Emitted with the new text when an inline edit commits. */
-	readonly textCommit = output<{ id: string; text: string }>();
+	readonly textCommit = output<{
+		id: string;
+		text: string;
+		height?: number;
+		autoFitFontScale?: number;
+		autoFitLineSpacingReduction?: number;
+	}>();
 	/**
 	 * Emitted on EVERY keystroke while inline-editing. The commit path stays the
 	 * only thing that touches editor state/history; this feeds the collaboration
@@ -694,6 +408,15 @@ export class SlideCanvasComponent implements SlideContext {
 	readonly tableChange = output<{ id: string; tableData: PptxTableData }>();
 
 	private drag: DragState | null = null;
+	/** Live shape-adjustment gesture (amber diamond), or null when idle. */
+	private adjustDrag: ShapeAdjustmentDragState | null = null;
+
+	/** Live connector-endpoint gesture, in SLIDE px, or null when idle. */
+	protected readonly connectorEndpointDrag = signal<{
+		kind: ConnectorEndpointKind;
+		x: number;
+		y: number;
+	} | null>(null);
 	private editCancelled = false;
 	private marquee: {
 		startX: number;
@@ -784,8 +507,24 @@ export class SlideCanvasComponent implements SlideContext {
 			const stage = this.stageRef()?.nativeElement;
 			const elements = this.allElements();
 			const interactive = this.interactive();
-			if (stage && interactive) {
-				queueMicrotask(() => applyRenderedElementAccessibility(stage, elements));
+			const presenting = this.presenting();
+			// An inherited master/layout shape only gets the authoring chrome while
+			// it is actually editable, matching React's `canInteract` gate.
+			const decorated = affordanceElements(elements, this.editTemplateMode(), isTemplateElement);
+			if (stage && (interactive || presenting)) {
+				queueMicrotask(() => {
+					applyRenderedElementAccessibility(stage, elements, { presenting });
+					// The on-canvas action affordances (amber badge + hover link
+					// tooltip) ride the same post-render pass: `ElementRendererComponent`
+					// dispatches every non-shape type straight to a per-type component
+					// whose root IS the element node, leaving no wrapper in the template
+					// to hang the chrome off.
+					applyElementActionAffordances(stage, decorated, {
+						canInteract: interactive,
+						presenting,
+						labels: actionAffordanceLabels((key) => this.translate.instant(key) as string),
+					});
+				});
 			}
 		});
 
@@ -836,12 +575,22 @@ export class SlideCanvasComponent implements SlideContext {
 	readonly elements = computed(() => this.slide()?.elements ?? []);
 
 	/**
+	 * `templateElements()` filtered for "Hide Background Graphics"
+	 * (`showMasterShapes === false`); every consumer below reads THIS instead
+	 * of the raw input, so toggling the flag takes effect immediately instead
+	 * of requiring a full reload.
+	 */
+	readonly visibleTemplateElements = computed<readonly PptxElement[]>(() =>
+		filterVisibleTemplateElements(this.slide(), this.templateElements()),
+	);
+
+	/**
 	 * Template elements + the slide's own elements, template first (behind). Used
 	 * for every id-based lookup (hit-testing, selection boxes, inline-edit box) so
 	 * a selected/dragged template element resolves the same as a normal one.
 	 */
 	readonly allElements = computed<readonly PptxElement[]>(() => [
-		...this.templateElements(),
+		...this.visibleTemplateElements(),
 		...this.elements(),
 	]);
 
@@ -853,6 +602,8 @@ export class SlideCanvasComponent implements SlideContext {
 	 */
 	private readonly fieldContextSvc = inject(FieldContextService, { optional: true });
 	readonly fieldContext = computed(() => this.fieldContextSvc?.forSlide(this.slide()));
+	/** Options > Proofing > AutoCorrect, applied to committed inline-edit text. */
+	private readonly viewerOpts = inject(ViewerOptionsService, { optional: true });
 
 	/**
 	 * Obstacle rects (absolute slide coords) for connector A* routing: every
@@ -875,9 +626,24 @@ export class SlideCanvasComponent implements SlideContext {
 		computeSingleSelected(this.allElements(), this.selectedIds()),
 	);
 
-	/** Resize-handle render boxes (stage coords) for the single selection. */
+	/** Look an element up by id across the slide + template layers. */
+	private elementById(id: string): PptxElement | undefined {
+		return this.allElements().find((el) => el.id === id);
+	}
+
+	/** The single selected element itself (not just its box), or null. */
+	private readonly singleSelectedElement = computed<PptxElement | null>(() => {
+		const box = this.singleSelected();
+		return box ? (this.elementById(box.id) ?? null) : null;
+	});
+
+	/**
+	 * Resize-handle render boxes (stage coords) for the single selection. Empty
+	 * for an element whose authored `a:spLocks/@noResize` pins its size.
+	 */
 	readonly handleBoxes = computed(() =>
-		computeHandleBoxes(
+		computeResizeHandleBoxes(
+			this.singleSelectedElement(),
 			this.singleSelected(),
 			this.editable(),
 			HANDLE_SCREEN_PX,
@@ -885,34 +651,104 @@ export class SlideCanvasComponent implements SlideContext {
 		),
 	);
 
-	/** Rotation-handle box (stage coords) above the single selection, or null. */
+	/**
+	 * Rotation-handle box (stage coords) above the single selection, or null (also
+	 * null when `a:spLocks/@noRotation` is authored on the element).
+	 */
 	readonly rotateHandle = computed(() =>
-		computeCornerHandle(
+		computeRotateHandleBox(
+			this.singleSelectedElement(),
 			this.singleSelected(),
 			this.editable(),
 			HANDLE_SCREEN_PX,
 			24,
 			this.effectiveScale(),
-			'top-center',
 		),
 	);
 
 	/**
-	 * Shape-adjustment-handle box (stage coords) for the single selection, or
-	 * null. Sits just outside the top-left corner so it never collides with the
-	 * resize/rotate handles. Selection-only + editable-only, so it vanishes in
-	 * presentation alongside the rest of the edit chrome.
+	 * Shape-adjustment-handle boxes (stage coords) for the single selection.
+	 * Position, existence and cursor all come from the SHARED
+	 * `getShapeAdjustmentHandleDescriptors`, so a handle appears only for a
+	 * geometry that actually has an adjustable parameter, there is ONE per
+	 * `a:avLst` guide, and each sits exactly where the other four bindings put
+	 * it. Selection-only + editable-only, so they vanish in presentation with
+	 * the rest of the chrome.
 	 */
-	readonly adjustHandle = computed(() =>
-		computeCornerHandle(
+	readonly adjustHandles = computed(() =>
+		computeAdjustHandles(
+			this.singleSelectedElement(),
 			this.singleSelected(),
 			this.editable(),
 			HANDLE_SCREEN_PX,
-			16,
 			this.effectiveScale(),
-			'top-left',
 		),
 	);
+
+	/** The selected connector, when exactly one connector is selected. */
+	private readonly selectedConnector = computed<PptxElement | null>(() => {
+		const element = this.singleSelectedElement();
+		return element && element.type === 'connector' ? element : null;
+	});
+
+	/**
+	 * The two endpoint handles of the selected connector, in stage coords.
+	 *
+	 * Angular could DRAW a connector but never bind one: nothing in this binding
+	 * ever wrote `a:stCxn` / `a:endCxn`, so `connector-reroute` only ever fired
+	 * for connectors that arrived already bound from a `.pptx`.
+	 */
+	readonly connectorEndpoints = computed(() => {
+		const connector = this.selectedConnector();
+		if (!connector || !this.editable()) {
+			return [];
+		}
+		const size = HANDLE_SCREEN_PX / (this.effectiveScale() || 1);
+		const drag = this.connectorEndpointDrag();
+		return getConnectorEndpointHandles(connector).map((handle) => {
+			const live = drag?.kind === handle.kind ? drag : handle;
+			return { ...handle, left: live.x - size / 2, top: live.y - size / 2, size };
+		});
+	});
+
+	/** Candidate connection sites, resolved only while an end is in flight. */
+	readonly connectorSiteCandidates = computed(() => {
+		const connector = this.selectedConnector();
+		if (!connector || !this.connectorEndpointDrag()) {
+			return [];
+		}
+		const size = HANDLE_SCREEN_PX / (this.effectiveScale() || 1);
+		const drag = this.connectorEndpointDrag();
+		const candidates = collectConnectorSiteCandidates(
+			this.allElements().filter((element) => element.id !== connector.id),
+		);
+		const snapped = drag ? findConnectorSiteNear(candidates, drag.x, drag.y) : null;
+		return candidates.map((site) => ({
+			key: `${site.elementId}-${site.siteIndex}`,
+			left: site.x - size / 4,
+			top: site.y - size / 4,
+			size: size / 2,
+			snapped: snapped?.elementId === site.elementId && snapped.siteIndex === site.siteIndex,
+		}));
+	});
+
+	/** Begin dragging one end of the selected connector. */
+	onConnectorEndpointPointerDown(event: PointerEvent, kind: ConnectorEndpointKind): void {
+		event.preventDefault();
+		event.stopPropagation();
+		(event.target as Element | null)?.setPointerCapture?.(event.pointerId);
+		this.connectorEndpointDrag.set({ kind, ...this.stagePoint(event) });
+	}
+
+	/** Pointer position in SLIDE px (the stage carries the scale as a transform). */
+	private stagePoint(event: PointerEvent): { x: number; y: number } {
+		const rect = this.stageRef()?.nativeElement.getBoundingClientRect();
+		const scale = this.effectiveScale() || 1;
+		return {
+			x: (event.clientX - (rect?.left ?? 0)) / scale,
+			y: (event.clientY - (rect?.top ?? 0)) / scale,
+		};
+	}
 
 	/**
 	 * Resolve the id of the interactive element under a pointer target, or null.
@@ -961,7 +797,9 @@ export class SlideCanvasComponent implements SlideContext {
 			const now = event.timeStamp || Date.now();
 			if (this.lastTap && this.lastTap.id === id && now - this.lastTap.time < DOUBLE_TAP_MS) {
 				this.lastTap = null;
-				this.textEditStart.emit({ id });
+				if (this.canTextEdit(id)) {
+					this.textEditStart.emit({ id });
+				}
 				return;
 			}
 			this.lastTap = { id, time: now };
@@ -994,6 +832,11 @@ export class SlideCanvasComponent implements SlideContext {
 		}
 		const el = this.allElements().find((e) => e.id === id);
 		if (!el) {
+			return;
+		}
+		// A `noMove` shape may still be SELECTED (otherwise the user could never
+		// reach the inspector to unlock it) but must not arm a drag.
+		if (!canInteractWithElement(el, 'move')) {
 			return;
 		}
 		this.drag = {
@@ -1042,12 +885,24 @@ export class SlideCanvasComponent implements SlideContext {
 		return { id: el.id, x: el.x, y: el.y, width: el.width, height: el.height, text: plainText(el) };
 	});
 
+	/**
+	 * May inline text editing begin on this element? Honours the authored
+	 * `a:spLocks/@noTextEdit`, which Angular ignored entirely while the other four
+	 * bindings enforced it: a locked caption opened an editable textarea here.
+	 */
+	private canTextEdit(id: string): boolean {
+		return canInteractWithElement(
+			this.allElements().find((el) => el.id === id),
+			'textEdit',
+		);
+	}
+
 	onDblClick(event: MouseEvent): void {
 		if (!this.editable()) {
 			return;
 		}
 		const id = this.interactiveElementIdAt(event.target);
-		if (id) {
+		if (id && this.canTextEdit(id)) {
 			event.preventDefault();
 			this.textEditStart.emit({ id });
 		}
@@ -1130,7 +985,28 @@ export class SlideCanvasComponent implements SlideContext {
 			return;
 		}
 		const editor = event.target as HTMLTextAreaElement;
-		this.textCommit.emit({ id, text: editor.value });
+		// `a:spAutoFit` ("Resize shape to fit text"): grow/shrink the shape to
+		// the text's natural content height, the way PowerPoint does. `editor`
+		// is the live, still-mounted textarea (this handler runs off its own
+		// `blur`), so no separate DOM lookup is needed here.
+		const height = resolveCommitTextAutoFitHeight(this.allElements(), id, editor);
+		// `a:normAutofit` ("Shrink text on overflow"): recompute the font
+		// scale/line-spacing reduction so the (possibly now longer or shorter)
+		// text still fits the shape. Mutually exclusive with the `spAutoFit`
+		// resize above (both read `autoFitMode`, only one mode is ever set).
+		const shrink = resolveCommitTextNormAutofitShrink(this.allElements(), id, editor);
+		const text = this.viewerOpts ? this.viewerOpts.autoCorrect(editor.value) : editor.value;
+		this.textCommit.emit({
+			id,
+			text,
+			...(height !== undefined ? { height } : {}),
+			...(shrink !== 'unchanged'
+				? {
+						autoFitFontScale: shrink.fontScale,
+						autoFitLineSpacingReduction: shrink.lnSpcReduction,
+					}
+				: {}),
+		});
 	}
 
 	onContextMenu(event: MouseEvent): void {
@@ -1138,7 +1014,13 @@ export class SlideCanvasComponent implements SlideContext {
 			return;
 		}
 		event.preventDefault();
-		const id = this.interactiveElementIdAt(event.target);
+		// The inline text editor renders as an overlay beside the elements, not a
+		// child of the one it edits, so a right-click inside it hit-tests to
+		// nothing via interactiveElementIdAt. Fall back to the element being
+		// edited rather than swallowing the menu on the element the user just
+		// clicked (matches Vue's and Svelte's useContextMenu/onStageContextMenu).
+		const hitId = this.interactiveElementIdAt(event.target),
+			id = resolveContextMenuElementId(hitId, event.target, this.editingId());
 		this.contextMenu.emit({ id, x: event.clientX, y: event.clientY });
 	}
 
@@ -1146,7 +1028,7 @@ export class SlideCanvasComponent implements SlideContext {
 		event.stopPropagation();
 		(event.target as Element | null)?.setPointerCapture?.(event.pointerId);
 		const box = this.singleSelected();
-		if (!box) {
+		if (!box || !canInteractWithElement(this.singleSelectedElement(), 'resize')) {
 			return;
 		}
 		this.drag = {
@@ -1165,10 +1047,10 @@ export class SlideCanvasComponent implements SlideContext {
 		(event.target as Element | null)?.setPointerCapture?.(event.pointerId);
 		const box = this.singleSelected();
 		const stage = this.stageRef()?.nativeElement;
-		if (!box || !stage) {
+		const el = this.singleSelectedElement();
+		if (!box || !stage || !canInteractWithElement(el, 'rotate')) {
 			return;
 		}
-		const el = this.allElements().find((e) => e.id === box.id);
 		const zoom = this.effectiveScale() || 1;
 		const rect = stage.getBoundingClientRect();
 		const centerX = box.x + box.width / 2;
@@ -1190,8 +1072,38 @@ export class SlideCanvasComponent implements SlideContext {
 		};
 	}
 
+	/**
+	 * Begin a shape-adjustment gesture on the amber diamond. Captures the shared
+	 * {@link ShapeAdjustmentDragState} so every subsequent pointer move resolves
+	 * through `getDraggedShapeAdjustmentValue` rather than the resize pipeline
+	 * this handle used to be wired to.
+	 */
+	onAdjustPointerDown(event: PointerEvent, handle: AdjustHandleBox): void {
+		event.stopPropagation();
+		(event.target as Element | null)?.setPointerCapture?.(event.pointerId);
+		const el = this.singleSelectedElement();
+		if (!el) {
+			return;
+		}
+		// The gesture acts on the diamond the user GRABBED, not on the element's
+		// first adjustable parameter: a `quadArrow` has three and they are not
+		// interchangeable.
+		this.adjustDrag = beginShapeAdjustmentDrag(el, handle, event.clientX, event.clientY);
+	}
+
+	/**
+	 * Keyboard resize from a focused handle.
+	 *
+	 * The step comes from the shared `editorNudgeDelta`, the same function the
+	 * arrow keys nudge with, because a hand-rolled copy of it here is how the two
+	 * gestures end up disagreeing: this one carried its own `shiftKey ? 10 : 1`
+	 * literal, so a change to the shared step (which has already been wrong once,
+	 * at 2/20 in two bindings) would have moved the nudge and left the keyboard
+	 * resize behind.
+	 */
 	onResizeHandleKeydown(event: KeyboardEvent, handle: ResizeHandle): void {
-		if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+		const delta = editorNudgeDelta(event.key, event.shiftKey);
+		if (!delta) {
 			return;
 		}
 		event.preventDefault();
@@ -1200,9 +1112,7 @@ export class SlideCanvasComponent implements SlideContext {
 		if (!box) {
 			return;
 		}
-		const step = event.shiftKey ? 10 : 1;
-		const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
-		const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+		const { dx, dy } = delta;
 		this.transformStart.emit({
 			id: box.id,
 			label: this.translate.instant('pptx.undoAction.resize'),
@@ -1245,6 +1155,47 @@ export class SlideCanvasComponent implements SlideContext {
 		}
 		// ── END DRAW BRANCH ───────────────────────────────────────────────────
 
+		// ── CONNECTOR ENDPOINT ────────────────────────────────────────────────
+		// Resolved before the drag/resize pipeline: this gesture rebinds an end,
+		// it never moves the connector's box as a whole.
+		if (this.connectorEndpointDrag()) {
+			const current = this.connectorEndpointDrag();
+			if (current) {
+				this.connectorEndpointDrag.set({ ...current, ...this.stagePoint(event) });
+			}
+			return;
+		}
+		// ── END CONNECTOR ENDPOINT ────────────────────────────────────────────
+
+		// ── SHAPE ADJUSTMENT ──────────────────────────────────────────────────
+		// The amber diamond writes `shapeAdjustments[key]`, never a box, so it is
+		// resolved before (and independently of) the drag/resize pipeline.
+		const adjust = this.adjustDrag;
+		if (adjust) {
+			const adjustments = draggedAdjustments(
+				adjust,
+				event.clientX,
+				event.clientY,
+				this.effectiveScale(),
+			);
+			const travelled = Math.hypot(
+				event.clientX - adjust.startClientX,
+				event.clientY - adjust.startClientY,
+			);
+			if (!adjust.moved && travelled >= DRAG_THRESHOLD) {
+				adjust.moved = true;
+				this.transformStart.emit({
+					id: adjust.elementId,
+					label: this.translate.instant('pptx.selectionOverlay.adjust'),
+				});
+			}
+			if (adjust.moved) {
+				this.adjustUpdate.emit({ id: adjust.elementId, adjustments });
+			}
+			return;
+		}
+		// ── END SHAPE ADJUSTMENT ──────────────────────────────────────────────
+
 		const marquee = this.marquee;
 		if (marquee) {
 			const stage = this.stageRef()?.nativeElement;
@@ -1274,6 +1225,13 @@ export class SlideCanvasComponent implements SlideContext {
 
 		const drag = this.drag;
 		if (!drag) {
+			return;
+		}
+		// Belt-and-braces lock gate: the pointer-down paths already refuse to arm a
+		// gesture a lock forbids, but a lock added mid-gesture (a collaborator, an
+		// AI edit) must not keep writing transforms for the rest of the drag.
+		if (!canInteractWithElement(this.elementById(drag.id), DRAG_MODE_INTERACTION[drag.mode])) {
+			this.drag = null;
 			return;
 		}
 		const zoom = this.effectiveScale() || 1;
@@ -1390,6 +1348,37 @@ export class SlideCanvasComponent implements SlideContext {
 		}
 		// ── END DRAW BRANCH ───────────────────────────────────────────────────
 
+		// ── CONNECTOR ENDPOINT ────────────────────────────────────────────────
+		// The drop point is the last position `onPointerMove` recorded: this host
+		// listener takes no event, and re-deriving it from a stale pointer would
+		// be worse than reading the value the move branch already resolved.
+		const endpoint = this.connectorEndpointDrag();
+		const connector = this.selectedConnector();
+		if (endpoint) {
+			this.connectorEndpointDrag.set(null);
+			if (connector) {
+				const elements = this.allElements();
+				const target = findConnectorSiteNear(
+					collectConnectorSiteCandidates(elements.filter((element) => element.id !== connector.id)),
+					endpoint.x,
+					endpoint.y,
+				);
+				const update = resolveConnectorEndpointUpdate(
+					connector,
+					elements,
+					endpoint.kind,
+					endpoint,
+					target,
+				);
+				this.connectorEndpointUpdate.emit({
+					id: connector.id,
+					element: withConnectorEndpointUpdate(connector, update),
+				});
+			}
+			return;
+		}
+		// ── END CONNECTOR ENDPOINT ────────────────────────────────────────────
+
 		const marquee = this.marquee;
 		if (marquee) {
 			const rect = this.marqueeRect();
@@ -1407,8 +1396,20 @@ export class SlideCanvasComponent implements SlideContext {
 			this.marquee = null;
 			this.marqueeRect.set(null);
 		}
+		if (this.adjustDrag) {
+			this.adjustDrag = null;
+			return;
+		}
+		const drag = this.drag;
 		this.drag = null;
 		this.snapGuides.set([]);
+		// A gesture that actually moved/resized a shape must let the parent reroute
+		// the connectors bound to it, otherwise every connector keeps pointing at
+		// where its shape used to be. Rotation leaves the box (and so every
+		// connection site's anchor) alone, so it is not worth a model write.
+		if (drag?.started && drag.mode !== 'rotate') {
+			this.transformEnd.emit({ ids: [drag.id] });
+		}
 	}
 
 	readonly wrapperStyle = computed<StyleMap>(() => {
@@ -1425,7 +1426,11 @@ export class SlideCanvasComponent implements SlideContext {
 			'padding-left': rulerOffset > 0 ? `${rulerOffset}px` : '0',
 			position: 'relative',
 			'box-sizing': 'content-box',
-			margin: '1rem auto',
+			flex: 'none',
+			// `margin: auto` on a flex item consumes all free space on both axes,
+			// centering the slide horizontally and vertically (matching Svelte),
+			// rather than only horizontally with a fixed top/bottom gap.
+			margin: 'auto',
 		};
 	});
 
@@ -1437,8 +1442,12 @@ export class SlideCanvasComponent implements SlideContext {
 	 */
 	readonly effectiveScalePublic = computed(() => this.effectiveScale());
 
-	/** Grid dot spacing (slide-local px, 8 px = matches React GRID_SIZE). */
-	readonly gridSpacingPx = computed(() => 8);
+	/**
+	 * Grid dot spacing (slide-local px). Derived from the deck's authored
+	 * `gridSpacing` input via the shared `computeGridSpacingPx`; falls back to
+	 * 8px (matching React's `GRID_SIZE`) when the deck has none.
+	 */
+	readonly gridSpacingPx = computed(() => computeGridSpacingPx(this.gridSpacing(), 8));
 
 	/**
 	 * SVG dot-grid pattern id: unique per instance so multiple canvases on the
@@ -1446,20 +1455,65 @@ export class SlideCanvasComponent implements SlideContext {
 	 */
 	protected readonly gridPatternId = `pptx-ng-grid-${Math.random().toString(36).slice(2, 8)}`;
 
-	/** Tick marks for the horizontal ruler strip (scaled slide width). */
-	readonly hRulerTicks = computed<ReadonlyArray<RulerTick>>(() => {
-		if (!this.interactive() || !this.showRulers()) {
-			return [];
-		}
-		return generateRulerTicks(this.canvasSize().width, this.effectiveScale());
-	});
+	/**
+	 * Tick marks for the horizontal ruler strip (scaled slide width).
+	 *
+	 * Generated by the SHARED `generateTicks`, which is what gives Angular the
+	 * same unit system, subdivision-density collapse at low zoom and label
+	 * thinning the other bindings have. A local generator used to live in
+	 * `ruler-ticks.ts` with fixed quarter-inch subdivisions and inch-only
+	 * labels, so Angular disagreed with every other binding at every zoom.
+	 */
+	readonly hRulerTicks = computed<ReadonlyArray<Tick>>(() =>
+		rulerStripTicks(
+			this.interactive() && this.showRulers(),
+			this.canvasSize().width,
+			this.effectiveScale(),
+			this.rulerUnit(),
+		),
+	);
 
 	/** Tick marks for the vertical ruler strip (scaled slide height). */
-	readonly vRulerTicks = computed<ReadonlyArray<RulerTick>>(() => {
-		if (!this.interactive() || !this.showRulers()) {
-			return [];
+	readonly vRulerTicks = computed<ReadonlyArray<Tick>>(() =>
+		rulerStripTicks(
+			this.interactive() && this.showRulers(),
+			this.canvasSize().height,
+			this.effectiveScale(),
+			this.rulerUnit(),
+		),
+	);
+
+	/** Ruler strip thickness / label font size, exposed for the template. */
+	protected readonly rulerThickness = RULER_THICKNESS;
+	protected readonly rulerFontSize = RULER_FONT_SIZE;
+
+	/**
+	 * Bounds of a single selection, highlighted on both strips (PowerPoint shades
+	 * the selected shape's span on its rulers). Multi-selection paints nothing,
+	 * matching React and Svelte.
+	 */
+	private readonly rulerHighlightBounds = computed(() => {
+		const ids = this.selectedIds();
+		if (ids.length !== 1) {
+			return null;
 		}
-		return generateRulerTicks(this.canvasSize().height, this.effectiveScale());
+		const all = [...this.visibleTemplateElements(), ...(this.slide()?.elements ?? [])];
+		const element = all.find((candidate) => candidate.id === ids[0]);
+		return element
+			? { x: element.x, y: element.y, width: element.width, height: element.height }
+			: null;
+	});
+
+	/** Selected element extent (scaled px) highlighted on the horizontal strip. */
+	readonly hRulerHighlight = computed(() => {
+		const bounds = this.rulerHighlightBounds();
+		return rulerHighlight(bounds?.x, bounds?.width, this.effectiveScale());
+	});
+
+	/** Selected element extent (scaled px) highlighted on the vertical strip. */
+	readonly vRulerHighlight = computed(() => {
+		const bounds = this.rulerHighlightBounds();
+		return rulerHighlight(bounds?.y, bounds?.height, this.effectiveScale());
 	});
 
 	readonly stageStyle = computed<StyleMap>(() => {
@@ -1474,8 +1528,17 @@ export class SlideCanvasComponent implements SlideContext {
 			position: 'relative',
 			overflow: 'hidden',
 			'box-shadow': '0 10px 40px rgba(0, 0, 0, 0.35)',
+			// Motion-path keyframes translate by a fraction of the SLIDE, not of the
+			// animated element's own box, so the stage publishes its size for those
+			// `calc(var(--pptx-slide-w) * f)` offsets to resolve against.
+			'--pptx-slide-w': `${size.width}px`,
+			'--pptx-slide-h': `${size.height}px`,
 			// Resolved slide background: image → gradient → pattern → solid colour.
-			...getSlideBackgroundStyle(slide),
+			// A stacked overlay layer (the morph departing slide) opts out entirely
+			// and stays see-through, so it cannot occlude the stage beneath it.
+			...(this.transparentBackground()
+				? { background: 'none', 'background-color': 'transparent', 'box-shadow': 'none' }
+				: getSlideBackgroundStyle(slide, { widthPx: size.width, heightPx: size.height })),
 		};
 		return style;
 	});

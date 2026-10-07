@@ -11,6 +11,31 @@ import { parseCondition, serializeCondition } from './native-animation-helpers';
 import { PptxNativeAnimationService } from './PptxNativeAnimationService';
 
 describe('presentationML timing target choices', () => {
+	it('round-trips a background-only shape target', () => {
+		const xml: XmlObject = { 'p:spTgt': { '@_spid': '17', 'p:bg': {} } };
+		const parsed = parseTimeTargetElement(xml);
+		expect(parsed).toMatchObject({
+			type: 'shape',
+			shapeId: '17',
+			backgroundOnly: true,
+		});
+		expect(serializeTimeTargetElement(parsed!)).toStrictEqual(xml);
+	});
+
+	it('writes and removes p:bg when the model changes', () => {
+		expect(
+			serializeTimeTargetElement({ type: 'shape', shapeId: '4', backgroundOnly: true }),
+		).toStrictEqual({ 'p:spTgt': { '@_spid': '4', 'p:bg': {} } });
+		expect(
+			serializeTimeTargetElement({
+				type: 'shape',
+				shapeId: '4',
+				backgroundOnly: false,
+				rawXml: { 'p:spTgt': { '@_spid': '4', 'p:bg': {} } },
+			}),
+		).toStrictEqual({ 'p:spTgt': { '@_spid': '4' } });
+	});
+
 	it('round-trips a sound target and unknown XML', () => {
 		const xml: XmlObject = {
 			'p:sndTgt': { '@_r:embed': 'rId9', '@_name': 'Chime', '@_future': 'kept' },
@@ -28,6 +53,118 @@ describe('presentationML timing target choices', () => {
 		const xml: XmlObject = { 'p:inkTgt': { '@_spid': '42' } };
 		const parsed = parseTimeTargetElement(xml);
 		expect(parsed).toMatchObject({ type: 'ink', shapeId: '42' });
+		expect(serializeTimeTargetElement(parsed!)).toStrictEqual(xml);
+	});
+
+	it('round-trips a p:subSp sub-shape target (grouped shape animation)', () => {
+		const xml: XmlObject = { 'p:spTgt': { '@_spid': '4', 'p:subSp': { '@_spid': '3' } } };
+		const parsed = parseTimeTargetElement(xml);
+		expect(parsed).toMatchObject({ type: 'shape', shapeId: '4', subShapeId: '3' });
+		expect(serializeTimeTargetElement(parsed!)).toStrictEqual(xml);
+	});
+
+	it('removes p:subSp when the model no longer carries a subShapeId', () => {
+		expect(
+			serializeTimeTargetElement({
+				type: 'shape',
+				shapeId: '4',
+				rawXml: { 'p:spTgt': { '@_spid': '4', 'p:subSp': { '@_spid': '3' } } },
+			}),
+		).toStrictEqual({ 'p:spTgt': { '@_spid': '4' } });
+	});
+
+	it('round-trips a p:graphicEl chart series target', () => {
+		const xml: XmlObject = {
+			'p:spTgt': {
+				'@_spid': '9',
+				'p:graphicEl': { 'p:chart': { '@_seriesIdx': '2', '@_bldStep': 'series' } },
+			},
+		};
+		const parsed = parseTimeTargetElement(xml);
+		expect(parsed).toMatchObject({
+			type: 'shape',
+			shapeId: '9',
+			graphicElement: { kind: 'chart', seriesIdx: 2, bldStep: 'series' },
+		});
+		expect(serializeTimeTargetElement(parsed!)).toStrictEqual(xml);
+	});
+
+	it('round-trips a p:graphicEl diagram category target', () => {
+		const xml: XmlObject = {
+			'p:spTgt': {
+				'@_spid': '11',
+				'p:graphicEl': { 'p:dgm': { '@_categoryIdx': '0', '@_bldStep': 'category' } },
+			},
+		};
+		const parsed = parseTimeTargetElement(xml);
+		expect(parsed).toMatchObject({
+			type: 'shape',
+			shapeId: '11',
+			graphicElement: { kind: 'dgm', categoryIdx: 0, bldStep: 'category' },
+		});
+		expect(serializeTimeTargetElement(parsed!)).toStrictEqual(xml);
+	});
+
+	it('round-trips a p:graphicEl diagram node-id target (p:bldDgm per-node build)', () => {
+		const xml: XmlObject = {
+			'p:spTgt': {
+				'@_spid': '12',
+				'p:graphicEl': {
+					'p:dgm': { '@_id': '{11111111-2222-3333-4444-555555555555}', '@_bldStep': 'sp' },
+				},
+			},
+		};
+		const parsed = parseTimeTargetElement(xml);
+		expect(parsed).toMatchObject({
+			type: 'shape',
+			shapeId: '12',
+			graphicElement: {
+				kind: 'dgm',
+				id: '{11111111-2222-3333-4444-555555555555}',
+				bldStep: 'sp',
+			},
+		});
+		expect(serializeTimeTargetElement(parsed!)).toStrictEqual(xml);
+	});
+
+	it('round-trips a p:graphicEl diagram background build step', () => {
+		const xml: XmlObject = {
+			'p:spTgt': { '@_spid': '13', 'p:graphicEl': { 'p:dgm': { '@_bldStep': 'bg' } } },
+		};
+		const parsed = parseTimeTargetElement(xml);
+		expect(parsed).toMatchObject({
+			type: 'shape',
+			shapeId: '13',
+			graphicElement: { kind: 'dgm', bldStep: 'bg' },
+		});
+		expect(serializeTimeTargetElement(parsed!)).toStrictEqual(xml);
+	});
+
+	it('never writes @_id for a chart-kind graphicEl target', () => {
+		expect(
+			serializeTimeTargetElement({
+				type: 'shape',
+				shapeId: '14',
+				graphicElement: { kind: 'chart', seriesIdx: 1, id: 'ignored', bldStep: 'series' },
+			}),
+		).toStrictEqual({
+			'p:spTgt': {
+				'@_spid': '14',
+				'p:graphicEl': { 'p:chart': { '@_seriesIdx': '1', '@_bldStep': 'series' } },
+			},
+		});
+	});
+
+	it('round-trips a p:oleChartEl legacy OLE chart sub-element target', () => {
+		const xml: XmlObject = {
+			'p:spTgt': { '@_spid': '5', 'p:oleChartEl': { '@_type': 'series', '@_lvl': '1' } },
+		};
+		const parsed = parseTimeTargetElement(xml);
+		expect(parsed).toMatchObject({
+			type: 'shape',
+			shapeId: '5',
+			oleChartElement: { subelementType: 'series', level: 1 },
+		});
 		expect(serializeTimeTargetElement(parsed!)).toStrictEqual(xml);
 	});
 

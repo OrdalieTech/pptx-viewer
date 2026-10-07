@@ -11,6 +11,8 @@
  */
 
 import type { PptxChartTrendline, XmlObject } from '../types';
+import type { ResolveChartColor } from './chart-color-choice';
+import { writeChartShapeProps } from './chart-shape-props-writer';
 import { buildTrendlineLabel } from './chart-trendline-label';
 
 type GetLocalName = (key: string) => string;
@@ -36,10 +38,6 @@ function ensureArray<T>(v: T | T[] | undefined): T[] {
 	return Array.isArray(v) ? v : [v];
 }
 
-function hex(color: string): string {
-	return color.replace(/^#/u, '').toUpperCase();
-}
-
 function assertFinite(value: number | undefined, name: string): void {
 	if (value !== undefined && !Number.isFinite(value)) {
 		throw new RangeError(`${name} must be finite`);
@@ -61,28 +59,27 @@ function validateTrendline(t: PptxChartTrendline): void {
 	assertFinite(t.intercept, 'trendline intercept');
 }
 
-/** Merge a trendline colour into an existing `c:spPr` (preserving other line props). */
+/**
+ * Merge a trendline colour/width/dash into an existing `c:spPr` (preserving
+ * other line props). Delegates to the shared {@link writeChartShapeProps}
+ * writer so a width or dash edit is not silently dropped the way the
+ * colour-only writer this replaced would drop it.
+ */
 function buildSpPr(
 	existing: XmlObject | undefined,
-	color: string | undefined,
+	t: PptxChartTrendline,
 	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
 ): XmlObject | undefined {
-	if (!color) {
+	if (!t.color && t.lineWidth === undefined && !t.lineDashStyle) {
 		return existing;
 	}
-	const spPr: XmlObject = existing ? { ...existing } : {};
-	const lnKey = findKey(spPr, 'ln', getLocalName) ?? 'a:ln';
-	const existingLn = (spPr[lnKey] as XmlObject | undefined) ?? {};
-	const fillKey = findKey(existingLn, 'solidFill', getLocalName) ?? 'a:solidFill';
-	// Drop any other fill style on the line so the chosen colour wins.
-	const noFillKey = findKey(existingLn, 'noFill', getLocalName);
-	const ln: XmlObject = { ...existingLn };
-	if (noFillKey) {
-		delete ln[noFillKey];
-	}
-	ln[fillKey] = { 'a:srgbClr': { '@_val': hex(color) } };
-	spPr[lnKey] = ln;
-	return spPr;
+	return writeChartShapeProps(
+		existing,
+		{ strokeColor: t.color, strokeWidth: t.lineWidth, strokeDashStyle: t.lineDashStyle },
+		getLocalName,
+		resolveColor,
+	);
 }
 
 /** Build a single `c:trendline` node in schema order, preserving unmodeled children. */
@@ -90,6 +87,7 @@ function buildTrendline(
 	existing: XmlObject | undefined,
 	t: PptxChartTrendline,
 	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
 ): XmlObject {
 	validateTrendline(t);
 	const node: XmlObject = {};
@@ -102,8 +100,9 @@ function buildTrendline(
 	}
 	const spPr = buildSpPr(
 		existing ? (existing[findKey(existing, 'spPr', getLocalName) ?? ''] as XmlObject) : undefined,
-		t.color,
+		t,
 		getLocalName,
+		resolveColor,
 	);
 	if (spPr) {
 		node['c:spPr'] = spPr;
@@ -161,11 +160,14 @@ export function applySeriesTrendlinesToXml(
 	seriesNode: XmlObject,
 	trendlines: PptxChartTrendline[],
 	getLocalName: GetLocalName,
+	resolveColor?: ResolveChartColor,
 ): void {
 	const existingKey = findKey(seriesNode, 'trendline', getLocalName);
 	const existingNodes = (existingKey ? ensureArray(seriesNode[existingKey]) : []) as XmlObject[];
 
-	const built = trendlines.map((t, i) => buildTrendline(existingNodes[i], t, getLocalName));
+	const built = trendlines.map((t, i) =>
+		buildTrendline(existingNodes[i], t, getLocalName, resolveColor),
+	);
 
 	// Remove the existing key; we will re-insert in the correct position.
 	if (existingKey) {

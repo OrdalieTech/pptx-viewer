@@ -8,4 +8,9 @@
  * implementation under the names the Angular viewer already consumes, so
  * existing imports keep working without a local duplicate.
  */
-export { getResolvedShapeClipPath, getResolvedShapeClipPathFor } from '../internal/shared';
+export {
+	getResolvedShapeClipPath,
+	getResolvedShapeClipPathFor,
+	isHollowShapeElement,
+	isIdentityRectClip,
+} from '../internal/shared';

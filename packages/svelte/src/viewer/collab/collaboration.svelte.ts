@@ -1,14 +1,8 @@
-/**
- * Real-time collaboration for the Svelte viewer (Yjs: y-websocket or serverless
- * y-webrtc), a runes port of the Vue binding's `useCollaboration` core. Provider
- * status and the remote-slide observer are extracted to `collaboration-status.ts`
- * / `collaboration-remote-sync.ts`, and presence to `collaboration-presence.svelte.ts`.
- * KNOWN LIMITATION: collaborative-undo semantics are undefined in shared - local
- * undo is kept as-is and may fight a concurrent remote edit (matching the others).
- */
+/** Svelte collaboration controller. Undo remains local, as in the other bindings. */
 import type { PptxSlide } from 'pptx-viewer-core';
 import type {
 	CollaborationConfig,
+	CollabLoadOrigin,
 	CollaborationLivePatcher,
 	ConnectionStatus,
 	RemoteCursor,
@@ -19,6 +13,7 @@ import type {
 import {
 	createCollaborationLivePatcher,
 	createSyncGate,
+	registerCollaborationSource,
 	createWriteBackScheduler,
 	DEFAULT_CURSOR_COLOR,
 	isMixedContentBlocked,
@@ -35,16 +30,12 @@ import {
 	adoptDocSlidesAfterLoad,
 	observeRemoteSlides,
 	publishLocalSlides,
+	restoreMissingSlideLayout,
 } from './collaboration-remote-sync';
 import type { CollabSession, CollabSessionFactory } from './collaboration-session';
 import { createDefaultSession } from './collaboration-session';
-import { wireProviderStatus } from './collaboration-status';
+import { wireInitialSync, wireProviderStatus } from './collaboration-status';
 
-/**
- * The collaboration controller. Construct it once during component setup: it
- * registers the two effects (auto start/stop from the config, granular publish
- * of local edits) itself, so no further wiring is needed in the SFC.
- */
 export class CollaborationController {
 	/** Live connection status (reactive). */
 	status = $state<ConnectionStatus>('disconnected');
@@ -59,19 +50,31 @@ export class CollaborationController {
 	#ydoc: YDocLike | null = null;
 	#factories: YjsFactories | null = null;
 	#provider: CollabProviderHandle | null = null;
-	#config: CollaborationConfig | null = null;
+	#config: CollaborationConfig | null = $state(null);
 	#lastStarted: CollaborationConfig | null = null;
 	#startedByEffect = false;
 
 	#applyingRemote = false;
 	#lastSynced = '';
+	#didSync = false;
+	#loadedSourceSlides: PptxSlide[] | null = null;
 	#unobserve: (() => void) | null = null;
 	#connectTimer: ReturnType<typeof setTimeout> | null = null;
 
-	readonly #gate = createSyncGate(() => this.#flushLocalSlides());
+	readonly #gate = createSyncGate(() => {
+		this.#restoreMissingLayout();
+		if (this.#ydoc && !this.#didSync) {
+			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps());
+		}
+		this.#didSync = true;
+		if (this.#ydoc) {
+			this.#flushLocalSlides();
+		}
+	});
 	readonly #writeBack = createWriteBackScheduler({
 		getYDoc: () => this.#ydoc,
 		getSourceBytes: () => this.#deps.getSourceBytes?.() ?? null,
+		getSaveOptions: () => this.#deps.getSaveOptions?.(),
 	});
 	readonly #presence: CollaborationPresence;
 
@@ -98,25 +101,35 @@ export class CollaborationController {
 		});
 	}
 
-	/** Whether a session is live (reactive). */
 	get active(): boolean {
 		return this.#active;
+	}
+	/** Return this session's live Y.Doc, or null when collaboration is stopped. */
+	getDocument(): YDocLike | null {
+		return this.#ydoc;
 	}
 	/** Read-only participant (session live with the `viewer` role) - cannot select/drag/mutate. */
 	get readOnly(): boolean {
 		return this.#active && this.#config?.role === 'viewer';
 	}
-	/** Remote cursors on the current slide (reactive). */
 	get cursors(): RemoteCursor[] {
 		return this.#presence.cursors;
 	}
-	/** Remote collaborators in the session (reactive). */
 	get remotePresences(): SanitizedPresence[] {
 		return this.#presence.remotePresences;
 	}
 	/** Followed peer's client id, or null when free (reactive). */
 	get followedClientId(): number | null {
 		return this.#presence.followedClientId;
+	}
+	/** The config the active session was started with (null when stopped); the
+	 * Share dialog's active view reads the local user's name/colour from this. */
+	get activeCollaboration(): CollaborationConfig | null {
+		return this.#config;
+	}
+	/** Total connected participants (self + remote peers), reactive. */
+	get connectedCount(): number {
+		return this.remotePresences.length + (this.#active ? 1 : 0);
 	}
 
 	/** Publish a cursor move (slide-space px); no-op when no session is active. */
@@ -136,17 +149,29 @@ export class CollaborationController {
 		this.#presence.followUser(clientId);
 	}
 
-	/**
-	 * Re-adopt the shared doc's slides after a local content load committed a
-	 * parsed deck to viewer state (see `adoptDocSlidesAfterLoad`). The load
-	 * pipeline calls this synchronously right after it applies, i.e. before the
-	 * publish effect can flush the freshly loaded slides into the doc, so a
-	 * late joiner's bootstrap deck never clobbers the room's synced content.
-	 */
-	adoptDocAfterLoad(): void {
+	/** Register the parsed source before adopting authoritative room slides. */
+	adoptDocAfterLoad(origin: CollabLoadOrigin = 'user'): void {
 		if (this.#active && this.#ydoc) {
-			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps());
+			this.#loadedSourceSlides = this.#deps.getSlides();
+			registerCollaborationSource(this.#ydoc, this.#loadedSourceSlides);
+			if (this.#gate.isOpen()) this.#restoreMissingLayout();
+			adoptDocSlidesAfterLoad(this.#ydoc, this.#remoteDeps(), origin);
 		}
+	}
+
+	#restoreMissingLayout(): void {
+		if (
+			!this.#ydoc ||
+			!this.#factories ||
+			!this.#loadedSourceSlides ||
+			this.#config?.role === 'viewer'
+		)
+			return;
+		if (
+			restoreMissingSlideLayout(this.#ydoc, this.#loadedSourceSlides, this.#factories) &&
+			this.#config
+		)
+			this.#writeBack.schedule(this.#config);
 	}
 
 	#syncConfig(config: CollaborationConfig | undefined): void {
@@ -155,9 +180,6 @@ export class CollaborationController {
 			this.#startedByEffect = true;
 			void this.#run(config);
 		} else if (!config && this.#active && this.#startedByEffect) {
-			// Only auto-stop a session THIS effect started; a direct `start()`
-			// call (e.g. from a dialog) always clears the flag below, so it
-			// is immune to this branch on the effect's next run.
 			this.#lastStarted = null;
 			this.#startedByEffect = false;
 			this.stop();
@@ -191,47 +213,46 @@ export class CollaborationController {
 	}
 	/** Start (or restart) a session with the given config (dialog-driven). */
 	async start(config: CollaborationConfig): Promise<void> {
-		// Set synchronously, before any `await` below, so a same-tick effect
-		// flush (see `#syncConfig`) sees this config as already current and
-		// does not redundantly start a second, concurrent session.
 		this.#lastStarted = config;
 		this.#startedByEffect = false;
 		await this.#run(config);
 	}
 
+	#connectionGeneration = 0;
+
 	async #run(config: CollaborationConfig): Promise<void> {
 		this.stop();
+		const generation = this.#connectionGeneration;
 		this.#config = config;
 		try {
 			validateRoomId(config.roomId);
 		} catch {
 			this.status = 'error';
+			config.onstatus?.('error', new Error('Collaboration unavailable'));
 			return;
 		}
 		const transport = config.transport ?? resolveTransportForServerUrl(config.serverUrl);
-		// Mixed-content only affects a ws:// socket from an https page.
 		if (transport === 'websocket' && isMixedContentBlocked(config.serverUrl)) {
 			this.status = 'error';
+			config.onstatus?.('error', new Error('Collaboration unavailable'));
 			return;
 		}
 		this.status = 'connecting';
 		try {
 			const session = await this.#makeSession(transport, config);
+			if (generation !== this.#connectionGeneration) {
+				session.destroy();
+				return;
+			}
 			this.#session = session;
 			this.#ydoc = session.ydoc;
+			this.#loadedSourceSlides = this.#deps.getSlides();
+			registerCollaborationSource(session.ydoc, this.#loadedSourceSlides);
 			this.#factories = session.factories;
 			this.livePatcher.configure(session.ydoc, session.factories);
 			this.#provider = session.provider;
 
-			// Gate local writes on the provider's initial sync; the grace timer
-			// covers a lone webrtc peer that never receives a sync event.
-			this.#gate.reset();
-			this.#provider.onSynced(() => this.#gate.open());
-			if (this.#provider.syncedNow) {
-				this.#gate.open();
-			} else {
-				this.#gate.arm();
-			}
+			wireInitialSync(this.#provider, transport, this.#gate);
 
 			this.#presence.start(this.#provider.awareness, {
 				userName: config.userName,
@@ -244,14 +265,26 @@ export class CollaborationController {
 
 			this.#active = true;
 			this.#deps.onStart?.(config);
-		} catch {
+		} catch (error) {
+			if (generation !== this.#connectionGeneration) {
+				return;
+			}
 			this.stop();
 			this.status = 'error';
+			config.onstatus?.(
+				'error',
+				error instanceof Error ? error : new Error('Collaboration unavailable'),
+			);
 		}
 	}
 
-	/** Callback bundle shared by the remote observer and post-load adoption. */
 	#remoteDeps = (): ObserveRemoteDeps => ({
+		onError: (error) => {
+			const config = this.#config;
+			this.stop();
+			this.status = 'error';
+			config?.onstatus?.('error', error instanceof Error ? error : new Error(String(error)));
+		},
 		isApplyingRemote: () => this.#applyingRemote,
 		setApplyingRemote: (value) => (this.#applyingRemote = value),
 		setLastSynced: (value) => (this.#lastSynced = value),
@@ -266,7 +299,12 @@ export class CollaborationController {
 		}
 		this.#unobserve = observeRemoteSlides(this.#ydoc, config, this.#remoteDeps());
 		wireProviderStatus(this.#provider, transport, {
-			setStatus: (status) => (this.status = status),
+			setStatus: (status) => {
+				this.status = status;
+				if (status === 'error') {
+					config.onstatus?.('error', new Error('Collaboration unavailable'));
+				}
+			},
 			getStatus: () => this.status,
 			isActive: () => this.#active,
 			stop: () => this.stop(),
@@ -277,6 +315,7 @@ export class CollaborationController {
 	}
 
 	stop(): void {
+		this.#connectionGeneration++;
 		this.#clearTimers();
 		this.#gate.reset();
 		this.#presence.stop();
@@ -287,9 +326,12 @@ export class CollaborationController {
 		this.#provider = null;
 		this.#ydoc = null;
 		this.#factories = null;
+		this.#config = null;
 		this.livePatcher.configure(null, null);
 		this.#applyingRemote = false;
 		this.#lastSynced = '';
+		this.#didSync = false;
+		this.#loadedSourceSlides = null;
 		if (this.#active) {
 			this.#deps.onStop?.();
 		}

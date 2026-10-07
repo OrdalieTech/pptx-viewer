@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per pass, several separated by
+   comments or guard clauses); merging them isn't a style choice here. */
 /**
  * release-plan.mjs: decide which packages to version + publish for a release,
  * with an INDEPENDENT version line per package.
@@ -24,8 +27,28 @@
  *   - `shared` (private, never published) is inlined/vendored into react, vue
  *     and angular, so a shared change re-releases all three.
  *   - `core` is bundled into react, vue, and angular, so a core change
- *     re-releases all three. tools has a loose peer range on core, so a core
- *     patch resolves forward for tools with no re-release needed.
+ *     re-releases all three.
+ *   - `cli` holds a real (non-bundled) npm dependency on react (see its
+ *     `tsup.config.ts` `external` list) but is still a `triggers` entry on
+ *     `packages/react`: any react release also re-releases cli (patch/minor/
+ *     major follows react's own bump level over that scope), so cli's own
+ *     changelog and version visibly track the react release it ships against,
+ *     even though the caret range in its published manifest (`pptx-react-viewer:
+ *     workspace:*`, resolved by `publish-manifest.mjs` on every cli release)
+ *     would already resolve a patch/minor forward on its own.
+ *   - `tools` holds a real npm dependency on core the same way, but is NOT a
+ *     `triggers` entry on `packages/core`: an ordinary patch/minor there
+ *     resolves forward for it with no re-release needed. A MAJOR bump of core
+ *     is different: a caret range can never resolve across it, so tools would
+ *     otherwise silently keep shipping against the old major forever.
+ *     `majorTrigger` names the package whose major-bump forces a re-release
+ *     even with zero files changed under tools' own dir: tools re-releases
+ *     (patch bump) whenever core goes major. tools' own `pptx-viewer-core`
+ *     range in packages/tools/package.json is a literal string (not
+ *     `workspace:*`, so it reads correctly for anyone opening the file
+ *     without a resolution step) and is repointed at the live core version by
+ *     `release.yml`'s publish step on every tools release, the same way it
+ *     already does for angular's dist manifest.
  *   - everything else re-releases only when its own published files change.
  *
  * Output: writes `release-plan.json` at the repo root, prints a summary, and
@@ -44,10 +67,29 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SHARED_DIR = 'packages/shared';
 
 /**
+ * Paths OUTSIDE any package directory that still change what every published
+ * artifact contains, and therefore force a re-release of all of them.
+ *
+ * `scripts/publish-manifest.mjs` produces the package.json that each package
+ * actually ships: it resolves the `workspace:` protocol, which npm uploads
+ * verbatim and no consumer can install. Issue #129 shipped exactly that, and a
+ * fix confined to repo tooling touches no `packages/**` path, so without this
+ * list the corrected pipeline would sit on main while npm kept serving the
+ * broken manifests.
+ */
+const GLOBAL_TRIGGERS = ['scripts/publish-manifest.mjs'];
+
+/**
  * Publishable packages. `dir` is the source dir, `npm` the published name,
  * `packDir` where `bun pm pack` runs (angular ships from its ng-packagr dist),
- * and `triggers` the OTHER dirs whose change also forces a re-release (their
- * code is compiled into this package's artifact).
+ * `triggers` the OTHER dirs whose change also forces a re-release (their code
+ * is compiled into this package's artifact), and the optional `majorTrigger`
+ * a single package KEY (not a dir) whose MAJOR version bump forces a
+ * re-release even with no files changed under this package's own dir, for a
+ * real (non-bundled) npm dependency whose caret range cannot resolve across
+ * a major on its own. `majorTrigger` packages must appear in this object
+ * AFTER the package they name, since the main loop resolves it from the
+ * already-computed plan entry.
  */
 const PACKAGES = {
 	core: {
@@ -91,12 +133,13 @@ const PACKAGES = {
 		npm: 'pptx-viewer-mcp',
 		packDir: 'packages/tools',
 		triggers: [],
+		majorTrigger: 'core',
 	},
 	cli: {
 		dir: 'packages/cli',
 		npm: '@christophervr/pptx-viewer',
 		packDir: 'packages/cli',
-		triggers: [],
+		triggers: ['packages/react'],
 	},
 };
 
@@ -153,7 +196,7 @@ function commitPublishedFiles(hash, dirs) {
 	return out
 		.split('\n')
 		.map((f) => f.trim())
-		.filter((f) => f.length > 0 && isPublishedFile(f) && dirs.some((d) => dirTouched([f], d)));
+		.filter((f) => f.length > 0 && isPublishedFile(f) && dirs.some((d) => pathTouched([f], d)));
 }
 
 /**
@@ -299,6 +342,11 @@ function dirTouched(files, dir) {
 	return files.some((f) => f.startsWith(prefix));
 }
 
+/** Like {@link dirTouched}, but `target` may also be a single file path. */
+function pathTouched(files, target) {
+	return files.includes(target) || dirTouched(files, target);
+}
+
 function parseArgs(argv) {
 	const args = { write: false, npm: true };
 	for (const a of argv) {
@@ -337,11 +385,23 @@ function main() {
 		const files = changedFiles(base);
 		const own = dirTouched(files, meta.dir);
 		const viaTrigger = meta.triggers.some((dir) => dirTouched(files, dir));
-		const release = base ? own || viaTrigger : true;
+		// `majorTrigger` names an already-processed package key (declaration
+		// order in PACKAGES enforces this): re-release when IT bumped major,
+		// since a caret range on a real npm dependency can't resolve across
+		// that on its own.
+		const viaGlobal = GLOBAL_TRIGGERS.some((p) => pathTouched(files, p)),
+			viaMajorTrigger = meta.majorTrigger ? packages[meta.majorTrigger]?.bump === 'major' : false;
+		const release = base ? own || viaTrigger || viaGlobal || viaMajorTrigger : true;
 		const current = publishedVersion(meta, args.npm);
-		const bump = release ? bumpLevel(base, [meta.dir, ...meta.triggers]) : null;
+		const scope = [meta.dir, ...meta.triggers, ...GLOBAL_TRIGGERS];
+		const bump = release ? bumpLevel(base, scope) : null;
 		const version = release ? bumpVersion(current, bump) : current;
-		const includePaths = [meta.dir, ...meta.triggers].map((d) => `${d}/**`);
+		// Changelog scoping: package dirs match by subtree, global triggers are
+		// literal file paths.
+		const includePaths = [
+			...[meta.dir, ...meta.triggers].map((d) => `${d}/**`),
+			...GLOBAL_TRIGGERS,
+		];
 		packages[key] = {
 			npm: meta.npm,
 			dir: meta.dir,

@@ -1,3 +1,5 @@
+import { animationPresetTranslationsEn } from './translations-en-animation-presets';
+
 /**
  * The canonical English UI-string dictionary for pptx-viewer. None of the
  * React/Vue/Angular binding packages ship translations themselves - each
@@ -8,6 +10,10 @@
  * instead of drifting into three separate copies.
  */
 export const translationsEn: Record<string, string> = {
+	// Animation effect names for both preset vocabularies (278 mechanical
+	// entries), kept in their own module so they don't drown the UI copy here.
+	...animationPresetTranslationsEn,
+
 	// Status bar
 	'pptx.statusBar.allSaved': 'All saved',
 	'pptx.statusBar.unsavedChanges': 'Unsaved changes',
@@ -29,12 +35,22 @@ export const translationsEn: Record<string, string> = {
 	'pptx.autosave.disabled': 'AutoSave unavailable',
 	'pptx.autosave.disabledNoFilePath': 'AutoSave disabled: no file path provided',
 	'pptx.autosave.disabledToggleOff': 'AutoSave off',
+	'pptx.autosave.disabledByHost': 'AutoSave turned off by this application',
+	'pptx.autosave.disabledReadOnly': 'AutoSave disabled: this presentation is read-only',
 	'pptx.autosave.justNow': 'just now',
 	'pptx.autosave.oneMinAgo': '1 min ago',
 	'pptx.autosave.minutesAgo': '{{count}} min ago',
 	'pptx.autosave.saveFailed': 'Save failed',
 	'pptx.autosave.savedShort': 'Saved',
 	'pptx.autosave.allChangesSaved': 'All changes saved',
+	// Crash-recovery prompt (offered on load when a newer snapshot exists)
+	'pptx.autosave.recovery.title': 'Recover unsaved changes?',
+	'pptx.autosave.recovery.message':
+		'An autosaved copy of "{{file}}" ({{size}}) has changes that are not in the version you just opened.',
+	'pptx.autosave.recovery.savedLabel': 'Autosaved {{when}}',
+	'pptx.autosave.recovery.hoursAgo': '{{count}} h ago',
+	'pptx.autosave.recovery.restore': 'Restore',
+	'pptx.autosave.recovery.discard': 'Discard',
 
 	// Title bar (PowerPoint-style top chrome row)
 	'pptx.titleBar.autoSave': 'AutoSave',
@@ -186,6 +202,12 @@ export const translationsEn: Record<string, string> = {
 	'pptx.accessibility.error': 'Error: ',
 	'pptx.accessibility.warning': 'Warning: ',
 	'pptx.accessibility.info': 'Info: ',
+	// Element-level alt text / title (shape, text box, connector). A picture's
+	// own alt text field uses `pptx.image.altText` / `pptx.image.altTextPlaceholder`.
+	'pptx.elementAccessibility.altText': 'Alt text',
+	'pptx.elementAccessibility.altTextPlaceholder': 'Describe this element for accessibility',
+	'pptx.elementAccessibility.title': 'Title',
+	'pptx.elementAccessibility.titlePlaceholder': 'Accessibility title (optional)',
 
 	// Animations
 	'pptx.animations.previewTooltip': 'Preview animation on selected element',
@@ -392,6 +414,19 @@ export const translationsEn: Record<string, string> = {
 	'pptx.field.header': 'Header',
 	'pptx.field.footer': 'Footer',
 
+	// Home-tab font dropdown groups
+	'pptx.font.group.theme': 'Theme fonts',
+	'pptx.font.group.embedded': 'Embedded in this presentation',
+	'pptx.font.group.custom': 'Added this session',
+	'pptx.font.group.all': 'All fonts',
+	'pptx.font.role.heading': 'Headings',
+	'pptx.font.role.body': 'Body',
+
+	// New Slide / Layout gallery
+	'pptx.layoutGallery.current': 'Current layout',
+	'pptx.layoutGallery.loading': 'Loading layouts',
+	'pptx.layoutGallery.empty': 'No layouts available',
+
 	// Masters
 	'pptx.master.master': 'Master',
 	'pptx.master.layout': 'Layout',
@@ -401,6 +436,7 @@ export const translationsEn: Record<string, string> = {
 	// Print
 	'pptx.print.title': 'Print',
 	'pptx.print.printButton': 'Print',
+	'pptx.print.preparingToPrint': 'Preparing to print…',
 
 	// Export
 	'pptx.export.processing': 'Processing…',
@@ -421,6 +457,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.presentation.pen': 'Pen',
 	'pptx.presentation.highlighter': 'Highlighter',
 	'pptx.presentation.eraser': 'Eraser',
+	'pptx.presentation.blackboard': 'Blackboard',
 	'pptx.presentation.laserPointer': 'Laser Pointer',
 	'pptx.presentation.endOfSlideShow': 'End of slide show, click to exit.',
 	'pptx.presentation.pointerTools': 'Pointer Options',
@@ -462,17 +499,12 @@ export const translationsEn: Record<string, string> = {
 	'pptx.encryptedFile.message': 'This file is encrypted.',
 	'pptx.encryptedFile.instructions': 'Enter the password to open it.',
 
-	// Common (shared verb/label vocabulary reused across dialogs and panels)
-	'common.close': 'Close',
-	'common.cancel': 'Cancel',
-	'common.apply': 'Apply',
-	'common.delete': 'Delete',
-	'common.done': 'Done',
-	'common.loading': 'Loading…',
-	'common.ok': 'OK',
-	'common.remove': 'Remove',
-	'common.reset': 'Reset',
-	'common.save': 'Save',
+	// Common (shared verb/label vocabulary reused across dialogs and panels).
+	// The rest of this vocabulary lives with the other `pptx.common.*` entries
+	// further down; these three had no `pptx.`-prefixed twin.
+	'pptx.common.apply': 'Apply',
+	'pptx.common.loading': 'Loading…',
+	'pptx.common.remove': 'Remove',
 
 	// Accessibility (additions)
 	'pptx.accessibility.heading': 'Accessibility',
@@ -614,7 +646,7 @@ export const translationsEn: Record<string, string> = {
 	// Comments (additions)
 	'pptx.comments.unknownAuthor': 'Unknown',
 	'pptx.comments.reopen': 'Reopen',
-	'pptx.comments.remove': 'Remove',
+	'pptx.comments.remove': 'Delete',
 	'pptx.comments.removeComment': 'Remove comment',
 	'pptx.comments.noneOnSlide': 'No comments on this slide yet.',
 	'pptx.comments.commentingAs': 'Commenting as {{name}}',
@@ -719,6 +751,12 @@ export const translationsEn: Record<string, string> = {
 	'pptx.slideShow.subtitlesTooltip': 'Toggle subtitles',
 	'pptx.slideShow.subtitles': 'Subtitles',
 
+	// Record tab (camera overlay placeholders)
+	'pptx.record.cameo': 'Cameo',
+	'pptx.record.clear': 'Clear',
+	'pptx.record.learnMore': 'Learn More',
+	'pptx.record.resetToCameo': 'Reset to Cameo',
+
 	// Slide context menu
 	'pptx.slideMenu.duplicate': 'Duplicate slide',
 	'pptx.slideMenu.show': 'Show slide',
@@ -745,15 +783,18 @@ export const translationsEn: Record<string, string> = {
 	'pptx.zoom.sectionZoom': 'Section Zoom',
 	'pptx.zoom.ariaLabel': 'Zoom to slide {{number}}',
 	'pptx.zoom.ariaLabelSection': 'Zoom to slide {{number}} (section: {{section}})',
+	'pptx.zoom.summaryZoom': 'Summary Zoom',
+	'pptx.zoom.slideNumber': 'Slide {{number}}',
+	'pptx.zoom.ariaLabelSummary': 'Summary Zoom with {{count}} sections',
+	'pptx.zoom.ariaLabelSummaryTile': 'Zoom to section {{section}}, slide {{number}}',
 
 	// Canvas
 	'pptx.canvas.slide': 'Slide',
 
-	// Theme gallery (matches React's non-"pptx."-prefixed powerpoint.* namespace)
-	'powerpoint.toolbar.themes.gallery.title': 'Themes',
-	'powerpoint.toolbar.themes.gallery.description':
-		'Pick a built-in theme to recolour every slide in the deck.',
-	'powerpoint.toolbar.themes.gallery.ariaLabel': 'Theme gallery',
+	// Theme gallery
+	'pptx.themes.gallery.title': 'Themes',
+	'pptx.themes.gallery.description': 'Pick a built-in theme to recolour every slide in the deck.',
+	'pptx.themes.gallery.ariaLabel': 'Theme gallery',
 
 	// SmartArt (mixed casing preserved from source sweep - see follow-up note)
 	'pptx.smartArt.setFill': 'Set fill to {{color}}',
@@ -900,6 +941,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.effects.blur': 'Blur',
 	'pptx.effects.distance': 'Distance',
 	'pptx.effects.angle': 'Angle',
+	'pptx.effects.rotateWithShape': 'Rotate with Shape',
 	'pptx.effects.outerGlow': 'Outer Glow',
 	'pptx.effects.radius': 'Radius',
 	'pptx.effects.shapeOnlyNote': 'Shadow and glow are only available on shape-like elements.',
@@ -972,6 +1014,10 @@ export const translationsEn: Record<string, string> = {
 
 	// Shape / slide background / presentation settings
 	'pptx.shape.quickStyles': 'Quick Styles',
+	'pptx.shape.quickStyleAccent': 'Accent',
+	'pptx.shape.quickStyleSubtle': 'Subtle',
+	'pptx.shape.quickStyleOutline': 'Outline',
+	'pptx.shape.quickStyleDark': 'Dark',
 	'pptx.slideBackground.colour': 'Colour',
 	'pptx.slideBackground.colourAriaLabel': 'Slide background colour',
 	'pptx.slideBackground.image': 'Image',
@@ -980,6 +1026,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.slideBackground.backgroundPreview': 'Background preview',
 	'pptx.slideBackground.removeBackgroundImage': 'Remove background image',
 	'pptx.slideBackground.clearBackground': 'Clear Background',
+	'pptx.slideBackground.hideBackgroundGraphics': 'Hide Background Graphics',
 	'pptx.presentationSettings.showType': 'Show type',
 	'pptx.presentationSettings.showTypePresented': 'Presented',
 	'pptx.presentationSettings.showTypeBrowsed': 'Browsed',
@@ -991,7 +1038,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.presentationSettings.slidesPerPage': 'Slides / page',
 
 	// Theme gallery (additions)
-	'powerpoint.toolbar.themes.gallery.importTheme': 'Import Theme',
+	'pptx.themes.gallery.importTheme': 'Import Theme',
 
 	// Action buttons
 	'pptx.action.onClick': 'On Click',
@@ -1004,6 +1051,9 @@ export const translationsEn: Record<string, string> = {
 	'pptx.animation.duration': 'Duration (ms)',
 	'pptx.animation.moveDown': 'Move down',
 	'pptx.animation.moveUp': 'Move up',
+	'pptx.animation.nativeEffect': 'PowerPoint effect',
+	'pptx.animation.nativeEffectHint':
+		'Added in PowerPoint. Drag your own effects ahead of or behind it.',
 	'pptx.animation.none': 'None',
 	'pptx.animation.preview': 'Preview',
 	'pptx.animation.repeatCount': 'Repeat count',
@@ -1102,6 +1152,9 @@ export const translationsEn: Record<string, string> = {
 	'pptx.fonts.embedDescription':
 		'Embed fonts used in this presentation so they display correctly on other devices.',
 	'pptx.fonts.embedFonts': 'Embed Fonts',
+	'pptx.fonts.embedKeepsExisting': 'Turning this off removes the embedded font data when you save.',
+	'pptx.fonts.embedUnavailable':
+		'This presentation carries no embedded font data, and font files cannot be read from your system, so there is nothing to embed.',
 	'pptx.fonts.embedded': 'Embedded',
 	'pptx.fonts.enableEmbedding': 'Enable font embedding',
 	'pptx.fonts.missingWarning': '{{count}} font(s) could not be found and will not be embedded.',
@@ -1141,6 +1194,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.inspector.unlock': 'Unlock',
 
 	// Slide master / handout master / notes master
+	'pptx.master.backgroundColorLabel': 'Master background color',
 	'pptx.master.collapseMasterPane': 'Collapse pane',
 	'pptx.master.handoutBackground': 'Background',
 	'pptx.master.handoutMasterTitle': 'Handout Master',
@@ -1186,6 +1240,10 @@ export const translationsEn: Record<string, string> = {
 	'pptx.notes.toggleRichPlainEditor': 'Toggle rich/plain text editor',
 	'pptx.notes.underline': 'Underline',
 
+	// Group info panel (element inspector)
+	'pptx.group.childCount': '{{count}} children',
+	'pptx.group.groupedElement': 'Grouped element',
+
 	// OLE object properties
 	'pptx.ole.embedded': 'Embedded',
 	'pptx.ole.fileName': 'File Name',
@@ -1193,6 +1251,8 @@ export const translationsEn: Record<string, string> = {
 	'pptx.ole.linked': 'Linked',
 	'pptx.ole.title': 'OLE Object',
 	'pptx.ole.type': 'Type',
+	'pptx.ole.objectName': 'Object Name',
+	'pptx.ole.objectNamePlaceholder': 'Used by screen readers and the Selection Pane',
 
 	// Presentation mode (annotations-on-exit prompt)
 	'pptx.presentation.clearAnnotations': 'Clear Annotations',
@@ -1226,6 +1286,18 @@ export const translationsEn: Record<string, string> = {
 	'pptx.presenter.eraseAllInk': 'Erase All Ink on Slide',
 	'pptx.presenter.slideLabel': 'Slide {{current}} of {{total}}',
 	'pptx.presenter.timerProgress': 'Timer Progress',
+	// Presenter console strip (see render/presenter-chrome.ts). React shipped
+	// these as hard-coded English `title` attributes, which is why they arrive
+	// as new keys rather than reused ones.
+	'pptx.presenter.toggleTimer': 'Pause or Resume Timer',
+	'pptx.presenter.resetTimer': 'Reset Timer',
+	'pptx.presenter.zoomIn': 'Zoom In',
+	'pptx.presenter.zoomOut': 'Zoom Out',
+	'pptx.presenter.resetZoom': 'Reset Zoom',
+	'pptx.presenter.swapDisplays': 'Swap Displays',
+	'pptx.presenter.slideNavigator': 'Slide Navigator',
+	'pptx.presenter.closeNavigator': 'Close',
+	'pptx.presenter.timerTitle': '{{elapsed}} (segment {{segment}})',
 
 	// Print dialog
 	'pptx.print.allSlides': 'All Slides',
@@ -1397,6 +1469,14 @@ export const translationsEn: Record<string, string> = {
 	'pptx.transition.sound': 'Sound',
 	'pptx.transition.spokes': 'Spokes',
 	'pptx.transition.type': 'Type',
+	'pptx.transition.speed': 'Speed',
+	'pptx.transition.speed.slow': 'Slow',
+	'pptx.transition.speed.med': 'Medium',
+	'pptx.transition.speed.fast': 'Fast',
+	'pptx.transition.morphOption': 'Morph by',
+	'pptx.transition.morphOption.byObject': 'By Object',
+	'pptx.transition.morphOption.byWord': 'By Word',
+	'pptx.transition.morphOption.byChar': 'By Character',
 
 	// Context menu / editor toolbar (Angular/Vue-specific additions)
 	'pptx.contextMenu.ariaLabel': 'Context menu',
@@ -1778,6 +1858,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.documentProperties.modified': 'Modified',
 	'pptx.selectionPane.showElement': 'Show element',
 	'pptx.selectionPane.hideElement': 'Hide element',
+	'pptx.selectionPane.renameElement': 'Rename element',
 	'pptx.share.activeTitle': 'Collaboration active',
 	'pptx.share.connecting': 'Connecting',
 	'pptx.share.participantSingular': 'participant',
@@ -1788,6 +1869,8 @@ export const translationsEn: Record<string, string> = {
 	'pptx.security.hidePassword': 'Hide password',
 	'pptx.security.show': 'Show',
 	'pptx.security.hide': 'Hide',
+	'pptx.security.protectedViewTitle': 'PROTECTED VIEW',
+	'pptx.security.enableEditing': 'Enable Editing',
 	'pptx.ribbon.slideShowOptions': 'Slide show options',
 	'pptx.ribbon.fromBeginning': 'From Beginning',
 	'pptx.ribbon.presenterView': 'Presenter View',
@@ -1902,7 +1985,6 @@ export const translationsEn: Record<string, string> = {
 	'pptx.ribbon.toggleGridOverlay': 'Toggle grid overlay',
 	'pptx.ribbon.guides': 'Guides',
 	'pptx.ribbon.toggleGuides': 'Toggle center guide lines',
-	'pptx.ribbon.toggleSelectionPane': 'Show/hide the Selection pane',
 	'pptx.ribbon.snapToGridTitle': 'Snap elements to grid while moving',
 	'pptx.ribbon.templatesOn': 'Templates On',
 	'pptx.ribbon.templatesOff': 'Templates Off',
@@ -1935,6 +2017,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.ribbon.advanceAfterSeconds': 'Advance after specified duration',
 	'pptx.ribbon.sound': 'Sound:',
 	'pptx.ribbon.soundNone': '[No Sound]',
+	'pptx.ribbon.soundOther': 'Other Sound...',
 	'pptx.ribbon.inspector': 'Inspector',
 	'pptx.ribbon.openInspectorTransitions': 'Open Inspector for full transition options',
 	'pptx.ribbon.removeAnimation': 'Remove Animation',
@@ -1948,10 +2031,13 @@ export const translationsEn: Record<string, string> = {
 	'pptx.ribbon.customColour': 'Custom colour...',
 	'pptx.ribbon.textHighlightColour': 'Text highlight colour',
 	'pptx.ribbon.highlightColourValue': 'Highlight colour {{color}}',
+	'pptx.ribbon.fillColourValue': 'Fill colour {{color}}',
+	'pptx.ribbon.outlineColourValue': 'Outline colour {{color}}',
 	'pptx.ribbon.bulletList': 'Bullet list',
 	'pptx.ribbon.justify': 'Justify',
 	'pptx.toolbar.findAndReplace': 'Find and replace',
 	// Chart option labels (value/grouping/legend/axis/marker/trendline/etc. select lists)
+	'pptx.chart.typeColumn': 'Column',
 	'pptx.chart.typeBar': 'Bar',
 	'pptx.chart.typeLine': 'Line',
 	'pptx.chart.typePie': 'Pie',
@@ -2124,6 +2210,61 @@ export const translationsEn: Record<string, string> = {
 	'pptx.animation.sequence.byWord': 'By Word',
 	'pptx.animation.sequence.byLetter': 'By Letter',
 
+	// Motion-path authoring: the gallery families/presets, the panel row, and
+	// the on-canvas path editor handles.
+	'pptx.animation.motionPath': 'Motion Paths',
+	'pptx.animation.motionPath.family.lines': 'Lines',
+	'pptx.animation.motionPath.family.arcs': 'Arcs',
+	'pptx.animation.motionPath.family.turns': 'Turns',
+	'pptx.animation.motionPath.family.shapes': 'Shapes',
+	'pptx.animation.motionPath.family.loops': 'Loops',
+	'pptx.animation.motionPath.preset.lineRight': 'Right',
+	'pptx.animation.motionPath.preset.lineLeft': 'Left',
+	'pptx.animation.motionPath.preset.lineDown': 'Down',
+	'pptx.animation.motionPath.preset.lineUp': 'Up',
+	'pptx.animation.motionPath.preset.lineDiagonalUpRight': 'Diagonal Up Right',
+	'pptx.animation.motionPath.preset.lineDiagonalDownRight': 'Diagonal Down Right',
+	'pptx.animation.motionPath.preset.lineDiagonalUpLeft': 'Diagonal Up Left',
+	'pptx.animation.motionPath.preset.lineDiagonalDownLeft': 'Diagonal Down Left',
+	'pptx.animation.motionPath.preset.arcUp': 'Arc Up',
+	'pptx.animation.motionPath.preset.arcDown': 'Arc Down',
+	'pptx.animation.motionPath.preset.arcRight': 'Arc Right',
+	'pptx.animation.motionPath.preset.arcLeft': 'Arc Left',
+	'pptx.animation.motionPath.preset.turnUp': 'Turn Up',
+	'pptx.animation.motionPath.preset.turnDown': 'Turn Down',
+	'pptx.animation.motionPath.preset.turnRight': 'Turn Right',
+	'pptx.animation.motionPath.preset.turnLeft': 'Turn Left',
+	'pptx.animation.motionPath.preset.sCurve': 'S Curve',
+	'pptx.animation.motionPath.preset.zigzag': 'Zigzag',
+	'pptx.animation.motionPath.preset.circle': 'Circle',
+	'pptx.animation.motionPath.preset.square': 'Square',
+	'pptx.animation.motionPath.preset.triangle': 'Triangle',
+	'pptx.animation.motionPath.preset.diamond': 'Diamond',
+	'pptx.animation.motionPath.preset.hexagon': 'Hexagon',
+	'pptx.animation.motionPath.preset.loopDeLoop': 'Loop de Loop',
+	'pptx.animation.motionPath.preset.figureEight': 'Figure 8',
+	'pptx.animation.motionPath.preset.spiral': 'Spiral',
+	'pptx.animation.motionPath.label': 'Motion Path',
+	'pptx.animation.motionPath.custom': 'Custom Path',
+	'pptx.animation.motionPath.none': 'No motion path',
+	'pptx.animation.motionPath.remove': 'Remove motion path',
+	'pptx.animation.motionPath.editHint': 'Drag the end point on the slide to retarget the path',
+	'pptx.animation.motionPath.endHandle': 'Motion path end point',
+	'pptx.animation.motionPath.overlay': 'Motion path preview',
+	'pptx.animations.motionPathGalleryAria': 'Motion Paths: Lines, Arcs, Turns, Shapes, and Loops',
+
+	// --- Effect sound + "after animation" authoring controls ---
+	'pptx.animation.sound': 'Sound',
+	'pptx.animation.sound.none': '[No Sound]',
+	'pptx.animation.sound.custom': 'Choose sound file...',
+	'pptx.animation.sound.chooseFile': 'Choose an audio file',
+	'pptx.animation.afterAnimation': 'After animation',
+	'pptx.animation.afterAnimation.none': "Don't Dim",
+	'pptx.animation.afterAnimation.dimToColor': 'Dim after animation',
+	'pptx.animation.afterAnimation.hideAfterAnimation': 'Hide after animation',
+	'pptx.animation.afterAnimation.hideOnNextClick': 'Hide on next mouse click',
+	'pptx.animation.afterAnimation.color': 'Dim color',
+
 	// --- 2026-07-03 missing-key sweep: keys used by Vue/Angular with no
 	// existing dictionary entry (React has 0 such gaps and is the ground-
 	// truth reference these were derived from). Appended flat rather than
@@ -2134,6 +2275,9 @@ export const translationsEn: Record<string, string> = {
 	'pptx.arrange.duplicateSelection': 'Duplicate selection',
 	'pptx.arrange.groupLabel': 'Arrange',
 	'pptx.canvas.adjustShape': 'Adjust shape',
+	'pptx.canvas.connectorEndpointStart': 'Connector start point',
+	'pptx.canvas.connectorEndpointEnd': 'Connector end point',
+	'pptx.canvas.connectionSite': 'Connection point',
 	'pptx.canvas.guideTooltip': 'Drag to move guide, double-click to remove',
 	'pptx.customShows.none': 'None',
 	'pptx.customShows.noSlidesYet': 'No slides in this show yet.',
@@ -2151,6 +2295,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.editorToolbar.resetZoom': 'Reset zoom',
 	'pptx.editorToolbar.resetZoomTo100': 'Reset zoom to 100%',
 	'pptx.effects.innerShadow': 'Inner Shadow',
+	'pptx.element.hasAction': 'Has action',
 	'pptx.element.linkFallback': 'Link',
 	'pptx.export.export': 'Export',
 	'pptx.export.gifAnimated': 'Animated GIF',
@@ -2161,8 +2306,6 @@ export const translationsEn: Record<string, string> = {
 	'pptx.file.copyImageTooltip': 'Copy Slide as Image',
 	'pptx.file.fonts': 'Fonts',
 	'pptx.file.gif': 'GIF',
-	'pptx.file.package': 'Package',
-	'pptx.file.packageTooltip': 'Package for Sharing',
 	'pptx.file.pdf': 'PDF',
 	'pptx.file.png': 'PNG',
 	'pptx.file.saveAsPpsx': 'Save .ppsx',
@@ -2182,6 +2325,63 @@ export const translationsEn: Record<string, string> = {
 	'pptx.headerFooter.updateAutomatically': 'Update automatically',
 	'pptx.home.chooseLayout': 'Choose layout',
 	'pptx.home.newSlide': 'New Slide',
+	'pptx.home.slideTemplates': 'Slide Templates',
+
+	// Slide template gallery (New Slide flow)
+	'pptx.slideTemplates.galleryTitle': 'Slide Templates',
+	'pptx.slideTemplates.galleryDescription': 'Pick a starter slide; it inherits the deck theme.',
+	'pptx.slideTemplates.gallery': 'Slide template gallery',
+	'pptx.slideTemplates.close': 'Close',
+	'pptx.slideTemplates.cancel': 'Cancel',
+	'pptx.slideTemplates.insert': 'Insert',
+	'pptx.undoAction.insertTemplateSlide': 'Insert slide from template',
+	'pptx.slideTemplates.title.name': 'Title Slide',
+	'pptx.slideTemplates.title.description': 'Large title with subtitle and accent bar',
+	'pptx.slideTemplates.titleAndContent.name': 'Title and Content',
+	'pptx.slideTemplates.titleAndContent.description': 'Heading with a bulleted content area',
+	'pptx.slideTemplates.sectionHeader.name': 'Section Header',
+	'pptx.slideTemplates.sectionHeader.description':
+		'Accent side panel with section number and title',
+	'pptx.slideTemplates.agenda.name': 'Agenda',
+	'pptx.slideTemplates.agenda.description': 'Numbered agenda rows with dividers',
+	'pptx.slideTemplates.twoContent.name': 'Two Content',
+	'pptx.slideTemplates.twoContent.description': 'Heading with two side-by-side content panels',
+	'pptx.slideTemplates.comparison.name': 'Comparison',
+	'pptx.slideTemplates.comparison.description': 'Two headed columns for contrasting options',
+	'pptx.slideTemplates.quote.name': 'Quote',
+	'pptx.slideTemplates.quote.description': 'Centred quotation with attribution',
+	'pptx.slideTemplates.timeline.name': 'Timeline',
+	'pptx.slideTemplates.timeline.description': 'Horizontal timeline with four milestones',
+	'pptx.slideTemplates.keyMetrics.name': 'Key Metrics',
+	'pptx.slideTemplates.keyMetrics.description': 'Three stat tiles with big numbers',
+	'pptx.slideTemplates.titleOnly.name': 'Title Only',
+	'pptx.slideTemplates.titleOnly.description': 'Just a heading, room for anything below',
+	'pptx.slideTemplates.blank.name': 'Blank',
+	'pptx.slideTemplates.blank.description': 'An empty slide',
+	'pptx.slideTemplates.closing.name': 'Closing',
+	'pptx.slideTemplates.closing.description': 'Thank-you slide with contact line',
+	'pptx.slideTemplates.content.presentationTitle': 'Presentation Title',
+	'pptx.slideTemplates.content.presentationSubtitle': 'Subtitle or speaker name',
+	'pptx.slideTemplates.content.slideTitle': 'Slide Title',
+	'pptx.slideTemplates.content.point1': 'First key point',
+	'pptx.slideTemplates.content.point2': 'Second key point',
+	'pptx.slideTemplates.content.point3': 'Third key point',
+	'pptx.slideTemplates.content.sectionTitle': 'Section Title',
+	'pptx.slideTemplates.content.sectionCaption': 'A short introduction to this section',
+	'pptx.slideTemplates.content.agendaTitle': 'Agenda',
+	'pptx.slideTemplates.content.agendaItem': 'Agenda item',
+	'pptx.slideTemplates.content.leftContent': 'First content area',
+	'pptx.slideTemplates.content.rightContent': 'Second content area',
+	'pptx.slideTemplates.content.optionA': 'Option A',
+	'pptx.slideTemplates.content.optionB': 'Option B',
+	'pptx.slideTemplates.content.quoteText':
+		'A memorable quote that captures the message of this presentation.',
+	'pptx.slideTemplates.content.quoteAttribution': 'Speaker Name, Role',
+	'pptx.slideTemplates.content.milestoneStep': 'Step',
+	'pptx.slideTemplates.content.milestoneCaption': 'What happens at this milestone',
+	'pptx.slideTemplates.content.metricCaption': 'What this metric measures',
+	'pptx.slideTemplates.content.thankYou': 'Thank You',
+	'pptx.slideTemplates.content.contactLine': 'Questions? Reach out any time.',
 	'pptx.hyperlink.linkTo': 'Link to',
 	'pptx.hyperlink.urlPlaceholder': 'https://example.com',
 	'pptx.insert.addShape': 'Add shape',
@@ -2281,6 +2481,12 @@ export const translationsEn: Record<string, string> = {
 	'pptx.view.masterViews': 'Master Views',
 	'pptx.view.normal': 'Normal',
 	'pptx.view.presentationViews': 'Presentation Views',
+	'pptx.view.outlineView': 'Outline View',
+	'pptx.view.outlineViewTooltip': 'Outline view: edit the deck as indented text',
+	'pptx.outline.titleLine': 'Slide title',
+	'pptx.outline.bodyLine': 'Outline line',
+	'pptx.outline.hint':
+		'Tab and Shift+Tab change the level. Enter adds a line; on a title it adds a slide.',
 	'pptx.view.readingView': 'Reading View',
 	'pptx.view.selection': 'Selection',
 	'pptx.view.slideMasterTooltip': 'Edit slide masters and layouts',
@@ -2421,7 +2627,6 @@ export const translationsEn: Record<string, string> = {
 	'pptx.action.slideNumberPlaceholder': 'Slide number (1-based)',
 	'pptx.animation.trigger.afterDelay': 'After delay',
 	'pptx.animationPanel.stepsMore': '{{base}} +{{extra}} more',
-	'pptx.arrowhead.arrow': 'Arrow',
 	'pptx.arrowhead.diamond': 'Diamond',
 	'pptx.arrowhead.none': 'None',
 	'pptx.arrowhead.openArrow': 'Open Arrow',
@@ -2567,6 +2772,8 @@ export const translationsEn: Record<string, string> = {
 	'pptx.fillPatterns.wideVertical': 'Wide Vertical',
 	'pptx.fillPatterns.zigZag': 'Zig Zag',
 	'pptx.fillStroke.eyedropperTooltip': 'Eyedropper: pick colour from screen',
+	'pptx.colorPicker.themeColors': 'Theme Colors',
+	'pptx.colorPicker.standardColors': 'Standard Colors',
 	'pptx.image.cropBottom': 'Crop Bottom',
 	'pptx.image.cropLeft': 'Crop Left',
 	'pptx.image.cropRight': 'Crop Right',
@@ -2586,7 +2793,6 @@ export const translationsEn: Record<string, string> = {
 	'pptx.paragraph.rightToLeft': 'Right to Left',
 	'pptx.paragraph.textDirection': 'Text Direction',
 	'pptx.print.handoutPerPageTitle': 'Handout {{count}} per page',
-	'pptx.resizeHandles.rotateAria': 'Rotate',
 	'pptx.ribbon.columns1': '1 Column',
 	'pptx.ribbon.columns2': '2 Columns',
 	'pptx.ribbon.columns3': '3 Columns',
@@ -2632,6 +2838,26 @@ export const translationsEn: Record<string, string> = {
 	'pptx.slideBackground.templateBackgroundsHeading': 'Template Backgrounds',
 	'pptx.slideDiff.changeCount': '{{count}} change(s)',
 	'pptx.slides.ungroupedSlides': 'Ungrouped Slides',
+	'pptx.slideSize.orientation': 'Orientation',
+	'pptx.slideSize.landscape': 'Landscape',
+	'pptx.slideSize.portrait': 'Portrait',
+	'pptx.slideSize.customSize': 'Custom',
+	'pptx.slideSize.preset.screen4x3': 'On-screen Show (4:3)',
+	'pptx.slideSize.preset.screen16x9': 'On-screen Show (16:9)',
+	'pptx.slideSize.preset.screen16x10': 'On-screen Show (16:10)',
+	'pptx.slideSize.preset.widescreen': 'Widescreen',
+	'pptx.slideSize.preset.letter': 'Letter Paper (8.5x11 in)',
+	'pptx.slideSize.preset.ledger': 'Ledger Paper (11x17 in)',
+	'pptx.slideSize.preset.a3': 'A3 Paper (297x420 mm)',
+	'pptx.slideSize.preset.a4': 'A4 Paper (210x297 mm)',
+	'pptx.slideSize.preset.b4Iso': 'B4 (ISO) Paper (250x353 mm)',
+	'pptx.slideSize.preset.b5Iso': 'B5 (ISO) Paper (176x250 mm)',
+	'pptx.slideSize.preset.b4Jis': 'B4 (JIS) Paper (257x364 mm)',
+	'pptx.slideSize.preset.b5Jis': 'B5 (JIS) Paper (182x257 mm)',
+	'pptx.slideSize.preset.slide35mm': '35mm Slides',
+	'pptx.slideSize.preset.overhead': 'Overhead',
+	'pptx.slideSize.preset.banner': 'Banner',
+	'pptx.slideSize.preset.hagakiCard': 'Hagaki Card (100x148 mm)',
 	'pptx.slideSize.presetFullHd': 'Full HD (1920x1080)',
 	'pptx.slideSize.presetPortrait': 'Portrait 5:4 (1280x1024)',
 	'pptx.slideSize.presetQhd': 'QHD (2560x1440)',
@@ -2663,6 +2889,7 @@ export const translationsEn: Record<string, string> = {
 	'pptx.tableDataEditor.addRowLabel': '+ Row',
 	'pptx.tableDataEditor.addRowTitle': 'Add row below last',
 	'pptx.tableDataEditor.ariaLabel': 'Table data editor',
+	'pptx.tableDataEditor.cellAriaLabel': 'Row {{row}}, column {{column}}',
 	'pptx.tableDataEditor.removeColumnLabel': '- Col',
 	'pptx.tableDataEditor.removeColumnN': 'Remove column {{number}}',
 	'pptx.tableDataEditor.removeColumnTitle': 'Remove last column',
@@ -2795,6 +3022,17 @@ export const translationsEn: Record<string, string> = {
 	'pptx.options.general.userName': 'User name',
 	'pptx.options.general.userInitials': 'Initials',
 	'pptx.options.general.appearance': 'Viewer theme',
+	'pptx.options.general.fonts': 'Fonts',
+	'pptx.options.general.fontsDescription':
+		'Presentations sometimes use fonts your device does not have installed, and the viewer substitutes the closest available face. Adding the font file makes the deck render with the font it was written in.',
+	'pptx.options.general.enableCustomFonts': 'Let me add font files to this session',
+	'pptx.options.general.enableCustomFontsInfo':
+		'Added fonts are used for rendering and appear in the Home tab font list. They are held in memory only, are never uploaded or saved into the presentation, and are discarded when you reload the page.',
+	'pptx.options.general.addFontFile': 'Add font file',
+	'pptx.options.general.customFontsAdded': 'Fonts added this session',
+	'pptx.options.general.customFontsEmpty': 'No fonts added yet.',
+	'pptx.options.general.customFontsDisabled': 'Turn the setting above on to add a font file.',
+	'pptx.options.general.customFontError': 'That file could not be read as a font.',
 	'pptx.options.general.startup': 'Start up options',
 	'pptx.options.general.showStartScreen': 'Show the Start screen when this application starts',
 	'pptx.options.proofing.label': 'Proofing',
@@ -2831,11 +3069,9 @@ export const translationsEn: Record<string, string> = {
 	'pptx.options.save.minutes': 'minutes',
 	'pptx.options.save.keepLastAutoRecovered':
 		'Keep the last AutoRecovered version if I close without saving',
-	'pptx.options.save.fidelity': 'Preserve fidelity when sharing this presentation',
-	'pptx.options.save.embedFonts': 'Embed fonts in the file',
-	'pptx.options.save.embedFontsInfo':
-		'Embedding fonts increases file size but keeps text identical on other devices.',
-	'pptx.options.save.embedAllCharacters': 'Embed all characters (best for editing by other people)',
+	// No `pptx.options.save.fidelity` / `embedFonts` group: font embedding is the
+	// File > Fonts panel's setting (`pptx.fonts.embedFonts`), and the Options pane
+	// carried a second, unwired copy of the same switch.
 	'pptx.options.save.cache': 'Cache Settings',
 	'pptx.options.save.cacheRetentionDays': 'Days to keep files in the local document cache',
 	'pptx.options.save.days': 'days',
@@ -2881,6 +3117,9 @@ export const translationsEn: Record<string, string> = {
 	'pptx.options.advanced.display': 'Display',
 	'pptx.options.advanced.recentCount': 'Show this number of Recent Presentations',
 	'pptx.options.advanced.disableHardwareAcceleration': 'Disable hardware graphics acceleration',
+	'pptx.options.advanced.disable3DRendering': 'Disable 3D rendering (for performance)',
+	'pptx.options.advanced.disable3DRenderingInfo':
+		'Forces every 3D chart and SmartArt scene to fall back to flat 2D rendering, even in a presentation that enables 3D. Turn this on if 3D scenes run slowly on this device.',
 	'pptx.options.advanced.openDocumentsView': 'Open all documents using this view',
 	'pptx.options.openView.savedView': 'The view saved in the file',
 	'pptx.options.openView.normal': 'Normal',
@@ -2974,6 +3213,569 @@ export const translationsEn: Record<string, string> = {
 	'pptx.options.trust.allowExternalContentInfo':
 		'When off, only content embedded in the file is displayed.',
 	'pptx.options.trust.confirmHyperlinks': 'Confirm before opening external hyperlinks',
+
+	// Animations tab: Advanced Animation and Timing groups
+	'pptx.animations.advanced': 'Advanced Animation',
+	'pptx.animations.afterPrevious': 'After Previous',
+	'pptx.animations.duration': 'Duration',
+	'pptx.animations.effectOptions': 'Effect Options',
+	'pptx.animations.exitEffects': 'Exit Effects',
+	'pptx.animations.onClick': 'On Click',
+	'pptx.animations.painter': 'Animation Painter',
+	'pptx.animations.pathAnimation': 'Path Animation',
+	'pptx.animations.start': 'Start',
+	'pptx.animations.withPrevious': 'With Previous',
+
+	// Review tab
+	'pptx.review.accessibility': 'Accessibility',
+	'pptx.review.changes': 'Changes',
+	'pptx.review.hideInk': 'Hide Ink',
+	'pptx.review.markAllRead': 'Mark All as Read',
+	'pptx.review.proofing': 'Proofing',
+	'pptx.review.protect': 'Protect',
+	'pptx.review.readOnly': 'Always Open Read-Only',
+	'pptx.review.restrictPermission': 'Restrict Permission',
+	'pptx.review.showComments': 'Show Comments',
+	'pptx.review.thesaurus': 'Thesaurus',
+
+	// Slide Show tab
+	'pptx.slideShow.hideSlide': 'Hide Slide',
+	'pptx.slideShow.keepUpdated': 'Keep Slides Updated',
+	'pptx.slideShow.mediaControls': 'Show Media Controls',
+	'pptx.slideShow.options': 'Options',
+	'pptx.slideShow.playNarrations': 'Play Narrations',
+	'pptx.slideShow.present': 'Present',
+	'pptx.slideShow.rehearseCoach': 'Rehearse with Coach',
+	'pptx.slideShow.setUpGroup': 'Set Up',
+	'pptx.slideShow.start': 'Start Slide Show',
+	'pptx.slideShow.subtitleSettings': 'Subtitle Settings',
+
+	// Transition direction tokens (arrow picker button titles)
+	'pptx.transition.dir.l': 'Left',
+	'pptx.transition.dir.r': 'Right',
+	'pptx.transition.dir.u': 'Up',
+	'pptx.transition.dir.d': 'Down',
+	'pptx.transition.dir.lu': 'Left Up',
+	'pptx.transition.dir.ld': 'Left Down',
+	'pptx.transition.dir.ru': 'Right Up',
+	'pptx.transition.dir.rd': 'Right Down',
+	'pptx.transition.dir.in': 'In',
+	'pptx.transition.dir.out': 'Out',
+	'pptx.transition.dir.horz': 'Horizontal',
+	'pptx.transition.dir.vert': 'Vertical',
+
+	// View tab
+	'pptx.view.guides': 'Guides',
+	'pptx.view.macros': 'Macros',
+	'pptx.view.show': 'Show',
+	'pptx.view.slideSorter': 'Slide Sorter',
+	'pptx.view.snapToGrid': 'Snap to Grid',
+	'pptx.view.snapToShape': 'Snap to Shape',
+	'pptx.view.window': 'Window',
+
+	// Shared vocabulary
+	'pptx.common.back': 'Back',
+	'pptx.common.clear': 'Clear',
+	'pptx.common.delete': 'Delete',
+	'pptx.common.done': 'Done',
+	'pptx.common.next': 'Next',
+	'pptx.common.previous': 'Previous',
+	'pptx.common.reset': 'Reset',
+
+	// Ribbon group captions
+	'pptx.ribbon.editing': 'Editing',
+	'pptx.ribbon.selectionPane': 'Selection Pane',
+	'pptx.ribbon.slides': 'Slides',
+
+	// Chart inspector: axis, series, data point, trendline and error bar fields
+	'pptx.chart.axis': 'Axis',
+	'pptx.chart.axisColor': 'Axis Color',
+	'pptx.chart.axisFontColor': 'Axis Font Color',
+	'pptx.chart.axisFontSize': 'Axis Font Size',
+	'pptx.chart.axisMaximum': 'Maximum Bound',
+	'pptx.chart.axisMinimum': 'Minimum Bound',
+	'pptx.chart.customMinus': 'Negative Error Value',
+	'pptx.chart.customPlus': 'Positive Error Value',
+	'pptx.chart.dataLabelPosition': 'Data Label Position',
+	'pptx.chart.dataPointColor': 'Data Point Color',
+	'pptx.chart.dataPointIndex': 'Data Point Index',
+	'pptx.chart.dataPointMarker': 'Data Point Marker',
+	'pptx.chart.errorBarColor': 'Error Bar Color',
+	'pptx.chart.errorBarDirection': 'Error Bar Direction',
+	'pptx.chart.errorBarType': 'Error Bar Type',
+	'pptx.chart.forecastBackward': 'Forecast Backward',
+	'pptx.chart.forecastForward': 'Forecast Forward',
+	'pptx.chart.invertIfNegative': 'Invert if Negative',
+	'pptx.chart.marker': 'Marker Type',
+	'pptx.chart.markerOutline': 'Marker Outline',
+	'pptx.chart.noEndCap': 'No End Cap',
+	'pptx.chart.reverseOrder': 'Values in Reverse Order',
+	'pptx.chart.secondaryAxis': 'Secondary Axis',
+	'pptx.chart.seriesType': 'Series Chart Type',
+	'pptx.chart.showCategory': 'Show Category Name',
+	'pptx.chart.showLeaderLines': 'Show Leader Lines',
+	'pptx.chart.showPercentage': 'Show Percentage',
+	'pptx.chart.showSeriesName': 'Show Series Name',
+	'pptx.chart.showValue': 'Show Value',
+	'pptx.chart.tickLabelPosition': 'Tick Label Position',
+	'pptx.chart.trendlineColor': 'Trendline Color',
+	'pptx.chart.trendlineIntercept': 'Trendline Intercept',
+	'pptx.chart.trendlineOrder': 'Trendline Order',
+	'pptx.chart.trendlinePeriod': 'Trendline Period',
+
+	// Table inspector: structure and cell formatting
+	'pptx.table.alignment': 'Alignment',
+	'pptx.table.borderColor': 'Border Color',
+	'pptx.table.borderWidth': 'Border Width',
+	'pptx.table.gradientEnd': 'Gradient End',
+	'pptx.table.gradientStart': 'Gradient Start',
+	'pptx.table.styleId': 'Style ID',
+	'pptx.table.totalRow': 'Total Row',
+	'pptx.table.verticalAlignment': 'Vertical Alignment',
+
+	// Character formatting toggles shared by the table and text inspectors
+	'pptx.format.bold': 'Bold',
+	'pptx.format.italic': 'Italic',
+	'pptx.format.underline': 'Underline',
+
+	// Advanced text inspector
+	'pptx.textAdvanced.characterSpacing': 'Character Spacing',
+	'pptx.textAdvanced.direction': 'Text Direction',
+	'pptx.textAdvanced.direction.horizontal': 'Horizontal',
+	'pptx.textAdvanced.direction.vertical': 'Rotate all text 90°',
+	'pptx.textAdvanced.direction.vertical270': 'Rotate all text 270°',
+	'pptx.textAdvanced.direction.eaVert': 'East Asian vertical',
+	'pptx.textAdvanced.direction.wordArtVert': 'Stacked',
+	'pptx.textAdvanced.direction.wordArtVertRtl': 'Stacked, right to left',
+	'pptx.textAdvanced.direction.mongolianVert': 'Mongolian vertical',
+	'pptx.textAdvanced.lineSpacing': 'Line Spacing',
+	'pptx.textAdvanced.lineSpacingExact': 'Line Spacing (Exact)',
+	'pptx.textAdvanced.marginLeft': 'Left Margin',
+
+	// Text and shape effects
+	'pptx.textEffects.adjustment': 'Adjustment',
+	'pptx.textEffects.glowColor': 'Glow Color',
+	'pptx.textEffects.outline': 'Text Outline',
+	'pptx.textEffects.outlineWidth': 'Outline Width',
+	'pptx.textEffects.shadowColor': 'Shadow Color',
+	'pptx.textEffects.transform': 'Transform',
+	'pptx.textFormatting.columns': 'Columns',
+	'pptx.textFormatting.columnSpacing': 'Column Spacing',
+	'pptx.textFormatting.strikethrough': 'Strikethrough',
+	'pptx.shape.shadowDistance': 'Shadow Distance',
+	'pptx.shape.softEdges': 'Soft Edges',
+
+	// Picture and media inspectors
+	'pptx.image.duotoneDark': 'Duotone Dark',
+	'pptx.image.duotoneLight': 'Duotone Light',
+	'pptx.media.autoPlay': 'Play Automatically',
+	'pptx.media.captions': 'Captions',
+	'pptx.media.playbackSpeed': 'Playback Speed',
+	'pptx.media.trimEnd': 'Trim End',
+	'pptx.media.trimStart': 'Trim Start',
+	'pptx.smartArt.fillColor': 'Fill Color',
+
+	// Theme editor swatches
+	'pptx.theme.primary': 'Primary',
+	'pptx.theme.background': 'Background',
+	'pptx.theme.foreground': 'Foreground',
+	'pptx.theme.border': 'Border',
+
+	// Print dialog and document properties
+	'pptx.print.range': 'Slide Range',
+	'pptx.print.pureBlackWhite': 'Pure Black and White',
+	'pptx.documentProperties.summary.title': 'Title',
+	'pptx.documentProperties.summary.subject': 'Subject',
+	'pptx.documentProperties.summary.author': 'Author',
+	'pptx.documentProperties.summary.keywords': 'Keywords',
+
+	'pptx.animations.galleryAria': 'Add Animation: Entrance, Emphasis, and Exit effects',
+
+	// File-tab backstage. Wording follows PowerPoint's own File tab. Every
+	// string here used to be hardcoded in all five bindings, which made the
+	// backstage the last wholly untranslatable surface in the viewer.
+	'pptx.backstage.nav.home': 'Home',
+	'pptx.backstage.nav.new': 'New',
+	'pptx.backstage.nav.open': 'Open',
+	'pptx.backstage.nav.info': 'Info',
+	'pptx.backstage.nav.save': 'Save',
+	'pptx.backstage.nav.saveAs': 'Save As',
+	'pptx.backstage.nav.print': 'Print',
+	'pptx.backstage.nav.share': 'Share',
+	'pptx.backstage.nav.export': 'Export',
+	'pptx.backstage.nav.close': 'Close',
+	'pptx.backstage.nav.account': 'Account',
+	'pptx.backstage.nav.options': 'Options',
+
+	'pptx.backstage.title': 'File',
+	'pptx.backstage.back': 'Back to presentation',
+	'pptx.backstage.greeting': 'Good evening',
+	'pptx.backstage.newHeading': 'New',
+	'pptx.backstage.searchPlaceholder': 'Search recent presentations',
+	'pptx.backstage.browseDevice': 'Browse this device',
+	'pptx.backstage.recentHeading': 'Recent',
+	'pptx.backstage.columnName': 'Name',
+	'pptx.backstage.columnModified': 'Date modified',
+	'pptx.backstage.columnSize': 'Size',
+	'pptx.backstage.noRecent': 'No recent presentations yet.',
+	'pptx.backstage.untitled': 'Untitled Presentation.pptx',
+	'pptx.backstage.savedToBrowser': 'Saved to this browser',
+	'pptx.backstage.browserStorage': 'Browser storage',
+	'pptx.backstage.justNow': 'Just now',
+	'pptx.backstage.minutesAgo': '{{count}} min ago',
+	'pptx.backstage.hoursAgo': '{{count}} hr ago',
+	'pptx.backstage.optionsTitle': 'PowerPoint Options',
+	'pptx.backstage.optionsBody':
+		'Configure autosave, proofing, grid, rulers, language, theme, and keyboard shortcuts.',
+	'pptx.backstage.openOptions': 'Open Options',
+
+	'pptx.backstage.template.blank.name': 'Blank Presentation',
+	'pptx.backstage.template.blank.description': 'Start with a clean canvas',
+	'pptx.backstage.template.warm.name': 'Warm Welcome',
+	'pptx.backstage.template.warm.description': 'Bold editorial title slides',
+	'pptx.backstage.template.geometry.name': 'Geometric',
+	'pptx.backstage.template.geometry.description': 'Modern shapes and strong contrast',
+	'pptx.backstage.template.mono.name': 'Urban Monochrome',
+	'pptx.backstage.template.mono.description': 'Architectural black and white',
+	'pptx.backstage.template.earth.name': 'Earthy Inspiration',
+	'pptx.backstage.template.earth.description': 'Natural, calm presentation system',
+	'pptx.backstage.template.future.name': 'Future Forward',
+	'pptx.backstage.template.future.description': 'Clean technology storytelling',
+
+	'pptx.backstage.card.protect.title': 'Protect Presentation',
+	'pptx.backstage.card.protect.body': 'Control what changes people can make to this presentation.',
+	'pptx.backstage.card.inspect.title': 'Inspect Presentation',
+	'pptx.backstage.card.inspect.body':
+		'Review document properties, accessibility, and hidden content.',
+	'pptx.backstage.card.embedFonts.title': 'Embed Fonts',
+	'pptx.backstage.card.embedFonts.body':
+		'Keep typography consistent when the file moves between devices.',
+	'pptx.backstage.card.signatures.title': 'Digital Signatures',
+	'pptx.backstage.card.signatures.body':
+		'View and manage signatures attached to this presentation.',
+	'pptx.backstage.card.versionHistory.title': 'Version History',
+	'pptx.backstage.card.versionHistory.body': 'Restore or remove the latest recovery snapshot.',
+	'pptx.backstage.card.saveAsPptx.title': 'PowerPoint Presentation',
+	'pptx.backstage.card.saveAsPptx.body': 'Save an editable .pptx copy.',
+	'pptx.backstage.card.saveAsPpsx.title': 'PowerPoint Show',
+	'pptx.backstage.card.saveAsPpsx.body': 'Save a .ppsx file that opens directly in slide show.',
+	'pptx.backstage.card.saveAsPptm.title': 'Macro-Enabled Presentation',
+	'pptx.backstage.card.saveAsPptm.body': 'Preserve VBA content in a .pptm file.',
+	'pptx.backstage.card.pdf.title': 'Create PDF',
+	'pptx.backstage.card.pdf.body': 'Publish a portable document with one page per slide.',
+	'pptx.backstage.card.png.title': 'Export current slide',
+	'pptx.backstage.card.png.body': 'Create a high-quality PNG image.',
+	'pptx.backstage.card.video.title': 'Create a Video',
+	'pptx.backstage.card.video.body': 'Export slide timings and animations as WebM.',
+	'pptx.backstage.card.gif.title': 'Create an Animated GIF',
+	'pptx.backstage.card.gif.body': 'Make a compact looping preview.',
+	'pptx.backstage.card.json.title': 'Export as JSON',
+	'pptx.backstage.card.json.body':
+		'Save a portable JSON document that re-imports with full fidelity.',
+	'pptx.backstage.card.copyImage.title': 'Copy as Image',
+	'pptx.backstage.card.copyImage.body': 'Copy the current slide to the clipboard.',
+	'pptx.backstage.card.print.title': 'Print Presentation',
+	'pptx.backstage.card.print.body':
+		'Choose a printer, layout, copies, and output settings in your browser print dialog.',
+	'pptx.backstage.card.share.title': 'Share with People',
+	'pptx.backstage.card.share.body': 'Invite collaborators and work on the presentation together.',
+
+	// OOXML wire tokens that controls used to render verbatim. Wording follows
+	// PowerPoint's own dialogs; see `render/schema-label-keys.ts` for the
+	// token -> key lookups these back.
+	'pptx.themeColor.dark1': 'Dark 1',
+	'pptx.themeColor.light1': 'Light 1',
+	'pptx.themeColor.dark2': 'Dark 2',
+	'pptx.themeColor.light2': 'Light 2',
+	'pptx.themeColor.accent1': 'Accent 1',
+	'pptx.themeColor.accent2': 'Accent 2',
+	'pptx.themeColor.accent3': 'Accent 3',
+	'pptx.themeColor.accent4': 'Accent 4',
+	'pptx.themeColor.accent5': 'Accent 5',
+	'pptx.themeColor.accent6': 'Accent 6',
+	'pptx.themeColor.hyperlink': 'Hyperlink',
+	'pptx.themeColor.followedHyperlink': 'Followed Hyperlink',
+	'pptx.themeColor.tintBase': 'Base',
+	'pptx.themeColor.tintLighter80': 'Lighter 80%',
+	'pptx.themeColor.tintLighter60': 'Lighter 60%',
+	'pptx.themeColor.tintLighter40': 'Lighter 40%',
+	'pptx.themeColor.tintDarker25': 'Darker 25%',
+	'pptx.themeColor.tintDarker50': 'Darker 50%',
+
+	'pptx.smartart.schemeColorful1': 'Colourful 1',
+	'pptx.smartart.schemeColorful2': 'Colourful 2',
+	'pptx.smartart.schemeColorful3': 'Colourful 3',
+	'pptx.smartart.schemeMonochromatic1': 'Monochromatic 1',
+	'pptx.smartart.schemeMonochromatic2': 'Monochromatic 2',
+	'pptx.smartart.styleFlat': 'Flat',
+	'pptx.smartart.styleModerate': 'Moderate',
+	'pptx.smartart.styleIntense': 'Intense',
+	'pptx.smartart.category.matrix': 'Matrix',
+	'pptx.smartart.category.pyramid': 'Pyramid',
+	'pptx.smartart.category.funnel': 'Funnel',
+	'pptx.smartart.category.target': 'Target',
+	'pptx.smartart.category.gear': 'Gear',
+	'pptx.smartart.category.venn': 'Venn',
+	'pptx.smartart.category.timeline': 'Timeline',
+	'pptx.smartart.category.chevron': 'Chevron',
+	'pptx.smartart.category.bending': 'Bending',
+
+	'pptx.chart.typeOfPie': 'Pie of Pie',
+	'pptx.chart.typeBar3D': 'Bar (3-D)',
+	'pptx.chart.typeLine3D': 'Line (3-D)',
+	'pptx.chart.typePie3D': 'Pie (3-D)',
+	'pptx.chart.typeArea3D': 'Area (3-D)',
+	'pptx.chart.typeSurface': 'Surface',
+	'pptx.chart.typeHistogram': 'Histogram',
+	'pptx.chart.typePareto': 'Pareto',
+	'pptx.chart.typeFunnel': 'Funnel',
+	'pptx.chart.typeTreemap': 'Treemap',
+	'pptx.chart.typeSunburst': 'Sunburst',
+	'pptx.chart.typeBoxWhisker': 'Box and Whisker',
+	'pptx.chart.typeRegionMap': 'Filled Map',
+	'pptx.chart.typeUnknown': 'Unknown',
+	'pptx.chart.placeholderLabel': 'Chart: {{type}}',
+	'pptx.chart.groupingStandard': 'Standard',
+	'pptx.chart.seriesAxis': 'Series axis',
+	'pptx.chart.labelPosAbove': 'Above',
+	'pptx.chart.labelPosBelow': 'Below',
+	'pptx.chart.labelPosLeft': 'Left',
+	'pptx.chart.labelPosRight': 'Right',
+	'pptx.chart.errorBarCustom': 'Custom',
+	'pptx.chart.errorBarDirectionX': 'Horizontal (X)',
+	'pptx.chart.errorBarDirectionY': 'Vertical (Y)',
+
+	'pptx.transitionPresets.conveyor': 'Conveyor',
+	'pptx.transitionPresets.doors': 'Doors',
+	'pptx.transitionPresets.ferris': 'Ferris Wheel',
+	'pptx.transitionPresets.flash': 'Flash',
+	'pptx.transitionPresets.flythrough': 'Fly Through',
+	'pptx.transitionPresets.gallery': 'Gallery',
+	'pptx.transitionPresets.glitter': 'Glitter',
+	'pptx.transitionPresets.honeycomb': 'Honeycomb',
+	'pptx.transitionPresets.pan': 'Pan',
+	'pptx.transitionPresets.prism': 'Prism',
+	'pptx.transitionPresets.reveal': 'Reveal',
+	'pptx.transitionPresets.ripple': 'Ripple',
+	'pptx.transitionPresets.shred': 'Shred',
+	'pptx.transitionPresets.switch': 'Switch',
+	'pptx.transitionPresets.vortex': 'Vortex',
+	'pptx.transitionPresets.warp': 'Warp',
+	'pptx.transitionPresets.wheelReverse': 'Reverse Wheel',
+	'pptx.transitionPresets.window': 'Window',
+	'pptx.transitionPresets.cube': 'Cube',
+	'pptx.transitionPresets.flip': 'Flip',
+	'pptx.transitionPresets.rotate': 'Rotate',
+	'pptx.transitionPresets.box': 'Box',
+	'pptx.transitionPresets.orbit': 'Orbit',
+	'pptx.transitionPresets.fallOver': 'Fall Over',
+	'pptx.transitionPresets.drape': 'Drape',
+	'pptx.transitionPresets.curtains': 'Curtains',
+	'pptx.transitionPresets.wind': 'Wind',
+	'pptx.transitionPresets.prestige': 'Prestige',
+	'pptx.transitionPresets.fracture': 'Fracture',
+	'pptx.transitionPresets.crush': 'Crush',
+	'pptx.transitionPresets.peelOff': 'Peel Off',
+	'pptx.transitionPresets.pageCurlDouble': 'Page Curl Double',
+	'pptx.transitionPresets.pageCurlSingle': 'Page Curl Single',
+	'pptx.transitionPresets.airplane': 'Airplane',
+	'pptx.transitionPresets.origami': 'Origami',
+
+	// Write-protection recommendation (presentation parity wave 2)
+	'pptx.readOnly.modifyVerifierRecommended':
+		'This presentation is password-protected. Opened read-only until the password is provided.',
+	'pptx.readOnly.markedFinal':
+		'This presentation was marked as final by its author. Opened read-only to discourage editing.',
+
+	// Compatibility warning toasts (presentation parity wave 2)
+	'pptx.compatibility.generic':
+		'This presentation contains a feature that may not be fully supported ({{code}}).',
+	'pptx.compatibility.unmodelledPresentationMarkup':
+		'Some presentation-level settings are preserved but not editable in this viewer.',
+	'pptx.compatibility.unmodelledSlideMarkup':
+		'Some slide-level settings are preserved but not editable in this viewer.',
+	'pptx.compatibility.unmodelledShapeProperty':
+		'Some shape properties are preserved but not editable in this viewer.',
+	'pptx.compatibility.unmodelledTextBodyMarkup':
+		'Some text formatting is preserved but not editable in this viewer.',
+	'pptx.compatibility.unmodelledBlipFillMarkup':
+		'Some picture fill settings are preserved but not editable in this viewer.',
+	'pptx.compatibility.unmodelledImageEffect':
+		'Some image effects are preserved but not rendered in this viewer.',
+	'pptx.compatibility.externalImageReference':
+		'This presentation links to an image outside the file, which may not load for other people.',
+	'pptx.compatibility.slideSynchronizationMetadata':
+		'This slide is linked to another presentation for synchronization; that link is preserved but not applied here.',
+	'pptx.compatibility.unsupportedAlternateContentChoice':
+		'This presentation uses a newer PowerPoint feature; a compatible fallback was used instead.',
+	'pptx.compatibility.groupDepthExceeded':
+		'A group of shapes is nested more deeply than this viewer supports and was flattened.',
+	'pptx.compatibility.saveNotesRelationshipMissing':
+		'Speaker notes could not be linked to this slide when saving.',
+	'pptx.compatibility.saveNotesPartMissing': 'Speaker notes could not be saved for this slide.',
+	'pptx.compatibility.saveNotesUpdateSkipped':
+		'Changes to speaker notes were not saved for this slide.',
+	'pptx.compatibility.chartExternalDataWritebackUnsupported':
+		'This chart uses external data that cannot be updated by this viewer.',
+	'pptx.compatibility.chartEmbeddedWorkbookMissing':
+		"This chart's embedded data workbook is missing, so its data could not be saved.",
+	'pptx.compatibility.chartEmbeddedWorkbookUnreadable':
+		"This chart's embedded data workbook could not be read, so its data could not be saved.",
+	'pptx.compatibility.chartEmbeddedWorkbookPartialWriteback':
+		"Only some of this chart's data changes could be saved to its embedded workbook.",
+	'pptx.compatibility.saveImagePayloadUnsupported':
+		'One image could not be saved in its original format and was skipped.',
+	'pptx.compatibility.saveMediaPayloadUnsupported':
+		'One audio or video clip could not be saved in its original format and was skipped.',
+	'pptx.compatibility.saveElementSkipped': 'One slide element could not be saved and was skipped.',
+	'pptx.compatibility.saveSignaturesStripped':
+		'This presentation had digital signatures, which are removed once the file is edited and saved.',
+	'pptx.compatibility.saveGroupChildSkipped':
+		'One shape inside a group could not be saved and was skipped.',
+	'pptx.compatibility.saveAnimationSoundPayloadUnsupported':
+		'One animation sound could not be saved and was skipped.',
+	'pptx.compatibility.saveBackgroundImageUnsupported':
+		'One slide background image could not be saved and was skipped.',
+	'pptx.compatibility.shapeIdDeduplicated':
+		'Two shapes shared the same internal id; one was reassigned automatically.',
+	'pptx.compatibility.saveTransitionSoundPayloadUnsupported':
+		'One slide transition sound could not be saved and was skipped.',
+	'pptx.compatibility.diagramRelationshipIdsIncomplete':
+		'This SmartArt diagram is missing some internal references, so it may not display exactly as authored.',
+	'pptx.compatibility.exportBackendUnavailable':
+		'Export to this format is not available in the current environment.',
+
+	// bar3D shape / radar style / surface wireframe pickers (chart subtypes wave 2)
+	'pptx.chart.bar3DShapeBox': 'Box',
+	'pptx.chart.bar3DShapeCylinder': 'Cylinder',
+	'pptx.chart.bar3DShapeFullPyramid': 'Full Pyramid',
+	'pptx.chart.bar3DShapePartialPyramid': 'Partial Pyramid',
+	'pptx.chart.bar3DShapeFullCone': 'Full Cone',
+	'pptx.chart.bar3DShapePartialCone': 'Partial Cone',
+	'pptx.chart.radarStyleStandard': 'Standard',
+	'pptx.chart.radarStyleMarker': 'Markers',
+	'pptx.chart.radarStyleFilled': 'Filled',
+	'pptx.chart.wireframeOn': 'Wireframe',
+	'pptx.chart.wireframeOff': 'Solid',
+
+	// Wave-4 parity UI: read-only banner, compat toasts, slide-size rescale,
+	// chart subtype pickers, master-view CRUD, comment mentions, recent colours,
+	// custom-show / extended hyperlink actions
+	'pptx.readOnly.bannerTitle': 'Read-only',
+	'pptx.readOnly.editAnyway': 'Edit anyway',
+	'pptx.readOnly.dismiss': 'Dismiss',
+	// Modify-password unlock prompt: shown instead of unlocking immediately when
+	// the modifyVerifier carries a hash this viewer can check.
+	'pptx.readOnly.passwordLabel': 'Password',
+	'pptx.readOnly.passwordPlaceholder': 'Enter password',
+	'pptx.readOnly.unlock': 'Unlock',
+	'pptx.readOnly.wrongPassword': "That password isn't correct. The presentation stays read-only.",
+	'pptx.readOnly.unsupportedAlgorithm':
+		"This file's password protection cannot be verified by this viewer.",
+	'pptx.compatibility.toastTitle': 'Compatibility notice',
+	'pptx.compatibility.dismiss': 'Dismiss',
+	'pptx.compatibility.dismissAll': 'Dismiss all',
+	'pptx.slideSize.rescaleTitle': 'Scale content for the new slide size?',
+	'pptx.slideSize.rescaleDescription':
+		'You are changing the slide size. Choose how to fit the existing content.',
+	'pptx.slideSize.rescaleMaximize': 'Maximize',
+	'pptx.slideSize.rescaleMaximizeHint': 'Content fills the new slide and may be cropped.',
+	'pptx.slideSize.rescaleEnsureFit': 'Ensure Fit',
+	'pptx.slideSize.rescaleEnsureFitHint': 'Content shrinks so nothing is cut off.',
+	'pptx.chart.bar3DShapeLabel': 'Column shape',
+	'pptx.chart.radarStyleLabel': 'Radar style',
+	'pptx.chart.surfaceWireframeLabel': 'Surface',
+	'pptx.chart.userShapes': 'Overlay shapes',
+	'pptx.chart.userShapesEmpty': 'No overlay shapes on this chart.',
+	'pptx.chart.userShapeAddTextBox': 'Add text box',
+	'pptx.chart.userShapeAddIntoGroup': 'Add shape here',
+	'pptx.chart.userShapeDelete': 'Delete overlay shape',
+	'pptx.chart.userShapeFrom': 'From',
+	'pptx.chart.userShapeTo': 'To',
+	'pptx.chart.userShapeNotEditable': 'This overlay shape type can be viewed but not edited here.',
+	'pptx.chart.userShapeKindSp': 'Shape',
+	'pptx.chart.userShapeKindCxnSp': 'Connector',
+	'pptx.chart.userShapeKindPic': 'Picture',
+	'pptx.chart.userShapeKindGrpSp': 'Group',
+	'pptx.chart.userShapeKindGraphicFrame': 'Embedded object',
+	'pptx.chart.userShapeText': 'Text',
+	'pptx.chart.userShapeFill': 'Fill',
+	'pptx.chart.userShapeStroke': 'Line',
+	'pptx.chart.userShapeAltText': 'Alt text',
+	'pptx.chart.userShapePosition': 'Position',
+	'pptx.chart.userShapeSize': 'Size',
+	'pptx.chart.userShapeRotation': 'Rotation',
+	'pptx.masterView.addLayout': 'Insert Layout',
+	'pptx.masterView.duplicateLayout': 'Duplicate Layout',
+	'pptx.masterView.deleteLayout': 'Delete Layout',
+	'pptx.masterView.renameLayout': 'Rename Layout',
+	'pptx.masterView.addMaster': 'Insert Slide Master',
+	'pptx.masterView.duplicateMaster': 'Duplicate Slide Master',
+	'pptx.masterView.deleteMaster': 'Delete Slide Master',
+	'pptx.masterView.renameMaster': 'Rename Slide Master',
+	'pptx.masterView.renamePrompt': 'New name',
+	'pptx.masterView.layoutInUse': 'This layout is used by slides and cannot be deleted.',
+	'pptx.masterView.masterInUse': 'This slide master is used by slides and cannot be deleted.',
+	'pptx.masterView.lastMaster': 'The last slide master cannot be deleted.',
+	'pptx.masterView.notFound': 'The selected layout or slide master no longer exists.',
+	'pptx.comments.mentionPlaceholder': 'Type @ to mention someone',
+	'pptx.comments.mentionSuggestions': 'People',
+	'pptx.colorPicker.recentColors': 'Recent Colors',
+	'pptx.colorPicker.customColors': 'Custom Colors',
+	'pptx.hyperlink.actionCustomShow': 'Custom show',
+	'pptx.hyperlink.customShowLabel': 'Custom show',
+	'pptx.hyperlink.customShowReturn': 'Show and return',
+	'pptx.hyperlink.actionLastViewed': 'Last slide viewed',
+	'pptx.hyperlink.actionOpenFile': 'Open file',
+	'pptx.hyperlink.actionOpenPresentation': 'Open presentation',
+	'pptx.hyperlink.actionPlayMedia': 'Play media',
+	'pptx.hyperlink.actionOleVerb': 'Object action',
+
+	// Table style (a:tblStyleLst) definition editor.
+	'pptx.tableStyleEditor.editButton': 'Edit style...',
+	'pptx.tableStyleEditor.title': 'Table Style Editor',
+	'pptx.tableStyleEditor.close': 'Close',
+	'pptx.tableStyleEditor.noStyleSelected': 'Select a table style to edit its definition.',
+	'pptx.tableStyleEditor.styleName': 'Style name',
+	'pptx.tableStyleEditor.sections': 'Sections',
+	'pptx.tableStyleEditor.newFromCurrent': 'New style from current',
+	'pptx.tableStyleEditor.newStyle': 'Create new style',
+	'pptx.tableStyleEditor.deleteStyle': 'Delete style',
+	'pptx.tableStyleEditor.deleteConfirm': 'Delete this table style? This cannot be undone.',
+	'pptx.tableStyleEditor.newStyleNamePrompt': 'Name for the new style',
+	'pptx.tableStyleEditor.part.wholeTbl': 'Whole Table',
+	'pptx.tableStyleEditor.part.firstRow': 'First Row',
+	'pptx.tableStyleEditor.part.lastRow': 'Last Row',
+	'pptx.tableStyleEditor.part.firstCol': 'First Column',
+	'pptx.tableStyleEditor.part.lastCol': 'Last Column',
+	'pptx.tableStyleEditor.part.band1H': 'Band 1 Horizontal',
+	'pptx.tableStyleEditor.part.band2H': 'Band 2 Horizontal',
+	'pptx.tableStyleEditor.part.band1V': 'Band 1 Vertical',
+	'pptx.tableStyleEditor.part.band2V': 'Band 2 Vertical',
+	'pptx.tableStyleEditor.part.neCell': 'NE Cell',
+	'pptx.tableStyleEditor.part.nwCell': 'NW Cell',
+	'pptx.tableStyleEditor.part.seCell': 'SE Cell',
+	'pptx.tableStyleEditor.part.swCell': 'SW Cell',
+	'pptx.tableStyleEditor.part.background': 'Background',
+	'pptx.tableStyleEditor.fillSection': 'Fill',
+	'pptx.tableStyleEditor.noFill': 'No fill',
+	'pptx.tableStyleEditor.textSection': 'Text',
+	'pptx.tableStyleEditor.textColor': 'Text color',
+	'pptx.tableStyleEditor.bordersSection': 'Borders',
+	'pptx.tableStyleEditor.borderDash': 'Dash style',
+	'pptx.tableStyleEditor.noBorder': 'No border',
+	'pptx.tableStyleEditor.cell3DSection': '3D bevel',
+	'pptx.tableStyleEditor.bevelWidth': 'Bevel width',
+	'pptx.tableStyleEditor.bevelHeight': 'Bevel height',
+	'pptx.tableStyleEditor.bevelPreset': 'Bevel preset',
+	'pptx.tableStyleEditor.side.left': 'Left',
+	'pptx.tableStyleEditor.side.right': 'Right',
+	'pptx.tableStyleEditor.side.top': 'Top',
+	'pptx.tableStyleEditor.side.bottom': 'Bottom',
+	'pptx.tableStyleEditor.side.insideH': 'Inside horizontal',
+	'pptx.tableStyleEditor.side.insideV': 'Inside vertical',
+	'pptx.tableStyleEditor.side.tl2br': 'Diagonal top-left to bottom-right',
+	'pptx.tableStyleEditor.side.tr2bl': 'Diagonal top-right to bottom-left',
 };
 
 /**

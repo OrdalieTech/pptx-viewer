@@ -1,45 +1,31 @@
-import type { GroupPptxElement, PptxElement, PptxSlide, ShapeStyle } from 'pptx-viewer-core';
-import { hasShapeProperties, hasTextProperties } from 'pptx-viewer-core';
-import { getGroupChildParentFill, resolveGroupChildFill } from 'pptx-viewer-shared';
+import type { GroupPptxElement } from 'pptx-viewer-core';
+import { hasTextProperties } from 'pptx-viewer-core';
+import {
+	getAriaLabel,
+	getAriaRoleDescription,
+	getGroupChildParentFill,
+	isElementRendered,
+} from 'pptx-viewer-shared';
 import React from 'react';
 
-import { DEFAULT_FILL_COLOR, DEFAULT_STROKE_COLOR, DEFAULT_TEXT_COLOR } from '../constants';
 import {
-	buildCssGradientFromShapeStyle,
 	getElementTransform,
 	getImageEffectsFilter,
 	getImageEffectsOpacity,
 	getImageRenderStyle,
-	getShapeVisualStyle,
-	getTextStyleForElement,
 	isEditableTextElement,
-	normalizeHexColor,
 	renderVectorShape,
 } from '../utils';
-import type { TableStyleContext } from '../utils/table-band-style';
-import type { FieldSubstitutionContext } from '../utils/text-field-substitution';
 import { renderBody } from './elements/ElementBody';
 import { ShapeEffectOverlay } from './elements/ShapeEffectOverlay';
+import type { StaticElementRendererProps } from './static-element-renderer-types';
+import {
+	getStaticElementInteractionState,
+	getStaticElementVisualState,
+	getStaticElementWrapperClassName,
+} from './static-element-renderer-utils';
 
-export interface StaticElementRendererProps {
-	element: PptxElement;
-	activeSlide?: PptxSlide;
-	allSlides?: readonly PptxSlide[];
-	mediaDataUrls?: Map<string, string>;
-	sourceSlideIndex?: number;
-	zIndex?: number;
-	positioned?: boolean;
-	/** Text-field substitution context (slide number, date/header/footer). */
-	fieldContext?: FieldSubstitutionContext;
-	/** Theme + table style map for resolving table band/header colours. */
-	tableStyleContext?: TableStyleContext;
-	/**
-	 * The enclosing group's fill (`GroupPptxElement.groupFill`), passed down by
-	 * the group branch below so a child painted with `a:grpFill`
-	 * (`fillMode === 'group'`) inherits the group's resolved fill.
-	 */
-	parentGroupFill?: ShapeStyle;
-}
+export type { StaticElementRendererProps };
 
 const noop = (): void => {};
 const EMPTY_MEDIA_DATA_URLS = new Map<string, string>();
@@ -55,40 +41,85 @@ function StaticElementRendererImpl({
 	fieldContext,
 	tableStyleContext,
 	parentGroupFill,
-}: StaticElementRendererProps): React.ReactElement {
-	const style = hasShapeProperties(element) ? element.shapeStyle : undefined;
-	const hasFill =
-		(style?.fillColor !== undefined && style.fillColor !== 'transparent') ||
-		Boolean(buildCssGradientFromShapeStyle(style) || style?.fillGradient) ||
-		(style?.fillMode === 'pattern' && Boolean(style.fillPatternPreset));
-	const fill = normalizeHexColor(style?.fillColor, DEFAULT_FILL_COLOR);
-	const strokeWidth = Math.max(0, style?.strokeWidth || 0);
-	const stroke = normalizeHexColor(style?.strokeColor, DEFAULT_STROKE_COLOR);
-	const baseVisualStyle = getShapeVisualStyle(element, hasFill, fill, strokeWidth, stroke);
-	// `a:grpFill`: a child with fillMode 'group' inherits the enclosing group's
-	// fill. `getShapeVisualStyle` has no group branch, so override the resolved
-	// background here from the shared resolver (no-op for non-grpFill children).
-	const inheritedFill = resolveGroupChildFill(element, parentGroupFill);
-	const visualStyle: React.CSSProperties = inheritedFill
-		? {
-				...baseVisualStyle,
-				backgroundColor: inheritedFill.backgroundColor,
-				backgroundImage: inheritedFill.backgroundImage,
-				backgroundRepeat: inheritedFill.backgroundRepeat,
-				backgroundSize: inheritedFill.backgroundSize,
-				backgroundPosition: inheritedFill.backgroundPosition,
-			}
-		: baseVisualStyle;
-	const textStyle = getTextStyleForElement(
+	onActionClick,
+	actionRequiresModifier = false,
+	animation,
+	imageAnimation,
+	exposeElementId = false,
+	suppressReflection = false,
+}: StaticElementRendererProps): React.ReactElement | null {
+	// Selection-Pane-hidden elements are not drawn on any surface, so the static
+	// path (thumbnails, presenter previews, transition ghosts, export rasters)
+	// skips them too. This function holds no hooks, so the guard can lead.
+	if (!isElementRendered(element)) {
+		return null;
+	}
+	const {
+		hasFill,
+		fill,
+		strokeWidth,
+		stroke,
+		visualStyle,
+		textStyle,
+		isImage,
+		letsTextOverflow,
+		isCallout,
+	} = getStaticElementVisualState(element, parentGroupFill);
+	const { action, isActionable, contractRole } = getStaticElementInteractionState(
 		element,
-		element.type === 'shape' && hasFill ? '#ffffff' : DEFAULT_TEXT_COLOR,
+		Boolean(onActionClick),
+		exposeElementId,
 	);
-	const isImage = element.type === 'picture' || element.type === 'image';
 
 	return (
 		<div
 			data-static-element-type={element.type}
-			className={`${positioned ? 'absolute' : 'relative'} overflow-hidden pointer-events-none`}
+			data-element-id={exposeElementId ? element.id : undefined}
+			// The neutral element marker belongs on the same nodes as the rest of
+			// the contract. A live-stage group child already carries the id, the
+			// role, the accessible name and `data-pptx-action`, so withholding just
+			// this attribute made React advertise 28 elements on a slide where the
+			// other four bindings advertised 33 - the same DOM, counted differently.
+			// It is not a selection key (a click on a child resolves UP to the group
+			// via `resolveTopLevelElementId`, which walks `data-element-id`), so
+			// marking children cannot change what a click selects.
+			data-pptx-element={exposeElementId ? 'true' : undefined}
+			data-pptx-action={isActionable ? 'click' : undefined}
+			className={getStaticElementWrapperClassName(
+				element,
+				{ isImage, letsTextOverflow, isCallout },
+				positioned,
+				isActionable,
+			)}
+			role={contractRole}
+			aria-label={exposeElementId ? getAriaLabel(element) : undefined}
+			aria-roledescription={exposeElementId ? getAriaRoleDescription(element) : undefined}
+			tabIndex={isActionable ? 0 : undefined}
+			title={isActionable ? action?.tooltip || action?.url || undefined : undefined}
+			onClick={
+				isActionable
+					? (event) => {
+							if (actionRequiresModifier && !event.ctrlKey && !event.metaKey) {
+								return;
+							}
+							event.stopPropagation();
+							event.preventDefault();
+							onActionClick?.(element.id, action!);
+						}
+					: undefined
+			}
+			onKeyDown={
+				isActionable
+					? (event) => {
+							if (event.key !== 'Enter' && event.key !== ' ') {
+								return;
+							}
+							event.preventDefault();
+							event.stopPropagation();
+							onActionClick?.(element.id, action!);
+						}
+					: undefined
+			}
 			style={{
 				left: positioned ? element.x : undefined,
 				top: positioned ? element.y : undefined,
@@ -98,10 +129,24 @@ function StaticElementRendererImpl({
 				transformOrigin: 'center',
 				zIndex,
 				...visualStyle,
+				...(isImage
+					? {
+							backgroundColor: 'transparent',
+							backgroundImage: undefined,
+							backgroundRepeat: undefined,
+							backgroundSize: undefined,
+							backgroundPosition: undefined,
+							borderRadius: undefined,
+							clipPath: undefined,
+							overflow: 'visible',
+						}
+					: {}),
+				animation,
 			}}
 		>
-			{/* Soft-edge <filter> defs + DAG fill-overlay tint layer. */}
-			<ShapeEffectOverlay element={element} />
+			{/* Soft-edge <filter> defs + DAG fill-overlay tint layer + (unless
+			    suppressed) this element's own reflection mirror. */}
+			<ShapeEffectOverlay element={element} suppressReflection={suppressReflection} />
 			{element.type === 'group' ? (
 				<div className='relative w-full h-full'>
 					{((element as GroupPptxElement).children ?? []).map((child, index) => (
@@ -115,7 +160,16 @@ function StaticElementRendererImpl({
 							zIndex={index}
 							fieldContext={fieldContext}
 							tableStyleContext={tableStyleContext}
-							parentGroupFill={getGroupChildParentFill(element)}
+							// Chained, not just this group's own fill: `a:grpFill` resolves
+							// against the nearest ANCESTOR that has one, so a nested group
+							// without a fill of its own passes its parent's straight down.
+							parentGroupFill={getGroupChildParentFill(element, parentGroupFill)}
+							onActionClick={onActionClick}
+							actionRequiresModifier={actionRequiresModifier}
+							exposeElementId={exposeElementId}
+							// NOT `suppressReflection`: a child is not the element being
+							// mirrored, so its own reflection (if it has one) must still
+							// render inside this group's mirror. See the prop doc above.
 						/>
 					))}
 				</div>
@@ -128,8 +182,16 @@ function StaticElementRendererImpl({
 					spellCheck: false,
 					txtSE: hasTextProperties(element) ? element.textStyle : undefined,
 					txtS: textStyle,
-					vecShape: renderVectorShape(element, hasFill, fill, strokeWidth, stroke),
-					imgStyle: getImageRenderStyle(element),
+					vecShape: renderVectorShape(
+						element,
+						isImage ? false : hasFill,
+						fill,
+						strokeWidth,
+						stroke,
+					),
+					imgStyle: imageAnimation
+						? { ...getImageRenderStyle(element), animation: imageAnimation }
+						: getImageRenderStyle(element),
 					imgFilter: getImageEffectsFilter(element),
 					imgOpacity: getImageEffectsOpacity(element),
 					imgAlt: '',
@@ -143,6 +205,12 @@ function StaticElementRendererImpl({
 					onCommit: noop,
 					onCancel: noop,
 					isPresentationPassive: false,
+					// This renderer only ever paints a STILL of a slide (presenter
+					// console panes, thumbnails, previews). It is not in presentation
+					// mode, so without saying so a video here would carry Chrome's
+					// scrubber over a slide nobody can play.
+					isStaticSurface: true,
+					placeholderPromptMode: 'thumbnail',
 					slideElements: activeSlide?.elements,
 					allSlides,
 					sourceSlideIndex,

@@ -1,5 +1,10 @@
-import type { PptxElement, PptxHandler, PptxSlide } from 'pptx-viewer-core';
-import type { ViewerMode } from 'pptx-viewer-shared';
+import type { PptxElement, PptxHandler, PptxModifyVerifier, PptxSlide } from 'pptx-viewer-core';
+import type {
+	CompatibilityWarningToast,
+	ReadOnlyRecommendation,
+	ViewerMode,
+} from 'pptx-viewer-shared';
+import { clampZoomScale } from 'pptx-viewer-shared';
 /**
  * useViewerIntegration: Wires pointer handling, content lifecycle,
  * I/O, annotations, recovery, imperative handle, parent callbacks,
@@ -8,7 +13,6 @@ import type { ViewerMode } from 'pptx-viewer-shared';
 import { useEffect, useImperativeHandle, useState } from 'react';
 import type { Dispatch, ForwardedRef, RefObject, SetStateAction } from 'react';
 
-import { MIN_ZOOM_SCALE, MAX_ZOOM_SCALE } from '../constants';
 import type { PowerPointViewerHandle } from '../types';
 import type { AnnotationHandlersResult } from './useAnnotationHandlers';
 import { useAnnotationHandlers } from './useAnnotationHandlers';
@@ -22,6 +26,7 @@ import { useKeyboardShortcutWiring } from './useKeyboardShortcutWiring';
 import { usePointerHandlers } from './usePointerHandlers';
 import type { PresentationSetupResult } from './usePresentationSetup';
 import { useRecoveryDetection } from './useRecoveryDetection';
+import type { UseRecoveryDetectionResult } from './useRecoveryDetection';
 import type { ViewerState } from './useViewerState';
 import type { UseZoomViewportResult } from './useZoomViewport';
 import type { ViewerDialogsResult } from './viewer-dialog-types';
@@ -42,9 +47,43 @@ export interface UseViewerIntegrationInput {
 	gridSpacingPx: number;
 	content: ArrayBuffer | Uint8Array | null;
 	filePath: string | undefined;
-	/** AutoSave toggle state from the title bar. */
+	/**
+	 * Whether autosave actually runs: the shared `resolveAutosaveActivation`
+	 * verdict (host `autosave` prop as a ceiling, title-bar toggle inside it).
+	 */
 	autosaveEnabled: boolean;
+	/**
+	 * Whether the host permits autosave at all. Only the recovery prompt needs
+	 * this separately from `autosaveEnabled`: a user who merely switched the
+	 * toggle off should still be offered a snapshot from before the crash.
+	 */
+	autosaveAllowed?: boolean;
+	/**
+	 * The resolved cadence in milliseconds (shared `resolveAutosaveIntervalMs`).
+	 * Optional: omitting it keeps the shared 120s AutoRecover default.
+	 */
+	autosaveIntervalMs?: number;
+	/** File > Options > Trust Center > "Allow external content"; forwarded to `useContentLifecycle`. */
+	allowExternalImages?: boolean;
+	/** Forwarded to `useContentLifecycle` -> `useLoadContent`: see `useReadOnlyRecommendationState`. */
+	setReadOnlyRecommendation: Dispatch<SetStateAction<ReadOnlyRecommendation>>;
+	/** Forwarded to `useContentLifecycle` -> `useLoadContent`: see `useReadOnlyRecommendationState`. */
+	setModifyVerifier: Dispatch<SetStateAction<PptxModifyVerifier | undefined>>;
+	/** Forwarded to `useContentLifecycle` -> `useLoadContent`: see `useCompatibilityToastsState`. */
+	setCompatToasts: Dispatch<SetStateAction<CompatibilityWarningToast[]>>;
 	canEdit: boolean;
+	/**
+	 * Options > Advanced > "Prompt to keep ink annotations when exiting"
+	 * (default true). When false, exiting a slide show with annotations
+	 * skips the dialog and keeps them silently.
+	 */
+	promptKeepInkAnnotations?: boolean;
+	/**
+	 * File > Options > Advanced > "Image Size and Quality", resolved via the
+	 * shared `resolveImageResolutionScale`. Threaded into PNG/PDF export and
+	 * copy-slide-as-image so the option actually controls output resolution.
+	 */
+	imageExportScale?: number;
 	mode: ViewerState['mode'];
 	slides: PptxSlide[];
 	activeSlide: PptxSlide | undefined;
@@ -79,6 +118,8 @@ export interface ViewerIntegrationResult {
 	handleEnterPresenterView: AnnotationHandlersResult['handleEnterPresenterView'];
 	handleEnterRehearsalMode: AnnotationHandlersResult['handleEnterRehearsalMode'];
 	autosaveStatus: AutosaveStatus;
+	/** The crash-recovery prompt (shared descriptor) plus its accept/decline actions. */
+	recovery: UseRecoveryDetectionResult;
 	isEncryptedDialogOpen: boolean;
 	setIsEncryptedDialogOpen: Dispatch<SetStateAction<boolean>>;
 	/** The loaded core handler, exposed for the AI bridge (`getHandler`). */
@@ -109,7 +150,15 @@ export function useViewerIntegration(input: UseViewerIntegrationInput): ViewerIn
 		content,
 		filePath,
 		autosaveEnabled,
+		autosaveAllowed = true,
+		autosaveIntervalMs,
+		allowExternalImages,
+		setReadOnlyRecommendation,
+		setModifyVerifier,
+		setCompatToasts,
 		canEdit,
+		promptKeepInkAnnotations,
+		imageExportScale,
 		mode,
 		slides,
 		activeSlide,
@@ -140,6 +189,7 @@ export function useViewerIntegration(input: UseViewerIntegrationInput): ViewerIn
 		resizeStateRef: state.resizeStateRef,
 		shapeAdjustmentDragStateRef: state.shapeAdjustmentDragStateRef,
 		marqueeStateRef: state.marqueeStateRef,
+		justInteractedRef: state.justInteractedRef,
 		editTemplateMode: state.editTemplateMode,
 		snapToGrid: state.snapToGrid,
 		snapToShape: state.snapToShape,
@@ -162,19 +212,28 @@ export function useViewerIntegration(input: UseViewerIntegrationInput): ViewerIn
 	// ── Content lifecycle (load, font, serialize, autosave) ───────
 	const [isEncryptedDialogOpen, setIsEncryptedDialogOpen] = useState(false);
 	const [loadVersion, setLoadVersion] = useState(0);
-	const { handlerRef, serializeSlides, autosaveStatus } = useContentLifecycle({
-		content,
-		filePath,
-		autosaveEnabled,
-		slides,
-		state,
-		history,
-		ops: editorOps.ops,
-		actionSoundHandlerRef,
-		setIsEncryptedDialogOpen,
-		password: dialogs.presentationPassword ?? undefined,
-		onContentApplied: () => setLoadVersion((v) => v + 1),
-	});
+	const { handlerRef, serializeSlides, serializeForRecovery, autosaveStatus } = useContentLifecycle(
+		{
+			content,
+			filePath,
+			autosaveEnabled,
+			autosaveIntervalMs,
+			// The File > Fonts toggle, finally reaching a save call.
+			embedFonts: dialogs.embedFontsEnabled,
+			slides,
+			state,
+			history,
+			ops: editorOps.ops,
+			actionSoundHandlerRef,
+			setIsEncryptedDialogOpen,
+			password: dialogs.presentationPassword ?? undefined,
+			onContentApplied: () => setLoadVersion((v) => v + 1),
+			allowExternalImages,
+			setReadOnlyRecommendation,
+			setModifyVerifier,
+			setCompatToasts,
+		},
+	);
 
 	// ── I/O handlers (export, print, theme, properties) ───────────
 	const { exportHandlers, printHandlers, themeHandlers, propertyHandlers } = useIOHandlers({
@@ -188,9 +247,10 @@ export function useViewerIntegration(input: UseViewerIntegrationInput): ViewerIn
 		zoom,
 		handlerRef,
 		serializeSlides,
+		serializeForRecovery,
 		setContent,
 		onContentChange,
-		password: dialogs.presentationPassword ?? undefined,
+		imageExportScale,
 	});
 
 	// ── Mode switching with annotation awareness ──────────────────
@@ -208,15 +268,20 @@ export function useViewerIntegration(input: UseViewerIntegrationInput): ViewerIn
 		history,
 		setMode: state.setMode,
 		setSlides: state.setSlides,
+		promptKeepInkAnnotations,
 	});
 
 	// ── Recovery detection ────────────────────────────────────────
-	useRecoveryDetection({
+	// The snapshot is offered as a real prompt now; the Version History panel is
+	// no longer flung open unannounced, because "a panel appeared" never told the
+	// user that unsaved changes were waiting for them.
+	const recovery = useRecoveryDetection({
 		filePath,
 		loading,
 		error,
 		slideCount: slides.length,
-		openVersionHistory: () => propertyHandlers.setIsVersionHistoryOpen(true),
+		autosaveAllowed,
+		onRestore: setContent,
 	});
 
 	// ── Imperative handle ─────────────────────────────────────────
@@ -263,7 +328,7 @@ export function useViewerIntegration(input: UseViewerIntegrationInput): ViewerIn
 				return zoom.scale;
 			},
 			setZoom(level: number) {
-				zoom.setScale(Math.min(Math.max(level, MIN_ZOOM_SCALE), MAX_ZOOM_SCALE));
+				zoom.setScale(clampZoomScale(level));
 			},
 			zoomIn() {
 				zoom.handleZoomIn();
@@ -423,6 +488,8 @@ export function useViewerIntegration(input: UseViewerIntegrationInput): ViewerIn
 		ops: editorOps.ops,
 		manipulation: editorOps.manipulation,
 		history,
+		onEnterPresentModeFromBeginning: presentation.enterPresentModeFromBeginning,
+		onSetMode: handleSetMode,
 	});
 
 	return {
@@ -437,6 +504,7 @@ export function useViewerIntegration(input: UseViewerIntegrationInput): ViewerIn
 		handleEnterPresenterView,
 		handleEnterRehearsalMode,
 		autosaveStatus,
+		recovery,
 		isEncryptedDialogOpen,
 		setIsEncryptedDialogOpen,
 		handlerRef,

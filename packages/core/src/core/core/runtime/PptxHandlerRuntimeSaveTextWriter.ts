@@ -1,8 +1,17 @@
 import { XmlObject } from '../../types';
-import type { PptxElementWithText } from '../../types';
+import type { PptxElementWithText, TextStyle } from '../../types';
 import { writeBodyPrBooleanAttrs } from '../../utils/body-properties-parser';
 import { applyTextBodyScene3d } from '../../utils/text-body-scene3d';
+import {
+	applyElementParagraphGeometryToListStyle,
+	elementParagraphGeometryEdits,
+	hasElementParagraphGeometry,
+	withoutElementParagraphGeometry,
+} from './element-paragraph-geometry';
+import { loadedTextSegments } from './group-shape-writer';
+import { preserveParagraphScopedState } from './paragraph-scoped-segment-state';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveEffectsWriter';
+import { buildParagraphPropertiesXml } from './PptxHandlerRuntimeSaveParagraphHelpers';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	/**
@@ -23,6 +32,21 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const hasEditableTextContent =
 			typeof el.text === 'string' || (el.textSegments?.length ?? 0) > 0;
 		if (!hasEditableTextContent) {
+			return;
+		}
+
+		// A footer / header / date / slide-number placeholder whose text the loader
+		// INHERITED from the slide master must go back out the way PowerPoint
+		// writes it: an empty body on the slide, so the string keeps coming from
+		// the master and the Header & Footer dialog keeps owning it. Re-emitting
+		// the resolved string would pin this slide to the text the master happened
+		// to hold at load. An edit changes `el.text`, so the equality check still
+		// lets a genuine per-slide override through to the writer below.
+		if (
+			el.inheritedPlaceholderText !== undefined &&
+			el.text === el.inheritedPlaceholderText &&
+			el.rawXml !== undefined
+		) {
 			return;
 		}
 
@@ -136,13 +160,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// Resolve text value and segments
 		const textValueForSave = this.getTextValueForSave(el.text, el.textSegments);
 		let textSegmentsForSave = el.textSegments;
-		if (typeof el.text === 'string' && this.areTextSegmentsUniform(el.textSegments)) {
+		const existingTextSegments = this.extractTextSegmentsFromTxBodyForRewrite(
+			txBody,
+			el.textStyle,
+			getSlideRelationshipMap(),
+		);
+		if (
+			typeof el.text === 'string' &&
+			this.areTextSegmentsUniform(el.textSegments) &&
+			el.text !== el.textSegments?.map((segment) => segment.text).join('')
+		) {
 			textSegmentsForSave = undefined;
-			const existingTextSegments = this.extractTextSegmentsFromTxBodyForRewrite(
-				txBody,
-				el.textStyle,
-				getSlideRelationshipMap(),
-			);
 			if (existingTextSegments.length > 1 && this.hasMixedTextStyles(existingTextSegments)) {
 				textSegmentsForSave = this.remapEditedTextToExistingStyles(
 					existingTextSegments,
@@ -150,15 +178,126 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					el.textStyle,
 				);
 			}
+			// "Uniform" is a RUN-scope judgement (every `a:rPr` would come out
+			// the same), so collapsing the runs is legitimate. The paragraph
+			// scope is not its to discard: `a:pPr` geometry, the outline level,
+			// the bullet and `a:endParaRPr` all ride on the first segment of
+			// each paragraph, and the segmentless path supplies none of them, so
+			// dropping the list flattened every authored `a:pPr` to `<a:pPr/>`.
+			textSegmentsForSave = preserveParagraphScopedState(
+				textSegmentsForSave,
+				textValueForSave,
+				el.textSegments,
+			);
 		}
 
 		txBody['a:bodyPr'] = bodyPr;
+		const authoredParagraphs = this.ensureArray(txBody['a:p']);
+		const paragraphGeometry = this.routeElementParagraphGeometry(txBody, el.textStyle);
 		txBody['a:p'] = this.createParagraphsFromTextContent(
 			textValueForSave,
-			el.textStyle,
+			paragraphGeometry,
 			textSegmentsForSave,
 			resolveHyperlinkRelationshipId,
+			loadedTextSegments(this, el.id) ?? existingTextSegments,
 		);
+		// A bullet the source paragraph inherited (layout or list style) stays inherited unless it was edited.
+		const loadedSegments = loadedTextSegments(this, el.id);
+		const rebuiltSource =
+			Array.isArray(loadedSegments) && loadedSegments.length
+				? this.createParagraphsFromTextContent(
+						void 0,
+						paragraphGeometry,
+						loadedSegments,
+						resolveHyperlinkRelationshipId,
+						existingTextSegments,
+					)
+				: [];
+		const paragraphs = this.ensureArray(txBody['a:p']);
+		if (
+			rebuiltSource.length === paragraphs.length &&
+			authoredParagraphs.length === paragraphs.length
+		) {
+			const bulletKeys = [
+				'a:buClrTx',
+				'a:buClr',
+				'a:buSzTx',
+				'a:buSzPct',
+				'a:buSzPts',
+				'a:buFontTx',
+				'a:buFont',
+				'a:buNone',
+				'a:buAutoNum',
+				'a:buChar',
+				'a:buBlip',
+			];
+			const bullets = (paragraph: XmlObject) =>
+				JSON.stringify(
+					bulletKeys.map((key2) => (paragraph?.['a:pPr'] as XmlObject | undefined)?.[key2]),
+					(_key, value) =>
+						value && typeof value === 'object' && !Array.isArray(value)
+							? Object.fromEntries(
+									Object.keys(value)
+										.sort()
+										.map((key2) => [key2, value[key2]]),
+								)
+							: value,
+				);
+			paragraphs.forEach((paragraph, index) => {
+				const authored = authoredParagraphs[index]?.['a:pPr'] as XmlObject | undefined;
+				const pPr = paragraph['a:pPr'] as XmlObject | undefined;
+				if (
+					!pPr ||
+					bulletKeys.some((key2) => authored?.[key2] !== void 0) ||
+					bullets(paragraph) !== bullets(rebuiltSource[index])
+				) {
+					return;
+				}
+				for (const key2 of bulletKeys) {
+					delete pPr[key2];
+				}
+				if (!Object.keys(pPr).length && authored === void 0) {
+					delete paragraph['a:pPr'];
+				}
+			});
+		}
+	}
+
+	/**
+	 * Move the element-scope paragraph geometry out of every `a:pPr` and into
+	 * the text body's `a:lstStyle > a:lvl1pPr`, returning the element style with
+	 * that geometry removed so the paragraph writer no longer broadcasts it.
+	 *
+	 * See `element-paragraph-geometry.ts` for why the `a:lstStyle` slot is the
+	 * one that makes the "authored versus resolved" question answerable at all.
+	 */
+	private routeElementParagraphGeometry(
+		txBody: XmlObject,
+		textStyle: TextStyle | undefined,
+	): TextStyle | undefined {
+		const edits = elementParagraphGeometryEdits(textStyle);
+		if (edits === undefined) {
+			// No load-time snapshot: this text was not parsed from a deck, so the
+			// element style is its only description and the paragraph writer must
+			// keep writing it out. Nothing changes for SDK-built decks.
+			return textStyle;
+		}
+		if (hasElementParagraphGeometry(edits)) {
+			applyElementParagraphGeometryToListStyle(
+				txBody,
+				buildParagraphPropertiesXml(edits, this.textAlignToDrawingValue(edits.align), undefined, {
+					spacingBefore: this.createParagraphSpacingXmlFromPx(edits.paragraphSpacingBefore),
+					spacingAfter: this.createParagraphSpacingXmlFromPx(edits.paragraphSpacingAfter),
+					lineSpacing: this.createLineSpacingXmlFromMultiplier(edits.lineSpacing),
+					lineSpacingExactPt: edits.lineSpacingExactPt,
+				}),
+			);
+		}
+		// Everything else the element style says about paragraphs came out of the
+		// cascade, so it is dropped rather than stamped onto every `a:pPr`: the
+		// paragraphs that authored geometry still emit their own, and the rest go
+		// back to inheriting it.
+		return withoutElementParagraphGeometry(textStyle);
 	}
 
 	/** Apply auto-fit mode settings to bodyPr. */
@@ -256,6 +395,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 	/** Apply 3D text properties to bodyPr. */
 	private applyText3d(bodyPr: XmlObject, el: PptxElementWithText): void {
+		// `a:sp3d` / `a:flatTx` are a mutually exclusive choice (`EG_Text3D`):
+		// an explicit "render flat" override never coexists with extrusion/bevel
+		// data, so it is written instead of (never alongside) `a:sp3d`.
+		if (el.textStyle?.flatText) {
+			bodyPr['a:flatTx'] = {};
+			delete bodyPr['a:sp3d'];
+			return;
+		}
+		delete bodyPr['a:flatTx'];
 		const t3d = el.textStyle?.text3d;
 		if (t3d && Object.keys(t3d).length > 0) {
 			const sp3dXml: XmlObject = {};

@@ -1,115 +1,236 @@
 import type {
 	PptxAppProperties,
+	PptxCommentAuthor,
 	PptxCoreProperties,
 	PptxCustomProperty,
 	PptxElement,
 	PptxHandoutMaster,
 	PptxHeaderFooter,
 	PptxHandler,
+	PptxModernCommentAuthor,
 	PptxNotesMaster,
 	PptxSaveFormat,
 	PptxSection,
 	PptxSlide,
 	PptxSlideMaster,
+	PptxSlideSize,
+	PptxTheme,
+	PptxViewProperties,
 	PptxPresentationProperties,
 	PptxCustomShow,
+	PptxTagCollection,
 	TextSegment,
 } from 'pptx-viewer-core';
-import type { ElementClipboardPayload, TemplateElementMap } from 'pptx-viewer-shared';
+import { buildThemeColorMap } from 'pptx-viewer-core';
+import type {
+	DeckSaveIntent,
+	ElementBoxPatch,
+	ElementClipboardPayload,
+	FontEmbeddingDescriptor,
+	TableStyleSaveOptions,
+	TemplateElementMap,
+} from 'pptx-viewer-shared';
 import {
-	EditorHistory,
+	canInteractWithElement,
+	describeFontEmbedding,
 	isElementIdInteractive,
-	partitionTemplateElements,
+	pushRecentColor,
 } from 'pptx-viewer-shared';
 
 import { EditorAnimationController } from './editor-animation-controller';
 import { EditorArrangeController } from './editor-arrange-controller';
 import { EditorBackgroundController } from './editor-background-controller';
 import { EditorClipboardController } from './editor-clipboard-controller';
-import { createEditorSnapshot, saveEditorDocument } from './editor-document-state';
+import type { LoadDocumentArgs } from './editor-document-lifecycle';
+import {
+	applyRemoteEditorSlides,
+	loadEditorDocument,
+	resetEditorSession,
+	restoreEditorSnapshot,
+	saveEditorState,
+	updateEditorDocumentProperties,
+	updateEditorTagCollections,
+} from './editor-document-lifecycle';
+import { createEditorSnapshot } from './editor-document-state';
 import type { EditorSnapshot } from './editor-document-state';
 import { EditorElementController } from './editor-element-controller';
 import { EditorEquationController } from './editor-equation-controller.svelte';
 import { EditorFormatPainterController } from './editor-format-painter-controller.svelte';
+import { EditorHistoryState } from './editor-history-state.svelte';
 import { EditorInkController } from './editor-ink-controller.svelte';
 import { EditorMasterController } from './editor-master-controller';
 import type { MasterViewTarget } from './editor-master-controller';
-import type { ElementBoxPatch } from './editor-mutations';
+import { EditorMasterCrudController } from './editor-master-crud';
 import { EditorPresentationMetadata } from './editor-presentation-metadata.svelte';
 import { EditorSectionController } from './editor-section-controller';
-import { EditorSelection } from './editor-selection.svelte';
+import { EditorSelection, resolveSelectedElements } from './editor-selection.svelte';
 import { EditorSlidesController } from './editor-slides-controller';
 import { EditorTemplateController } from './editor-template-controller';
 import { EditorTransitionController } from './editor-transition-controller';
 import type { ZOrderDirection } from './editor-zorder';
-
-const MAX_HISTORY_ENTRIES = 100;
+import { TableCellSelection } from './table-cell-selection.svelte';
 
 export interface EditorStateDeps {
 	getCurrent(): number;
 	getHandler(): PptxHandler | null;
+	/**
+	 * The `p:sldSz` a save should write, resolved from the viewer's EMU slide
+	 * size and its pixel canvas by the shared `resolveSlideSizeSelection`.
+	 * Optional so out-of-tree mounts (and the unit tests) can omit it, in which
+	 * case core re-emits the load-time dimensions verbatim.
+	 */
+	getSlideSize?: () => PptxSlideSize | undefined;
+	/**
+	 * The `tableStyles`/`tableStylesDefaultId`/`tableStylesToDelete` save
+	 * options (see `pptx-viewer-shared`'s `tableStyleSaveOptions`). Table style
+	 * DEFINITION edits live on the loader (like slide size), not the undo
+	 * stack, so they reach the save through this dep the same way. Optional
+	 * for out-of-tree mounts and the unit tests.
+	 */
+	getTableStyleOptions?: () => TableStyleSaveOptions;
+	/**
+	 * Adopt a fresh handler in place of the loaded one. Master-view CRUD
+	 * (`masterCrud`) rebuilds the package through core and comes back with a
+	 * new `PptxHandler`; the loader owns handler lifecycle, so it disposes the
+	 * previous one here. Optional for out-of-tree mounts and the unit tests.
+	 */
+	setHandler?: (handler: PptxHandler) => void;
 	onChange?: () => void;
 }
 
 export class EditorState {
+	/**
+	 * Options > Proofing > AutoCorrect, applied to committed inline-edit text.
+	 * Identity until `useViewerOptionsWiring` installs the real transform (the
+	 * options store is constructed after `EditorState`).
+	 */
+	transformCommittedText: (text: string) => string = (text) => text;
 	slides = $state.raw<PptxSlide[]>([]);
 	templateElementsBySlideId = $state.raw<TemplateElementMap>({});
 	slideMasters = $state.raw<PptxSlideMaster[]>([]);
 	notesMaster = $state.raw<PptxNotesMaster | undefined>(undefined);
 	handoutMaster = $state.raw<PptxHandoutMaster | undefined>(undefined);
 	sections = $state.raw<PptxSection[]>([]);
-	readonly presentationMetadata: EditorPresentationMetadata;
+	readonly presentationMetadata = new EditorPresentationMetadata(this);
 	coreProperties = $state.raw<PptxCoreProperties | undefined>(undefined);
 	appProperties = $state.raw<PptxAppProperties | undefined>(undefined);
 	customProperties = $state.raw<PptxCustomProperty[]>([]);
+	/**
+	 * The deck's `ppt/tags/*.xml` name/value metadata. Seeded from the load via
+	 * {@link adoptTagCollections} and edited by the inspector's Tags section;
+	 * carried through the undo snapshot and re-emitted on save.
+	 */
+	tagCollections = $state.raw<PptxTagCollection[]>([]);
+	/**
+	 * The deck's active theme, kept here so the Home tab's font dropdown can
+	 * lead with the theme fonts. Set by the viewer once a deck is loaded;
+	 * deliberately outside {@link EditorSnapshot} because it is not content the
+	 * undo stack owns.
+	 */
+	theme = $state.raw<PptxTheme | undefined>(undefined);
+	/**
+	 * `ppt/viewProps.xml`, seeded from the load and kept in sync with the View >
+	 * Grid/Guides/Snap toggles (wave 4 #5: `viewPropertiesPatchFromPreferences`
+	 * writes the toggle state back in here). Deliberately outside
+	 * {@link EditorSnapshot}, like {@link theme}: PowerPoint does not undo a view
+	 * toggle, so this is session state that `saveEditorDocument` reads directly,
+	 * never something `pushHistory`/`commitChange` touches.
+	 */
+	viewProperties = $state.raw<PptxViewProperties | undefined>(undefined);
+	/**
+	 * Modern comment authors (`ppt/authors.xml`, Office 2021 `p188:author`),
+	 * seeded from the load. Read-only round-trip metadata, like {@link theme}:
+	 * the comment panel's @-mention typeahead (wave-4 B5) reads this to match
+	 * against, never something a binding edits or that undo restores.
+	 */
+	modernCommentAuthors = $state.raw<PptxModernCommentAuthor[]>([]);
+	/**
+	 * Legacy comment authors (`ppt/commentAuthors.xml`), offered to the
+	 * @-mention typeahead alongside {@link modernCommentAuthors}. Same
+	 * read-only, non-undo lifecycle.
+	 */
+	commentAuthors = $state.raw<PptxCommentAuthor[]>([]);
+	/**
+	 * Families the deck embeds, offered as their own font-dropdown group. Write
+	 * through {@link adoptEmbeddedFontFamilies} so {@link embedFonts} is reseeded
+	 * with them.
+	 */
+	embeddedFontFamilies = $state.raw<readonly string[]>([]);
+	/**
+	 * File > Fonts > "Embed fonts in the file". Session state like
+	 * {@link savePassword}, not document content, so undo never restores it.
+	 * Seeded from the loaded deck (see {@link adoptEmbeddedFontFamilies}): a deck
+	 * that arrived with embedded fonts keeps them on save, so the switch has to
+	 * start "on" or turning it off would be the only way to describe what save
+	 * already does. Read by `saveEditorDocument`.
+	 */
+	embedFonts = $state(true);
+	/**
+	 * Families the user registered from a local font file this session
+	 * (File > Options > Fonts, off by default). Session state, never persisted:
+	 * the font binary is the user's, not ours to store.
+	 */
+	customFontFamilies = $state.raw<readonly string[]>([]);
 	masterViewTarget = $state.raw<MasterViewTarget | null>(null);
 	readonly selection = new EditorSelection();
+	/** The block of table cells marquee'd inside the selected table, if any. */
+	readonly tableCells = new TableCellSelection();
 	editable = $state(false);
 	dirty = $state(false);
+	/**
+	 * Monotonic counter bumped by {@link setSlides}, i.e. every time a freshly
+	 * loaded deck is installed as the working document.
+	 *
+	 * It exists because the loader's own `loadCount` is bumped in an EARLIER
+	 * flush than the one that writes these slides: the seeding effect
+	 * (`viewer-effects.svelte.ts`) reacts to `loadCount`, so by the time it calls
+	 * `setSlides` the autosave effect has already run once, seen the new count
+	 * against the old slides, and settled. The slide reassignment that followed
+	 * then looked exactly like a user edit, and merely OPENING a deck wrote a
+	 * crash-recovery snapshot. This counter changes in the SAME synchronous block
+	 * as the slides it describes, so the reseed can never be misread again.
+	 */
+	seedNonce = $state(0);
 	editTemplateMode = $state(false);
 	interactionActive = $state(false);
 	clipboard = $state.raw<ElementClipboardPayload | null>(null);
+	/**
+	 * File ▸ Info ▸ Protect Presentation state. Deliberately NOT part of
+	 * {@link EditorSnapshot}: the secret is session state, not document content,
+	 * so undo must never restore or clear it. {@link saveIntent} feeds it to the
+	 * shared `planDeckSave`, which routes a protected save through
+	 * `saveEncrypted` (an OLE2 container) instead of `save` (a plain ZIP).
+	 */
+	passwordProtected = $state(false);
+	savePassword = $state<string | null>(null);
 
-	#history = new EditorHistory<EditorSnapshot>({ maxDepth: MAX_HISTORY_ENTRIES });
-	#historyDepth = MAX_HISTORY_ENTRIES;
-	#canUndo = $state(false);
-	#canRedo = $state(false);
+	/** Undo/redo stack; the `canUndo` / `canRedo` getters below mirror it. */
+	readonly history = new EditorHistoryState();
 	readonly #deps: EditorStateDeps;
 
-	readonly clipboardOps: EditorClipboardController;
-	readonly elementOps: EditorElementController;
-	readonly templateOps: EditorTemplateController;
-	readonly slidesOps: EditorSlidesController;
-	readonly sectionOps: EditorSectionController;
-	readonly arrangeOps: EditorArrangeController;
-	readonly backgroundOps: EditorBackgroundController;
-	readonly transitionOps: EditorTransitionController;
-	readonly animationOps: EditorAnimationController;
-	readonly inkOps: EditorInkController;
-	readonly masterOps: EditorMasterController;
-	readonly formatPainter: EditorFormatPainterController;
-	readonly equationOps: EditorEquationController;
+	// Each sub-controller only stores this reference, so a field initializer is
+	// safe here even though `#deps` is not assigned until the constructor body.
+	readonly clipboardOps = new EditorClipboardController(this);
+	readonly elementOps = new EditorElementController(this);
+	readonly templateOps = new EditorTemplateController(this);
+	readonly slidesOps = new EditorSlidesController(this);
+	readonly sectionOps = new EditorSectionController(this);
+	readonly arrangeOps = new EditorArrangeController(this);
+	readonly backgroundOps = new EditorBackgroundController(this);
+	readonly transitionOps = new EditorTransitionController(this);
+	readonly animationOps = new EditorAnimationController(this);
+	readonly inkOps = new EditorInkController(this);
+	readonly masterOps = new EditorMasterController(this);
+	readonly masterCrud = new EditorMasterCrudController(this);
+	readonly formatPainter = new EditorFormatPainterController(this);
+	readonly equationOps = new EditorEquationController(this);
 
 	constructor(deps: EditorStateDeps) {
 		this.#deps = deps;
-		this.presentationMetadata = new EditorPresentationMetadata(this);
-		this.clipboardOps = new EditorClipboardController(this);
-		this.elementOps = new EditorElementController(this);
-		this.templateOps = new EditorTemplateController(this);
-		this.slidesOps = new EditorSlidesController(this);
-		this.sectionOps = new EditorSectionController(this);
-		this.arrangeOps = new EditorArrangeController(this);
-		this.backgroundOps = new EditorBackgroundController(this);
-		this.transitionOps = new EditorTransitionController(this);
-		this.animationOps = new EditorAnimationController(this);
-		this.inkOps = new EditorInkController(this);
-		this.masterOps = new EditorMasterController(this);
-		this.formatPainter = new EditorFormatPainterController(this);
-		this.equationOps = new EditorEquationController(this);
 	}
 
 	get canUndo(): boolean {
-		return this.#canUndo;
+		return this.history.canUndo;
 	}
 
 	get headerFooter(): PptxHeaderFooter {
@@ -124,8 +245,36 @@ export class EditorState {
 		return this.presentationMetadata.customShows;
 	}
 
+	/** The colour picker's "Recent colours" row (`p:clrMru`), most-recent-first. */
+	get mruColors(): string[] {
+		return this.presentationProperties.mruColors ?? [];
+	}
+
+	/**
+	 * The deck's resolved theme colour map (scheme key -> hex), for every
+	 * colour picker's "Theme Colors" grid (`buildThemeColorSwatchGrid`).
+	 * `undefined` before a theme has loaded.
+	 */
+	get themeColorMap(): Record<string, string> | undefined {
+		return this.theme?.colorScheme ? buildThemeColorMap(this.theme.colorScheme) : undefined;
+	}
+
+	/**
+	 * Record a colour just picked in ANY colour picker (fill, line, text,
+	 * background, table cell, chart series, ...) into the recent-colours row
+	 * (wave-4 B6). Writes `presentationProperties.mruColors` OUTSIDE the undo
+	 * stack, like the view-preferences write-back.
+	 */
+	recordRecentColor(hex: string): void {
+		const current = this.mruColors;
+		const next = pushRecentColor(current, hex);
+		if (next !== current) {
+			this.presentationMetadata.setMruColorsSilently(next);
+		}
+	}
+
 	get canRedo(): boolean {
-		return this.#canRedo;
+		return this.history.canRedo;
 	}
 
 	get selectedElementId(): string | null {
@@ -139,19 +288,7 @@ export class EditorState {
 	}
 
 	get selectedElements(): PptxElement[] {
-		const ids = this.selection.ids;
-		if (ids.length === 0) {
-			return [];
-		}
-		const elements = this.activeElements;
-		if (ids.length === 1) {
-			const element = elements.find((candidate) => candidate.id === ids[0]);
-			return element ? [element] : [];
-		}
-		const elementsById = new Map(elements.map((element) => [element.id, element]));
-		return ids
-			.map((id) => elementsById.get(id))
-			.filter((el): el is PptxElement => el !== undefined);
+		return resolveSelectedElements(this.selection.ids, this.activeElements);
 	}
 
 	get activeElements(): PptxElement[] {
@@ -176,83 +313,72 @@ export class EditorState {
 		return this.#deps.getHandler();
 	}
 
-	#syncHistoryFlags(): void {
-		this.#canUndo = this.#history.canUndo;
-		this.#canRedo = this.#history.canRedo;
-	}
-
-	setSlides(
-		slides: PptxSlide[],
-		slideMasters: PptxSlideMaster[] = [],
-		notesMaster?: PptxNotesMaster,
-		handoutMaster?: PptxHandoutMaster,
-		sections: PptxSection[] = [],
-		coreProperties?: PptxCoreProperties,
-		appProperties?: PptxAppProperties,
-		customProperties: PptxCustomProperty[] = [],
-		headerFooter: PptxHeaderFooter = {},
-		presentationProperties: PptxPresentationProperties = {},
-		customShows: PptxCustomShow[] = [],
-	): void {
-		const partition = partitionTemplateElements(slides);
-		this.slides = partition.slides;
-		this.templateElementsBySlideId = partition.templateElementsBySlideId;
-		this.slideMasters = structuredClone(slideMasters);
-		this.notesMaster = structuredClone(notesMaster);
-		this.handoutMaster = structuredClone(handoutMaster);
-		this.sections = structuredClone(sections);
-		this.coreProperties = structuredClone(coreProperties);
-		this.appProperties = structuredClone(appProperties);
-		this.customProperties = structuredClone(customProperties);
-		this.presentationMetadata.set(headerFooter, presentationProperties, customShows);
-		this.masterViewTarget = null;
-		this.selection.clear();
-		this.editTemplateMode = false;
-		this.dirty = false;
-		this.interactionActive = false;
-		this.#history.clear();
-		this.elementOps.resetNudge();
-		this.inkOps.setTool('select');
-		this.#syncHistoryFlags();
+	/** Hand a rebuilt handler to the loader (see `EditorStateDeps.setHandler`). */
+	adoptHandler(handler: PptxHandler): void {
+		this.#deps.setHandler?.(handler);
 	}
 
 	/**
-	 * Replace the working slides with a remote (collaboration) snapshot without
-	 * recording an undo step or touching the dirty flag: the granular reconcile
-	 * already merged the peer's change, and treating an incoming remote edit as
-	 * a local mutation would both pollute the undo stack and re-broadcast it.
-	 *
-	 * Selection is preserved when the selected element still exists so a remote
-	 * edit does not yank the local user's selection out from under them. Local
-	 * undo history is intentionally kept (see the collaboration module JSDoc):
-	 * shared defines no collaborative-undo semantics, so, matching React/Vue,
-	 * local undo may fight a concurrent remote edit.
+	 * The `p:sldSz` the next save should write, or undefined to leave the
+	 * load-time dimensions alone. Slide size lives on the loader (it is not
+	 * content the undo stack owns), so it reaches the save through this dep the
+	 * same way the handler does.
 	 */
+	getSlideSize(): PptxSlideSize | undefined {
+		return this.#deps.getSlideSize?.();
+	}
+
+	/**
+	 * The table style save options the next save should forward, or `{}` to
+	 * leave `ppt/tableStyles.xml` alone. See {@link EditorStateDeps.getTableStyleOptions}.
+	 */
+	getTableStyleOptions(): TableStyleSaveOptions {
+		return this.#deps.getTableStyleOptions?.() ?? {};
+	}
+
+	/** Adopt a freshly loaded deck as the working document (see `loadEditorDocument`). */
+	setSlides(...args: LoadDocumentArgs): void {
+		loadEditorDocument(this, ...args);
+	}
+
+	/** Adopt a remote (collaboration) snapshot; see `applyRemoteEditorSlides`. */
 	applyRemoteSlides(slides: PptxSlide[]): void {
-		const partition = partitionTemplateElements(slides);
-		this.slides = partition.slides;
-		this.templateElementsBySlideId = partition.templateElementsBySlideId;
-		this.selection.prune((id) => this.activeElements.some((element) => element.id === id));
+		applyRemoteEditorSlides(this, slides);
 	}
 
 	reset(): void {
-		this.selection.clear();
-		this.editTemplateMode = false;
-		this.masterViewTarget = null;
-		this.dirty = false;
-		this.interactionActive = false;
-		this.#history.clear();
-		this.elementOps.resetNudge();
-		this.inkOps.setTool('select');
-		this.#syncHistoryFlags();
+		resetEditorSession(this);
 	}
 
 	select(id: string | null): void {
-		this.selection.set(id && this.isElementInteractive(id) ? id : null);
+		const next = id && this.isElementInteractive(id) ? id : null;
+		this.selection.set(next);
+		// A different element (or nothing) is selected now, so any table cell
+		// range built on the previous one is stale. Fed the id we just set
+		// rather than re-reading `selection.primary`: the host's editable
+		// effect calls this AND writes the selection, so reading it back here
+		// closed a read-write cycle that tripped `effect_update_depth_exceeded`
+		// and took the whole viewer down.
+		this.tableCells.syncElement(next);
 	}
 
+	/** The element with `id` on the surface the pointer acts on, or undefined. */
+	elementById(id: string): PptxElement | undefined {
+		return this.activeElements.find((element) => element.id === id);
+	}
+
+	/**
+	 * May the pointer act on `id` at all? Two gates, both of which must pass:
+	 * the template rule (an inherited master/layout node is inert unless
+	 * edit-template mode is on) and the element's own authored `a:spLocks`. The
+	 * lock half was missing entirely, which is why a `noSelect` shape from a
+	 * real deck was as selectable and draggable as any other.
+	 */
 	isElementInteractive(id: string): boolean {
-		return isElementIdInteractive(id, this.editTemplateMode);
+		if (!isElementIdInteractive(id, this.editTemplateMode)) {
+			return false;
+		}
+		return canInteractWithElement(this.elementById(id), 'select');
 	}
 
 	setTemplateEditing(enabled: boolean): void {
@@ -261,31 +387,22 @@ export class EditorState {
 		}
 		this.editTemplateMode = enabled;
 		this.selection.clear();
+		this.tableCells.clear();
 	}
 
-	/**
-	 * Apply the File > Options "maximum number of undos" value. Recreates the
-	 * history stack when the depth changes (PowerPoint likewise applies the new
-	 * maximum going forward; existing entries are dropped).
-	 */
+	/** Apply the File > Options "maximum number of undos" value. */
 	setHistoryDepth(depth: number): void {
-		if (depth === this.#historyDepth) {
-			return;
-		}
-		this.#historyDepth = depth;
-		this.#history = new EditorHistory<EditorSnapshot>({ maxDepth: depth });
-		this.#syncHistoryFlags();
+		this.history.setDepth(depth);
 	}
 
 	pushHistory(): void {
-		this.#history.record(this.#snapshot(), '');
+		this.history.record(this.snapshot());
 		this.elementOps.resetNudge();
-		this.#syncHistoryFlags();
 	}
 
 	commitChange(): void {
 		this.dirty = true;
-		this.#syncHistoryFlags();
+		this.history.sync();
 		this.#deps.onChange?.();
 	}
 
@@ -317,32 +434,42 @@ export class EditorState {
 		this.commitChange();
 	}
 
-	#snapshot(): EditorSnapshot {
+	/** A deep clone of the whole editable document (one undo entry, or save input). */
+	snapshot(): EditorSnapshot {
 		return createEditorSnapshot(this);
 	}
 
-	#restore(snapshot: EditorSnapshot | undefined): void {
-		if (!snapshot) {
-			return;
-		}
-		const restored = createEditorSnapshot(snapshot);
-		this.slides = restored.slides;
-		this.templateElementsBySlideId = restored.templateElementsBySlideId;
-		this.slideMasters = restored.slideMasters;
-		this.notesMaster = restored.notesMaster;
-		this.handoutMaster = restored.handoutMaster;
-		this.sections = restored.sections;
-		this.coreProperties = restored.coreProperties;
-		this.appProperties = restored.appProperties;
-		this.customProperties = restored.customProperties;
-		this.presentationMetadata.set(
-			restored.headerFooter,
-			restored.presentationProperties,
-			restored.customShows,
-		);
-		this.interactionActive = false;
-		this.selection.prune((id) => this.activeElements.some((element) => element.id === id));
-		this.commitChange();
+	/**
+	 * Adopt the families a freshly loaded deck embeds, and reseed
+	 * {@link embedFonts} to the position that describes the file save would write
+	 * right now. Deliberately not an undo step: the parsed font list is not a
+	 * user edit.
+	 */
+	adoptEmbeddedFontFamilies(families: readonly string[]): void {
+		this.embeddedFontFamilies = families;
+		this.embedFonts = describeFontEmbedding(families).initialEnabled;
+	}
+
+	/** How File > Fonts should render its toggle for the loaded deck. */
+	get fontEmbedding(): FontEmbeddingDescriptor {
+		return describeFontEmbedding(this.embeddedFontFamilies);
+	}
+
+	/** The Protect-Presentation state every save path hands to `planDeckSave`. */
+	saveIntent(): DeckSaveIntent {
+		return { password: this.savePassword, passwordProtected: this.passwordProtected };
+	}
+
+	/** File ▸ Info ▸ Protect Presentation: arm password encryption for saves. */
+	setSavePassword(password: string): void {
+		this.savePassword = password;
+		this.passwordProtected = true;
+	}
+
+	/** File ▸ Info ▸ Protect Presentation: back to saving in the clear. */
+	clearSavePassword(): void {
+		this.savePassword = null;
+		this.passwordProtected = false;
 	}
 
 	deleteSelected = (): void => this.elementOps.deleteSelected();
@@ -363,38 +490,32 @@ export class EditorState {
 		app: PptxAppProperties,
 		custom: PptxCustomProperty[],
 	): void {
-		if (!this.editable) {
-			return;
-		}
-		this.pushHistory();
-		this.coreProperties = { ...core };
-		this.appProperties = { ...app };
-		this.customProperties = custom.map((property) => ({ ...property }));
-		this.commitChange();
+		updateEditorDocumentProperties(this, core, app, custom);
+	}
+
+	/**
+	 * Seed the deck's tag parts straight after a load. Deliberately NOT an undo
+	 * step: the load already cleared history, and treating the parsed value as
+	 * a user edit would mark a pristine deck dirty.
+	 */
+	adoptTagCollections(tags: readonly PptxTagCollection[]): void {
+		this.tagCollections = structuredClone(tags as PptxTagCollection[]);
+	}
+
+	/** Replace the tag collections as one undoable edit (inspector Tags section). */
+	updateTagCollections(next: readonly PptxTagCollection[]): void {
+		updateEditorTagCollections(this, next);
 	}
 
 	undo(): void {
-		this.#restore(this.#history.undo(this.#snapshot())?.snapshot);
+		restoreEditorSnapshot(this, this.history.undo(this.snapshot()));
 	}
 
 	redo(): void {
-		this.#restore(this.#history.redo(this.#snapshot())?.snapshot);
+		restoreEditorSnapshot(this, this.history.redo(this.snapshot()));
 	}
 
-	async save(format: PptxSaveFormat = 'pptx'): Promise<Uint8Array> {
-		const handler = this.#deps.getHandler();
-		if (!handler) {
-			throw new Error('No presentation is loaded.');
-		}
-		const bytes = await saveEditorDocument(
-			handler,
-			{
-				...this.#snapshot(),
-				slides: this.renderedSlides,
-			},
-			format,
-		);
-		this.dirty = false;
-		return bytes;
+	save(format: PptxSaveFormat = 'pptx'): Promise<Uint8Array> {
+		return saveEditorState(this, format);
 	}
 }

@@ -120,6 +120,8 @@ describe('collaboration-sync: element field coverage', () => {
 			inkOpacities: [1],
 			inkTool: 'pen',
 			inkPointPressures: [[0.5, 0.6]],
+			inkPointTiltX: [[10, 30]],
+			inkPointTiltY: [[0, -15]],
 		};
 		expect(roundTripElement(ink)).toStrictEqual(ink);
 	});
@@ -418,7 +420,11 @@ describe('collaboration-sync: slide field coverage', () => {
 
 describe('collaboration-sync: field-schema completeness guard', () => {
 	it('scalar + complex + asset element keys + textSegments cover every PptxElement field', () => {
-		const coveredKind: Record<string, string> = { textSegments: 'text' };
+		const coveredKind: Record<string, string> = {
+			textSegments: 'text',
+			children: 'nested',
+			tableData: 'nested',
+		};
 		for (const key of SCALAR_ELEMENT_KEYS) {
 			coveredKind[key] = 'scalar';
 		}

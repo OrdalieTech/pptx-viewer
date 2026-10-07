@@ -47,13 +47,16 @@ import { boolFromEvent, selectValue } from './chart-event-helpers';
 					<label class="pptx-chart-card__row">
 						<span class="pptx-chart-card__label">{{ 'pptx.chart.labelPosition' | translate }}</span>
 						<select
+							[attr.aria-label]="'pptx.chart.labelPosition' | translate"
 							class="pptx-chart-card__input"
 							[disabled]="!canEdit()"
 							[value]="labels().position ?? ''"
 							(change)="onPosition($event)"
 						>
 							@for (opt of positionOptions; track opt.value) {
-								<option [value]="opt.value">{{ opt.labelKey | translate }}</option>
+								<option [value]="opt.value" [selected]="opt.value === (labels().position ?? '')">
+									{{ opt.labelKey | translate }}
+								</option>
 							}
 						</select>
 					</label>

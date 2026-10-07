@@ -4,6 +4,9 @@
  * and Vue `element-animation.test.ts` coverage (the two bindings' authoring
  * models, now consolidated here).
  */
+/* oxlint-disable eslint/one-var -- each `it`/`describe` block below declares
+   its own independent fixture locals; merging unrelated declarations across
+   these many test cases would hurt readability, not help it. */
 
 import type { PptxElementAnimation } from 'pptx-viewer-core';
 import { describe, expect, it } from 'vitest';
@@ -11,10 +14,12 @@ import { describe, expect, it } from 'vitest';
 import {
 	animationFor,
 	applyAnimationPreset,
+	buildAnimationTimelineBars,
 	hasAnimation,
 	removeAnimation,
 	removeElementAnimation,
 	reorderAnimationDown,
+	reorderAnimationTo,
 	reorderAnimationUp,
 	setAnimationEmphasis,
 	setAnimationEntrance,
@@ -398,6 +403,67 @@ describe('reorderAnimationDown', () => {
 	});
 });
 
+describe('reorderAnimationTo', () => {
+	const three: PptxElementAnimation[] = [
+		{ elementId: 'a', entrance: 'fadeIn', order: 0, trigger: 'onClick' },
+		{ elementId: 'b', entrance: 'fadeIn', order: 1, trigger: 'onClick' },
+		{ elementId: 'c', entrance: 'fadeIn', order: 2, trigger: 'onClick' },
+	];
+
+	it('moves an entry by resolved index and re-normalises order (row-index drag, React/Vue/Angular/Vanilla)', () => {
+		const result = reorderAnimationTo(three, 2, 0);
+		expect(result.map((a) => a.elementId)).toStrictEqual(['c', 'a', 'b']);
+		expect(result.map((a) => a.order)).toStrictEqual([0, 1, 2]);
+	});
+
+	it('moves an entry keyed by elementId (Svelte ribbon-tab drag, Vanilla moveAnimation)', () => {
+		const result = reorderAnimationTo(three, { elementId: 'c' }, 0);
+		expect(result.map((a) => a.elementId)).toStrictEqual(['c', 'a', 'b']);
+		expect(result.map((a) => a.order)).toStrictEqual([0, 1, 2]);
+	});
+
+	it('resolves an elementId target by looking up its sorted index first', () => {
+		const targetIndex = [...three]
+			.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+			.findIndex((a) => a.elementId === 'a');
+		const result = reorderAnimationTo(three, { elementId: 'c' }, targetIndex);
+		expect(result.map((a) => a.elementId)).toStrictEqual(['c', 'a', 'b']);
+	});
+
+	it('returns a sorted, re-indexed copy without moving anything when source and target coincide', () => {
+		const result = reorderAnimationTo(three, 1, 1);
+		expect(result.map((a) => a.elementId)).toStrictEqual(['a', 'b', 'c']);
+		expect(result.map((a) => a.order)).toStrictEqual([0, 1, 2]);
+	});
+
+	it('returns a sorted, re-indexed copy when the source index is out of range', () => {
+		const result = reorderAnimationTo(three, 5, 0);
+		expect(result.map((a) => a.elementId)).toStrictEqual(['a', 'b', 'c']);
+	});
+
+	it('returns a sorted, re-indexed copy when the target index is out of range', () => {
+		const result = reorderAnimationTo(three, 0, 5);
+		expect(result.map((a) => a.elementId)).toStrictEqual(['a', 'b', 'c']);
+	});
+
+	it('returns a sorted, re-indexed copy when the elementId cannot be resolved', () => {
+		const result = reorderAnimationTo(three, { elementId: 'ghost' }, 0);
+		expect(result.map((a) => a.elementId)).toStrictEqual(['a', 'b', 'c']);
+	});
+
+	it('sorts by order before moving, independent of input array order', () => {
+		const shuffled = [three[2], three[0], three[1]];
+		const result = reorderAnimationTo(shuffled, { elementId: 'c' }, 0);
+		expect(result.map((a) => a.elementId)).toStrictEqual(['c', 'a', 'b']);
+	});
+
+	it('does not mutate the input array', () => {
+		const input = [...three];
+		reorderAnimationTo(input, 2, 0);
+		expect(input.map((a) => a.elementId)).toStrictEqual(['a', 'b', 'c']);
+	});
+});
+
 describe('immutability', () => {
 	it('setters do not mutate the source array', () => {
 		const source: PptxElementAnimation[] = [
@@ -463,6 +529,47 @@ describe('applyAnimationPreset', () => {
 		const result = applyAnimationPreset(seeded, 'el1', 'emphasis', 'pulse');
 		expect(result).toHaveLength(1);
 		expect(result[0]).toMatchObject({ entrance: 'fadeIn', emphasis: 'pulse', durationMs: 500 });
+	});
+});
+
+describe('buildAnimationTimelineBars', () => {
+	it('returns empty for no animations', () => {
+		expect(buildAnimationTimelineBars([])).toStrictEqual([]);
+	});
+
+	it('computes left/width percentages against the longest end time', () => {
+		const bars = buildAnimationTimelineBars([
+			{ elementId: 'a', order: 0, delayMs: 0, durationMs: 500 } as PptxElementAnimation,
+			{ elementId: 'b', order: 1, delayMs: 500, durationMs: 500 } as PptxElementAnimation,
+		]);
+		expect(bars[0]).toMatchObject({ elementId: 'a', leftPercent: 0, widthPercent: 50 });
+		expect(bars[1]).toMatchObject({ elementId: 'b', leftPercent: 50, widthPercent: 50 });
+	});
+
+	it('defaults duration to 500ms and delay to 0', () => {
+		const bars = buildAnimationTimelineBars([
+			{ elementId: 'a', entrance: 'fadeIn' } as PptxElementAnimation,
+		]);
+		expect(bars[0]).toMatchObject({ leftPercent: 0, widthPercent: 100 });
+	});
+
+	it('returns bars sorted by the order field, independent of input order', () => {
+		const bars = buildAnimationTimelineBars([
+			{ elementId: 'a', order: 0, durationMs: 200 } as PptxElementAnimation,
+			{ elementId: 'b', order: 1, durationMs: 400, delayMs: 100 } as PptxElementAnimation,
+			{ elementId: 'c', order: 2, durationMs: 300 } as PptxElementAnimation,
+		]);
+		expect(bars.map((bar) => bar.elementId)).toStrictEqual(['a', 'b', 'c']);
+		expect(bars[1]).toMatchObject({ elementId: 'b', leftPercent: 20, widthPercent: 80 });
+	});
+
+	it('floors a very short duration to a visible minimum width', () => {
+		const bars = buildAnimationTimelineBars([
+			{ elementId: 'a', order: 0, delayMs: 0, durationMs: 10_000 } as PptxElementAnimation,
+			{ elementId: 'b', order: 1, delayMs: 0, durationMs: 10 } as PptxElementAnimation,
+		]);
+		const short = bars.find((bar) => bar.elementId === 'b')!;
+		expect(short.widthPercent).toBeGreaterThanOrEqual(2);
 	});
 });
 

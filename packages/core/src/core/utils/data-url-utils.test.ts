@@ -7,6 +7,15 @@ import { parseDataUrlToBytes } from './data-url-utils';
 // ---------------------------------------------------------------------------
 
 describe('parseDataUrlToBytes', () => {
+	it('decodes persisted URL-encoded SVG icons without losing Unicode', () => {
+		const svg = '<svg xmlns="http://www.w3.org/2000/svg"><title>Été</title></svg>';
+		const result = parseDataUrlToBytes(
+			`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
+		);
+		expect(result?.extension).toBe('svg');
+		expect(result && new TextDecoder().decode(result.bytes)).toBe(svg);
+		expect(parseDataUrlToBytes('data:image/svg+xml;charset=utf-8,%broken')).toBeNull();
+	});
 	it('returns null for non-data-url strings', () => {
 		expect(parseDataUrlToBytes('https://example.com/image.png')).toBeNull();
 	});

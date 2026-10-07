@@ -139,4 +139,165 @@ describe('selectionOverlay', () => {
 		window.dispatchEvent(pointer('pointerup', { clientX: 1, clientY: 1 }));
 		wrapper.unmount();
 	});
+
+	// A press that never leaves the dead zone is a tap, not a drag, and the
+	// overlay is what turns "click an already-selected element again" into an
+	// inline edit. Nothing else in the app can emit this.
+	it('treats a tap that never moved as a request to edit, not a transform', async () => {
+		const wrapper = mount(SelectionOverlay, {
+			attachTo: document.body,
+			props: { elements: [el()], selectedIds: ['s1'], zoom: 1 },
+		});
+		const body = wrapper.find('.pptx-vue-selection-body');
+		body.element.dispatchEvent(pointer('pointerdown', { clientX: 0, clientY: 0 }));
+		window.dispatchEvent(pointer('pointerup', { clientX: 0, clientY: 0 }));
+		await wrapper.vm.$nextTick();
+
+		expect(wrapper.emitted('requestEdit')?.[0]?.[0]).toStrictEqual({ id: 's1' });
+		expect(wrapper.emitted('transformEnd')).toBeFalsy();
+		wrapper.unmount();
+	});
+
+	// The inspector's Lock toggle wrote `locks` that the overlay never read, so a
+	// shape the author pinned still offered all nine transform affordances.
+	it('hides the resize handles for a noResize element', () => {
+		const wrapper = mount(SelectionOverlay, {
+			props: {
+				elements: [el({ locks: { noResize: true } })],
+				selectedIds: ['s1'],
+				zoom: 1,
+			},
+		});
+		expect(wrapper.findAll('.pptx-vue-resize-handle')).toHaveLength(0);
+		// Each lock gates exactly one gesture: rotation is still on offer.
+		expect(wrapper.find('.pptx-vue-rotate-knob').exists()).toBeTruthy();
+	});
+
+	it('hides the rotate knob for a noRotation element', () => {
+		const wrapper = mount(SelectionOverlay, {
+			props: {
+				elements: [el({ locks: { noRotation: true } })],
+				selectedIds: ['s1'],
+				zoom: 1,
+			},
+		});
+		expect(wrapper.find('.pptx-vue-rotate-knob').exists()).toBeFalsy();
+		expect(wrapper.findAll('.pptx-vue-resize-handle')).toHaveLength(8);
+	});
+
+	it('hides every transform affordance for a noSelect element', () => {
+		const wrapper = mount(SelectionOverlay, {
+			props: {
+				elements: [el({ locks: { noSelect: true } })],
+				selectedIds: ['s1'],
+				zoom: 1,
+			},
+		});
+		expect(wrapper.findAll('.pptx-vue-resize-handle')).toHaveLength(0);
+		expect(wrapper.find('.pptx-vue-rotate-knob').exists()).toBeFalsy();
+	});
+
+	// The framework-neutral e2e contract: a selected roundRect must expose a
+	// control named "Adjust shape" that drives the corner radius.
+	it('exposes the adjust handle for a roundRect and drags its corner radius', async () => {
+		const wrapper = mount(SelectionOverlay, {
+			attachTo: document.body,
+			props: {
+				elements: [el({ shapeType: 'roundRect', shapeAdjustments: { adj: 16667 } })],
+				selectedIds: ['s1'],
+				zoom: 1,
+			},
+		});
+		const adjust = wrapper.find('.pptx-vue-adjust-handle');
+		expect(adjust.exists()).toBeTruthy();
+		expect(adjust.attributes('aria-label')).toBe('Adjust shape');
+
+		adjust.element.dispatchEvent(pointer('pointerdown', { clientX: 0, clientY: 0 }));
+		window.dispatchEvent(pointer('pointermove', { clientX: 20, clientY: 0 }));
+		window.dispatchEvent(pointer('pointerup', { clientX: 20, clientY: 0 }));
+		await wrapper.vm.$nextTick();
+
+		expect(wrapper.emitted('adjustStart')?.[0]?.[0]).toStrictEqual({ id: 's1' });
+		const ends = wrapper.emitted('adjustEnd') ?? [];
+		const adjustments = (ends[0]?.[0] as { adjustments: Record<string, number> } | undefined)
+			?.adjustments;
+		// 200x100 box, so ss = 100 px per 100000 guide units: +20 px is +20000.
+		expect(adjustments?.adj).toBe(36667);
+		wrapper.unmount();
+	});
+
+	// A preset with several `a:avLst` guides must offer one diamond per guide.
+	it('exposes one adjust handle per adjustable parameter', () => {
+		const wrapper = mount(SelectionOverlay, {
+			props: {
+				elements: [el({ shapeType: 'rightArrow' })],
+				selectedIds: ['s1'],
+				zoom: 1,
+			},
+		});
+		const keys = wrapper
+			.findAll('.pptx-vue-adjust-handle')
+			.map((h) => h.attributes('data-pptx-adjust-key'));
+		expect(keys).toStrictEqual(['adj1', 'adj2']);
+	});
+
+	it('offers no adjust handle for a plain rect', () => {
+		const wrapper = mount(SelectionOverlay, {
+			props: { elements: [el({ shapeType: 'rect' })], selectedIds: ['s1'], zoom: 1 },
+		});
+		expect(wrapper.find('.pptx-vue-adjust-handle').exists()).toBeFalsy();
+	});
+
+	it('hides the adjust handle for a shape locked with noAdjustHandles', () => {
+		const wrapper = mount(SelectionOverlay, {
+			props: {
+				elements: [el({ shapeType: 'roundRect', locks: { noAdjustHandles: true } })],
+				selectedIds: ['s1'],
+				zoom: 1,
+			},
+		});
+		expect(wrapper.find('.pptx-vue-adjust-handle').exists()).toBeFalsy();
+	});
+
+	it('rotates about the box centre, and snaps to 15 degrees with shift held', async () => {
+		const wrapper = mount(SelectionOverlay, {
+			attachTo: document.body,
+			props: { elements: [el()], selectedIds: ['s1'], zoom: 1 },
+		});
+		// Rotation is the one gesture that maps client coords through the overlay
+		// root, so the root's rect has to be believable; happy-dom reports zeroes.
+		const root = wrapper.find('[data-testid="selection-overlay"]').element;
+		vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({
+			left: 0,
+			top: 0,
+			right: 800,
+			bottom: 600,
+			width: 800,
+			height: 600,
+			x: 0,
+			y: 0,
+			toJSON: () => ({}),
+		} as DOMRect);
+
+		const knob = wrapper.find('.pptx-vue-rotate-knob');
+		knob.element.dispatchEvent(pointer('pointerdown', { clientX: 200, clientY: 100 }));
+		// The box spans (100,100)-(300,200), so its centre is (200,150). A pointer
+		// straight to the right of the centre is 90 degrees from straight up.
+		window.dispatchEvent(pointer('pointermove', { clientX: 400, clientY: 150 }));
+		await wrapper.vm.$nextTick();
+
+		const moves = wrapper.emitted('transform');
+		const rotated = moves?.[moves.length - 1]?.[0] as { rotation: number };
+		expect(rotated.rotation).toBeCloseTo(90, 5);
+
+		// Shift snaps to the nearest 15-degree step.
+		window.dispatchEvent(pointer('pointermove', { clientX: 400, clientY: 130, shiftKey: true }));
+		await wrapper.vm.$nextTick();
+		const all = wrapper.emitted('transform');
+		const snapped = all?.[all.length - 1]?.[0] as { rotation: number };
+		expect(snapped.rotation % 15).toBeCloseTo(0, 5);
+
+		window.dispatchEvent(pointer('pointerup', { clientX: 400, clientY: 130 }));
+		wrapper.unmount();
+	});
 });

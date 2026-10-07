@@ -7,12 +7,19 @@
  *
  * @module PptxSlideLoaderService
  */
+import { applyBackgroundFillToShapes } from '../core/builders/background-fill-shapes';
+import { applyHiddenFlagFromRawXml } from '../core/builders/element-hidden-flag';
 import type { PptxSlide, XmlObject } from '../types';
+import { flattenElementsDeep } from '../utils/flatten-elements';
 import { parseSlideDrawingGuides } from '../utils/guide-utils';
 import { loadSlideSynchronization } from '../utils/slide-synchronization';
 import { loadLegacyVmlDrawings } from '../utils/vml-drawing-loader';
+import { mergeNativeBuildTemplatesIntoEditorAnimations } from './animation-build-template-merge';
+import { mergeNativeSoundIntoEditorAnimations } from './animation-sound-merge';
 import { reconcileAnimationTargets } from './animation-target-reconcile';
+import { computeAnimationTimelineOrder } from './animation-timeline-anchors';
 import type { IPptxSlideLoaderService, PptxSlideLoaderParams } from './slide-loader-types';
+import { readCommonSlideDataName } from './slide-name';
 
 export type {
 	PptxMediaTimingEntry,
@@ -177,16 +184,25 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 		// Phase 2 Stream B / C-H4.
 		await params.setActiveMasterForSlide?.(path);
 
-		// Use try/finally to ensure theme override state is always restored
-		let restoreThemeOverride: (() => void) | undefined;
+		// Use try/finally to ensure theme override state is always restored.
+		// Restores run in reverse order of application (slide first, then
+		// layout), so each one puts back exactly the state it replaced.
+		const restoreThemeOverrides: Array<() => void> = [];
 		try {
 			// Apply layout-level theme overrides if present
 			const layoutPathForOverride = params.findLayoutPathForSlide(path);
 			if (layoutPathForOverride) {
 				const themeOverride = await params.loadThemeOverride(layoutPathForOverride);
 				if (themeOverride) {
-					restoreThemeOverride = params.applyThemeOverrideState(themeOverride);
+					restoreThemeOverrides.push(params.applyThemeOverrideState(themeOverride));
 				}
+			}
+			// A slide can carry its OWN `themeOverride` relationship (a pasted
+			// slide keeping its source deck's colours). It sits on top of the
+			// layout's, so it is applied second and wins on overlapping keys.
+			const slideThemeOverride = await params.loadThemeOverride(path);
+			if (slideThemeOverride) {
+				restoreThemeOverrides.push(params.applyThemeOverrideState(slideThemeOverride));
 			}
 
 			// Layout parsing seeds placeholder defaults consumed by slide parsing.
@@ -205,10 +221,22 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 				params.enrichOleElementsWithEmbeddedData(slideElements, path),
 			]);
 
-			// Merge layout elements (behind) with slide elements (on top)
-			const elements = [...layoutElements, ...slideElements];
+			// Merge layout elements (behind) with slide elements (on top),
+			// unless the slide opted out. `p:sld/@showMasterSp="0"` is
+			// PowerPoint's Design > Format Background > "Hide background
+			// graphics": the slide keeps its own content and its inherited
+			// placeholders, but the decorative shapes drawn on the layout and
+			// master are not displayed (ECMA-376 §19.3.1.38). The layout-level
+			// equivalent is honoured inside `getLayoutElements`; the parse
+			// itself still runs, because it is what seeds the placeholder
+			// defaults the slide's own shapes inherit from.
+			const showMasterShapes = params.extractShowMasterShapes(slideXmlObj);
+			const elements =
+				showMasterShapes === false ? [...slideElements] : [...layoutElements, ...slideElements];
 			const ownBackgroundColor = params.extractBackgroundColor(slideXmlObj);
 			const ownBackgroundGradient = params.extractBackgroundGradient(slideXmlObj);
+			let ownBackgroundImage: string | undefined;
+			let backgroundImageProperties: PptxSlide['backgroundImageProperties'];
 			const [
 				backgroundColor,
 				backgroundGradient,
@@ -225,14 +253,35 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 					? Promise.resolve(ownBackgroundGradient)
 					: params.getLayoutBackgroundGradient(path),
 				(async () => {
-					const ownBackgroundImage = await params.extractBackgroundImage(slideXmlObj, path);
-					return ownBackgroundImage || params.getLayoutBackgroundImage(path);
+					const own = await params.extractBackgroundImage(slideXmlObj, path);
+					// Kept, not just consumed: whether the image was the slide's own
+					// is half the "did this slide author a background" question.
+					ownBackgroundImage = own;
+					if (own) {
+						backgroundImageProperties = params.extractBackgroundImageProperties(slideXmlObj);
+						return own;
+					}
+					backgroundImageProperties = await params.getLayoutBackgroundImageProperties(path);
+					return params.getLayoutBackgroundImage(path);
 				})(),
 				params.extractSlideNotes(path),
 				params.extractSlideComments(path),
 				params.extractModernSlideComments(path),
 				params.parseSlideCustomerData(slideXmlObj, path),
 			]);
+
+			// Everything above resolved through the inheritance chain, because a
+			// renderer needs one paintable value. The save writer needs the other
+			// half of the story: whether the slide authored any of it, or is just
+			// showing what its layout and master provide. Without this record it
+			// wrote the resolved colour back as a slide-level `p:bg`, which
+			// outranks both and pinned every slide to flat white.
+			params.rememberSlideBackgroundOrigin(path, {
+				authored: Boolean(ownBackgroundColor || ownBackgroundGradient || ownBackgroundImage),
+				color: backgroundColor,
+				gradient: backgroundGradient || undefined,
+				image: backgroundImage,
+			});
 
 			// Merge modern and legacy comments; prefer separate lists when both exist
 			const comments =
@@ -242,18 +291,54 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 			const backgroundPattern = params.extractBackgroundPattern(slideXmlObj);
 			const backgroundShadeToTitle = params.extractBackgroundShadeToTitle(slideXmlObj);
 			const backgroundShowAnimation = params.extractBackgroundShowAnimation(slideXmlObj);
-			const showMasterShapes = params.extractShowMasterShapes(slideXmlObj);
+			const showMasterPhAnim = params.extractShowMasterPhAnim(slideXmlObj);
 			const transition = params.parseSlideTransition(slideXmlObj, path);
-			const animations = params.parseEditorAnimations(slideXmlObj);
-			const nativeAnimations = params.parseNativeAnimations(slideXmlObj);
+			let animations = params.parseEditorAnimations(slideXmlObj);
+			const nativeAnimations = params.parseNativeAnimations(slideXmlObj, path);
+			const rawTiming = (slideXmlObj['p:sld'] as XmlObject | undefined)?.['p:timing'] as
+				| XmlObject
+				| undefined;
+			// Re-ground each editor animation's `order` in the live `p:timing`
+			// tree, and collect anchors for the deck's own (non-editor) effect
+			// groups, BEFORE the id-space rewrite below: both operate on the raw
+			// `spid` ownership keys the tree itself uses. Without this, `order`
+			// stays whatever a previous save's editor-only counter happened to
+			// record, which is not comparable to a native group's position, so
+			// the authoring UI could never place an effect relative to one.
+			let animationTimelineAnchors: PptxSlide['animationTimelineAnchors'];
+			if (rawTiming) {
+				const timeline = computeAnimationTimelineOrder(rawTiming, animations ?? []);
+				animations = timeline.animations;
+				animationTimelineAnchors = timeline.anchors.length > 0 ? timeline.anchors : undefined;
+			}
 			// Reconcile animation shape references (native cNvPr ids in
 			// `p:spTgt/@spid`) against the positional `element.id`s assigned on
 			// load, and stamp each element's `shapeId`. Without this the animation
 			// target ids never match any loaded element id, so nothing animates.
-			reconcileAnimationTargets(elements, nativeAnimations, animations);
-			const rawTiming = (slideXmlObj['p:sld'] as XmlObject | undefined)?.['p:timing'] as
-				| XmlObject
-				| undefined;
+			reconcileAnimationTargets(elements, nativeAnimations, animations, animationTimelineAnchors);
+			// See `animation-sound-merge`: without this, the surgical timing writer
+			// would delete a deck's own effect sound the first time the user edits
+			// any other field on that effect via the animation panel.
+			mergeNativeSoundIntoEditorAnimations(nativeAnimations, animations);
+			// See `animation-build-template-merge`: seeds a loaded per-build-level
+			// `p:tmplLst` onto the editor list so a full timing-tree rebuild (no
+			// prior `p:timing` on the slide) can re-emit it via `buildBuildListXml`.
+			mergeNativeBuildTemplatesIntoEditorAnimations(nativeAnimations, animations);
+
+			// PowerPoint's Selection Pane eye toggle lives on `p:cNvPr/@hidden`.
+			// Lift it onto the model here rather than in each per-type parser: they
+			// all capture the whole shape node on `element.rawXml`, so one pass
+			// covers shapes, pictures, connectors, graphic frames and groups.
+			applyHiddenFlagFromRawXml(elements);
+
+			// `<p:sp useBgFill="1">` paints the slide background, which is only
+			// resolvable now: it may be inherited from the layout or master.
+			applyBackgroundFillToShapes(elements, {
+				backgroundColor,
+				backgroundGradient: backgroundGradient || undefined,
+				backgroundImage,
+				backgroundPattern,
+			});
 
 			const drawingGuides = parseSlideDrawingGuides(slideXmlObj);
 
@@ -272,7 +357,22 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 			return {
 				id: path,
 				rId,
+				// `p:sldIdLst/p:sldId/@id`, the numeric key sections and section
+				// zooms name slides by. It is NOT derivable from the slide part
+				// (`p:sld` carries no id), so anything that has to write a
+				// section's membership needs it carried on the model.
+				slideId: slideId || undefined,
 				slideNumber: slideIndex + 1,
+				// The slide -> slideLayout relationship, kept on the loaded model so
+				// the editor can mark the active entry in the layout gallery and
+				// scope the offered layouts to this slide's master. Resolved above
+				// for the theme override; the field stayed unset until now, so
+				// nothing downstream could tell which layout a slide was using.
+				layoutPath: layoutPathForOverride,
+				// `p:cSld/@name`, the author-facing slide name PowerPoint shows in
+				// the Selection Pane and Outline view and that section zooms and
+				// VBA address slides by. Layouts already round-trip theirs.
+				name: readCommonSlideDataName(slideXmlObj),
 				hidden,
 				sectionId: sectionMeta?.sectionId,
 				sectionName: sectionMeta?.sectionName,
@@ -280,8 +380,10 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 				backgroundColor,
 				backgroundGradient: backgroundGradient || undefined,
 				backgroundImage,
+				backgroundImageProperties,
 				transition,
 				animations,
+				animationTimelineAnchors,
 				nativeAnimations,
 				rawTiming: rawTiming || undefined,
 				notes: notesResult.notes,
@@ -294,6 +396,7 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 				backgroundShadeToTitle: backgroundShadeToTitle ?? undefined,
 				backgroundShowAnimation: backgroundShowAnimation ?? undefined,
 				showMasterShapes: showMasterShapes ?? undefined,
+				showMasterPhAnim: showMasterPhAnim ?? undefined,
 				guides: drawingGuides.length > 0 ? drawingGuides : undefined,
 				customerData: customerData.length > 0 ? customerData : undefined,
 				activeXControls: activeXControls.length > 0 ? activeXControls : undefined,
@@ -301,8 +404,8 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 				slideSynchronization,
 			};
 		} finally {
-			if (restoreThemeOverride) {
-				restoreThemeOverride();
+			for (const restore of restoreThemeOverrides.reverse()) {
+				restore();
 			}
 			params.setCurrentSlideClrMapOverride(null);
 		}
@@ -323,7 +426,9 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 		params: PptxSlideLoaderParams,
 	): Promise<void> {
 		for (const slide of slides) {
-			for (const element of slide.elements) {
+			// Same tree walk as `enrichChartData`: grouped SmartArt is just as
+			// reachable as a grouped chart and had the same enrichment gap.
+			for (const element of flattenElementsDeep(slide.elements)) {
 				if (element.type !== 'smartArt' || element.smartArtData) {
 					continue;
 				}
@@ -357,7 +462,11 @@ export class PptxSlideLoaderService implements IPptxSlideLoaderService {
 	 */
 	private async enrichChartData(slides: PptxSlide[], params: PptxSlideLoaderParams): Promise<void> {
 		for (const slide of slides) {
-			for (const element of slide.elements) {
+			// Walk the tree, not the top level: a chart the user dropped into a
+			// group lives in `group.children` and would otherwise never be
+			// enriched, rendering as a placeholder while an identical ungrouped
+			// chart rendered fine.
+			for (const element of flattenElementsDeep(slide.elements)) {
 				if (element.type !== 'chart' || element.chartData) {
 					continue;
 				}

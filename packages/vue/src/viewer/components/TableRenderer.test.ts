@@ -95,6 +95,13 @@ describe('tableRenderer', () => {
 		expect(wrapper.find('table').exists()).toBeTruthy();
 	});
 
+	it('declares the shared default font family on the table root', () => {
+		// Without it an unstyled cell inherits the HOST chrome's font stack, and
+		// the same deck measured different type metrics in every binding.
+		const wrapper = mount(TableRenderer, { props: { element: table(basicGrid), zIndex: 0 } });
+		expect(wrapper.get('table').attributes('style')).toContain('Segoe UI');
+	});
+
 	it('renders the right number of rows and cells for a basic grid', () => {
 		const wrapper = mount(TableRenderer, { props: { element: table(basicGrid), zIndex: 0 } });
 		expect(wrapper.findAll('tr')).toHaveLength(2);
@@ -164,6 +171,15 @@ describe('tableRenderer', () => {
 		expect(cell.attributes('style')).toContain('background-color: #ff0000');
 	});
 
+	it('renders fractional cell font sizes in PowerPoint points', () => {
+		const sized: PptxTableData = {
+			columnWidths: [1],
+			rows: [{ cells: [{ text: 'Sized', style: { fontSize: 14.5 } }] }],
+		};
+		const wrapper = mount(TableRenderer, { props: { element: table(sized), zIndex: 0 } });
+		expect(wrapper.get('td').attributes('style')).toContain('font-size: 14.5pt');
+	});
+
 	it('defaults body-cell text to the dark slide colour when none is set', () => {
 		// Without this fallback an unstyled cell inherits the dark-UI chrome
 		// `foreground` (near-white) and is invisible on a light table.
@@ -184,6 +200,41 @@ describe('tableRenderer', () => {
 		const style = wrapper.get('td').attributes('style') ?? '';
 		expect(style).toContain('color: #ff0000');
 		expect(style).not.toContain('#111827');
+	});
+
+	it('renders a resolved cell image fill as a cover background', () => {
+		const imaged: PptxTableData = {
+			columnWidths: [1],
+			rows: [
+				{
+					cells: [
+						{
+							text: 'Photo',
+							style: {
+								fillMode: 'image',
+								backgroundImageFillData: 'data:image/png;base64,AAAA',
+							},
+						},
+					],
+				},
+			],
+		};
+		const wrapper = mount(TableRenderer, { props: { element: table(imaged), zIndex: 0 } });
+		const style = wrapper.get('td').attributes('style') ?? '';
+		expect(style).toContain('background-image: url(');
+		expect(style).toContain('data:image/png;base64,AAAA');
+		expect(style).toContain('background-size: cover');
+	});
+
+	it('renders an explicit zero cell margin as zero padding', () => {
+		const dense: PptxTableData = {
+			columnWidths: [1],
+			rows: [{ cells: [{ text: 'Dense', style: { marginLeft: 0, marginTop: 0 } }] }],
+		};
+		const wrapper = mount(TableRenderer, { props: { element: table(dense), zIndex: 0 } });
+		const style = wrapper.get('td').attributes('style') ?? '';
+		expect(style).toContain('padding-left: 0px');
+		expect(style).toContain('padding-top: 0px');
 	});
 
 	it('applies header-row banding (bold + background) when firstRowHeader is set', () => {
@@ -531,6 +582,19 @@ describe('tableRenderer', () => {
 		expect(wrapper.find('input.pptx-vue-table__cell-input').exists()).toBeFalsy();
 	});
 
+	// G8 (OpenXML parity audit, D3): a:graphicFrameLocks/@noDrilldown was
+	// parsed but never enforced - a cell was still double-click editable on a
+	// locked table.
+	it('does not enter edit mode when noDrilldown is set', async () => {
+		const commit = vi.fn();
+		const wrapper = mount(TableRenderer, {
+			props: { element: table(basicGrid, { locks: { noDrilldown: true } }), zIndex: 0 },
+			global: { provide: { [TableCellEditKey as symbol]: { canEdit: () => true, commit } } },
+		});
+		await wrapper.findAll('td')[0].trigger('dblclick');
+		expect(wrapper.find('input.pptx-vue-table__cell-input').exists()).toBeFalsy();
+	});
+
 	it('stops pointerdown propagation from the cell input so the canvas cannot steal focus', async () => {
 		const { wrapper } = mountEditable(basicGrid);
 		await wrapper.findAll('td')[0].trigger('dblclick');
@@ -598,6 +662,46 @@ describe('tableRenderer', () => {
 		expect(selection.value?.selectedCells).toHaveLength(4);
 		// Non-anchor cells in the rect get the in-selection highlight.
 		expect(wrapper.findAll('td')[3].classes()).toContain('pptx-vue-table__cell--in-selection');
+	});
+
+	/**
+	 * The gesture, not the maths.
+	 *
+	 * `computeCellSelection` was always correct, and the test above always
+	 * passed, because a mounted `TableRenderer` has no canvas above it. In the
+	 * real viewer the `<td>` press bubbles to `<main>`'s `@pointerdown`, whose
+	 * additive branch TOGGLED this table out of the slide selection; the
+	 * selection watcher then nulled the cell selection, so the click handler
+	 * found no anchor and could only ever select one cell. Block merge was
+	 * unreachable in Vue: its context menu offered "merge right / merge down"
+	 * where React offered "merge selected cells". A Shift-press inside a cell of
+	 * the selected table must therefore be CONSUMED before it reaches an
+	 * ancestor.
+	 */
+	it('consumes a shift+pointerdown inside a cell so the canvas cannot toggle the table', async () => {
+		const { wrapper } = mountSelectable(basicGrid),
+			reachedCanvas = vi.fn();
+		wrapper.element.addEventListener('pointerdown', reachedCanvas);
+
+		// A plain press still reaches the canvas: that is what selects the table
+		// and arms the drag.
+		await wrapper.findAll('td')[0].trigger('pointerdown', { pointerType: 'mouse' });
+		expect(reachedCanvas).toHaveBeenCalledOnce();
+
+		// Anchor the range, then Shift-press: this one must stop at the cell.
+		await wrapper.findAll('td')[0].trigger('click');
+		await wrapper.findAll('td')[3].trigger('pointerdown', { pointerType: 'mouse', shiftKey: true });
+		expect(reachedCanvas).toHaveBeenCalledOnce();
+	});
+
+	it('lets a shift+pointerdown through when there is no range to extend', async () => {
+		const { wrapper } = mountSelectable(basicGrid),
+			reachedCanvas = vi.fn();
+		wrapper.element.addEventListener('pointerdown', reachedCanvas);
+		// No cell selected yet, so the press is an ordinary element press and the
+		// canvas must still see it (otherwise the table could never be selected).
+		await wrapper.findAll('td')[3].trigger('pointerdown', { pointerType: 'mouse', shiftKey: true });
+		expect(reachedCanvas).toHaveBeenCalledOnce();
 	});
 
 	it('does not select cells when no selection context is provided', async () => {

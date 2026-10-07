@@ -64,6 +64,73 @@ describe('editorTransitionController', () => {
 		expect(editor.slides[0].transition?.durationMs).toBe(0);
 	});
 
+	it('applyRibbonDraft writes the whole tab draft, advance modifiers included', () => {
+		const editor = make();
+		editor.setSlides([slide('a')]);
+		editor.transitionOps.applyRibbonDraft(
+			{
+				type: 'fade',
+				durationSec: 1.25,
+				advanceOnClick: false,
+				advanceAfter: true,
+				advanceAfterText: '00:03.00',
+			},
+			false,
+		);
+		expect(editor.slides[0].transition).toStrictEqual({
+			type: 'fade',
+			durationMs: 1250,
+			advanceOnClick: false,
+			advanceAfterMs: 3000,
+		});
+	});
+
+	it('applyRibbonDraft merges onto every slide, keeping each authored direction', () => {
+		const editor = make();
+		editor.setSlides([slide('a', { transition: { type: 'push', direction: 'l' } }), slide('b')]);
+		editor.transitionOps.applyRibbonDraft(
+			{
+				type: 'cut',
+				durationSec: 0,
+				advanceOnClick: true,
+				advanceAfter: false,
+				advanceAfterText: '00:00.00',
+			},
+			true,
+		);
+		expect(editor.slides[0].transition?.direction).toBe('l');
+		expect(editor.slides[0].transition?.type).toBe('cut');
+		expect(editor.slides[1].transition?.type).toBe('cut');
+		// One undoable step for the whole apply-to-all, not one per slide.
+		editor.undo();
+		expect(editor.slides[1].transition).toBeUndefined();
+	});
+
+	it('applyChange merges a raw partial change onto the current slide, undoably', () => {
+		const editor = make();
+		editor.setSlides([slide('a', { transition: { type: 'fade', durationMs: 500 } })]);
+		editor.transitionOps.applyChange({
+			soundData: 'data:audio/wav;base64,AA==',
+			soundFileName: 'x.wav',
+		});
+		expect(editor.slides[0].transition).toMatchObject({
+			type: 'fade',
+			durationMs: 500,
+			soundData: 'data:audio/wav;base64,AA==',
+			soundFileName: 'x.wav',
+		});
+		editor.undo();
+		expect(editor.slides[0].transition?.soundData).toBeUndefined();
+	});
+
+	it('applyChange is a no-op when not editable', () => {
+		const editor = make();
+		editor.setSlides([slide('a')]);
+		editor.editable = false;
+		editor.transitionOps.applyChange({ soundFileName: 'x.wav' });
+		expect(editor.slides[0].transition).toBeUndefined();
+	});
+
 	it('is a no-op when not editable', () => {
 		const editor = make();
 		editor.setSlides([slide('a')]);

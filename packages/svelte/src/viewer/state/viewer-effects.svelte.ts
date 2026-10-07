@@ -4,6 +4,11 @@ import type { Translator } from '../../i18n/translator';
 import type { EditorController } from '../editor/editor-controller.svelte';
 import type { EditorState } from '../editor/editor-state.svelte';
 import type { ViewerLoadDetail } from '../types';
+import {
+	removeGoogleWebfontsLink,
+	resolveWebfontHref,
+	syncGoogleWebfontsLink,
+} from './google-webfonts';
 import type { PresentationLoader } from './presentation-loader.svelte';
 import type { ViewerState } from './viewer-state.svelte';
 
@@ -11,6 +16,7 @@ export interface ViewerEffectsDeps {
 	getSource(): Uint8Array | ArrayBuffer | null | undefined;
 	getEditable(): boolean;
 	getInitialSlide(): number;
+	getRemoteFonts(): boolean;
 	getTranslator(): Translator;
 	loader: PresentationLoader;
 	viewer: ViewerState;
@@ -24,7 +30,8 @@ export interface ViewerEffectsDeps {
 	 * state, before the commit's effects flush. Collaboration re-adopts the
 	 * shared doc's slides here so a slow bootstrap load that lands mid-session
 	 * cannot clobber content already synced from the room (and the placeholder
-	 * deck is never published into the doc).
+	 * deck is never published into the doc); the per-load session seeding that
+	 * belongs to the new deck (the authored custom show) rides along.
 	 */
 	onContentApplied?(): void;
 }
@@ -66,7 +73,8 @@ export function useViewerEffects(deps: ViewerEffectsDeps): void {
 			// untrack: load()'s synchronous prefix reads loader state (e.g. the
 			// previous handler); without this the effect would re-run, and
 			// re-load, every time a load commits.
-			untrack(() => void deps.loader.load(raw));
+			// The host's own deck: a room that already holds slides outranks it.
+			untrack(() => void deps.loader.load(raw, 'bootstrap'));
 		}
 	});
 
@@ -91,6 +99,22 @@ export function useViewerEffects(deps: ViewerEffectsDeps): void {
 					deps.loader.presentationProperties,
 					deps.loader.customShows,
 				);
+				// Seeded separately from setSlides for the same reason as the tag
+				// parts below: the Home tab's font dropdown leads with the deck's
+				// theme fonts and the families it embeds, neither of which is
+				// content the undo stack owns.
+				deps.editor.theme = deps.loader.presentationTheme;
+				// Also reseeds the File > Fonts "Embed fonts" toggle: a deck that
+				// arrives with embedded fonts keeps them on save, so the switch must
+				// start "on" or turning it off would be the only honest position.
+				deps.editor.adoptEmbeddedFontFamilies(deps.loader.embeddedFonts.map((font) => font.name));
+				// Seeded separately from setSlides (which clears them) so the
+				// parsed tag parts survive the load without becoming an undo step.
+				deps.editor.adoptTagCollections(deps.loader.tagCollections);
+				// Wave 4 B5: seed the comment @-mention typeahead's author list.
+				// Read-only round-trip metadata, like `theme` above, not an undo step.
+				deps.editor.modernCommentAuthors = deps.loader.modernCommentAuthors;
+				deps.editor.commentAuthors = deps.loader.commentAuthors;
 				// Must run before this commit's effects flush: a live collab
 				// session re-adopts the shared doc's slides so the load cannot
 				// clobber (or publish over) already-synced room content.
@@ -99,6 +123,7 @@ export function useViewerEffects(deps: ViewerEffectsDeps): void {
 			deps.getOnload()?.({
 				slideCount: deps.loader.slides.length,
 				canvasSize: deps.loader.canvasSize,
+				compatibilityWarnings: deps.loader.compatibilityWarnings,
 			});
 		}
 	});
@@ -121,4 +146,28 @@ export function useViewerEffects(deps: ViewerEffectsDeps): void {
 			deps.getOnslidechange()?.(index);
 		}
 	});
+
+	// Google-hosted webfonts for referenced families that are neither installed
+	// nor embedded (Microsoft 365 "cloud fonts" have no browser equivalent);
+	// the probe is session-cached, so only unseen families hit the network.
+	if (typeof document !== 'undefined') {
+		$effect(() => {
+			if (!deps.getRemoteFonts()) {
+				removeGoogleWebfontsLink(document);
+				return;
+			}
+			let cancelled = false;
+			void resolveWebfontHref(deps.loader.slides, deps.loader.embeddedFonts).then((href) => {
+				if (cancelled) {
+					return null;
+				}
+				syncGoogleWebfontsLink(document, href);
+				return href;
+			});
+			return () => {
+				cancelled = true;
+				removeGoogleWebfontsLink(document);
+			};
+		});
+	}
 }

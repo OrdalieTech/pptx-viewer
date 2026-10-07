@@ -8,9 +8,20 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import { PRESET_ID_TO_EFFECT } from './animation-presets';
 
+// entr.47 ("Descend", verified over COM) plays back as a reuse of the generic
+// `flyInTop` keyframe (a documented approximation, not a dedicated one), but
+// is not itself authorable yet: the UI's "Fly In" picker already owns
+// `flyIn`/entr.2 with a direction subtype, and entr.61's pre-existing
+// `descendIn` name means a naive entr.47 authoring entry would collide with
+// that assumption rather than resolve it. See the comments beside `swivel`
+// and `descendIn` in `animation-write-mappings.ts` for the full history.
+const PLAYABLE_NOT_YET_AUTHORABLE_ENTR_IDS = ['47'];
+
 describe('pRESET_TO_OOXML', () => {
 	it('should cover all entrance effects from the rendering engine', () => {
-		const renderEntrIds = Object.keys(PRESET_ID_TO_EFFECT.entr);
+		const renderEntrIds = Object.keys(PRESET_ID_TO_EFFECT.entr).filter(
+			(id) => !PLAYABLE_NOT_YET_AUTHORABLE_ENTR_IDS.includes(id),
+		);
 		const writeEntrIds = Object.values(PRESET_TO_OOXML)
 			.filter((m) => m.presetClass === 'entr')
 			.map((m) => String(m.presetId));
@@ -78,10 +89,20 @@ describe('pRESET_TO_OOXML', () => {
 		}
 		for (const [cls, idMap] of byClass) {
 			for (const [id, names] of idMap) {
+				// entr.11 (Flash Once, verified via COM) carries three legacy
+				// aliases (`flashIn`, `flashOnceIn`, `flashBulbIn`) rather than
+				// the usual two, so it gets a wider allowance than the rest.
+				// emph.26 (Pulse, verified via COM + UI Automation to be the SAME
+				// preset as Flash Bulb) similarly carries three: `pulse`
+				// (canonical, the modern ribbon name), `flashBulb` (the older
+				// `MsoAnimEffect` name for the same effect), and the pre-existing,
+				// unverified `bounce` alias (PowerPoint has no real "Bounce"
+				// emphasis effect; see `animation-write-mappings.ts`).
+				const allowance = (cls === 'entr' && id === 11) || (cls === 'emph' && id === 26) ? 3 : 2;
 				expect(
 					names.length,
 					`${cls} presetId=${id} is mapped by multiple presets: ${names.join(', ')}`,
-				).toBeLessThanOrEqual(2); // Allow aliases (e.g., bounce/pulse)
+				).toBeLessThanOrEqual(allowance); // Allow aliases (e.g., bounce/pulse)
 			}
 		}
 	});

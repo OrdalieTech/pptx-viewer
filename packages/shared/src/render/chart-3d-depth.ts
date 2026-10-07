@@ -16,8 +16,15 @@
  */
 import type { PptxChartView3D } from 'pptx-viewer-core';
 
-import { shade, tint } from './chart-palette';
+import type { Chart3DSurfaces } from './chart-3d-surfaces';
+import { build3DSurfacePanels } from './chart-3d-surfaces';
+import type { BarFacePictureContext } from './chart-bar3d-face-picture';
+import { resolveExtrusionFaceFill } from './chart-bar3d-face-picture';
+import { computeSeriesDepth, sortSeriesBackToFront } from './chart-bar3d-series-depth';
+import { shade } from './chart-palette';
+import { applyPieTiltForeshortening, computePieTiltScale } from './chart-pie3d-tilt';
 import type {
+	ChartSvgDef,
 	ChartViewModel,
 	SvgPath,
 	SvgPolygon,
@@ -25,6 +32,8 @@ import type {
 	SvgPrimitive,
 	SvgRect,
 } from './chart-view-model';
+
+export type { BarFacePictureContext } from './chart-bar3d-face-picture';
 
 /** Oblique depth offset vector (px) derived from the chart's view3D. */
 export interface DepthVector {
@@ -57,25 +66,40 @@ export function computeDepthVector(view3D: PptxChartView3D | undefined): DepthVe
 	};
 }
 
-/** Top + right-side extrusion faces for one bar rectangle. */
-function barExtrusion(rect: SvgRect, depth: DepthVector): SvgPolygon[] {
+/**
+ * Top ("end") + right-side extrusion faces for one bar rectangle.
+ *
+ * `picture` (bar3D only) resolves each face's OWN picture-fill targeting
+ * independently of the front rect's (`chart-datapoint-picture-fills.ts`),
+ * via {@link resolveExtrusionFaceFill}: `c:applyToSides`/`c:applyToEnd` paint
+ * the corresponding face with the point's (or series') picture; an
+ * untargeted face keeps the tinted/shaded solid fill it always had.
+ */
+function barExtrusion(
+	rect: SvgRect,
+	depth: DepthVector,
+	picture?: BarFacePictureContext,
+): { polygons: SvgPolygon[]; defs: ChartSvgDef[] } {
 	const { x, y, w, h, fill } = rect;
 	const { dx, dy } = depth;
+	const defs: ChartSvgDef[] = [];
+	const topPoints = `${x},${y} ${x + w},${y} ${x + w + dx},${y + dy} ${x + dx},${y + dy}`;
 	const topFace: SvgPolygon = {
 		kind: 'polygon',
-		points: `${x},${y} ${x + w},${y} ${x + w + dx},${y + dy} ${x + dx},${y + dy}`,
-		fill: tint(fill, 0.22),
+		points: topPoints,
+		fill: resolveExtrusionFaceFill(topPoints, 'end', fill, rect, picture, defs),
 		stroke: 'none',
 		strokeWidth: 0,
 	};
+	const sidePoints = `${x + w},${y} ${x + w},${y + h} ${x + w + dx},${y + h + dy} ${x + w + dx},${y + dy}`;
 	const sideFace: SvgPolygon = {
 		kind: 'polygon',
-		points: `${x + w},${y} ${x + w},${y + h} ${x + w + dx},${y + h + dy} ${x + w + dx},${y + dy}`,
-		fill: shade(fill, 0.25),
+		points: sidePoints,
+		fill: resolveExtrusionFaceFill(sidePoints, 'side', fill, rect, picture, defs),
 		stroke: 'none',
 		strokeWidth: 0,
 	};
-	return [topFace, sideFace];
+	return { polygons: [topFace, sideFace], defs };
 }
 
 /** Translate a generated pie-slice path (`M`/`L`/`A`/`Z` grammar) by (dx, dy). */
@@ -178,26 +202,73 @@ export function applyChart3DDepth(
 	vm: ChartViewModel,
 	chartType: string,
 	view3D: PptxChartView3D | undefined,
+	surfaces?: Chart3DSurfaces,
+	grouping?: 'clustered' | 'stacked' | 'percentStacked',
+	pieCenter?: { cx: number; cy: number },
+	picture?: BarFacePictureContext,
 ): ChartViewModel {
 	const depth = computeDepthVector(view3D);
 	let extrusion: SvgPrimitive[] = [];
+	const extrusionDefs: ChartSvgDef[] = [];
+	let isCartesian = false;
+	let workingVm = vm;
 
 	if (chartType === 'bar3D') {
 		const bars = vm.primitives.filter(
 			(p): p is SvgRect => p.kind === 'rect' && p.part?.role === 'dataPoint',
 		);
-		extrusion = bars.flatMap((r) => barExtrusion(r, depth));
+		const extrudeBar = (rect: SvgRect, barDepth: DepthVector): SvgPolygon[] => {
+			const { polygons, defs } = barExtrusion(rect, barDepth, picture);
+			extrusionDefs.push(...defs);
+			return polygons;
+		};
+		// A stacked (or percent-stacked) 3D column keeps every series' segment
+		// coplanar (they visually belong to one bar), so it uses the chart's one
+		// shared depth vector, same as before. A clustered 3D column lays series
+		// out along PowerPoint's depth ("series") axis, so each series recedes by
+		// its own offset - the single biggest gap between this oblique illusion
+		// and an actual 3D projection: previously every series shared the exact
+		// same depth plane. Series are then painted back-to-front so a nearer
+		// series' extrusion correctly occludes one staggered behind it.
+		if (grouping === 'stacked' || grouping === 'percentStacked') {
+			extrusion = bars.flatMap((r) => extrudeBar(r, depth));
+		} else {
+			const seriesIndexes = [...new Set(bars.map((r) => r.part?.seriesIndex ?? 0))];
+			const seriesCount = seriesIndexes.length;
+			extrusion = sortSeriesBackToFront(seriesIndexes, seriesCount).flatMap((seriesIndex) => {
+				const seriesDepth = computeSeriesDepth(depth, seriesIndex, seriesCount);
+				return bars
+					.filter((r) => (r.part?.seriesIndex ?? 0) === seriesIndex)
+					.flatMap((r) => extrudeBar(r, seriesDepth));
+			});
+		}
+		isCartesian = true;
 	} else if (chartType === 'pie3D') {
-		const slices = vm.primitives.filter((p): p is SvgPath => p.kind === 'path');
+		const tiltScale = computePieTiltScale(view3D);
+		if (pieCenter && tiltScale < 1) {
+			workingVm = applyPieTiltForeshortening(vm, pieCenter.cy, tiltScale);
+		}
+		const slices = workingVm.primitives.filter((p): p is SvgPath => p.kind === 'path');
 		extrusion = pieExtrusion(slices, depth);
 	} else if (chartType === 'line3D' || chartType === 'area3D') {
 		extrusion = ribbonExtrusion(vm.primitives, depth);
+		isCartesian = true;
 	} else {
 		return vm;
 	}
 
-	if (extrusion.length === 0) {
-		return vm;
+	// c:floor / c:sideWall / c:backWall only apply to a cartesian 3D plot
+	// (bar3D/line3D/area3D); pie3D has no plot rectangle to wall in, matching
+	// PowerPoint's own behaviour.
+	const panels =
+		isCartesian && surfaces ? build3DSurfacePanels(workingVm.primitives, surfaces, depth) : [];
+
+	if (extrusion.length === 0 && panels.length === 0) {
+		return workingVm;
 	}
-	return { ...vm, primitives: [...extrusion, ...vm.primitives] };
+	return {
+		...workingVm,
+		primitives: [...panels, ...extrusion, ...workingVm.primitives],
+		...(extrusionDefs.length > 0 ? { defs: [...(workingVm.defs ?? []), ...extrusionDefs] } : {}),
+	};
 }

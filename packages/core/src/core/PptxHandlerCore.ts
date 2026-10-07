@@ -6,12 +6,14 @@ import type {
 	PptxHandlerLoadOptions,
 	PptxHandlerSaveOptions,
 } from './core';
+import { convertPptToPptx, isEncryptedLegacyPpt, isLegacyPpt } from './ppt';
 import type {
 	PptxChartData,
 	PptxCompatibilityWarning,
 	PptxElement,
 	PptxExportOptions,
 	PptxLayoutOption,
+	PptxLayoutPreview,
 	PptxData,
 	PptxSlide,
 	PptxSmartArtData,
@@ -21,6 +23,7 @@ import type {
 	XmlObject,
 } from './types';
 import { detectFileFormat, EncryptedFileError } from './utils/encryption-detection';
+import { parseOle2 } from './utils/ole2-parser';
 import { decryptPptx, encryptPptx } from './utils/ooxml-crypto';
 import type { EncryptionOptions } from './utils/ooxml-crypto';
 import { applyThemeToData } from './utils/theme-switching';
@@ -144,6 +147,32 @@ export class PptxHandlerCore {
 	 */
 	public getLayoutOptions(): PptxLayoutOption[] {
 		return this.runtime.getLayoutOptions();
+	}
+
+	/**
+	 * Build the artwork thumbnails backing the New Slide / Layout galleries.
+	 *
+	 * Parsing happens on first request and is memoised afterwards, so opening
+	 * the gallery costs one pass over the layout parts and reopening it costs
+	 * nothing. Callers that only need one entry should prefer
+	 * {@link getLayoutPreview}.
+	 *
+	 * @param layoutPaths - Restrict the result to these layouts; defaults to
+	 *   every layout in the presentation.
+	 * @returns One {@link PptxLayoutPreview} per resolvable layout.
+	 */
+	public getLayoutPreviews(layoutPaths?: readonly string[]): Promise<PptxLayoutPreview[]> {
+		return this.runtime.getLayoutPreviews(layoutPaths);
+	}
+
+	/**
+	 * Build the artwork thumbnail for a single layout.
+	 *
+	 * @param layoutPath - Archive path of the `p:sldLayout` part.
+	 * @returns The preview, or `null` when the presentation has no such layout.
+	 */
+	public getLayoutPreview(layoutPath: string): Promise<PptxLayoutPreview | null> {
+		return this.runtime.getLayoutPreview(layoutPath);
 	}
 
 	/**
@@ -369,7 +398,30 @@ export class PptxHandlerCore {
 	public async load(data: ArrayBuffer, options: PptxHandlerLoadOptions = {}): Promise<PptxData> {
 		const detection = detectFileFormat(data);
 
-		if (detection.encrypted) {
+		if (detection.format === 'ole') {
+			// A malformed compound file falls through to the encrypted-OOXML
+			// branch, which produces the historical EncryptedFileError.
+			let ole: ReturnType<typeof parseOle2> | undefined;
+			try {
+				ole = parseOle2(data);
+			} catch {
+				ole = undefined;
+			}
+
+			// A legacy PowerPoint 97-2003 (.ppt) binary presentation: convert
+			// it to an in-memory PPTX package and load that. Editing works as
+			// usual; saving produces a .pptx (like modern PowerPoint does).
+			if (ole && isLegacyPpt(ole)) {
+				const wasEncrypted = isEncryptedLegacyPpt(ole);
+				const pptxBytes = await convertPptToPptx(ole, options.password);
+				const result = await this.runtime.load(pptxBytes, options);
+				if (wasEncrypted) {
+					result.isPasswordProtected = true;
+				}
+				return result;
+			}
+
+			// Otherwise the OLE container wraps an encrypted OOXML package.
 			if (!options.password) {
 				throw new EncryptedFileError(
 					'This presentation is encrypted. Provide a password via options.password to open it.',
@@ -587,24 +639,38 @@ export class PptxHandlerCore {
 	}
 
 	/**
-	 * Export selected slides as individual PPTX files.
+	 * Export selected slides to a vector or raster format, keyed by slide index.
 	 *
-	 * Each entry in the returned map is keyed by slide index and contains a
-	 * standalone `Uint8Array` PPTX with only that slide.
+	 * **This does not produce PPTX files.** The previous version of this comment
+	 * said each entry was "a standalone PPTX with only that slide", named the
+	 * option `slideIndexes` (the real field is `slideIndices`), and wrote the
+	 * bytes to `slide_N.pptx`. None of that was ever true: the runtime has
+	 * always taken a `format` of `svg` / `png` / `pdf`. Per-slide PPTX
+	 * extraction is a different operation and is not implemented here.
+	 *
+	 * Only `svg` works without a host-supplied backend, and it works fully:
+	 * the headless {@link SvgExporter} renders it with no DOM. `png` and `pdf`
+	 * THROW, because this package carries no rasteriser; use a viewer binding's
+	 * browser export pipeline, or override `exportSlides` on the runtime with
+	 * your own backend.
 	 *
 	 * @param slides  - Full slide array.
-	 * @param options - Export options (slide indexes, format, etc.).
-	 * @returns A `Map<slideIndex, Uint8Array>` of exported files.
+	 * @param options - Export options (`format`, `slideIndices`, `width`, ...).
+	 * @returns A `Map<slideIndex, Uint8Array>` of exported files. Hidden slides
+	 *   are omitted unless `options.includeHidden` is set, so the map can be
+	 *   smaller than `options.slideIndices`.
+	 * @throws {Error} when `options.format` is `png` or `pdf`.
 	 *
 	 * @example
 	 * ```ts
 	 * const exports = await handler.exportSlides(data.slides, {
-	 *   slideIndexes: [0, 2],
+	 *   format: 'svg',
+	 *   slideIndices: [0, 2],
 	 * });
 	 * for (const [idx, bytes] of exports) {
-	 *   await fs.writeFile(`slide_${idx}.pptx`, Buffer.from(bytes));
+	 *   await fs.writeFile(`slide_${idx}.svg`, Buffer.from(bytes));
 	 * }
-	 * // => Map<number, Uint8Array> — one standalone .pptx per exported slide
+	 * // => Map<number, Uint8Array>: one SVG document per exported slide
 	 * ```
 	 */
 	public async exportSlides(

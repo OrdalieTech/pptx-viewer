@@ -19,6 +19,10 @@ function makeElement(
 		rotation: number;
 		flipHorizontal: boolean;
 		flipVertical: boolean;
+		xEmu: number;
+		yEmu: number;
+		widthEmu: number;
+		heightEmu: number;
 	}>,
 ): PptxElement {
 	return {
@@ -31,6 +35,10 @@ function makeElement(
 		rotation: overrides.rotation,
 		flipHorizontal: overrides.flipHorizontal,
 		flipVertical: overrides.flipVertical,
+		xEmu: overrides.xEmu,
+		yEmu: overrides.yEmu,
+		widthEmu: overrides.widthEmu,
+		heightEmu: overrides.heightEmu,
 	} as unknown as PptxElement;
 }
 
@@ -199,14 +207,40 @@ describe('pptxElementTransformUpdater', () => {
 
 	// ── No-op when no transform node exists ──────────────────────────────
 
-	it('does nothing when shape has no transform node at all', () => {
+	it('keeps an untouched inherited transform implicit', () => {
 		const shape: XmlObject = { 'p:spPr': {} };
-		const element = makeElement({ x: 100, y: 100 });
+		const element = makeElement({
+			x: 100,
+			y: 100,
+			xEmu: 952500,
+			yEmu: 952500,
+			widthEmu: 952500,
+			heightEmu: 952500,
+		});
 		updater.applyTransform(shape, element, EMU_PER_PX);
 		// Should not throw and should not create a transform
 		expect((shape['p:spPr'] as XmlObject)['a:xfrm']).toBeUndefined();
 	});
 
+	it('writes a local transform when an inherited placeholder moves', () => {
+		const shape: XmlObject = { 'p:spPr': {} };
+		updater.applyTransform(
+			shape,
+			makeElement({
+				x: 120,
+				y: 100,
+				xEmu: 952500,
+				yEmu: 952500,
+				widthEmu: 952500,
+				heightEmu: 952500,
+			}),
+			EMU_PER_PX,
+		);
+		expect(((shape['p:spPr'] as XmlObject)['a:xfrm'] as XmlObject)['a:off']).toStrictEqual({
+			'@_x': '1143000',
+			'@_y': '952500',
+		});
+	});
 	// ── Creates a:off / a:ext if missing ─────────────────────────────────
 
 	it('creates a:off and a:ext nodes if they are missing from xfrm', () => {
@@ -236,6 +270,51 @@ describe('pptxElementTransformUpdater', () => {
 		// 10.7 * 9525 = 101917.5 → 101918 (Math.round)
 		expect((xfrm['a:off'] as XmlObject)['@_x']).toBe(String(Math.round(10.7 * EMU_PER_PX)));
 		expect((xfrm['a:off'] as XmlObject)['@_y']).toBe(String(Math.round(20.3 * EMU_PER_PX)));
+	});
+
+	// The model already contains the editor's chosen resize position. Saving must not re-anchor it.
+	it('preserves the model position when a rotated shape is resized', () => {
+		const shape = makeShapeXml();
+		const element = makeElement({
+			x: 400, // unchanged from xEmu (3810000 / 9525 = 400): the resize never touched x
+			y: 133, // unchanged from yEmu (1270000 / 9525 rounds to 133)
+			width: 400, // new width (3810000 / 9525 = 400 exactly)
+			height: 107, // unchanged (1016000 / 9525 rounds to 107)
+			rotation: 90,
+			xEmu: 3810000,
+			yEmu: 1270000,
+			widthEmu: 2540000,
+			heightEmu: 1016000,
+		});
+		updater.applyTransform(shape, element, EMU_PER_PX);
+
+		const xfrm = (shape['p:spPr'] as XmlObject)['a:xfrm'] as XmlObject;
+		expect((xfrm['a:ext'] as XmlObject)['@_cx']).toBe('3810000');
+		expect((xfrm['a:ext'] as XmlObject)['@_cy']).toBe('1016000');
+		expect((xfrm['a:off'] as XmlObject)['@_x']).toBe('3810000');
+		expect((xfrm['a:off'] as XmlObject)['@_y']).toBe('1270000');
+	});
+
+	it('leaves an unrotated resize byte-identical to the pre-existing naive result', () => {
+		const shape = makeShapeXml();
+		const element = makeElement({
+			x: 400,
+			y: 133,
+			width: 400,
+			height: 107,
+			xEmu: 3810000,
+			yEmu: 1270000,
+			widthEmu: 2540000,
+			heightEmu: 1016000,
+		});
+		updater.applyTransform(shape, element, EMU_PER_PX);
+
+		const xfrm = (shape['p:spPr'] as XmlObject)['a:xfrm'] as XmlObject;
+		// No rotation: a:off stays exactly what the naive resolve produces
+		// (x/y unchanged in px, so the exact original EMU is re-emitted).
+		expect((xfrm['a:off'] as XmlObject)['@_x']).toBe('3810000');
+		expect((xfrm['a:off'] as XmlObject)['@_y']).toBe('1270000');
+		expect((xfrm['a:ext'] as XmlObject)['@_cx']).toBe('3810000');
 	});
 
 	// ── Combined position + rotation + flip ──────────────────────────────

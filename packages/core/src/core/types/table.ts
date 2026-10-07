@@ -9,6 +9,10 @@
 // Table types: cells, rows, data, and table style map
 // ==========================================================================
 
+import type { PptxThemeColorRef } from './color-ref';
+import type { ParsedTableStyleEffect } from './table-style-edit';
+import type { TextSegment } from './text';
+
 /**
  * Per-cell visual style for a table cell.
  *
@@ -27,11 +31,17 @@
  * ```
  */
 export interface PptxTableCellStyle {
+	/** Font size in points (`a:rPr@sz / 100`). */
 	fontSize?: number;
 	bold?: boolean;
 	italic?: boolean;
 	underline?: boolean;
 	color?: string;
+	/**
+	 * Font family from the first run's `a:rPr/a:latin@typeface` (falling back to
+	 * `a:ea` / `a:cs`). Per-run families live on {@link PptxTableCellTextRun}.
+	 */
+	fontFamily?: string;
 	/**
 	 * Raw XML colour-choice node preserved from `a:tc/a:txBody/.../a:rPr/a:solidFill`
 	 * for round-trip serialisation. Currently unused by the cell-level writer
@@ -39,6 +49,14 @@ export interface PptxTableCellStyle {
 	 * future expansion alongside the run-properties round-trip path.
 	 */
 	colorXml?: import('./common').XmlObject;
+	/**
+	 * Typed theme colour reference for the cell text colour, set when
+	 * {@link colorXml} is a plain `a:schemeClr`. Wins on save, mirroring
+	 * `TextStyle.colorRef`. Distinct from {@link ParsedTableStyleFill.schemeColor},
+	 * which describes a `ppt/tableStyles.xml` section fill rather than an
+	 * individual cell override.
+	 */
+	colorRef?: PptxThemeColorRef;
 	backgroundColor?: string;
 	/**
 	 * Raw XML colour-choice node preserved from cell `a:tcPr/a:solidFill` for
@@ -46,6 +64,12 @@ export interface PptxTableCellStyle {
 	 * {@link backgroundColor} still matches the original colour.
 	 */
 	backgroundColorXml?: import('./common').XmlObject;
+	/**
+	 * Typed theme colour reference for the cell fill, set when
+	 * {@link backgroundColorXml} is a plain `a:schemeClr`. Wins on save,
+	 * mirroring `ShapeStyle.fillColorRef`.
+	 */
+	backgroundColorRef?: PptxThemeColorRef;
 	borderColor?: string;
 	/** Top border width in px. */
 	borderTopWidth?: number;
@@ -112,8 +136,8 @@ export interface PptxTableCellStyle {
 	textGlowRadius?: number;
 	/** Cell text glow opacity (0-1). */
 	textGlowOpacity?: number;
-	/** Cell fill mode: solid, gradient, pattern, or none. */
-	fillMode?: 'solid' | 'gradient' | 'pattern' | 'none';
+	/** Cell fill mode: solid, gradient, pattern, image, or none. */
+	fillMode?: 'solid' | 'gradient' | 'pattern' | 'image' | 'none';
 	/** Gradient fill stops (colours with positions). */
 	gradientFillStops?: Array<{
 		color: string;
@@ -138,6 +162,23 @@ export interface PptxTableCellStyle {
 	patternFillForeground?: string;
 	/** Pattern fill background colour. */
 	patternFillBackground?: string;
+	/**
+	 * Image fill (`a:tcPr/a:blipFill`, CT_TableCellProperties). Resolved
+	 * archive-relative path (or external `http(s):`/`data:` URL) for the
+	 * cell's background image, from `a:blipFill/a:blip/@r:embed` (or
+	 * `@r:link`). Present when `fillMode` is `'image'`.
+	 *
+	 * The parser resolves this synchronously (path only, no binary read);
+	 * a viewer's load pipeline resolves it further to a displayable
+	 * `data:`/`blob:` URL, written back to {@link backgroundImageFillData}.
+	 */
+	backgroundImageFillPath?: string;
+	/**
+	 * Displayable image data (`data:` or `blob:` URL) for an image cell
+	 * fill, once resolved by the load pipeline. Renderers should prefer
+	 * this over {@link backgroundImageFillPath} when both are present.
+	 */
+	backgroundImageFillData?: string;
 	/**
 	 * Cell 3D bevel + lighting from `a:tcPr/a:cell3D` (CT_Cell3D,
 	 * ECMA-376 §21.1.3.1). Rendered as a CSS bevel treatment.
@@ -188,6 +229,46 @@ export interface PptxTableCell3D {
 }
 
 /**
+ * One styled text run inside a table cell's `a:txBody`.
+ *
+ * `PptxTableCell.text` is a flat string and `PptxTableCell.style` describes
+ * only the FIRST run, so a cell mixing formats ("Revenue **grew 42%** last
+ * year") cannot be represented by those two alone. {@link PptxTableCell.runs}
+ * carries the full sequence, with paragraph and line breaks as marker entries
+ * so a renderer can walk it linearly.
+ *
+ * Structurally identical to `pptx-viewer-shared`'s `CellTextRun`, which every
+ * binding's table renderer already consumes.
+ *
+ * @example
+ * ```ts
+ * const runs: PptxTableCellTextRun[] = [
+ *   { text: "Revenue " },
+ *   { text: "grew 42%", bold: true, color: "#C00000" },
+ * ];
+ * // => satisfies PptxTableCellTextRun[]
+ * ```
+ */
+export interface PptxTableCellTextRun {
+	/** Run text. Empty for the break markers below. */
+	text: string;
+	/** This entry starts a new paragraph (`a:p` boundary) rather than carrying text. */
+	isParagraphBreak?: boolean;
+	/** This entry is a soft line break (`a:br`) rather than carrying text. */
+	isLineBreak?: boolean;
+	bold?: boolean;
+	italic?: boolean;
+	underline?: boolean;
+	strikethrough?: boolean;
+	/** Resolved run colour as a CSS colour string. */
+	color?: string;
+	/** Run font size in points (`a:rPr@sz` / 100). */
+	fontSize?: number;
+	/** Run font family from `a:rPr/a:latin@typeface` (or `a:ea` / `a:cs`). */
+	fontFamily?: string;
+}
+
+/**
  * A single table cell with text content, optional style, and merge info.
  *
  * @example
@@ -201,8 +282,21 @@ export interface PptxTableCell3D {
  * ```
  */
 export interface PptxTableCell {
+	/** Stable collaboration identity; retained by editor copies, stored in the codec's native extension. */
+	collaborationId?: string;
 	text: string;
 	style?: PptxTableCellStyle;
+	/**
+	 * Per-run formatting for the cell's text, when it has any beyond what
+	 * {@link style} can express. Present only for cells whose `a:txBody`
+	 * actually carries runs; renderers fall back to {@link text} when absent.
+	 *
+	 * Editing a cell's text invalidates these (the editor produces a plain
+	 * string), so an edit path must clear them alongside setting `text`.
+	 */
+	textRuns?: PptxTableCellTextRun[];
+	/** Rich text used by collaborative edits and lossless PPTX serialization. */
+	textSegments?: TextSegment[];
 	/** Column span (defaults to 1). */
 	gridSpan?: number;
 	/** Row span (defaults to 1). */
@@ -237,6 +331,8 @@ export interface PptxTableCell {
  * ```
  */
 export interface PptxTableRow {
+	/** Stable collaboration identity, independent of the row's current position. */
+	collaborationId?: string;
 	/** Row height in px. */
 	height?: number;
 	cells: PptxTableCell[];
@@ -286,6 +382,24 @@ export interface PptxTableData {
 	bandColCycle?: number;
 	/** Right-to-left table layout from `a:tblPr/@rtl`. */
 	rtl?: boolean;
+	/**
+	 * `a:tblPr`'s OWN fill (`CT_TableProperties` §21.1.3.15's
+	 * `EG_FillProperties`), independent of any `a:tblStyleLst`-referenced style
+	 * or that style's `a:tblBg`. Applied as the lowest-priority fill layer,
+	 * beneath the table style's `wholeTbl` fill. Real PowerPoint decks route
+	 * table appearance through `tableStyleId` instead, so this mainly matters
+	 * for non-PowerPoint authoring tools (issue G6).
+	 */
+	tableFill?: ParsedTableStyleFill;
+	/**
+	 * `a:tblPr`'s own `a:effectLst` (or `a:effectDag`) effect chain,
+	 * independent of the referenced table style, decomposed into a typed
+	 * sequence of {@link ParsedTableStyleEffect} nodes (issue G6). Each node
+	 * keeps its own XML verbatim for lossless round-trip; empty array is
+	 * normalised to `undefined` by the parser so `tableEffects` is only ever
+	 * present when there is at least one effect.
+	 */
+	tableEffects?: ParsedTableStyleEffect[];
 }
 
 // ==========================================================================
@@ -324,6 +438,25 @@ export interface ParsedTableStyleFill {
 	gradient?: ParsedTableStyleGradient;
 	/** Preset pattern fill parsed from `a:pattFill`. */
 	pattern?: ParsedTableStylePattern;
+	/** Image texture fill parsed from `a:blipFill`. */
+	image?: ParsedTableStyleImage;
+}
+
+/**
+ * An image texture fill parsed from a table style section's `a:blipFill`.
+ *
+ * `ppt/tableStyles.xml` is a presentation-level part parsed once (not
+ * per-slide), so this mirrors the per-CELL `a:tcPr/a:blipFill` two-field lazy
+ * pattern (`PptxTableCellStyle.backgroundImageFillPath` /
+ * `backgroundImageFillData`): `path` starts out as a raw archive-relative
+ * path (or an already-external `http(s):`/`data:` URL), and a load pipeline
+ * patches it to a displayable URL in `data` once resolved.
+ */
+export interface ParsedTableStyleImage {
+	/** Archive-relative path, or an already-displayable external/data URL. */
+	path?: string;
+	/** Displayable URL once a load pipeline has resolved `path`. */
+	data?: string;
 }
 
 /** A single colour stop within a {@link ParsedTableStyleGradient}. */
@@ -399,7 +532,7 @@ export interface ParsedTableStyleText {
  * A single border side within a table style's `a:tcStyle/a:tcBdr`.
  *
  * Corresponds to one of `a:left`, `a:right`, `a:top`, `a:bottom`,
- * `a:insideH`, `a:insideV`, `a:tl2br`, `a:bl2tr` (each a
+ * `a:insideH`, `a:insideV`, `a:tl2br`, `a:tr2bl` (each a
  * `CT_ThemeableLineStyle` wrapping an `a:ln`).
  *
  * @example
@@ -440,20 +573,35 @@ export interface ParsedTableStyleBorders {
 	insideV?: ParsedTableStyleBorder;
 	/** Top-left to bottom-right diagonal. */
 	tl2br?: ParsedTableStyleBorder;
-	/** Bottom-left to top-right diagonal. */
-	bl2tr?: ParsedTableStyleBorder;
+	/**
+	 * Top-right to bottom-left diagonal (`a:tr2bl`, ECMA-376's
+	 * `CT_TableCellBorderStyle` sequence: left/right/top/bottom/insideH/
+	 * insideV/tl2br/tr2bl). The field keeps its historical `bl2tr` spelling
+	 * only in the sense that it names the same geometric anti-diagonal line
+	 * (top-right-to-bottom-left and bottom-left-to-top-right describe one
+	 * undirected diagonal); the parser accepts the real `a:tr2bl` element and,
+	 * leniently, a legacy `a:bl2tr` this app previously wrote (issue G4).
+	 */
+	tr2bl?: ParsedTableStyleBorder;
 }
 
 /**
  * Table background style (CT_TableBackgroundStyle, ECMA-376 §21.1.3.7).
  *
- * Corresponds to the `<a:tblBg>` child of `<a:tblStyle>`. Currently
- * captures only the resolved scheme-fill colour (verbatim XML for fill
- * / effect references is preserved separately by the save path).
+ * Corresponds to the `<a:tblBg>` child of `<a:tblStyle>`. Captures the
+ * resolved scheme-fill colour, an unresolved style-matrix `a:fillRef`, and a
+ * presence flag for effects (verbatim XML for the effect list is preserved
+ * separately by the save path).
  */
 export interface ParsedTableBackground {
 	/** Solid fill (resolved from `a:fill > a:solidFill > a:schemeClr`). */
 	fill?: ParsedTableStyleFill;
+	/**
+	 * Style-matrix fill reference (`<a:fillRef idx="N">...</a:fillRef>`),
+	 * mutually exclusive with {@link fill} (`a:fill` is the choice sibling of
+	 * `a:fillRef` in `CT_TableBackgroundStyle`).
+	 */
+	fillRef?: import('./table-style-edit').ParsedTableFillRef;
 	/** Has an `a:effectLst` child that should be round-tripped. */
 	hasEffectLst?: boolean;
 }
@@ -511,6 +659,26 @@ export interface ParsedTableStyleEntry {
 	swCellText?: ParsedTableStyleText;
 	neCellText?: ParsedTableStyleText;
 	nwCellText?: ParsedTableStyleText;
+	/**
+	 * Per-role 3D bevel + lighting from `a:tcStyle/a:cell3D` (CT_Cell3D),
+	 * distinct from the per-cell `a:tcPr/a:cell3D` {@link PptxTableCellStyle}
+	 * already supports. None of PowerPoint's 74 built-in gallery styles use
+	 * this (0 hits in the built-in catalogue), so it only matters for a
+	 * hand-authored or third-party table style.
+	 */
+	wholeTblCell3D?: PptxTableCell3D;
+	firstRowCell3D?: PptxTableCell3D;
+	lastRowCell3D?: PptxTableCell3D;
+	firstColCell3D?: PptxTableCell3D;
+	lastColCell3D?: PptxTableCell3D;
+	band1HCell3D?: PptxTableCell3D;
+	band2HCell3D?: PptxTableCell3D;
+	band1VCell3D?: PptxTableCell3D;
+	band2VCell3D?: PptxTableCell3D;
+	seCellCell3D?: PptxTableCell3D;
+	swCellCell3D?: PptxTableCell3D;
+	neCellCell3D?: PptxTableCell3D;
+	nwCellCell3D?: PptxTableCell3D;
 }
 
 /**

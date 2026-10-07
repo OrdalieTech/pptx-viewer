@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import { PptxHandler } from 'pptx-viewer-core';
+// The openable-file allow list comes from the binding's public surface, not a
+// local regex: a hand-rolled `.pptx|.ppt|.json` refused a `.pptm` on drop that
+// the viewer's own File > Open accepted.
 import {
+	PPTX_OPEN_ACCEPT,
 	PowerPointViewer,
 	isAudienceTab,
+	isSupportedPresentationFile,
 	loadAudienceContent,
 	parsePresentationSessionId,
+	rememberSessionDeck,
+	restoreSessionDeck,
 	themeToCssVars,
 } from 'pptx-vue-viewer';
 import type { CollaborationConfig } from 'pptx-vue-viewer';
@@ -34,6 +41,9 @@ import { themes } from './themes';
 
 const content = shallowRef<Uint8Array | null>(null);
 const fileName = ref('');
+// Whether the "does this tab have a deck to reopen?" check has finished. The
+// `?sample=1` auto-load waits for it so a restored deck wins over the sample.
+const restoreChecked = ref(false);
 
 // Demo AI provider: the host builds an OpenAI-compatible browser model from
 // localStorage-supplied fields and passes it to the viewer's optional `ai`
@@ -107,6 +117,25 @@ const isWebrtcJoin = urlTransport === 'webrtc';
 const urlServer = isWebrtcJoin ? '' : (params.get('server') ?? resolveDefaultServerUrl());
 // Opt in to the experimental Three.js SmartArt renderer via `?smartArt3D=1`.
 const smartArt3D = params.get('smartArt3D') === '1';
+// Opt in to the experimental Three.js interactive surface-chart renderer
+// (camera orbit/zoom + raycast hover tooltip) via `?surfaceChart3D=1`.
+const surfaceChart3D = params.get('surfaceChart3D') === '1';
+// Opt in to the experimental Three.js interactive bar3D-chart renderer
+// (real box meshes, camera orbit/zoom + raycast hover tooltip) via
+// `?barChart3D=1`.
+const barChart3D = params.get('barChart3D') === '1';
+// Opt in to the experimental Three.js interactive line3D-chart renderer
+// (real tube-path meshes, camera orbit/zoom + raycast hover tooltip) via
+// `?lineChart3D=1`.
+const lineChart3D = params.get('lineChart3D') === '1';
+// Opt in to the experimental Three.js interactive area3D-chart renderer
+// (real tube-path + ribbon meshes, camera orbit/zoom + raycast hover
+// tooltip) via `?areaChart3D=1`.
+const areaChart3D = params.get('areaChart3D') === '1';
+// Opt in to the experimental Three.js interactive pie3D-chart renderer
+// (real wedge meshes, camera orbit/zoom + raycast hover tooltip) via
+// `?pieChart3D=1`.
+const pieChart3D = params.get('pieChart3D') === '1';
 // `?sample=1` auto-loads the bundled sample deck (used by the docs landing
 // page to embed a live, pre-populated viewer).
 const urlSample = params.get('sample') === '1';
@@ -219,9 +248,11 @@ function handleStopCollaboration(): void {
 }
 
 // Auto-load the bundled sample deck when `?sample=1` is present, so a
-// `?sample=1&room=…` host pane seeds the session with the sample.
+// `?sample=1&room=…` host pane seeds the session with the sample. Waits for the
+// restore check below: a tab that already has a deck of its own must not have
+// the sample dropped back on top of it.
 watchEffect((onCleanup) => {
-	if (!urlSample || content.value) {
+	if (!restoreChecked.value || !urlSample || content.value) {
 		return;
 	}
 	let cancelled = false;
@@ -355,6 +386,58 @@ onMounted(() => {
 	);
 });
 
+// ── Refresh survival ───────────────────────────────────────────────────────
+// Remember the open deck for THIS tab, and reopen it on the next load. A
+// refresh used to drop the presentation and land the user back on the file
+// picker; now it comes back, with any autosaved edits (restoreSessionDeck
+// prefers the newer of the two). An audience tab is fed by the presenter
+// window, so it neither remembers nor restores.
+watchEffect(() => {
+	const bytes = content.value;
+	if (!bytes || isAudienceTab()) {
+		return;
+	}
+	void rememberSessionDeck(fileName.value, bytes);
+});
+
+onMounted(() => {
+	// Collaboration / broadcast / audience tabs are fed by the session; they never
+	// restore, and must not hold the sample fetch up either.
+	if (joinRoomId.value || isAudienceTab()) {
+		restoreChecked.value = true;
+		return;
+	}
+	void restoreSessionDeck().then((deck) => {
+		if (deck && !content.value) {
+			// This tab has moved on from the bundled sample (the user opened a deck
+			// of their own, possibly through the viewer's own File > Open), so a
+			// leftover `?sample=1` must not re-seed it on the next refresh.
+			dropSampleParam();
+			content.value = deck.data;
+			fileName.value = deck.fileName;
+		}
+		restoreChecked.value = true;
+		return undefined;
+	});
+});
+
+/**
+ * Drop `?sample=1` from the address bar.
+ *
+ * The docs landing page embeds the demo with `?sample=1` so it opens
+ * pre-populated. Once the user opens a deck of their own that param is stale:
+ * left in place it would re-seed the bundled sample on the next refresh and
+ * throw away what they were looking at.
+ */
+function dropSampleParam(): void {
+	const url = new URL(window.location.href);
+	if (!url.searchParams.has('sample')) {
+		return;
+	}
+	url.searchParams.delete('sample');
+	window.history.replaceState({}, '', url.toString());
+}
+
 // Update document title when in collaboration/broadcast mode.
 watchEffect(() => {
 	const config = collaborationConfig.value;
@@ -387,6 +470,7 @@ function onDirtyChange(dirty: boolean): void {
 
 // ── Loading ────────────────────────────────────────────────────────────────
 function loadFile(file: File): void {
+	dropSampleParam();
 	fileName.value = file.name;
 	const reader = new FileReader();
 	reader.onload = () => {
@@ -396,6 +480,7 @@ function loadFile(file: File): void {
 }
 
 async function newPresentation(): Promise<void> {
+	dropSampleParam();
 	const { handler, data } = await PptxHandler.createBlank({
 		title: 'Untitled Presentation',
 		initialSlideCount: 1,
@@ -407,7 +492,7 @@ async function newPresentation(): Promise<void> {
 function onDrop(e: DragEvent): void {
 	e.preventDefault();
 	const file = e.dataTransfer?.files?.[0];
-	if (file?.name.endsWith('.pptx')) {
+	if (file && isSupportedPresentationFile(file.name)) {
 		loadFile(file);
 	}
 }
@@ -418,6 +503,27 @@ function onInputChange(e: Event): void {
 		loadFile(file);
 	}
 }
+
+const fileInput = ref<HTMLInputElement | null>(null);
+
+/** Open the native picker from the explicit Browse control. */
+function openFilePicker(): void {
+	fileInput.value?.click();
+}
+
+/**
+ * The dashed zone paints `cursor: pointer` over its whole area and the copy
+ * says "click to browse", so the whole area has to open the picker, not just
+ * the one text line that happens to be a <label>. Clicks that originate on a
+ * button, on the label, or on the input itself are already handled by those
+ * elements; re-opening from here would double-fire or loop.
+ */
+function onZoneClick(e: MouseEvent): void {
+	if ((e.target as HTMLElement).closest('button, label[for="file-input"], #file-input')) {
+		return;
+	}
+	openFilePicker();
+}
 </script>
 
 <template>
@@ -426,8 +532,14 @@ function onInputChange(e: Event): void {
 			:content="content"
 			:file-name="fileName"
 			autosave
+			:autosave-interval-ms="2000"
 			can-edit
 			:smartArt3D="smartArt3D"
+			:surfaceChart3D="surfaceChart3D"
+			:barChart3D="barChart3D"
+			:lineChart3D="lineChart3D"
+			:areaChart3D="areaChart3D"
+			:pieChart3D="pieChart3D"
 			:ai="aiConfig"
 			:author-name="collaborationConfig?.userName ?? autoName"
 			:collaboration="collaborationConfig ?? undefined"
@@ -443,7 +555,9 @@ function onInputChange(e: Event): void {
 		<div
 			class="demo-dropzone"
 			role="group"
+			data-testid="dropzone"
 			:aria-label="t('demo.dropzone.uploadAriaLabel')"
+			@click="onZoneClick"
 			@drop="onDrop"
 			@dragover.prevent
 		>
@@ -463,13 +577,24 @@ function onInputChange(e: Event): void {
 				<label class="demo-hint" for="file-input">{{ t('demo.dropzone.hint') }}</label>
 			</template>
 			<p class="demo-sub">{{ t('demo.dropzone.processed') }}</p>
-			<button type="button" @click.stop="newPresentation">
-				{{ t('demo.dropzone.newPresentation') }}
-			</button>
+			<div class="demo-actions">
+				<button
+					type="button"
+					class="demo-browse"
+					data-testid="browse-files"
+					@click.stop="openFilePicker"
+				>
+					{{ t('demo.dropzone.browse') }}
+				</button>
+				<button type="button" @click.stop="newPresentation">
+					{{ t('demo.dropzone.newPresentation') }}
+				</button>
+			</div>
 			<input
 				id="file-input"
+				ref="fileInput"
 				type="file"
-				accept=".pptx"
+				:accept="PPTX_OPEN_ACCEPT"
 				:aria-label="t('demo.dropzone.uploadAriaLabel')"
 				class="sr-only"
 				@change="onInputChange"
@@ -507,18 +632,24 @@ body {
 	background: var(--pptx-background, #030712);
 }
 
+/*
+ * Kept metric-for-metric identical to the React demo's landing card, which is
+ * the reference for demo chrome: 900px cap, 3rem padding, 12px hint gap, 16px
+ * before the action row, 14px secondary text, and the same corner radii. The
+ * Vue card used to run 16px taller with a smaller sub-line, so the two demos
+ * did not line up side by side at 1920x1080.
+ */
 .demo-dropzone {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	gap: 0.75rem;
 	max-width: 900px;
 	width: 100%;
 	padding: 3rem;
 	text-align: center;
 	border: 2px dashed var(--pptx-border, #374151);
-	border-radius: 0.75rem;
+	border-radius: 0.625rem;
 	cursor: pointer;
 	transition:
 		border-color 0.15s,
@@ -531,7 +662,7 @@ body {
 }
 
 .demo-join {
-	margin: 0;
+	margin: 0 0 0.5rem;
 	font-weight: 500;
 	color: var(--pptx-foreground, #f3f4f6);
 }
@@ -541,11 +672,15 @@ body {
 	margin: 0;
 	font-size: 1rem;
 	color: var(--pptx-muted-foreground, #9ca3af);
+	/* The copy says "click to browse" and the label really does open the picker,
+	   so the pointer has to confirm it (the dashed card's `cursor: pointer` does
+	   not reach a <label>, which resets to the default arrow). */
+	cursor: pointer;
 }
 
 .demo-sub {
 	margin: 0;
-	font-size: 0.8rem;
+	font-size: 0.875rem;
 	color: var(--pptx-muted-foreground, #9ca3af);
 }
 
@@ -569,19 +704,40 @@ body {
 	font-family: ui-monospace, monospace;
 }
 
+.demo-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: center;
+	gap: 0.5rem;
+	margin-top: 1rem;
+}
+
 .demo-dropzone button {
-	margin-top: 0.5rem;
 	padding: 0.5rem 1rem;
-	border-radius: 0.5rem;
+	border-radius: 0.375rem;
 	border: 1px solid var(--pptx-border, #374151);
 	background: var(--pptx-muted, #1f2937);
 	color: var(--pptx-foreground, #f3f4f6);
-	font-size: 0.85rem;
+	font-size: 0.875rem;
 	cursor: pointer;
 	transition: background 0.15s;
 }
 
 .demo-dropzone button:hover {
 	background: var(--pptx-accent, #1f2937);
+}
+
+/* The primary call to action: the explicit "browse" control the copy promises. */
+.demo-dropzone button.demo-browse {
+	border-color: var(--pptx-primary, #6366f1);
+	background: var(--pptx-primary, #6366f1);
+	color: var(--pptx-primary-foreground, #ffffff);
+	font-weight: 500;
+}
+
+.demo-dropzone button.demo-browse:hover {
+	background: var(--pptx-primary, #6366f1);
+	opacity: 0.9;
 }
 </style>

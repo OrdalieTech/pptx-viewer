@@ -3,6 +3,7 @@
  * canvas, context menu, and side panels.
  */
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
+import { setMasterViewBackgroundColor } from 'pptx-viewer-shared';
 import type { ToolbarActionId } from 'pptx-viewer-shared';
 import type { PptxAiBridge, PptxAiConfig } from 'pptx-viewer-shared/ai';
 import { useMemo } from 'react';
@@ -12,6 +13,7 @@ import type { AiPanelController } from '../hooks/ai/useAiPanelController';
 import type { UseCommentsResult } from '../hooks/useComments-helpers';
 import type { EditorHistoryResult } from '../hooks/useEditorHistory';
 import type { EditorOperationsResult } from '../hooks/useEditorOperations';
+import type { UseMasterViewCrudResult } from '../hooks/useMasterViewCrud';
 import type { UsePresentationAnnotationsResult } from '../hooks/usePresentationAnnotations';
 import type { UsePresentationModeResult } from '../hooks/usePresentationMode';
 import type { PropertyHandlersResult } from '../hooks/usePropertyHandlers';
@@ -53,6 +55,8 @@ export interface ViewerMainContentProps {
 	themeHandlers: ThemeHandlersResult;
 	history: EditorHistoryResult;
 	comments: UseCommentsResult;
+	/** Slide Master view sidebar CRUD (Insert/Duplicate/Delete/Rename). */
+	masterViewCrud: UseMasterViewCrudResult;
 	zoom: UseZoomViewportResult;
 	/** Whether the viewport is mobile-sized (<768px). */
 	isMobile?: boolean;
@@ -105,6 +109,7 @@ export function ViewerMainContent(props: ViewerMainContentProps) {
 		themeHandlers,
 		history,
 		comments,
+		masterViewCrud,
 		zoom,
 		isMobile: _isMobile = false,
 		isTouchDevice: _isTouchDevice = false,
@@ -152,6 +157,13 @@ export function ViewerMainContent(props: ViewerMainContentProps) {
 		[state.theme, state.tableStyleMap],
 	);
 
+	// Recent-colours ("Most Recently Used") support, shared by every colour
+	// picker in BOTH the ribbon toolbar and the inspector via context, is
+	// provided by `PowerPointViewer` above `ViewerToolbarSection` and this
+	// component (siblings in that tree), not here: a provider nested only
+	// inside this component would leave the ribbon reading the context's
+	// empty default (see `RecentColorsContext`'s doc).
+
 	return (
 		<ChartPartSelectionProvider>
 			<div className='relative z-10 flex flex-1 min-h-0'>
@@ -175,6 +187,7 @@ export function ViewerMainContent(props: ViewerMainContentProps) {
 							onDeleteSection={sectionOps.deleteSection}
 							onMoveSectionUp={sectionOps.moveSectionUp}
 							onMoveSectionDown={sectionOps.moveSectionDown}
+							onToggleSectionCollapse={sectionOps.toggleSectionCollapse}
 							rehearsalTimings={
 								Object.keys(presentation.recordedTimings).length > 0
 									? presentation.recordedTimings
@@ -201,6 +214,8 @@ export function ViewerMainContent(props: ViewerMainContentProps) {
 						onSelectLayout={dialogs.handleSelectLayout}
 						onCollapse={dialogs.handleCloseMasterView}
 						onTabChange={state.setMasterViewTab}
+						crudActions={masterViewCrud.crudActions}
+						onCrudAction={masterViewCrud.handleCrudAction}
 						onHandoutSlidesPerPageChange={(count) => {
 							state.setHandoutSlidesPerPage(count);
 							state.setHandoutMaster((master) =>
@@ -218,10 +233,29 @@ export function ViewerMainContent(props: ViewerMainContentProps) {
 							);
 							state.setIsDirty(true);
 						}}
+						canEdit={canEdit}
+						onSlidesBackgroundChange={(backgroundColor) => {
+							const write = setMasterViewBackgroundColor(
+								{ slideMasters: state.slideMasters },
+								{
+									tab: 'slides',
+									masterIndex: state.activeMasterIndex,
+									layoutIndex: state.activeLayoutIndex,
+								},
+								backgroundColor,
+							);
+							if (write?.slideMasters) {
+								state.setSlideMasters(write.slideMasters);
+								state.setIsDirty(true);
+							}
+						}}
 					/>
 				)}
 
 				<ViewerCanvasArea
+					onUpdateSlideAnimations={(animations) =>
+						propertyHandlers.handleUpdateSlide({ animations })
+					}
 					mode={mode}
 					canEdit={canEdit}
 					slides={slides}
@@ -266,6 +300,7 @@ export function ViewerMainContent(props: ViewerMainContentProps) {
 						selectedElement={selectedElement}
 						tableEditorState={state.tableEditorState}
 						hasMultiSelection={state.effectiveSelectedIds.length > 1}
+						selectionGroupable={manipulation.selectionGroupable}
 						onAction={manipulation.handleContextMenuAction}
 						onInsertTableRow={tableOps.handleInsertTableRow}
 						onDeleteTableRow={tableOps.handleDeleteTableRow}

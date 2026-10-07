@@ -6,9 +6,15 @@
  * annotation tool toggles (laser/pen/highlighter/eraser), and an
  * end-presentation button.
  *
- * Auto-hides after 3 seconds of no mouse movement. Re-appears when
- * the mouse moves near the bottom of the screen.
+ * Auto-hide behaviour lives in `PresentationToolbarWrapper.tsx`.
  */
+import {
+	HIGHLIGHTER_COLORS,
+	isBlackboardActive,
+	PEN_COLORS,
+	PRESENT_TOOLBAR_CLASSES,
+} from 'pptx-viewer-shared';
+import type { PresentationBlackout } from 'pptx-viewer-shared';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -20,44 +26,15 @@ import {
 	LuChevronLeft,
 	LuChevronRight,
 	LuChevronDown,
+	LuPresentation,
 	LuTimer,
 	LuX,
 	LuPanelRight,
 } from 'react-icons/lu';
 
 import type { PresentationTool } from '../hooks/usePresentationAnnotations';
-import {
-	AUTO_HIDE_DELAY_MS,
-	isInBottomTriggerZone,
-	formatSlideCounter,
-} from './presentation-toolbar-utils';
+import { formatSlideCounter } from './presentation-toolbar-utils';
 import { formatElapsed } from './presenter-view-utils';
-
-// ---------------------------------------------------------------------------
-// Color picker presets
-// ---------------------------------------------------------------------------
-
-const PEN_COLORS = [
-	'#ff0000',
-	'#0000ff',
-	'#00aa00',
-	'#ff8800',
-	'#ffffff',
-	'#000000',
-	'#ff00ff',
-	'#00cccc',
-];
-
-const HIGHLIGHTER_COLORS = [
-	'#ffff00',
-	'#00ff00',
-	'#ff69b4',
-	'#00bfff',
-	'#ff8c00',
-	'#adff2f',
-	'#ff6347',
-	'#87ceeb',
-];
 
 // ---------------------------------------------------------------------------
 // Props
@@ -73,6 +50,10 @@ export interface PresentationToolbarProps {
 	onSetPenColor: (color: string) => void;
 	onSetHighlighterColor: (color: string) => void;
 	onClearAnnotations: () => void;
+	/** Current blackout state, for the Blackboard toggle's active reading. */
+	blackout: PresentationBlackout;
+	/** One click arms (or disarms) the black screen and the pen together. */
+	onToggleBlackboard: () => void;
 
 	// --- Navigation props ---
 	/** Zero-based index of the current presentation slide. */
@@ -104,6 +85,8 @@ export function PresentationToolbar({
 	onSetPenColor,
 	onSetHighlighterColor,
 	onClearAnnotations,
+	blackout,
+	onToggleBlackboard,
 	currentSlideIndex,
 	totalSlides,
 	onMovePresentationSlide,
@@ -164,24 +147,30 @@ export function PresentationToolbar({
 	}, []);
 
 	const toolBtnClass = (tool: PresentationTool): string =>
-		`flex items-center justify-center w-9 h-9 rounded-md transition-colors ${
-			presentationTool === tool
-				? 'bg-white/25 text-white'
-				: 'text-white/70 hover:text-white hover:bg-white/10'
-		}`;
+		presentationTool === tool
+			? PRESENT_TOOLBAR_CLASSES.toggleActive
+			: PRESENT_TOOLBAR_CLASSES.toggle;
 
-	const navBtnClass =
-		'flex items-center justify-center w-9 h-9 rounded-md transition-colors text-white/70 hover:text-white hover:bg-white/10 disabled:text-white/20 disabled:cursor-not-allowed';
+	const navBtnClass = PRESENT_TOOLBAR_CLASSES.button;
 
 	return (
 		<div
 			ref={toolbarRef}
-			className='flex items-center gap-1 px-3 py-2 rounded-xl bg-neutral-900/90 backdrop-blur-md border border-white/15 shadow-2xl'
+			data-pptx-present-toolbar
+			role='toolbar'
+			// Named so a screen reader announces the bar rather than a run of
+			// anonymous buttons. Focusable only programmatically: a running show
+			// keeps keyboard focus on the stage, where PowerPoint's navigation keys
+			// are bound, so the bar must not sit in the tab order.
+			tabIndex={-1}
+			aria-label={t('pptx.toolbar.presentationToolbarAria')}
+			className={PRESENT_TOOLBAR_CLASSES.container}
 			onClick={(e) => e.stopPropagation()}
 		>
 			{/* Previous slide */}
 			<button
 				type='button'
+				data-pptx-present-control='previous'
 				className={navBtnClass}
 				onClick={() => onMovePresentationSlide(-1)}
 				disabled={currentSlideIndex === 0}
@@ -192,13 +181,14 @@ export function PresentationToolbar({
 			</button>
 
 			{/* Slide counter */}
-			<span className='text-xs font-mono tabular-nums text-white/80 px-1.5 select-none min-w-[48px] text-center'>
+			<span data-pptx-present-control='counter' className={PRESENT_TOOLBAR_CLASSES.counter}>
 				{formatSlideCounter(currentSlideIndex, totalSlides)}
 			</span>
 
 			{/* Next slide */}
 			<button
 				type='button'
+				data-pptx-present-control='next'
 				className={navBtnClass}
 				onClick={() => onMovePresentationSlide(1)}
 				disabled={currentSlideIndex >= totalSlides - 1}
@@ -209,26 +199,33 @@ export function PresentationToolbar({
 			</button>
 
 			{/* Divider */}
-			<div className='w-px h-6 bg-white/20 mx-1' />
+			<div
+				data-pptx-present-control='divider-navigation'
+				className={PRESENT_TOOLBAR_CLASSES.divider}
+			/>
 
 			{/* Elapsed timer */}
 			<div
-				className='flex items-center gap-1.5 text-xs font-mono tabular-nums text-white/60 px-1 select-none'
+				data-pptx-present-control='timer'
+				className={PRESENT_TOOLBAR_CLASSES.timer}
 				title={t('pptx.presenter.elapsed')}
+				aria-label={t('pptx.presenter.elapsed')}
 			>
 				<LuTimer size={14} />
 				<span>{formatElapsed(elapsed)}</span>
 			</div>
 
 			{/* Divider */}
-			<div className='w-px h-6 bg-white/20 mx-1' />
+			<div data-pptx-present-control='divider-timer' className={PRESENT_TOOLBAR_CLASSES.divider} />
 
 			{/* Laser pointer */}
 			<button
 				type='button'
+				data-pptx-present-control='laser'
 				className={toolBtnClass('laser')}
 				onClick={() => handleToolClick('laser')}
 				title={t('pptx.presentation.laserPointer')}
+				aria-label={t('pptx.presentation.laserPointer')}
 			>
 				<LuMousePointer2 size={18} />
 			</button>
@@ -237,36 +234,40 @@ export function PresentationToolbar({
 			<div className='relative flex items-center'>
 				<button
 					type='button'
+					data-pptx-present-control='pen'
 					className={toolBtnClass('pen')}
 					onClick={() => handleToolClick('pen')}
 					onContextMenu={handlePenRightClick}
 					title={t('pptx.presentation.pen')}
+					aria-label={t('pptx.presentation.pen')}
 				>
 					<LuPenTool size={18} />
 					<div
-						className='absolute bottom-0.5 left-1/2 -translate-x-1/2 w-3 h-0.5 rounded-full'
+						className={PRESENT_TOOLBAR_CLASSES.swatchBar}
 						style={{ backgroundColor: penColor }}
 					/>
 				</button>
 				<button
 					type='button'
-					className='flex items-center justify-center w-7 h-9 -ml-1 rounded-r-md transition-colors text-white/50 hover:text-white hover:bg-white/10'
+					data-pptx-present-control='pen-color'
+					className={PRESENT_TOOLBAR_CLASSES.caret}
 					onClick={() => {
 						setShowPenColors((prev) => !prev);
 						setShowHighlighterColors(false);
 					}}
-					title={`${t('pptx.presentation.pen')} — color`}
+					title={t('pptx.presentationToolbar.penColor')}
+					aria-label={t('pptx.presentationToolbar.penColor')}
 				>
 					<LuChevronDown size={12} />
 				</button>
 				{showPenColors && (
-					<div className='absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-neutral-800 rounded-lg border border-white/20 shadow-xl grid grid-cols-4 gap-2'>
+					<div className={PRESENT_TOOLBAR_CLASSES.palette}>
 						{PEN_COLORS.map((color) => (
 							<button
 								key={color}
 								type='button'
-								aria-label={`${t('pptx.presentation.pen')} ${color}`}
-								className={`w-9 h-9 rounded-full border-2 transition-transform hover:scale-110 ${
+								aria-label={t('pptx.presentationToolbar.penColorValue', { color })}
+								className={`${PRESENT_TOOLBAR_CLASSES.swatch} ${
 									penColor === color ? 'border-white' : 'border-white/20'
 								}`}
 								style={{ backgroundColor: color }}
@@ -287,36 +288,40 @@ export function PresentationToolbar({
 			<div className='relative flex items-center'>
 				<button
 					type='button'
+					data-pptx-present-control='highlighter'
 					className={toolBtnClass('highlighter')}
 					onClick={() => handleToolClick('highlighter')}
 					onContextMenu={handleHighlighterRightClick}
 					title={t('pptx.presentation.highlighter')}
+					aria-label={t('pptx.presentation.highlighter')}
 				>
 					<LuHighlighter size={18} />
 					<div
-						className='absolute bottom-0.5 left-1/2 -translate-x-1/2 w-3 h-0.5 rounded-full'
+						className={PRESENT_TOOLBAR_CLASSES.swatchBar}
 						style={{ backgroundColor: highlighterColor }}
 					/>
 				</button>
 				<button
 					type='button'
-					className='flex items-center justify-center w-7 h-9 -ml-1 rounded-r-md transition-colors text-white/50 hover:text-white hover:bg-white/10'
+					data-pptx-present-control='highlighter-color'
+					className={PRESENT_TOOLBAR_CLASSES.caret}
 					onClick={() => {
 						setShowHighlighterColors((prev) => !prev);
 						setShowPenColors(false);
 					}}
-					title={`${t('pptx.presentation.highlighter')} — color`}
+					title={t('pptx.presentationToolbar.highlighterColor')}
+					aria-label={t('pptx.presentationToolbar.highlighterColor')}
 				>
 					<LuChevronDown size={12} />
 				</button>
 				{showHighlighterColors && (
-					<div className='absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-neutral-800 rounded-lg border border-white/20 shadow-xl grid grid-cols-4 gap-2'>
+					<div className={PRESENT_TOOLBAR_CLASSES.palette}>
 						{HIGHLIGHTER_COLORS.map((color) => (
 							<button
 								key={color}
 								type='button'
-								aria-label={`${t('pptx.presentation.highlighter')} ${color}`}
-								className={`w-9 h-9 rounded-full border-2 transition-transform hover:scale-110 ${
+								aria-label={t('pptx.presentationToolbar.highlighterColorValue', { color })}
+								className={`${PRESENT_TOOLBAR_CLASSES.swatch} ${
 									highlighterColor === color ? 'border-white' : 'border-white/20'
 								}`}
 								style={{ backgroundColor: color }}
@@ -336,43 +341,60 @@ export function PresentationToolbar({
 			{/* Eraser */}
 			<button
 				type='button'
+				data-pptx-present-control='eraser'
 				className={toolBtnClass('eraser')}
 				onClick={() => handleToolClick('eraser')}
 				title={t('pptx.presentation.eraser')}
+				aria-label={t('pptx.presentation.eraser')}
 			>
 				<LuEraser size={18} />
+			</button>
+
+			{/* Blackboard: black screen + pen, armed and disarmed as a pair */}
+			<button
+				type='button'
+				data-pptx-present-control='blackboard'
+				className={
+					isBlackboardActive(blackout, presentationTool)
+						? PRESENT_TOOLBAR_CLASSES.toggleActive
+						: PRESENT_TOOLBAR_CLASSES.toggle
+				}
+				onClick={onToggleBlackboard}
+				title={t('pptx.presentation.blackboard')}
+				aria-label={t('pptx.presentation.blackboard')}
+			>
+				<LuPresentation size={18} />
 			</button>
 
 			{/* Clear all */}
 			<button
 				type='button'
-				className={`flex items-center justify-center w-9 h-9 rounded-md transition-colors ${
-					hasAnnotations
-						? 'text-white/70 hover:text-red-400 hover:bg-white/10'
-						: 'text-white/30 cursor-not-allowed'
+				data-pptx-present-control='clear'
+				className={`${PRESENT_TOOLBAR_CLASSES.button} ${
+					hasAnnotations ? 'hover:text-red-400' : ''
 				}`}
 				onClick={hasAnnotations ? onClearAnnotations : undefined}
 				title={t('pptx.presentation.clearAnnotations')}
+				aria-label={t('pptx.presentation.clearAnnotations')}
 				disabled={!hasAnnotations}
 			>
 				<LuTrash2 size={18} />
 			</button>
 
 			{/* Divider */}
-			<div className='w-px h-6 bg-white/20 mx-1' />
+			<div data-pptx-present-control='divider-tools' className={PRESENT_TOOLBAR_CLASSES.divider} />
 
 			{/* Presenter view toggle */}
 			{onTogglePresenterView && (
 				<button
 					type='button'
-					className={`flex items-center justify-center w-9 h-9 rounded-md transition-colors ${
-						presenterMode
-							? 'bg-white/25 text-white'
-							: 'text-white/70 hover:text-white hover:bg-white/10'
-					}`}
+					data-pptx-present-control='presenter-view'
+					className={
+						presenterMode ? PRESENT_TOOLBAR_CLASSES.toggleActive : PRESENT_TOOLBAR_CLASSES.toggle
+					}
 					onClick={onTogglePresenterView}
-					title={t('pptx.presenter.presenterView', { defaultValue: 'Presenter view' })}
-					aria-label={t('pptx.presenter.presenterView', { defaultValue: 'Presenter view' })}
+					title={t('pptx.presenter.presenterView')}
+					aria-label={t('pptx.presenter.presenterView')}
 				>
 					<LuPanelRight size={18} />
 				</button>
@@ -381,103 +403,14 @@ export function PresentationToolbar({
 			{/* End presentation */}
 			<button
 				type='button'
-				className='flex items-center justify-center w-9 h-9 rounded-md transition-colors text-white/70 hover:text-red-400 hover:bg-white/10'
+				data-pptx-present-control='end'
+				className={`${PRESENT_TOOLBAR_CLASSES.button} hover:text-red-400`}
 				onClick={onEndPresentation}
 				title={t('pptx.presenter.endPresentation')}
 				aria-label={t('pptx.presenter.endPresentation')}
 			>
 				<LuX size={18} />
 			</button>
-		</div>
-	);
-}
-
-// ---------------------------------------------------------------------------
-// Auto-hide wrapper: renders PresentationToolbar with show/hide behavior.
-// ---------------------------------------------------------------------------
-
-export interface PresentationToolbarWrapperProps extends PresentationToolbarProps {
-	/** Ref to the container element used for bottom-zone hit testing. */
-	containerRef?: React.RefObject<HTMLElement | null>;
-}
-
-/**
- * Wraps `PresentationToolbar` with auto-hide logic:
- * - Shows on any mouse movement
- * - Hides after `AUTO_HIDE_DELAY_MS` (3 s) of no movement
- * - Always shows when hovering over the toolbar itself
- * - Uses CSS opacity transitions for smooth fade in/out
- */
-export function PresentationToolbarWrapper({
-	containerRef,
-	...toolbarProps
-}: PresentationToolbarWrapperProps): React.ReactElement {
-	const [visible, setVisible] = useState(false);
-	const hideTimerRef = useRef<number | null>(null);
-	const hoveringRef = useRef(false);
-
-	const clearHideTimer = useCallback(() => {
-		if (hideTimerRef.current !== null) {
-			window.clearTimeout(hideTimerRef.current);
-			hideTimerRef.current = null;
-		}
-	}, []);
-
-	const resetHideTimer = useCallback(() => {
-		clearHideTimer();
-		hideTimerRef.current = window.setTimeout(() => {
-			if (!hoveringRef.current) {
-				setVisible(false);
-			}
-		}, AUTO_HIDE_DELAY_MS);
-	}, [clearHideTimer]);
-
-	useEffect(() => {
-		const handleMouseMove = (e: MouseEvent) => {
-			const container = containerRef?.current;
-			if (container) {
-				const rect = container.getBoundingClientRect();
-				if (isInBottomTriggerZone(e.clientY, rect.height, rect.top)) {
-					setVisible(true);
-					resetHideTimer();
-					return;
-				}
-			}
-
-			// Any movement shows the toolbar, then starts auto-hide countdown
-			setVisible(true);
-			resetHideTimer();
-		};
-
-		document.addEventListener('mousemove', handleMouseMove);
-		return () => {
-			document.removeEventListener('mousemove', handleMouseMove);
-			clearHideTimer();
-		};
-	}, [containerRef, resetHideTimer, clearHideTimer]);
-
-	const handleMouseEnter = useCallback(() => {
-		hoveringRef.current = true;
-		clearHideTimer();
-		setVisible(true);
-	}, [clearHideTimer]);
-
-	const handleMouseLeave = useCallback(() => {
-		hoveringRef.current = false;
-		resetHideTimer();
-	}, [resetHideTimer]);
-
-	return (
-		<div
-			className='absolute bottom-6 left-1/2 -translate-x-1/2 z-[80] transition-opacity duration-300'
-			style={{
-				opacity: visible ? 1 : 0,
-				pointerEvents: visible ? 'auto' : 'none',
-			}}
-			onMouseEnter={handleMouseEnter}
-			onMouseLeave={handleMouseLeave}
-		>
-			<PresentationToolbar {...toolbarProps} />
 		</div>
 	);
 }

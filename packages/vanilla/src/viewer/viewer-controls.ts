@@ -1,10 +1,18 @@
+import {
+	firstShowSlideIndex,
+	hasShowSlideAfter,
+	lastShowSlideIndex,
+	nextShowSlideIndex,
+	presentationEntrySlideIndex,
+	previousShowSlideIndex,
+	resolveAuthoredSlideRange,
+	resolveShowSlideIndexes,
+	createViewerZoomStore,
+} from 'pptx-viewer-shared';
+
 import type { RenderController } from './render-controller';
 import { clampSlideIndex } from './state';
 import type { Store, ViewerState, ZoomLevel } from './state';
-
-const MIN_ZOOM = 0.1;
-const MAX_ZOOM = 8;
-const ZOOM_STEP = 1.25;
 
 /**
  * Navigation + zoom controls for the vanilla viewer, factored out of
@@ -14,6 +22,28 @@ const ZOOM_STEP = 1.25;
 export interface ViewerControls {
 	next(): void;
 	prev(): void;
+	/** Jump to the show's first slide (Home). */
+	firstSlide(): void;
+	/**
+	 * The deck index "Present From Beginning" should land on: the first slide
+	 * the show actually visits (skips a hidden slide 1, and honours an authored
+	 * `p:showPr/p:sldRg` range or custom show), NOT bare deck index 0.
+	 * Unconditional, unlike {@link firstSlide}'s Home-key behaviour, which only
+	 * applies the show order while already presenting.
+	 */
+	firstShowSlideIndex(): number;
+	/**
+	 * The deck index entering the show FROM the current slide should land on:
+	 * the active slide itself when the show includes it, otherwise the nearest
+	 * show slide (see `presentationEntrySlideIndex`). Every way of starting a
+	 * show "from current" (the status-bar button, ribbon From Current Slide,
+	 * Shift+F5, `setMode('present')`, the mobile toolbar) reads this instead of
+	 * the raw active slide, so a slide the author excluded from the show is
+	 * never the opening frame.
+	 */
+	presentationEntryIndex(): number;
+	/** Jump to the show's last slide (End). */
+	lastSlide(): void;
 	goToSlide(index: number): void;
 	slideCount(): number;
 	currentSlide(): number;
@@ -29,16 +59,87 @@ export function createViewerControls(
 	renderer: RenderController,
 	/** Ends the show; called when the end screen is dismissed forward. */
 	onEndShow?: () => void,
+	/**
+	 * File > Options > Advanced > "End with black slide". PowerPoint's default is
+	 * ON: running past the last slide raises the black end screen and only the
+	 * NEXT forward input ends the show. Off ends it at once. Read lazily because
+	 * the options controller is constructed after these controls.
+	 */
+	getEndWithBlackSlide?: () => boolean | undefined,
 ): ViewerControls {
-	const goToSlide = (index: number): void => {
+	/**
+	 * The deck indexes a running show visits: the active custom show's membership
+	 * (or the whole deck), minus every slide the author hid.
+	 *
+	 * PowerPoint's "Hide Slide" keeps the slide in the deck, the thumbnail rail
+	 * and the sorter but skips it while presenting, so this is consulted only by
+	 * `next` / `prev` / Home / End and never by `goToSlide`. Custom-show
+	 * membership is resolved by the same shared rule, which is what makes hiding
+	 * win over membership: a slide pulled out of rotation stays out of every show
+	 * it belongs to.
+	 */
+	const showOrder = (): number[] => {
+		const state = store.get();
+		const active = state.activeCustomShowId
+			? state.customShows.find(({ id }) => id === state.activeCustomShowId)
+			: undefined;
+		// `p:showPr/p:sldRg`: an authored deck asking to present only slides
+		// `st`..`end` (Set Up Slide Show > "Show slides" > "From"/"To"). No custom
+		// show active overrides it (see `resolveAuthoredSlideRange`'s own docs).
+		const authoredRange = resolveAuthoredSlideRange(
+			state.presentationProperties,
+			state.slides.length,
+		);
+		return resolveShowSlideIndexes(state.slides, active, authoredRange);
+	};
+
+	/**
+	 * Jump straight to a deck index. Deliberately NOT filtered by the show order:
+	 * PowerPoint's typed "slide number + Enter" reaches a hidden slide on purpose.
+	 */
+	const goToSlide = (index: number, enteringBackward = false): void => {
 		store.set({
 			currentSlide: clampSlideIndex(index, store.get().slides.length),
 			endOfShow: false,
+			enteringBackward,
 		});
 	};
+	// The zoom itself lives in the shared `createViewerZoomStore`, so this
+	// binding uses the same zoom MODEL as the other four rather than its own
+	// absolute-scale encoding. The vanilla store keeps holding an absolute
+	// `ZoomLevel`, because the render pipeline and `state-sync` diff on it; this
+	// is the one place the two representations meet.
+	const zoomStore = createViewerZoomStore();
+
+	/** Project the shared model back onto the store's absolute `ZoomLevel`. */
+	const publishZoom = (): void => {
+		const { zoom, fitScale, manual } = zoomStore.getState();
+		store.set({ zoom: manual ? fitScale * zoom : 'fit' });
+	};
+	zoomStore.subscribe(publishZoom);
+
+	/**
+	 * Feed the current viewport measurement in before any user-initiated zoom.
+	 * The shared model is fit-relative, so it can only convert to and from an
+	 * absolute scale if it knows the fit factor at the moment of the action.
+	 */
+	const measureFit = (): number => {
+		const fitScale = renderer.fitScale();
+		zoomStore.dispatch({ type: 'set-fit-scale', fitScale });
+		return fitScale;
+	};
+
 	const setZoom = (zoom: ZoomLevel): void => {
-		store.set({
-			zoom: zoom === 'fit' ? 'fit' : Math.min(Math.max(zoom, MIN_ZOOM), MAX_ZOOM),
+		if (zoom === 'fit') {
+			zoomStore.dispatch({ type: 'zoom-to-fit' });
+			return;
+		}
+		// Callers pass an ABSOLUTE stage scale (the pinch gesture and the public
+		// `setZoom` API both do), so divide the fit factor back out.
+		const fitScale = measureFit();
+		zoomStore.dispatch({
+			type: 'set-zoom',
+			zoom: fitScale > Number.EPSILON ? zoom / fitScale : zoom,
 		});
 	};
 	return {
@@ -57,13 +158,32 @@ export function createViewerControls(
 			if (state.presenting && renderer.presentationPlayback.advance()) {
 				return;
 			}
-			if (state.presenting && state.currentSlide >= state.slides.length - 1) {
+			const order = showOrder();
+			// "Loop Continuously" (`p:showPr/@loop`, the Set Up Slide Show dialog's
+			// checkbox): the end of the show wraps back to its first slide instead of
+			// raising the black end screen. Rehearsal (a distinct "record timings"
+			// flow) is not modelled by this controller, so there is no rehearsing
+			// exception to make here.
+			const loop = state.presentationProperties.loopContinuously === true;
+			if (state.presenting && !loop && !hasShowSlideAfter(state.currentSlide, order)) {
+				if (getEndWithBlackSlide?.() === false) {
+					// No black slide configured: PowerPoint ends the show outright
+					// rather than sitting on the last slide swallowing every advance.
+					onEndShow?.();
+					return;
+				}
 				// Nothing further to advance to: raise the black end screen rather
 				// than sitting on the last slide ignoring every further advance.
 				store.set({ endOfShow: true });
 				return;
 			}
-			goToSlide(state.currentSlide + 1);
+			// Outside a show the deck pages one slide at a time (hidden slides are
+			// still editable and still reachable); inside one the show order rules.
+			goToSlide(
+				state.presenting
+					? (nextShowSlideIndex(state.currentSlide, order, { loop }) ?? state.currentSlide)
+					: state.currentSlide + 1,
+			);
 		},
 		prev: () => {
 			// A backward input while the end screen is up just dismisses it.
@@ -71,15 +191,55 @@ export function createViewerControls(
 				store.set({ endOfShow: false });
 				return;
 			}
-			goToSlide(store.get().currentSlide - 1);
+			// A slide entered backward shows its builds already complete. The next
+			// back press replays them from the start rather than leaving the slide,
+			// so a presenter who overshot can watch the build again (PowerPoint).
+			if (store.get().presenting && renderer.presentationPlayback.isSeededCompleted()) {
+				renderer.presentationPlayback.replayCurrentSlide(document);
+				return;
+			}
+			const state = store.get();
+			goToSlide(
+				state.presenting
+					? (previousShowSlideIndex(state.currentSlide, showOrder()) ?? state.currentSlide)
+					: state.currentSlide - 1,
+				state.presenting,
+			);
+		},
+		// Home / End land on the show's first / last slide, so a deck whose first
+		// or last slide is hidden does not open one on a key PowerPoint reads as
+		// "go to the start / end of the show".
+		firstSlide: () => {
+			const state = store.get();
+			goToSlide(state.presenting ? (firstShowSlideIndex(showOrder()) ?? 0) : 0);
+		},
+		lastSlide: () => {
+			const state = store.get();
+			goToSlide(
+				state.presenting
+					? (lastShowSlideIndex(showOrder()) ?? state.slides.length - 1)
+					: state.slides.length - 1,
+			);
 		},
 		goToSlide,
+		firstShowSlideIndex: () => firstShowSlideIndex(showOrder()) ?? 0,
+		presentationEntryIndex: () =>
+			presentationEntrySlideIndex(store.get().currentSlide, showOrder()),
 		slideCount: () => store.get().slides.length,
 		currentSlide: () => store.get().currentSlide,
 		zoom: () => renderer.effectiveScale(),
 		setZoom,
-		zoomIn: () => setZoom(renderer.effectiveScale() * ZOOM_STEP),
-		zoomOut: () => setZoom(renderer.effectiveScale() / ZOOM_STEP),
-		zoomToFit: () => setZoom('fit'),
+		// The shared store already holds the fit-relative user factor, so a step is
+		// just a command. Re-measuring first keeps the absolute value it projects
+		// correct for the current viewport.
+		zoomIn: () => {
+			measureFit();
+			zoomStore.dispatch({ type: 'zoom-in' });
+		},
+		zoomOut: () => {
+			measureFit();
+			zoomStore.dispatch({ type: 'zoom-out' });
+		},
+		zoomToFit: () => zoomStore.dispatch({ type: 'zoom-to-fit' }),
 	};
 }

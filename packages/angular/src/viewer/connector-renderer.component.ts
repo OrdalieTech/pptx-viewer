@@ -8,6 +8,7 @@ import { buildConnectorGeometry } from './connector-path';
 import type { MarkerShape } from './connector-path';
 import type { Rect } from './connector-routing';
 import { ConnectorTextOverlayComponent } from './connector-text-overlay.component';
+import { DynamicStyleComponent } from './dynamic-style.component';
 
 /**
  * ConnectorRendererComponent: Angular port of the Vue `ConnectorRenderer.vue`
@@ -36,14 +37,19 @@ import { ConnectorTextOverlayComponent } from './connector-text-overlay.componen
 	selector: 'pptx-connector-renderer',
 	standalone: true,
 	changeDetection: ChangeDetectionStrategy.OnPush,
-	imports: [ConnectorTextOverlayComponent],
+	imports: [ConnectorTextOverlayComponent, DynamicStyleComponent],
 	template: `
 		<div
 			class="pptx-ng-element pptx-ng-connector"
 			[style]="wrapperStyle()"
-			[attr.data-element-id]="element().id"
-			[attr.data-pptx-element]="interactive() ? 'true' : null"
+			[attr.data-element-id]="elementIdAttr()"
+			[attr.data-pptx-element]="interactive() || marked() ? 'true' : null"
 		>
+			<!-- A font-style emphasis effect (Bold Flash, Bold Reveal, Underline,
+			     Change Font Style/Size) overrides the caption's own inline
+			     bold/italic/underline/size, which plain CSS inheritance cannot
+			     reach. See animation-text-style-css.ts. -->
+			<pptx-dynamic-style [css]="textStyleOverrideCss()" />
 			<svg
 				[attr.width]="geo().svgW"
 				[attr.height]="geo().svgH"
@@ -99,6 +105,23 @@ import { ConnectorTextOverlayComponent } from './connector-text-overlay.componen
 						</filter>
 					}
 				</defs>
+				<!--
+					The only pointer-reachable part of a connector: a transparent stroke
+					along the line that opts back into hit testing. The wrapper is
+					pointer-events:none so a connector's mostly-empty bounding box never
+					swallows clicks meant for the shapes it spans, which left the line
+					itself unclickable until this path existed.
+				-->
+				<path
+					class="pptx-ng-connector-hit"
+					[attr.d]="geo().hitPathD"
+					fill="none"
+					stroke="transparent"
+					[attr.stroke-width]="geo().hitStrokeWidth"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					style="pointer-events: stroke"
+				/>
 				@for (strand of strands(); track strand.key) {
 					@if (geo().pathD) {
 						<path
@@ -151,6 +174,21 @@ export class ConnectorRendererComponent {
 	readonly canvasHeight = input<number>(0);
 	/** See ElementRenderer.interactive: gates the data-pptx-element contract attr. */
 	readonly interactive = input<boolean>(true);
+	/** Keep the data-pptx-element marker on interaction-locked template elements. */
+	readonly marked = input<boolean>(false);
+	/**
+	 * When true (default), the rendered node carries `data-element-id`. The
+	 * miniature surfaces that paint every slide at once turn it off so one
+	 * element id resolves to exactly one node in the document; see
+	 * `ElementRendererComponent.exposeElementId`.
+	 */
+	readonly exposeElementId = input<boolean>(true);
+
+	/** `data-element-id` for this element, or null on a miniature surface. */
+	readonly elementIdAttr = computed<string | null>(() =>
+		this.exposeElementId() ? this.element().id : null,
+	);
+
 	/**
 	 * Native-animation playback state. When an active `p:animClr` colour animation
 	 * targets the stroke (`animatesStroke`), the SVG stroke + arrowheads paint
@@ -158,6 +196,14 @@ export class ConnectorRendererComponent {
 	 * outside a running presentation.
 	 */
 	readonly animationState = input<ElementAnimationState | undefined>(undefined);
+
+	/**
+	 * Scoped `!important` CSS override for an active font-style emphasis effect
+	 * (Bold Flash, Bold Reveal, Underline, Change Font Style/Size), built by the
+	 * parent `ElementRendererComponent` (`buildTextStyleOverrideCss`) so a
+	 * connector's own caption animates the same way a shape's text does.
+	 */
+	readonly textStyleOverrideCss = input<string | undefined>(undefined);
 
 	/** All derived geometry, recomputed on every input change. */
 	readonly geo = computed(() => {

@@ -22,6 +22,7 @@
 
 import type { PptxChartData, PptxElement } from 'pptx-viewer-core';
 
+import { dataLabelFontOverride, resolveDataLabelTextStyle } from './chart-data-label-text';
 import { computeHierarchicalSunburstArcs, computeSunburstArcs } from './chart-sunburst-hierarchy';
 import type { ChartViewModel, SvgPath, SvgPrimitive, SvgText } from './chart-view-model';
 import { computePlotLayout, formatAxisValue, paletteColor } from './chart-view-model';
@@ -87,6 +88,7 @@ export function computeFunnelSegments(
 	plotHeight: number,
 	categories: ReadonlyArray<string>,
 	colorPalette: readonly string[] | undefined,
+	seriesColorOverride?: string,
 ): FunnelSegment[] {
 	const count = values.length;
 	if (count === 0) {
@@ -114,7 +116,9 @@ export function computeFunnelSegments(
 
 		out.push({
 			d,
-			fill: paletteColor(i, colorPalette),
+			// An explicit series colour (c:ser/cx:series spPr solidFill) wins over
+			// the per-segment palette cycle, as in PowerPoint.
+			fill: seriesColorOverride ?? paletteColor(i, colorPalette),
 			topW,
 			botW,
 			labelX: centerX,
@@ -145,6 +149,7 @@ export function buildFunnelViewModel(
 		layout.plotHeight,
 		categoryLabels,
 		chartData.colorPalette,
+		chartData.series[0]?.color,
 	);
 
 	const primitives: SvgPrimitive[] = [];
@@ -159,7 +164,8 @@ export function buildFunnelViewModel(
 			strokeWidth: 1,
 		} satisfies SvgPath);
 	}
-	for (const seg of segments) {
+	const funnelSeries = chartData.series[0];
+	segments.forEach((seg, i) => {
 		dataLabels.push({
 			kind: 'text',
 			x: seg.labelX,
@@ -169,8 +175,11 @@ export function buildFunnelViewModel(
 			fill: '#ffffff',
 			textAnchor: 'middle',
 			fontWeight: 'bold',
+			...(funnelSeries
+				? dataLabelFontOverride(resolveDataLabelTextStyle(chartData, funnelSeries, i))
+				: {}),
 		});
-	}
+	});
 
 	const title = chartData.style?.hasTitle && chartData.title ? chartData.title : undefined;
 

@@ -35,13 +35,131 @@ describe('reviewCommentsPanel', () => {
 
 		expect(editor.slides[0]?.comments?.[0]?.text).toBe('Check the opening slide');
 		expect(target.textContent).toContain('Check the opening slide');
-		(target.querySelector('.pptx-svelte-comment-actions button') as HTMLButtonElement).click();
+		const actionButton = (label: string): HTMLButtonElement =>
+			Array.from(
+				target.querySelectorAll<HTMLButtonElement>('.pptx-svelte-comment-actions button'),
+			).find((button) => button.textContent === label)!;
+		actionButton('Resolve').click();
 		flushSync();
 		expect(editor.slides[0]?.comments?.[0]?.resolved).toBeTruthy();
-		(
-			target.querySelectorAll('.pptx-svelte-comment-actions button')[1] as HTMLButtonElement
-		).click();
+		actionButton('Delete').click();
 		flushSync();
 		expect(editor.slides[0]?.comments).toStrictEqual([]);
+	});
+
+	it('appends a threaded reply nested under the parent card', () => {
+		const target = document.createElement('div');
+		const editor = createEditor();
+		editor.setSlides([
+			{
+				id: 'slide-1',
+				elements: [],
+				comments: [{ id: 'c1', text: 'Parent comment', author: 'Alice' }],
+			} as PptxSlide,
+		]);
+		const instance = mount(ReviewCommentsPanel, { target, props: { editor } });
+		cleanup = () => unmount(instance);
+
+		const replyBox = target.querySelector(
+			'.pptx-svelte-comment-reply-compose textarea',
+		) as HTMLTextAreaElement;
+		expect(replyBox.getAttribute('placeholder')).toContain('Reply');
+		replyBox.value = 'A threaded reply';
+		replyBox.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		(target.querySelector('.pptx-svelte-comment-reply-submit') as HTMLButtonElement).click();
+		flushSync();
+
+		const parent = editor.slides[0]?.comments?.[0];
+		expect(parent?.replies?.[0]).toMatchObject({
+			text: 'A threaded reply',
+			threadId: 'c1',
+			parentId: 'c1',
+		});
+		// The reply renders nested INSIDE the parent card's replies block.
+		expect(target.querySelector('.pptx-svelte-comment-replies')?.textContent).toContain(
+			'A threaded reply',
+		);
+	});
+
+	it('uses the current collaborator name for new comments, not the translated default', () => {
+		const target = document.createElement('div');
+		const editor = createEditor();
+		editor.setSlides([
+			{
+				id: 'slide-1',
+				elements: [],
+				comments: [{ id: 'c1', text: 'From Alice', author: 'Alice' }],
+			} as PptxSlide,
+		]);
+		const instance = mount(ReviewCommentsPanel, {
+			target,
+			props: { editor },
+			context: new Map([['pptx-comment-author', () => 'Bob']]),
+		});
+		cleanup = () => unmount(instance);
+
+		const textarea = target.querySelector(
+			'.pptx-svelte-comments-compose textarea',
+		) as HTMLTextAreaElement;
+		textarea.value = 'From Bob';
+		textarea.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		(target.querySelector('.pptx-svelte-comments-compose button') as HTMLButtonElement).click();
+		flushSync();
+
+		expect(editor.slides[0]?.comments?.map((comment) => comment.author)).toEqual(['Alice', 'Bob']);
+		expect(
+			Array.from(target.querySelectorAll('.pptx-svelte-comment-meta strong')).map(
+				(element) => element.textContent,
+			),
+		).toEqual(['Alice', 'Bob']);
+		const replyBox = target.querySelector(
+			'.pptx-svelte-comment-reply-compose textarea',
+		) as HTMLTextAreaElement;
+		replyBox.value = 'Bob replies';
+		replyBox.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+		(target.querySelector('.pptx-svelte-comment-reply-submit') as HTMLButtonElement).click();
+		flushSync();
+		expect(editor.slides[0]?.comments?.[0]?.replies?.[0]?.author).toBe('Bob');
+		expect(target.querySelector('.pptx-svelte-comment-reply strong')?.textContent).toBe('Bob');
+	});
+
+	/**
+	 * Wave-4 B5: typing `@al` opens the typeahead; accepting inserts `@Alice `
+	 * into the draft AND records the mention, which must reach the saved
+	 * comment's `mentions` array.
+	 */
+	it('the @-mention typeahead inserts a mention that reaches the saved comment', () => {
+		const target = document.createElement('div');
+		const editor = createEditor();
+		editor.modernCommentAuthors = [{ id: 'a1', name: 'Alice', userId: 'u1', providerId: 'p1' }];
+		const instance = mount(ReviewCommentsPanel, { target, props: { editor } });
+		cleanup = () => unmount(instance);
+
+		const textarea = target.querySelector('textarea') as HTMLTextAreaElement;
+		textarea.value = 'hey @al';
+		textarea.selectionStart = 7;
+		textarea.selectionEnd = 7;
+		textarea.dispatchEvent(new Event('input', { bubbles: true }));
+		flushSync();
+
+		const suggestions = target.querySelector('[data-testid="pptx-comment-mention-suggestions"]');
+		expect(suggestions).not.toBeNull();
+		const option = target.querySelector(
+			'[data-testid="pptx-comment-mention-option"]',
+		) as HTMLButtonElement;
+		expect(option.textContent?.trim()).toBe('Alice');
+		option.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+		flushSync();
+
+		expect((target.querySelector('textarea') as HTMLTextAreaElement).value).toBe('hey @Alice ');
+		(target.querySelector('.pptx-svelte-comments-compose button') as HTMLButtonElement).click();
+		flushSync();
+
+		const saved = editor.slides[0]?.comments?.[0];
+		expect(saved?.text).toBe('hey @Alice');
+		expect(saved?.mentions?.[0]).toMatchObject({ personId: 'a1', authorName: 'Alice' });
 	});
 });

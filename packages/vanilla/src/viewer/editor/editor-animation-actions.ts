@@ -1,8 +1,13 @@
+/* oxlint-disable eslint/one-var -- the many action factory closures below each
+   declare their own independent locals; merging unrelated declarations across
+   them would hurt readability, not help it. */
 import type {
+	PptxAfterAnimationAction,
 	PptxAnimationPreset,
 	PptxAnimationDirection,
 	PptxAnimationRepeatMode,
 	PptxAnimationSequence,
+	PptxAnimationTimelineAnchor,
 	PptxAnimationTimingCurve,
 	PptxAnimationTrigger,
 	PptxElementAnimation,
@@ -10,25 +15,33 @@ import type {
 import type { AnimationGroup } from 'pptx-viewer-shared';
 import {
 	applyAnimationPreset,
+	applyAnimationTimelineOrder,
+	applyMotionPathPreset,
+	buildAnimationTimelineRows,
+	clearMotionPath,
+	moveAnimationTimelineRowBy,
 	removeElementAnimation,
-	reorderAnimationDown,
-	reorderAnimationUp,
+	reorderAnimationTimelineRows,
+	setAfterAnimation,
+	setAfterAnimationColor,
 	setAnimationEmphasis,
 	setAnimationEntrance,
 	setAnimationExit,
 	setDelay,
 	setDirection,
 	setDuration,
+	setEffectSound,
 	setRepeatCount,
 	setRepeatMode,
+	setMotionPath,
 	setSequence,
 	setTimingCurve,
 	setTrigger,
 	setTriggerShapeId,
+	updateSlide,
 } from 'pptx-viewer-shared';
 
 import type { Store, ViewerState } from '../state';
-import { updateSlide } from './editor-mutations';
 import type { EditorOps } from './editor-operations';
 
 /**
@@ -55,6 +68,8 @@ export interface AnimationTimingPatch {
 	repeatCount?: number;
 	repeatMode?: PptxAnimationRepeatMode | 'none';
 	triggerShapeId?: string;
+	afterAnimation?: PptxAfterAnimationAction;
+	afterAnimationColor?: string;
 }
 
 export interface AnimationActions {
@@ -67,7 +82,25 @@ export interface AnimationActions {
 	 * `setAnimationEntrance`/`setAnimationExit`/`setAnimationEmphasis`).
 	 */
 	setAnimationEffect(group: AnimationGroup, preset: PptxAnimationPreset | 'none'): void;
+	/**
+	 * Apply a catalogue motion path to the selected element by preset id.
+	 *
+	 * `'none'` clears the path; `'custom'` (the inspector's read-only marker for
+	 * a hand-dragged path) is deliberately a no-op, so re-picking the marker can
+	 * never snap the dragged geometry back to a catalogue entry.
+	 */
+	applyMotionPath(presetId: string): void;
+	/** Replace the selected element's raw path (canvas end-handle drag commit). */
+	setMotionPathData(path: string): void;
 	setAnimationTiming(elementId: string, patch: AnimationTimingPatch): void;
+	/**
+	 * Stage a newly-picked effect sound file (a pending `data:` URL, embedded
+	 * on save), or clear the sound entirely when `pick` is `undefined`.
+	 */
+	setAnimationSound(
+		elementId: string,
+		pick: { dataUrl: string; fileName?: string } | undefined,
+	): void;
 	reorderAnimation(elementId: string, direction: 'up' | 'down'): void;
 	moveAnimation(elementId: string, index: number): void;
 }
@@ -93,6 +126,10 @@ export function createAnimationActions(deps: AnimationActionsDeps): AnimationAct
 		store.set({ slides: updateSlide(state.slides, state.currentSlide, { animations }) });
 		ops.commitChange();
 	};
+
+	/** The active slide's read-only native-effect anchors (see `PptxAnimationTimelineAnchor`). */
+	const currentAnchors = (): readonly PptxAnimationTimelineAnchor[] =>
+		store.get().slides[store.get().currentSlide]?.animationTimelineAnchors ?? [];
 
 	return {
 		addAnimation(group, preset) {
@@ -143,6 +180,39 @@ export function createAnimationActions(deps: AnimationActionsDeps): AnimationAct
 			ops.commitChange();
 		},
 
+		applyMotionPath(presetId) {
+			if (presetId === 'custom') {
+				return;
+			}
+			const state = store.get();
+			const elementId = state.selectedElementId;
+			const slide = state.slides[state.currentSlide];
+			if (!state.editable || !elementId || !slide) {
+				return;
+			}
+			const current = slide.animations ?? [];
+			const animations =
+				presetId === 'none'
+					? clearMotionPath(current, elementId)
+					: applyMotionPathPreset(current, elementId, presetId);
+			ops.pushHistory();
+			store.set({ slides: updateSlide(state.slides, state.currentSlide, { animations }) });
+			ops.commitChange();
+		},
+
+		setMotionPathData(path) {
+			const state = store.get();
+			const elementId = state.selectedElementId;
+			const slide = state.slides[state.currentSlide];
+			if (!state.editable || !elementId || !slide) {
+				return;
+			}
+			const animations = setMotionPath(slide.animations ?? [], elementId, path);
+			ops.pushHistory();
+			store.set({ slides: updateSlide(state.slides, state.currentSlide, { animations }) });
+			ops.commitChange();
+		},
+
 		setAnimationTiming(elementId, patch) {
 			commitAnimations(elementId, (current) => {
 				let animations = [...current];
@@ -173,27 +243,39 @@ export function createAnimationActions(deps: AnimationActionsDeps): AnimationAct
 				if (patch.triggerShapeId !== undefined) {
 					animations = setTriggerShapeId(animations, elementId, patch.triggerShapeId || undefined);
 				}
+				if (patch.afterAnimation !== undefined) {
+					animations = setAfterAnimation(animations, elementId, patch.afterAnimation);
+				}
+				if (patch.afterAnimationColor !== undefined) {
+					animations = setAfterAnimationColor(animations, elementId, patch.afterAnimationColor);
+				}
 				return animations;
 			});
 		},
 
+		setAnimationSound(elementId, pick) {
+			commitAnimations(elementId, (current) => setEffectSound(current, elementId, pick));
+		},
+
+		// Both route through the FULL merged sequence (editor animations plus
+		// the deck's own read-only anchors), so an editor-authored effect can
+		// end up ahead of or behind a native effect, not just among the
+		// effects this editor added.
 		reorderAnimation(elementId, direction) {
 			commitAnimations(elementId, (animations) =>
-				direction === 'up'
-					? reorderAnimationUp(animations, elementId)
-					: reorderAnimationDown(animations, elementId),
+				moveAnimationTimelineRowBy(
+					animations,
+					currentAnchors(),
+					elementId,
+					direction === 'up' ? -1 : 1,
+				),
 			);
 		},
 		moveAnimation(elementId, index) {
 			commitAnimations(elementId, (animations) => {
-				const ordered = [...animations].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-				const from = ordered.findIndex((item) => item.elementId === elementId);
-				if (from < 0) {
-					return ordered;
-				}
-				const [moved] = ordered.splice(from, 1);
-				ordered.splice(Math.max(0, Math.min(index, ordered.length)), 0, moved);
-				return ordered.map((item, order) => ({ ...item, order }));
+				const rows = buildAnimationTimelineRows(animations, currentAnchors());
+				const nextRows = reorderAnimationTimelineRows(rows, `editor:${elementId}`, index);
+				return applyAnimationTimelineOrder(animations, nextRows);
 			});
 		},
 	};

@@ -7,24 +7,53 @@
 	 * `pptx-viewer-shared` (same gap noted by the vanilla binding), so this
 	 * uses a standard Office theme-color set local to the component.
 	 */
+	import type { PptxThemeColorRef } from 'pptx-viewer-core';
+	import type { ThemeColorPickerCommit } from 'pptx-viewer-shared';
+
 	import { useTranslator } from '../../../i18n/context';
+	import RecentColorsRow from '../inspector/RecentColorsRow.svelte';
+	import ThemeColorSwatchGrid from '../inspector/ThemeColorSwatchGrid.svelte';
+	import { anchoredPopup } from './anchored-popup';
 
 	const {
 		value,
 		onselect,
 		disabled = false,
 		label,
+		title,
 		glyph,
 		swatches,
+		recentColors,
+		themeColorMap,
+		currentRef,
+		onselectTheme,
 	}: {
 		value: string;
 		onselect: (hex: string) => void;
 		disabled?: boolean;
 		label: string;
+		/** Tooltip, when it should differ from the accessible name. Defaults to `label`. */
+		title?: string;
 		/** Short text glyph shown on the trigger button (e.g. "A", "H"). */
 		glyph: string;
 		/** Defaults to a standard Office theme-colour set when omitted. */
 		swatches?: readonly string[];
+		/**
+		 * When provided, renders the shared "Recent colours" row (wave-4 B6)
+		 * inside the popover, below the swatch grid. Omit for pickers that only
+		 * need to PUSH into the MRU list without showing a row of their own.
+		 */
+		recentColors?: readonly string[];
+		/**
+		 * When provided (alongside `onselectTheme`), renders the deck's real
+		 * "Theme Colors" grid above the standard swatches (font colour only:
+		 * highlight colour has no theme-ref concept on the model).
+		 */
+		themeColorMap?: Record<string, string>;
+		/** The element's current theme ref, if any (only meaningful with `themeColorMap`). */
+		currentRef?: PptxThemeColorRef;
+		/** Fired ONLY by a theme-swatch click, carrying both the hex and the ref. */
+		onselectTheme?: (commit: ThemeColorPickerCommit) => void;
 	} = $props();
 
 	const t = useTranslator();
@@ -44,6 +73,8 @@
 
 	const palette = $derived(swatches ?? DEFAULT_SWATCHES);
 	let open = $state(false);
+	// eslint-disable-next-line prefer-const
+	let triggerEl: HTMLElement | undefined = $state();
 
 	function onFocusOut(event: FocusEvent): void {
 		const root = event.currentTarget as HTMLElement;
@@ -60,20 +91,35 @@
 
 <div class="pptx-svelte-swatch" onfocusout={onFocusOut}>
 	<button
+		bind:this={triggerEl}
 		type="button"
 		class="pptx-svelte-swatch-trigger"
 		{disabled}
 		aria-haspopup="menu"
 		aria-expanded={open}
 		aria-label={label}
-		title={label}
+		title={title ?? label}
 		onclick={() => (open = !open)}
 	>
 		<span class="pptx-svelte-swatch-glyph">{glyph}</span>
 		<span class="pptx-svelte-swatch-swab" style={`background-color:${value}`}></span>
 	</button>
 	{#if open}
-		<div class="pptx-svelte-swatch-menu" role="menu">
+		<div class="pptx-svelte-swatch-menu" role="menu" use:anchoredPopup={{ anchor: triggerEl }}>
+			{#if themeColorMap && onselectTheme}
+				<ThemeColorSwatchGrid
+					{themeColorMap}
+					selectedRef={currentRef}
+					selectedHex={value}
+					onpick={(commit) => {
+						open = false;
+						onselectTheme(commit);
+					}}
+				/>
+				<div class="pptx-svelte-swatch-standard-heading">
+					{t('pptx.colorPicker.standardColors')}
+				</div>
+			{/if}
 			<div class="pptx-svelte-swatch-grid">
 				{#each palette as hex (hex)}
 					<button
@@ -87,6 +133,9 @@
 					></button>
 				{/each}
 			</div>
+			{#if recentColors}
+				<RecentColorsRow colors={recentColors} onselect={choose} />
+			{/if}
 			<label class="pptx-svelte-swatch-custom">
 				<span>{t('pptx.ribbon.customColour')}</span>
 				<input type="color" {value} onchange={(e) => choose(e.currentTarget.value)} />
@@ -142,11 +191,9 @@
 	}
 
 	.pptx-svelte-swatch-menu {
-		position: absolute;
-		top: 100%;
-		left: 0;
+		/* Positioned by `use:anchoredPopup` (position: fixed + inline top/left),
+		   which escapes the ribbon row's overflow-x clip (issue #183). */
 		z-index: 50;
-		margin-top: 4px;
 		display: flex;
 		flex-direction: column;
 		gap: 6px;
@@ -156,6 +203,11 @@
 		color: var(--pptx-popover-foreground, #f3f4f6);
 		padding: 8px;
 		box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.35), 0 4px 6px -4px rgba(0, 0, 0, 0.35);
+	}
+
+	.pptx-svelte-swatch-standard-heading {
+		font-size: 10px;
+		color: var(--pptx-muted-foreground, #94a3b8);
 	}
 
 	.pptx-svelte-swatch-grid {

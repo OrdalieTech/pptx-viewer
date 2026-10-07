@@ -1,3 +1,6 @@
+/* oxlint-disable eslint/one-var -- each parse method declares its own
+   independent locals; merging unrelated declarations across the many parse
+   methods here would hurt readability, not help it. */
 import { PptxElement, XmlObject } from '../../types';
 import type {
 	ContentPartPptxElement,
@@ -6,8 +9,17 @@ import type {
 	PptxTableData,
 } from '../../types';
 import { parseInkMlContent } from '../../utils';
+import { normalizePlaceholderIndex } from '../../utils/placeholder-index';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSavePipeline';
 import type { PlaceholderInfo } from './PptxHandlerRuntimeTypes';
+
+/**
+ * `p:ph/@type` values (CT_Placeholder, lowercased) whose slot carries
+ * dedicated formatting (date, footer, header, slide number) rather than
+ * authored slide content. These must never absorb an untyped placeholder,
+ * even when their `idx` happens to agree with it.
+ */
+const SPECIAL_PLACEHOLDER_TYPES = new Set(['dt', 'ftr', 'hdr', 'sldnum']);
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	/**
@@ -20,8 +32,46 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	/**
 	 * Parse table cell data from `a:tbl` XML inside a graphic frame.
 	 */
-	protected parseTableData(graphicData: XmlObject): PptxTableData | undefined {
-		return this.tableDataParser.parseTableData(graphicData);
+	protected parseTableData(graphicData: XmlObject, slidePath?: string): PptxTableData | undefined {
+		return this.tableDataParser.parseTableData(graphicData, slidePath);
+	}
+
+	/**
+	 * Resolve a table cell image fill's blip relationship (`r:embed` /
+	 * `r:link`) to a displayable path, mirroring the slide-background image
+	 * resolution's external-URL gating (`allowExternalImages`, Load H3).
+	 *
+	 * Table parsing is fully synchronous, so unlike shape/background image
+	 * fills this never eagerly decodes to a `data:` URL: it only resolves
+	 * the archive-relative path (or passes through an already-external /
+	 * `data:` target). A viewer's load pipeline resolves the remaining path
+	 * to a displayable URL, exactly as it already does for picture elements
+	 * parsed with `eagerDecodeImages: false`.
+	 */
+	protected resolveTableCellImagePath(
+		rEmbed: string | undefined,
+		rLink: string | undefined,
+		slidePath: string | undefined,
+	): string | undefined {
+		if (!slidePath) {
+			return undefined;
+		}
+		const relId = rEmbed || rLink;
+		if (!relId) {
+			return undefined;
+		}
+		const slideRels = this.slideRelsMap.get(slidePath);
+		const target = slideRels?.get(relId);
+		if (!target) {
+			return undefined;
+		}
+		if (target.startsWith('http://') || target.startsWith('https://')) {
+			return this.allowExternalImages === true ? target : undefined;
+		}
+		if (target.startsWith('data:')) {
+			return target;
+		}
+		return this.resolveImagePath(slidePath, target);
 	}
 
 	protected parseGraphicFrame(
@@ -47,7 +97,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			let inkStrokes: ContentPartPptxElement['inkStrokes'] = [];
 			let inkPartPath: string | undefined;
 			let inkPartRawXml: XmlObject | undefined;
-			const xfrm = contentPart['p:xfrm'] as XmlObject | undefined;
+			// PowerPoint qualifies EVERY child of a real `p:contentPart` with the
+			// 2010 `p14` prefix, so reading `p:xfrm` alone sent every genuine ink
+			// annotation to the hardcoded 0,0,120x80 default below.
+			const xfrm = (contentPart['p14:xfrm'] ?? contentPart['p:xfrm']) as XmlObject | undefined;
 			const off = xfrm?.['a:off'] as XmlObject | undefined;
 			const ext = xfrm?.['a:ext'] as XmlObject | undefined;
 
@@ -72,12 +125,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					const inkXml = await this.zip.file(inkPartPath)?.async('string');
 					if (inkXml) {
 						const inkData = this.parser.parse(inkXml) as XmlObject;
-						const parsed = parseInkMlContent(inkData);
+						const parsed = parseInkMlContent(inkData, { width, height });
 						inkStrokes = parsed.strokes;
 						inkPartRawXml = parsed.rawXml;
 					}
 				}
 			}
+
+			const nvPr = (contentPart['p14:nvContentPartPr'] ?? contentPart['p:nvContentPartPr']) as
+				| XmlObject
+				| undefined;
+			const cNvPr = (nvPr?.['p14:cNvPr'] ?? nvPr?.['p:cNvPr']) as XmlObject | undefined;
+			const shapeId = cNvPr?.['@_id'] === undefined ? undefined : String(cNvPr['@_id']);
+			const name = cNvPr?.['@_name'] === undefined ? undefined : String(cNvPr['@_name']);
 
 			return {
 				id,
@@ -86,6 +146,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				y,
 				width,
 				height,
+				// Exact EMU alongside the rounded/defaulted pixel value; see
+				// `xfrm-emu-resolution.ts`. Only recorded when the raw attribute
+				// parsed to a finite/positive value, mirroring the guards `width`/
+				// `height` above already apply before falling back to the 120x80
+				// default (a defaulted axis has no exact EMU source to re-emit).
+				...(Number.isFinite(rawX) ? { xEmu: rawX } : {}),
+				...(Number.isFinite(rawY) ? { yEmu: rawY } : {}),
+				...(Number.isFinite(rawCx) && rawCx > 0 ? { widthEmu: rawCx } : {}),
+				...(Number.isFinite(rawCy) && rawCy > 0 ? { heightEmu: rawCy } : {}),
+				shapeId,
+				name,
 				inkStrokes: inkStrokes.length > 0 ? inkStrokes : undefined,
 				inkPartPath,
 				inkPartRawXml,
@@ -198,6 +269,13 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				y,
 				width,
 				height,
+				// Exact EMU alongside the rounded/defaulted pixel value; see the
+				// matching comment on the `contentPart` parser above and
+				// `xfrm-emu-resolution.ts`.
+				...(Number.isFinite(rawX) ? { xEmu: rawX } : {}),
+				...(Number.isFinite(rawY) ? { yEmu: rawY } : {}),
+				...(Number.isFinite(rawCx) && rawCx > 0 ? { widthEmu: rawCx } : {}),
+				...(Number.isFinite(rawCy) && rawCy > 0 ? { heightEmu: rawCy } : {}),
 				rotation,
 				skewX,
 				skewY,
@@ -250,7 +328,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		return {
-			idx: idx !== undefined ? String(idx) : undefined,
+			// `idx="4294967295"` is PowerPoint's unsigned encoding of -1: the
+			// placeholder has no counterpart on the layout. Erasing it here lets
+			// the shape match on `type` instead of chasing an index that cannot
+			// exist, which used to fail the lookup and drop the shape outright.
+			idx: normalizePlaceholderIndex(idx),
 			type: type !== undefined ? String(type).toLowerCase() : undefined,
 			sz: sz !== undefined ? String(sz).toLowerCase() : undefined,
 			orient,
@@ -289,6 +371,17 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 		// idx agrees. When both sides carry a type they must be compatible.
 		if (source.type && target.type && !typesMatch) {
+			return false;
+		}
+
+		// A special placeholder (date/footer/header/slide-number) must never bind
+		// to an untyped generic placeholder just because their idx happens to
+		// agree: ordinary slide content would then inherit that slot's footer/date
+		// styling. This overrides the idx-alone trust below.
+		if (
+			(source.type && SPECIAL_PLACEHOLDER_TYPES.has(source.type) && !target.type) ||
+			(target.type && SPECIAL_PLACEHOLDER_TYPES.has(target.type) && !source.type)
+		) {
 			return false;
 		}
 

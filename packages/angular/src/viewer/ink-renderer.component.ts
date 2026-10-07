@@ -42,7 +42,8 @@ import type { InkStroke } from './ink-renderer-helpers';
 		<div
 			class="pptx-ng-element pptx-ng-ink"
 			[ngStyle]="containerStyle()"
-			[attr.data-element-id]="element().id"
+			[attr.data-element-id]="elementIdAttr()"
+			[attr.data-pptx-element]="markElement() ? 'true' : null"
 		>
 			@if (strokes().length > 0) {
 				<svg
@@ -55,7 +56,20 @@ import type { InkStroke } from './ink-renderer-helpers';
 						<style [textContent]="replayKeyframes"></style>
 					}
 					@for (stroke of strokes(); track $index) {
-						@if (stroke.circles && stroke.circles.length > 0) {
+						@if (stroke.nibMarks && stroke.nibMarks.length > 0) {
+							<g [attr.opacity]="stroke.opacity">
+								@for (m of stroke.nibMarks; track $index) {
+									<ellipse
+										[attr.cx]="m.cx"
+										[attr.cy]="m.cy"
+										[attr.rx]="m.rPerp"
+										[attr.ry]="m.rTilt"
+										[attr.transform]="'rotate(' + m.rotationDeg + ' ' + m.cx + ' ' + m.cy + ')'"
+										[attr.fill]="stroke.color"
+									/>
+								}
+							</g>
+						} @else if (stroke.circles && stroke.circles.length > 0) {
 							<g [attr.opacity]="stroke.opacity">
 								@for (c of stroke.circles; track $index) {
 									<circle
@@ -93,6 +107,31 @@ export class InkRendererComponent {
 	readonly zIndex = input<number>(0);
 	readonly mediaDataUrls = input<Map<string, string>>(new Map());
 	readonly replay = input<boolean>(false);
+	/**
+	 * Emit the neutral element marker (`data-pptx-element="true"`) on this
+	 * renderer's root, the node that also carries `data-element-id`.
+	 *
+	 * Set only by the main interactive canvas. It is an input rather than
+	 * something the dispatcher wraps around this component because the root here
+	 * positions itself absolutely, so an outer marked box would offset the ink
+	 * twice. Without it an ink element renders correctly but is not an element as
+	 * far as the shared contract is concerned, so anything enumerating or
+	 * hit-testing slide elements by the marker skips it.
+	 */
+	readonly markElement = input<boolean>(false);
+	/**
+	 * When true (default), the rendered node carries `data-element-id`. The
+	 * miniature surfaces that paint every slide at once turn it off so one
+	 * element id resolves to exactly one node in the document; see
+	 * `ElementRendererComponent.exposeElementId`.
+	 */
+	readonly exposeElementId = input<boolean>(true);
+
+	/** `data-element-id` for this element, or null on a miniature surface. */
+	readonly elementIdAttr = computed<string | null>(() =>
+		this.exposeElementId() ? this.element().id : null,
+	);
+
 	readonly replayKeyframes = INK_REPLAY_KEYFRAMES;
 
 	readonly containerStyle = computed<StyleMap>(() =>

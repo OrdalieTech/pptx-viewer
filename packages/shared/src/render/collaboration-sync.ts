@@ -17,9 +17,7 @@
  *   Each element Y.Map has scalar keys + `_`-prefixed JSON blobs + `textBody`
  *   textBody is a Y.Text with one delta-op per TextSegment
  *
- * NOTE: packages/tools' pptx-codec.ts implements a similar schema but with
- * different complex-field key prefixes (e.g. `_textStyle` vs `_ts` here); the
- * two doc layouts are NOT interchangeable on the same Y.Doc.
+ * This is also the canonical tools/codec schema. Source assets are local inputs.
  *
  * Prefer `reconcileSlidesInYDoc` (collaboration-reconcile.ts) over
  * `writeSlidesToYDoc` for live editing: it updates only what changed instead
@@ -37,234 +35,39 @@ import {
 	readAssetFields,
 	writeAssetFields,
 } from './collaboration-assets';
-import type { YTextLike } from './collaboration-text-codec';
+import { orderedYMaps } from './collaboration-order';
+import {
+	assertCollaborationSchema,
+	YDOC_META_KEY,
+	YDOC_SCHEMA_VERSION,
+	YDOC_SLIDES_KEY,
+	SCALAR_ELEMENT_KEYS,
+	COMPLEX_ELEMENT_FIELDS,
+	SCALAR_SLIDE_KEYS,
+	COMPLEX_SLIDE_FIELDS,
+} from './collaboration-schema';
+import type {
+	YMapLike,
+	YArrayLike,
+	YDocLike,
+	YjsFactories,
+	YDeepObserver,
+} from './collaboration-schema';
+import { mapSourceAssets } from './collaboration-source';
+import { readTableData, writeTableData } from './collaboration-table';
 import { encodeTextBody, decodeTextBody, isYTextLike } from './collaboration-text-codec';
 
 export * from './collaboration-assets';
 export * from './collaboration-text-codec';
+export * from './collaboration-source';
+export * from './collaboration-order';
+export * from './collaboration-table';
+export * from './collaboration-schema';
 
-// ---------------------------------------------------------------------------
-// Structural Yjs interfaces (no 'yjs' import; bindings supply live instances)
-// ---------------------------------------------------------------------------
-
-export interface YMapLike {
-	get: (key: string) => unknown;
-	set: (key: string, value: unknown) => void;
-	delete: (key: string) => void;
-	forEach: (cb: (value: unknown, key: string) => void) => void;
-}
-
-/** Shape of the Yjs transaction passed to (deep) observers. */
-export interface YTransactionLike {
-	origin?: unknown;
-}
-
-export type YDeepObserver = (events?: unknown, transaction?: YTransactionLike) => void;
-
-export interface YArrayLike {
-	readonly length: number;
-	get: (index: number) => unknown;
-	push: (items: unknown[]) => void;
-	delete: (index: number, length?: number) => void;
-	insert: (index: number, items: unknown[]) => void;
-	toArray: () => unknown[];
-	observe: (handler: () => void) => void;
-	unobserve: (handler: () => void) => void;
-	observeDeep: (handler: YDeepObserver) => void;
-	unobserveDeep: (handler: YDeepObserver) => void;
-}
-
-export interface YDocLike {
-	getMap: (name: string) => YMapLike;
-	getArray: (name: string) => YArrayLike;
-	transact: (fn: () => void, origin?: unknown) => void;
-}
-
-export interface YjsFactories {
-	createMap: () => YMapLike;
-	createArray: () => YArrayLike;
-	createText: () => YTextLike;
-}
-
-// ---------------------------------------------------------------------------
-// Y.Doc schema constants
-// ---------------------------------------------------------------------------
-
-export const YDOC_SLIDES_KEY = 'pptx:slides';
-export const YDOC_META_KEY = 'pptx:meta';
-
-export const SCALAR_ELEMENT_KEYS: ReadonlySet<string> = new Set([
-	'id',
-	'type',
-	'x',
-	'y',
-	'width',
-	'height',
-	'rotation',
-	'shapeId',
-	'skewX',
-	'skewY',
-	'flipHorizontal',
-	'flipVertical',
-	'hidden',
-	'opacity',
-	'text',
-	'name',
-	'altText',
-	'shapeType',
-	'imagePath',
-	'imageData',
-	'svgData',
-	'svgPath',
-	'cropLeft',
-	'cropTop',
-	'cropRight',
-	'cropBottom',
-	'tileOffsetX',
-	'tileOffsetY',
-	'tileScaleX',
-	'tileScaleY',
-	'tileFlip',
-	'tileAlignment',
-	'pathData',
-	'pathWidth',
-	'pathHeight',
-	'mediaType',
-	'mediaPath',
-	'mediaMimeType',
-	'mediaReferenceKind',
-	'mediaReferenceName',
-	'mediaReferenceContentType',
-	'trimStartMs',
-	'trimEndMs',
-	'posterFramePath',
-	'fullScreen',
-	'loop',
-	'fadeInDuration',
-	'fadeOutDuration',
-	'volume',
-	'autoPlay',
-	'playAcrossSlides',
-	'hideWhenNotPlaying',
-	'playbackSpeed',
-	'mediaMissing',
-	'isLinked',
-	'oleTarget',
-	'oleProgId',
-	'oleName',
-	'oleClsId',
-	'oleObjectType',
-	'oleFileExtension',
-	'fileName',
-	'externalPath',
-	'previewImage',
-	'oleShowAsIcon',
-	'oleImgW',
-	'oleImgH',
-	'oleEmbeddedFileName',
-	'oleEmbeddedMimeType',
-	'oleEmbeddedByteSize',
-	'inkPaths',
-	'inkColors',
-	'inkWidths',
-	'inkOpacities',
-	'inkTool',
-	'inkPartPath',
-	'zoomType',
-	'targetSlideIndex',
-	'targetSectionId',
-	'summaryLayout',
-	'modelPath',
-	'modelMimeType',
-	'posterImage',
-	'linkedTxbxId',
-	'linkedTxbxSeq',
-	'promptText',
-]);
-
-export const COMPLEX_ELEMENT_FIELDS: Readonly<Record<string, string>> = {
-	textStyle: '_ts',
-	shapeStyle: '_ss',
-	shapeAdjustments: '_sa',
-	adjustmentHandles: '_ah',
-	tableData: '_td',
-	chartData: '_cd',
-	smartArtData: '_smad',
-	children: '_ch',
-	paragraphIndents: '_pi',
-	rawXml: '_rx',
-	extLstXml: '_elx',
-	actionClick: '_ac',
-	actionHover: '_av',
-	locks: '_lk',
-	imageEffects: '_ie',
-	cropShape: '_cr',
-	bookmarks: '_mb',
-	captionTracks: '_ct',
-	audioCdStart: '_acd1',
-	audioCdEnd: '_acd2',
-	rawMediaReferenceXml: '_mrx',
-	metadata: '_md',
-	groupFill: '_gf',
-	inkPointPressures: '_ipp',
-	inkStrokes: '_cis',
-	inkPartRawXml: '_cirx',
-	summaryTargets: '_zst',
-	extensionXml: '_ext',
-	customGeometryPaths: '_cgp',
-	customGeometryRawData: '_cgr',
-	customGeometryAdjustHandlesXY: '_cgx',
-	customGeometryAdjustHandlesPolar: '_cgo',
-	customGeometryConnectionSites: '_cgc',
-	customGeometryTextRect: '_cgt',
-};
 const REV_COMPLEX_ELEMENT: Record<string, string> = Object.fromEntries(
 	Object.entries(COMPLEX_ELEMENT_FIELDS).map(([k, v]) => [v, k]),
 );
 
-export const SCALAR_SLIDE_KEYS: ReadonlySet<string> = new Set([
-	'id',
-	'rId',
-	'sourceSlideId',
-	'name',
-	'layoutPath',
-	'layoutName',
-	'slideNumber',
-	'hidden',
-	'sectionName',
-	'sectionId',
-	'backgroundColor',
-	'backgroundImage',
-	'backgroundGradient',
-	'backgroundShadeToTitle',
-	'notes',
-	'notesCSldName',
-	'backgroundShowAnimation',
-	'showMasterShapes',
-	'isDirty',
-]);
-
-export const COMPLEX_SLIDE_FIELDS: Readonly<Record<string, string>> = {
-	transition: '_tr',
-	animations: '_an',
-	nativeAnimations: '_na',
-	rawTiming: '_rt',
-	notesSegments: '_ns',
-	notesShapes: '_nsh',
-	notesClrMapOverride: '_ncm',
-	comments: '_cm',
-	warnings: '_wa',
-	rawXml: '_rx',
-	clrMapOverride: '_cm2',
-	guides: '_gu',
-	customerData: '_cu',
-	activeXControls: '_ax',
-	legacyVmlElements: '_lvml',
-	backgroundPattern: '_bp',
-	modernCommentPart: '_mc',
-	headerFooterFlags: '_hff',
-	slideSynchronization: '_sync',
-};
 const REV_COMPLEX_SLIDE: Record<string, string> = Object.fromEntries(
 	Object.entries(COMPLEX_SLIDE_FIELDS).map(([k, v]) => [v, k]),
 );
@@ -286,6 +89,22 @@ export function writeElementToYMap(
 		}
 		if (SCALAR_ELEMENT_KEYS.has(key)) {
 			ymap.set(key, value);
+		} else if (key === 'tableData') {
+			writeTableData(
+				value as import('pptx-viewer-core').PptxTableData,
+				ymap,
+				factories,
+				element.id,
+			);
+		} else if (key === 'children' && Array.isArray(value)) {
+			const children = factories.createArray();
+			for (const [index, child] of value.entries()) {
+				const childMap = factories.createMap();
+				writeElementToYMap(child, childMap, factories, assets);
+				childMap.set('_order', index);
+				children.push([childMap]);
+			}
+			ymap.set('children', children);
 		} else if (key === 'textSegments') {
 			if (Array.isArray(value)) {
 				const ytext = factories.createText();
@@ -293,7 +112,7 @@ export function writeElementToYMap(
 				ymap.set('textBody', ytext);
 			}
 		} else if (COMPLEX_ELEMENT_FIELDS[key]) {
-			ymap.set(COMPLEX_ELEMENT_FIELDS[key], JSON.stringify(value));
+			ymap.set(COMPLEX_ELEMENT_FIELDS[key], JSON.stringify(mapSourceAssets(value, assets, true)));
 		}
 	}
 	writeAssetFields(rec.id as string, rec, ymap, assets);
@@ -302,7 +121,16 @@ export function writeElementToYMap(
 export function readElementFromYMap(ymap: YMapLike, assets: YMapLike): PptxElement {
 	const element: Record<string, unknown> = {};
 	ymap.forEach((value: unknown, key: string) => {
-		if (key === 'textBody') {
+		if (key === '_order') {
+			return;
+		}
+		if (key === 'tableData') {
+			element.tableData = readTableData(ymap);
+		} else if (key === 'children') {
+			element.children = orderedYMaps(value as YArrayLike).map((child) =>
+				readElementFromYMap(child, assets),
+			);
+		} else if (key === 'textBody') {
 			if (isYTextLike(value)) {
 				element.textSegments = decodeTextBody(value);
 			}
@@ -310,16 +138,23 @@ export function readElementFromYMap(ymap: YMapLike, assets: YMapLike): PptxEleme
 			// Ref pointers are resolved by readAssetFields below; version
 			// counters are an internal sync token, never a PptxElement field.
 		} else if (REV_COMPLEX_ELEMENT[key]) {
-			try {
-				element[REV_COMPLEX_ELEMENT[key]] = JSON.parse(value as string);
-			} catch {
-				/* skip */
-			}
+			element[REV_COMPLEX_ELEMENT[key]] = mapSourceAssets(
+				JSON.parse(value as string),
+				assets,
+				false,
+			);
 		} else {
 			element[key] = value;
 		}
 	});
 	readAssetFields(ymap, assets, element);
+	if (Array.isArray(element.textSegments)) {
+		element.text = element.textSegments
+			.map((segment: { text: string; isParagraphBreak?: boolean; isLineBreak?: boolean }) =>
+				segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text,
+			)
+			.join('');
+	}
 	return element as unknown as PptxElement;
 }
 
@@ -335,22 +170,27 @@ export function writeSlideToYMap(
 ): void {
 	const rec = slide as unknown as Record<string, unknown>;
 	for (const key of SCALAR_SLIDE_KEYS) {
+		if (key === 'backgroundImage' || ASSET_ELEMENT_FIELDS.has(key)) {
+			continue;
+		}
 		if (rec[key] !== undefined) {
 			ymap.set(key, rec[key]);
 		}
 	}
 	for (const [original, prefixed] of Object.entries(COMPLEX_SLIDE_FIELDS)) {
 		if (rec[original] !== undefined) {
-			ymap.set(prefixed, JSON.stringify(rec[original]));
+			ymap.set(prefixed, JSON.stringify(mapSourceAssets(rec[original], assets, true)));
 		}
 	}
 	const elemArr = factories.createArray();
-	for (const el of slide.elements) {
+	for (const [index, el] of slide.elements.entries()) {
 		const elemMap = factories.createMap();
 		writeElementToYMap(el, elemMap, factories, assets);
+		elemMap.set('_order', index);
 		elemArr.push([elemMap]);
 	}
 	ymap.set('elements', elemArr);
+	writeAssetFields(rec.id as string, rec, ymap, assets);
 }
 
 export function readSlideFromYMap(ymap: YMapLike, assets: YMapLike): PptxSlide {
@@ -364,21 +204,18 @@ export function readSlideFromYMap(ymap: YMapLike, assets: YMapLike): PptxSlide {
 	for (const [prefixed, original] of Object.entries(REV_COMPLEX_SLIDE)) {
 		const v = ymap.get(prefixed) as string | undefined;
 		if (v !== undefined) {
-			try {
-				slide[original] = JSON.parse(v);
-			} catch {
-				/* skip */
-			}
+			slide[original] = mapSourceAssets(JSON.parse(v), assets, false);
 		}
 	}
 	const elemArr = ymap.get('elements') as YArrayLike | undefined;
 	const elements: PptxElement[] = [];
 	if (elemArr) {
-		for (let i = 0; i < elemArr.length; i++) {
-			elements.push(readElementFromYMap(elemArr.get(i) as YMapLike, assets));
+		for (const element of orderedYMaps(elemArr)) {
+			elements.push(readElementFromYMap(element, assets));
 		}
 	}
 	slide.elements = elements;
+	readAssetFields(ymap, assets, slide);
 	return slide as unknown as PptxSlide;
 }
 
@@ -399,24 +236,28 @@ export function writeSlidesToYDoc(
 ): void {
 	const assets = getAssetsMap(ydoc);
 	ydoc.transact(() => {
+		assertCollaborationSchema(ydoc);
+		ydoc.getMap(YDOC_META_KEY).set('schemaVersion', YDOC_SCHEMA_VERSION);
 		const arr = ydoc.getArray(YDOC_SLIDES_KEY);
 		if (arr.length > 0) {
 			arr.delete(0, arr.length);
 		}
-		for (const slide of slides) {
+		for (const [index, slide] of slides.entries()) {
 			const ymap = factories.createMap();
 			writeSlideToYMap(slide, ymap, factories, assets);
+			ymap.set('_order', index);
 			arr.push([ymap]);
 		}
 	}, origin);
 }
 
 export function readSlidesFromYDoc(ydoc: YDocLike): PptxSlide[] {
+	assertCollaborationSchema(ydoc);
 	const assets = getAssetsMap(ydoc);
 	const arr = ydoc.getArray(YDOC_SLIDES_KEY);
 	const slides: PptxSlide[] = [];
-	for (let i = 0; i < arr.length; i++) {
-		slides.push(readSlideFromYMap(arr.get(i) as YMapLike, assets));
+	for (const slide of orderedYMaps(arr)) {
+		slides.push(readSlideFromYMap(slide, assets));
 	}
 	return slides;
 }

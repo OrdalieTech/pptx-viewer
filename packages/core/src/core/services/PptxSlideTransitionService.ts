@@ -8,13 +8,24 @@
  * @module PptxSlideTransitionService
  */
 import type { PptxSlideTransition, XmlObject } from '../types';
-import { parseP14FromExtLst, buildP14ExtLst, P14_TRANSITION_TYPES } from './p14-transition-parser';
 import {
+	parseP14DirectChild,
+	parseP14FromExtLst,
+	P14_TRANSITION_TYPES,
+} from './p14-transition-parser';
+import {
+	parseP15DirectChild,
 	parseP15FromExtLst,
-	buildP15ExtLst,
 	P15_TRANSITION_PRESETS,
 } from './p15-transition-parser';
+import { hasDirectMorphChild, parseMorphFromExtLst } from './p159-morph-transition';
 import type { IPptxXmlLookupService } from './PptxXmlLookupService';
+import {
+	findTransitionInAlternateContent,
+	preservedP14ChildKey,
+	preservedP15ChildKey,
+	pruneDirectExtensionChildren,
+} from './slide-transition-envelope';
 import {
 	applyTransitionAttributes,
 	buildStandardTransitionChild,
@@ -24,12 +35,13 @@ import {
 	parseTransitionDetails,
 	parseTransitionSound,
 } from './slide-transition-xml';
-
-/**
- * Extension URI for the PowerPoint 2016+ `morph` slide transition.
- * Stored in `p:transition/p:extLst/p:ext[@uri="{C7C9D14B-FE2A-4D35-B620-AB07D5B017F4}"]/p159:morph`.
- */
-const MORPH_EXT_URI = '{C7C9D14B-FE2A-4D35-B620-AB07D5B017F4}';
+import type { ExtensionChildContext } from './transition-extension-child';
+import {
+	buildMorphDirectChild,
+	buildP14DirectChild,
+	buildP15DirectChild,
+	retainNonTransitionExtensions,
+} from './transition-extension-child';
 
 /**
  * Configuration options for creating a {@link PptxSlideTransitionService}.
@@ -80,7 +92,7 @@ export class PptxSlideTransitionService implements IPptxSlideTransitionService {
 		const slideRoot = this.xmlLookupService.getChildByLocalName(slideXml, 'sld');
 		const transitionNode =
 			this.xmlLookupService.getChildByLocalName(slideRoot, 'transition') ||
-			this.findTransitionInAlternateContent(slideRoot);
+			findTransitionInAlternateContent(slideRoot, this.xmlLookupService);
 		if (!transitionNode) {
 			return undefined;
 		}
@@ -89,6 +101,28 @@ export class PptxSlideTransitionService implements IPptxSlideTransitionService {
 		let transitionType = details.type;
 		let { direction, orient, pattern } = details;
 		const { spokes, thruBlk, rawSoundAction, rawExtLst } = details;
+		let { morphOption } = details;
+
+		// In the `mc:Choice Requires="p14"/"p15"` form the extension element is
+		// a DIRECT child of `p:transition` (`<p14:reveal dir="r"/>`,
+		// `<p15:prstTrans prst="origami"/>`), exactly like the direct
+		// `p159:morph` form: the envelope already declares the requirement, so
+		// PowerPoint skips the `p:extLst` escape hatch. Without this branch
+		// those transitions fell through to the `cut` default.
+		if (transitionType === 'cut') {
+			const p14Direct = parseP14DirectChild(transitionNode, this.getXmlLocalName);
+			const p15Direct = p14Direct
+				? undefined
+				: parseP15DirectChild(transitionNode, this.getXmlLocalName);
+			if (p14Direct) {
+				transitionType = p14Direct.type;
+				direction = p14Direct.direction ?? direction;
+				orient = p14Direct.orient ?? orient;
+				pattern = p14Direct.pattern ?? pattern;
+			} else if (p15Direct) {
+				transitionType = p15Direct.type;
+			}
+		}
 
 		// Parse p14 (Office 2010+) transitions from extLst if no standard
 		// transition type was found or if there is an extLst to parse
@@ -112,9 +146,17 @@ export class PptxSlideTransitionService implements IPptxSlideTransitionService {
 				// PowerPoint 2013+/365 preset transitions (Fracture, Peel Off,
 				// Page Curl, etc.) live in a `p15:prstTrans` extension.
 				transitionType = p15Result.type;
-			} else if (this.parseMorphFromExtLst(rawExtLst)) {
-				// PowerPoint 2016+ `morph` lives in a p159 extension.
-				transitionType = 'morph';
+			} else {
+				const morphResult = parseMorphFromExtLst(
+					rawExtLst,
+					this.xmlLookupService,
+					this.getXmlLocalName,
+				);
+				if (morphResult) {
+					// PowerPoint 2016+ `morph` lives in a p159 extension.
+					transitionType = 'morph';
+					morphOption = morphResult.morphOption;
+				}
 			}
 		}
 
@@ -133,71 +175,12 @@ export class PptxSlideTransitionService implements IPptxSlideTransitionService {
 			spokes,
 			pattern,
 			thruBlk,
+			morphOption,
 			...sound,
 			rawSoundAction,
 			rawExtLst,
 			rawTransition: transitionNode,
 		};
-	}
-
-	/**
-	 * Locate a `<p:transition>` wrapped in a slide-root `mc:AlternateContent`
-	 * envelope.
-	 *
-	 * Real PowerPoint (verified via COM-authored fixtures) wraps the
-	 * transition in `mc:AlternateContent` whenever it carries an Office
-	 * 2010+ attribute such as `p14:dur` (sub-second transition duration):
-	 * an `mc:Choice Requires="p14"` branch carries the richer transition,
-	 * and `mc:Fallback` carries a plain one for older readers. Without this
-	 * unwrap, `p:sld`'s direct-child lookup for `transition` finds nothing
-	 * and the whole transition (including plain ones falling back with no
-	 * p14 data) is silently dropped, even though `mc:Choice` is otherwise a
-	 * complete, directly usable `p:transition` node.
-	 */
-	private findTransitionInAlternateContent(
-		slideRoot: XmlObject | undefined,
-	): XmlObject | undefined {
-		const altContent = this.xmlLookupService.getChildByLocalName(slideRoot, 'AlternateContent');
-		if (!altContent) {
-			return undefined;
-		}
-		const choices = this.xmlLookupService.getChildrenArrayByLocalName(altContent, 'Choice');
-		for (const choice of choices) {
-			const transitionNode = this.xmlLookupService.getChildByLocalName(choice, 'transition');
-			if (transitionNode) {
-				return transitionNode;
-			}
-		}
-		const fallback = this.xmlLookupService.getChildByLocalName(altContent, 'Fallback');
-		return this.xmlLookupService.getChildByLocalName(fallback, 'transition');
-	}
-
-	/**
-	 * Detects the PowerPoint 2016+ `morph` transition stored as a p159 extension
-	 * inside the transition's extLst.
-	 */
-	private parseMorphFromExtLst(extLstNode: XmlObject): boolean {
-		const extEntries = this.xmlLookupService.getChildrenArrayByLocalName(extLstNode, 'ext');
-		for (const ext of extEntries) {
-			if (!ext) {
-				continue;
-			}
-			const uri = String(ext['@_uri'] || '').trim();
-			const matchesUri = uri.toUpperCase() === MORPH_EXT_URI.toUpperCase();
-			for (const key of Object.keys(ext)) {
-				if (key.startsWith('@_')) {
-					continue;
-				}
-				if (this.getXmlLocalName(key) === 'morph') {
-					// Accept either matching uri or just the morph element (be lenient on URI casing/whitespace).
-					if (matchesUri || uri.length === 0) {
-						return true;
-					}
-					return true;
-				}
-			}
-		}
-		return false;
 	}
 
 	public buildSlideTransitionXml(transition: PptxSlideTransition): XmlObject | undefined {
@@ -211,29 +194,60 @@ export class PptxSlideTransitionService implements IPptxSlideTransitionService {
 		const isMorphType = transitionType === 'morph';
 		const node = createPreservedTransitionNode(transition.rawTransition, this.getXmlLocalName);
 
+		// The mc:Choice form writes p14/p15 elements as DIRECT children of
+		// `p:transition`; `createPreservedTransitionNode` keeps those children
+		// verbatim (mirroring morph). When the preserved child still matches
+		// the transition being written, fabricating the extLst form on top of
+		// it would declare the transition twice, so we keep the child and skip
+		// the extLst. A preserved child that no longer matches (the type was
+		// edited) is pruned instead.
+		const p14ChildKey = isP14Type
+			? preservedP14ChildKey(node, transitionType, this.getXmlLocalName)
+			: undefined;
+		const p15ChildKey = isP15Type
+			? preservedP15ChildKey(node, transitionType, this.getXmlLocalName)
+			: undefined;
+		pruneDirectExtensionChildren(node, this.getXmlLocalName, p14ChildKey ?? p15ChildKey);
+
+		// An extension transition goes out as the DIRECT child PowerPoint reads;
+		// `slide-transition-reconcile` then wraps the whole element in the
+		// `mc:Choice Requires="..."` envelope that makes the child legal. The
+		// `p:extLst` form written here previously was silently ignored by
+		// PowerPoint, so every extended transition saved as no transition at all.
+		const extensionContext: ExtensionChildContext = {
+			rawExtLst: transition.rawExtLst,
+			xmlLookupService: this.xmlLookupService,
+			getXmlLocalName: this.getXmlLocalName,
+		};
+		const isExtensionType = isP14Type || isP15Type || isMorphType;
+
 		if (isP14Type) {
-			// p14 transitions are stored in the extLst, not as direct children
-			node['p:extLst'] = buildP14ExtLst(
-				transitionType,
-				transition.direction,
-				transition.orient,
-				transition.pattern,
-				transition.rawExtLst,
-				this.xmlLookupService,
-				this.getXmlLocalName,
-			);
+			if (!p14ChildKey) {
+				const child = buildP14DirectChild(
+					transitionType,
+					{
+						direction: transition.direction,
+						orient: transition.orient,
+						pattern: transition.pattern,
+						spokes: transition.spokes,
+					},
+					extensionContext,
+				);
+				node[child.key] = child.node;
+			}
 		} else if (isP15Type) {
-			// PowerPoint 2013+/365 preset transitions live in a `p15:prstTrans`
-			// extension, not as a direct child of `p:transition`. Emitting a
-			// standard child (or the historical `<p:cut/>` fallback) corrupts the
-			// file. Preserve the real extLst bytes when present; otherwise
-			// fabricate a minimal `p15:prstTrans` extension.
-			node['p:extLst'] = transition.rawExtLst ?? buildP15ExtLst(transitionType);
+			if (!p15ChildKey) {
+				const child = buildP15DirectChild(transitionType, extensionContext);
+				node[child.key] = child.node;
+			}
 		} else if (isMorphType) {
-			// PowerPoint 2016+ `morph` lives in the p159 extension list, not as a
-			// direct child of `p:transition`. Emitting `<p:morph/>` is silently
-			// dropped by PowerPoint.
-			node['p:extLst'] = this.buildMorphExtLst(transition.rawExtLst);
+			// `createPreservedTransitionNode` keeps an existing direct
+			// `<p159:morph/>` verbatim (with its `option`), so only fabricate one
+			// when the deck did not already have it.
+			if (!hasDirectMorphChild(node, this.getXmlLocalName)) {
+				const child = buildMorphDirectChild(transition.morphOption, extensionContext);
+				node[child.key] = child.node;
+			}
 		} else {
 			node[`p:${transitionType}`] = buildStandardTransitionChild(transition);
 		}
@@ -246,51 +260,21 @@ export class PptxSlideTransitionService implements IPptxSlideTransitionService {
 		if (soundAction) {
 			node['p:sndAc'] = soundAction;
 		}
-		// Only write rawExtLst when we did not already build our own extLst.
-		// p14, p15 and morph types build (or preserve) their own extLst.
-		if (transition.rawExtLst && !isP14Type && !isP15Type && !isMorphType) {
-			node['p:extLst'] = transition.rawExtLst;
+		// Extensions the deck carried survive, minus any that declared a
+		// transition: that declaration now lives on the element itself, and a
+		// leftover copy would contradict it (a stale preset, in the worst case).
+		const preservedExtensions = isExtensionType
+			? retainNonTransitionExtensions(extensionContext, isTransitionElementName)
+			: transition.rawExtLst;
+		if (preservedExtensions) {
+			node['p:extLst'] = preservedExtensions;
 		}
 
 		return node;
 	}
+}
 
-	/**
-	 * Build the extLst XML node for a morph (p159) transition, preserving any
-	 * non-morph extensions from rawExtLst.
-	 */
-	private buildMorphExtLst(rawExtLst: XmlObject | undefined): XmlObject {
-		const morphExt: XmlObject = {
-			'@_uri': MORPH_EXT_URI,
-			'p159:morph': {
-				'@_xmlns:p159': 'http://schemas.microsoft.com/office/powerpoint/2015/09/main',
-			},
-		};
-
-		if (!rawExtLst) {
-			return { 'p:ext': morphExt };
-		}
-
-		const existing = this.xmlLookupService.getChildrenArrayByLocalName(rawExtLst, 'ext');
-		const otherExts = existing.filter((ext) => {
-			if (!ext) {
-				return false;
-			}
-			const uri = String(ext['@_uri'] || '').trim();
-			if (uri.toUpperCase() === MORPH_EXT_URI.toUpperCase()) {
-				return false;
-			}
-			for (const key of Object.keys(ext)) {
-				if (key.startsWith('@_')) {
-					continue;
-				}
-				if (this.getXmlLocalName(key) === 'morph') {
-					return false;
-				}
-			}
-			return true;
-		});
-		const allExts = [morphExt, ...otherExts];
-		return { 'p:ext': allExts.length === 1 ? allExts[0] : allExts };
-	}
+/** Element local names that declare a transition inside a `p:ext`. */
+function isTransitionElementName(localName: string): boolean {
+	return P14_TRANSITION_TYPES.has(localName) || localName === 'prstTrans' || localName === 'morph';
 }

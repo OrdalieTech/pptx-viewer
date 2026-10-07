@@ -2,6 +2,68 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## READ FIRST: the two rules that govern every UI change
+
+This repo ships **five** UI bindings (react, vue, angular, svelte, vanilla) over
+one framework-agnostic core. Almost every expensive bug in its history came from
+breaking one of these two rules. They are not aspirational; they are the
+definition of "done" for any work that touches a binding.
+
+### Rule 1: a fix or feature in one binding must reach all five
+
+**Never finish a UI change in a single binding.** If you fix a bug in React, the
+same bug is almost certainly present in vue, angular, svelte and vanilla, because
+the bindings are ports of each other. Fixing one and stopping is how divergence
+gets created, and divergence is the most expensive debt in this repo.
+
+The required loop for **every** UI bug fix:
+
+1. **Diagnose the root cause**, not the symptom. Ask "where does this behaviour
+   actually come from?" If the answer is a shared module, one edit fixes all
+   five. If the answer is per-binding code, the bug exists five times.
+2. **Grep the other four bindings for the same pattern** before declaring the
+   fix scoped. Search for the property, class name, helper, or condition you just
+   changed across `packages/{react,vue,angular,svelte,vanilla}`.
+3. **Fix every affected binding in the same change.** Do not defer four of them
+   to "a follow-up"; the follow-up never happens and the drift becomes permanent.
+4. **Add a regression test per binding**, plus a framework-neutral spec in `e2e/`
+   when the behaviour is observable in a demo.
+5. **Verify in the running demos**, not just the unit suites. All five suites
+   have been green while a binding was visibly broken, because the defect lived
+   in template wiring no unit test covered. See the demo-resolution table below
+   (angular needs a build first).
+6. **If one binding is genuinely blocked, say so explicitly** and file a tracking
+   issue. Silently fixing one binding is the failure mode.
+
+Assume a UI bug is structural until proven otherwise. "Genuinely
+framework-specific" means Angular change detection, Svelte 5 runes, React effect
+ordering, and the like. A wrong colour, a mis-clipped shape, an off-by-one drag
+handle, or a dialog that will not open is almost never framework-specific.
+
+### Rule 2: take every opportunity to extract logic into `pptx-viewer-shared`
+
+When you touch logic in a binding, **ask whether it belongs in
+`packages/shared/src/render/` instead**, and move it there if it does. This is
+not a cleanup task to schedule later; it is how the parity rule above is made
+cheap. Logic that lives in shared is fixed once for all five bindings, and never
+drifts.
+
+Extraction triggers, any one of which means stop and extract:
+
+- You are about to make the same edit in more than one binding.
+- You are porting a fix from one binding to the others.
+- You find a pure helper (no framework imports) sitting inside
+  `packages/{react,vue,angular,svelte,vanilla}`.
+- You are writing new logic for a feature that all five bindings will need.
+
+The target shape is a **pure decision function**: shared exports a function that
+returns a framework-neutral descriptor, and the binding does nothing but map that
+descriptor onto its own style object or template. Following that shape, a new
+branch reaches all five bindings at once.
+
+Both rules are expanded, with the concrete failures that motivated them, under
+[Key Conventions](#key-conventions).
+
 ## Build & Development Commands
 
 ```bash
@@ -66,7 +128,7 @@ difference decides whether your edit is live on reload or needs a build first.
 | Specifier                     | react      | vue        | angular      | vanilla    | svelte     |
 | ----------------------------- | ---------- | ---------- | ------------ | ---------- | ---------- |
 | the binding (`pptx-*-viewer`) | source     | source     | **`dist`**   | source     | source     |
-| `pptx-viewer-core`            | source     | source     | source       | source     | source     |
+| `pptx-viewer-core`            | source     | source     | **`dist`**   | source     | source     |
 | `pptx-viewer-shared`          | **`dist`** | source     | **vendored** | source     | source     |
 | `pptx-viewer-locales`         | source     | source     | **`dist`**   | source     | source     |
 | `pptx-viewer-mcp`             | **`dist`** | **`dist`** | **`dist`**   | **`dist`** | **`dist`** |
@@ -79,7 +141,17 @@ output, so **source edits are invisible until you build that package**:
   screen until `bun run build` in `packages/angular`. This is the single most
   common way to waste an hour concluding "my change doesn't work in Angular".
   Angular also vendors shared source into `src/internal/shared-src` at build
-  time, so shared edits need the same rebuild.
+  time, so shared edits need the same rebuild. **Its `pptx-viewer-core` is
+  `dist` too**: the demo never aliases core, unlike the other four, so a core
+  edit needs `bun run --filter pptx-viewer-core build` before this demo sees it
+  at all. Core is also in the demo's `optimizeDeps.include`, so vite pre-bundles
+  it into `demos/demo-angular/node_modules/.vite/deps/pptx-viewer-core.js`; that
+  copy normally re-optimises when core's dist changes, but it has been observed
+  serving a stale core anyway (a long-running server on Windows, where the
+  watcher does not always see writes through the workspace symlink). If Angular
+  alone disagrees with the other four demos, delete that demo's
+  `node_modules/.vite` and restart before suspecting your code.
+  `e2e/dist-freshness.ts` checks both axes before every e2e run.
 - **`pptx-viewer-mcp`** (`packages/tools`) is aliased by no demo. It is reachable
   from the browser because `packages/shared/src/ai/tools/mcp-registry.ts` imports
   it, so a **stale `packages/tools/dist` breaks all five demos at once** with
@@ -100,6 +172,23 @@ Other demo gotchas:
   undefined" error from inside Svelte's own runtime and stopped decks rendering
   entirely. Delete the demo's `node_modules/.vite` and restart before believing
   a stack trace that points into a framework.
+- **A demo that never renders is usually a cached resolution failure, not your
+  code.** Vite caches a FAILED import resolution, so a module added while the
+  server was running keeps 500-ing after the file exists on disk and is
+  committed. The tell is that every e2e test times out on `#file-input` at once
+  while the page itself returns HTTP 200: the shell serves, the app never
+  mounts. Diagnose by checking which port actually 500s rather than assuming the
+  suite found a real regression:
+  `curl -s http://localhost:4176/@fs/<abs-path>/packages/shared/src/render/index.ts`
+  names the unresolved import. Then kill that port, delete that demo's
+  `node_modules/.vite`, and restart it. This has masked "all parity specs
+  failed" more than once; four of five demos being healthy is the clue.
+- **Rebuilding `packages/angular/dist` breaks the running Angular demo.** It
+  starts 404-ing on its own CSS and its vite pre-bundle of core goes stale
+  (`e2e/dist-freshness.ts` checks that second axis separately and tells you to
+  clear it). After any `bun run --filter pptx-angular-viewer build`, kill :4174,
+  `rm -rf demos/demo-angular/node_modules/.vite`, and restart before running
+  e2e.
 - The demos serve `e2e/fixtures` as their public dir, and the landing page's
   "or create a New Presentation" button gives an editable deck without a file.
 
@@ -143,7 +232,8 @@ Binary EMF/WMF → GDI record replay onto Canvas 2D → PNG data URL. Supports 3
   or non-trivial computation is a smell; that logic belongs in a composable or a
   shared module, leaving the SFC as thin presentation. Prefer many small,
   single-purpose files over one large one.
-- **Share framework-agnostic logic; default to `pptx-viewer-shared`.** The vast
+- **Share framework-agnostic logic; default to `pptx-viewer-shared`.**
+  (Rule 2 above; the extraction triggers are listed there.) The vast
   majority of each binding's code (React/Vue/Angular) is _not_ framework-specific:
   geometry, style/colour/gradient resolution, text/paragraph/bullet building,
   chart/axis maths, connector routing, animation, OMML/LaTeX, export data, etc.
@@ -153,7 +243,36 @@ Binary EMF/WMF → GDI record replay onto Canvas 2D → PNG data URL. Supports 3
   porting or adding a feature, put the logic in shared **first**, then have each
   binding import it, do not reimplement it per framework. Treat a pure helper
   sitting inside `packages/{vue,react,angular}` as an extraction candidate.
-- **UI changes must reach all five bindings.** This is a merge requirement, not
+  - **The shape to aim for is a pure decision function.** Shared exports a
+    function returning a framework-neutral _descriptor_; the binding only maps
+    that descriptor onto its own style object / template. Existing examples:
+    `presentation-keymap` (`mapPresentationKey`), `connector-hit-target`,
+    `hollow-shape-hit-test`, `shape-geometry-cascade`. Following that shape, a
+    new branch reaches all five bindings at once.
+  - **"I am making the same edit in N bindings" is the extraction signal.** Not
+    a nuisance to push through: stop and extract. Small tails are the dangerous
+    ones, because each copy looks trivial in isolation and nobody diffs five
+    files that all look fine. The shape-geometry cascade was hand-ported five
+    times, and Angular silently drifted: it compared `shapeType` **raw**
+    (`=== 'ellipse'`) instead of via `getShapeType`, so `oval` - a preset in the
+    shape picker - and every capitalised spelling missed the branch, and it had
+    no connector/line/cylinder branch at all.
+  - **Normalise before you branch.** Compare against `getShapeType(...)`, never
+    a raw `shapeType` string: the normaliser folds aliases (`oval`->`ellipse`,
+    `can`->`cylinder`) and lowercases. A raw compare is the single most common
+    way a binding drifts.
+  - **A shared value can be clobbered downstream.** Setting a property in a
+    shared style map does not mean it survives: a binding may spread that map
+    and then override the very property (Svelte's `ElementRenderer` re-sets
+    `pointerEvents` from its own interactive flag). After adding a
+    behaviour-bearing style in shared, grep each binding for that property.
+  - **Per-binding unit tests passing does NOT mean the binding works.** All five
+    suites were green while Svelte was still visibly broken, because the defect
+    lived in template wiring no unit test covered. Load the deck in each demo
+    and verify the actual behaviour (see the demo-resolution table above; Angular
+    needs a build first).
+- **UI changes must reach all five bindings.** (Rule 1 above; the required
+  bug-fix loop is listed there.) This is a merge requirement, not
   a nice-to-have: a user on Svelte is entitled to the feature set a user on
   React gets, and divergence between bindings is the most expensive debt in this
   repo.
@@ -169,6 +288,11 @@ Binary EMF/WMF → GDI record replay onto Canvas 2D → PNG data URL. Supports 3
     add a regression test to each. If one is genuinely blocked, say so
     explicitly and file a tracking issue: silently fixing one binding is what
     causes the drift.
+  - **Prefer fixing a UI bug in shared over fixing it five times.** When the
+    buggy behaviour is decided by logic that could live in
+    `packages/shared/src/render/`, move it there as part of the fix so the
+    correction lands once and cannot drift again. A bug you are about to patch
+    in more than one binding is the strongest possible extraction signal.
   - "Genuinely framework-specific" means Angular change detection, Svelte 5
     runes, React effect ordering, and the like. A wrong colour, a mis-clipped
     shape, an off-by-one drag handle, or a dialog that does not open is almost
@@ -258,6 +382,12 @@ real heredoc or `git commit -F <file>`; do **not** wrap the message in
 `@'…'@` (PowerShell here-string syntax); under `bash`/`sh` the stray `@`
 characters leak into the subject and break Conventional Commit parsing. End
 commit messages with the required `Co-Authored-By:` trailer.
+
+**Never include a Claude chat share link.** Do not add a `claude.ai/chat/...`
+(or any other Claude conversation) URL to a commit message, PR body, issue
+comment, changelog entry, code comment or doc. Those links are session-scoped
+and mean nothing to a reader of this repository. The `Co-Authored-By:` trailer
+is the only attribution that belongs in a commit.
 
 ## Tech Stack
 

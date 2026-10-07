@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { annotationOverlayZIndex, buildStrokePathD, cursorForTool } from 'pptx-viewer-shared';
+import type { PresentationBlackout } from 'pptx-viewer-shared';
 import type { CSSProperties } from 'vue';
 import { computed, ref } from 'vue';
 
@@ -7,7 +9,6 @@ import type {
 	LaserPosition,
 	PresentationTool,
 } from '../composables/usePresentationAnnotations';
-import { buildStrokePathD } from '../composables/usePresentationAnnotations';
 import type { CanvasSize } from '../types';
 
 /**
@@ -21,14 +22,23 @@ import type { CanvasSize } from '../types';
  * `usePresentationAnnotations`). Renders `null` (nothing) when the tool is
  * `'none'`.
  */
-const props = defineProps<{
-	canvasSize: CanvasSize;
-	editorScale: number;
-	presentationTool: PresentationTool;
-	annotationStrokes: AnnotationStroke[];
-	currentStroke: AnnotationStroke | null;
-	laserPosition: LaserPosition | null;
-}>();
+const props = withDefaults(
+	defineProps<{
+		canvasSize: CanvasSize;
+		editorScale: number;
+		presentationTool: PresentationTool;
+		annotationStrokes: AnnotationStroke[];
+		currentStroke: AnnotationStroke | null;
+		laserPosition: LaserPosition | null;
+		/**
+		 * Presenter-snapshot blackout state. During a blackout the overlay is
+		 * raised ABOVE the blackout sheet (shared `annotationOverlayZIndex`) so
+		 * "blackboard" ink stays visible on the blank screen.
+		 */
+		blackout?: PresentationBlackout;
+	}>(),
+	{ blackout: 'none' },
+);
 
 const emit = defineEmits<{
 	(e: 'pointer-down' | 'pointer-move' | 'laser-move' | 'erase', x: number, y: number): void;
@@ -113,22 +123,21 @@ function onPointerLeave(): void {
 	emit('pointer-up');
 }
 
-const cursor = computed<string>(() => {
-	switch (props.presentationTool) {
-		case 'laser':
-			return 'none';
-		case 'pen':
-		case 'highlighter':
-		case 'eraser':
-			return 'crosshair';
-		default:
-			return 'default';
-	}
-});
+const cursor = computed<string>(() => cursorForTool(props.presentationTool));
 
 const allStrokes = computed<AnnotationStroke[]>(() =>
 	props.currentStroke ? [...props.annotationStrokes, props.currentStroke] : props.annotationStrokes,
 );
+
+/**
+ * Cursor + stacking level. The z-index is bound inline (scoped CSS is static):
+ * 60 during a normal show, raised above the z-75 blackout sheet while the
+ * screen is blanked, per the shared blackboard layering rules.
+ */
+const overlayStyle = computed<CSSProperties>(() => ({
+	cursor: cursor.value,
+	zIndex: annotationOverlayZIndex(props.blackout),
+}));
 
 const svgStyle = computed<CSSProperties>(() => ({
 	position: 'absolute',
@@ -159,7 +168,12 @@ const laserStyle = computed<CSSProperties | undefined>(() => {
 </script>
 
 <template>
-	<div v-if="presentationTool !== 'none'" class="pptx-vue-annotation-overlay" :style="{ cursor }">
+	<div
+		v-if="presentationTool !== 'none'"
+		class="pptx-vue-annotation-overlay"
+		data-pptx-annotation-overlay
+		:style="overlayStyle"
+	>
 		<svg
 			ref="svgRef"
 			:style="svgStyle"
@@ -186,10 +200,12 @@ const laserStyle = computed<CSSProperties | undefined>(() => {
 </template>
 
 <style scoped>
+/* The z-index is bound inline (`overlayStyle`): it comes from the shared
+   `annotationOverlayZIndex(blackout)` rule and a scoped stylesheet cannot see
+   the blackout state. */
 .pptx-vue-annotation-overlay {
 	position: absolute;
 	inset: 0;
-	z-index: 60;
 	pointer-events: auto;
 }
 </style>

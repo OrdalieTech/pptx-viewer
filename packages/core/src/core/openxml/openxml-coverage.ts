@@ -1,11 +1,29 @@
+import { OPENXML_ANIMATION_TIMING_COVERAGE } from './openxml-coverage-animation-timing';
+import { OPENXML_ANIMATION_TIMING_SUPPLEMENT_COVERAGE } from './openxml-coverage-animation-timing-supplement';
 import { OPENXML_CHART_DISPLAY_EFFECTS_AND_DIAGRAM_LAYOUTS_COVERAGE } from './openxml-coverage-chart-display-effects-and-diagram-layouts';
+import { OPENXML_CHART_LABELS_SUPPLEMENT_COVERAGE } from './openxml-coverage-chart-labels-supplement';
+import { OPENXML_CHART_SUPPLEMENT_COVERAGE } from './openxml-coverage-chart-supplement';
+import { OPENXML_COLOR_GRADIENT_FILL_COVERAGE } from './openxml-coverage-color-gradient-fill';
 import { OPENXML_COLORS_SHOWS_AND_LABELS_COVERAGE } from './openxml-coverage-colors-shows-and-labels';
 import { OPENXML_COMMENTS_ANALYSIS_AND_FILLS_COVERAGE } from './openxml-coverage-comments-analysis-and-fills';
 import { OPENXML_DIAGRAM_DATA_AND_EFFECTS_COVERAGE } from './openxml-coverage-diagram-data-and-effects';
+import { OPENXML_DIAGRAM_SUPPLEMENT_COVERAGE } from './openxml-coverage-diagram-supplement';
 import { OPENXML_EFFECT_DAGS_AXIS_LABELS_AND_DIAGRAM_STYLES_COVERAGE } from './openxml-coverage-effect-dags-axis-labels-and-diagram-styles';
+import { OPENXML_EFFECT_STYLE_3D_THEME_COVERAGE } from './openxml-coverage-effect-style-3d-theme';
 import { testEvidence } from './openxml-coverage-evidence';
 import { OPENXML_FONTS_AUDIO_PIVOTS_AND_ALGORITHMS_COVERAGE } from './openxml-coverage-fonts-audio-pivots-and-algorithms';
 import { OPENXML_LINE_LAYOUT_AND_PIVOT_STRUCTURES_COVERAGE } from './openxml-coverage-line-layout-and-pivot-structures';
+import { OPENXML_LINE_STROKE_PROPERTIES_COVERAGE } from './openxml-coverage-line-stroke-properties';
+import { OPENXML_MASTER_TEXT_STYLE_SUPPLEMENT_COVERAGE } from './openxml-coverage-master-text-style-supplement';
+import { OPENXML_PRESENTATION_STRUCTURE_PARTS_COVERAGE } from './openxml-coverage-presentation-structure-parts';
+import { OPENXML_SHAPE_EFFECTS_SUPPLEMENT_COVERAGE } from './openxml-coverage-shape-effects-supplement';
+import { OPENXML_SHAPE_GEOMETRY_CONNECTORS_COVERAGE } from './openxml-coverage-shape-geometry-connectors';
+import { OPENXML_SLIDE_STRUCTURE_PARTS_COVERAGE } from './openxml-coverage-slide-structure-parts';
+import { OPENXML_TABLE_STYLE_PICTURE_FILL_COVERAGE } from './openxml-coverage-table-style-picture-fill';
+import { OPENXML_TABLE_STYLE_SUPPLEMENT_COVERAGE } from './openxml-coverage-table-style-supplement';
+import { OPENXML_TEXT_AUTOFIT_PARAGRAPH_BULLET_COVERAGE } from './openxml-coverage-text-autofit-paragraph-bullet';
+import { OPENXML_TEXT_RUN_HYPERLINK_COVERAGE } from './openxml-coverage-text-run-hyperlink';
+import { OPENXML_THEME_BLIP_TAGS_SUPPLEMENT_COVERAGE } from './openxml-coverage-theme-blip-tags-supplement';
 import { OPENXML_TRANSITIONS_SCENES_AND_CHART_TABLES_COVERAGE } from './openxml-coverage-transitions-scenes-and-chart-tables';
 import { OPENXML_VIEW_IMAGE_AND_CHART_POINT_FORMATTING_COVERAGE } from './openxml-coverage-view-image-and-chart-point-formatting';
 import {
@@ -83,6 +101,24 @@ const COVERAGE_OVERRIDES: Record<string, OpenXmlCoverageFacets> = {
 	...OPENXML_VIEW_IMAGE_AND_CHART_POINT_FORMATTING_COVERAGE,
 	...OPENXML_FONTS_AUDIO_PIVOTS_AND_ALGORITHMS_COVERAGE,
 	...OPENXML_LINE_LAYOUT_AND_PIVOT_STRUCTURES_COVERAGE,
+	...OPENXML_LINE_STROKE_PROPERTIES_COVERAGE,
+	...OPENXML_SHAPE_GEOMETRY_CONNECTORS_COVERAGE,
+	...OPENXML_SHAPE_EFFECTS_SUPPLEMENT_COVERAGE,
+	...OPENXML_TABLE_STYLE_PICTURE_FILL_COVERAGE,
+	...OPENXML_TABLE_STYLE_SUPPLEMENT_COVERAGE,
+	...OPENXML_COLOR_GRADIENT_FILL_COVERAGE,
+	...OPENXML_EFFECT_STYLE_3D_THEME_COVERAGE,
+	...OPENXML_TEXT_AUTOFIT_PARAGRAPH_BULLET_COVERAGE,
+	...OPENXML_TEXT_RUN_HYPERLINK_COVERAGE,
+	...OPENXML_PRESENTATION_STRUCTURE_PARTS_COVERAGE,
+	...OPENXML_SLIDE_STRUCTURE_PARTS_COVERAGE,
+	...OPENXML_DIAGRAM_SUPPLEMENT_COVERAGE,
+	...OPENXML_CHART_SUPPLEMENT_COVERAGE,
+	...OPENXML_CHART_LABELS_SUPPLEMENT_COVERAGE,
+	...OPENXML_ANIMATION_TIMING_COVERAGE,
+	...OPENXML_ANIMATION_TIMING_SUPPLEMENT_COVERAGE,
+	...OPENXML_THEME_BLIP_TAGS_SUPPLEMENT_COVERAGE,
+	...OPENXML_MASTER_TEXT_STYLE_SUPPLEMENT_COVERAGE,
 	'chart:complexType:CT_ManualLayout': {
 		parse: 'native',
 		preserve: 'native',
@@ -144,11 +180,12 @@ const COVERAGE_OVERRIDES: Record<string, OpenXmlCoverageFacets> = {
 		preserve: 'passthrough',
 		edit: 'partial',
 		serialize: 'partial',
-		note: 'Index, delete, and common txPr defaults are typed; extensions remain passthrough.',
+		note: 'Index, delete, and common txPr defaults are typed; extensions remain passthrough. Since this wave, a legend entry\'s typeface is also resolved through the theme (a "+mn-lt"/"+mj-lt" placeholder now resolves to the theme\'s actual minor/major Latin font) instead of being returned as the raw placeholder string; this is narrower than a chart-wide theme-font fix, since axis/title/data-label txPr typeface sites are unaffected by this particular change.',
 		evidence: [
 			testEvidence('src/core/utils/chart-legend-entry.test.ts', [
 				'parses delete values and the CT_Boolean default',
 				'edits an entry while preserving its extension list',
+				'resolves a theme-font placeholder typeface (+mn-lt) via resolveTypeface',
 			]),
 		],
 	},
@@ -166,11 +203,11 @@ const COVERAGE_OVERRIDES: Record<string, OpenXmlCoverageFacets> = {
 		],
 	},
 	'chart:complexType:CT_UpDownBars': {
-		parse: 'partial',
-		preserve: 'passthrough',
-		edit: 'partial',
-		serialize: 'partial',
-		note: 'Gap width and common up/down bar shape properties are typed; extensions are passthrough.',
+		parse: 'native',
+		preserve: 'native',
+		edit: 'native',
+		serialize: 'native',
+		note: 'Gap width and common up/down bar shape properties are typed and round-trip; verified native during wave 3 (W3-D1).',
 		evidence: [
 			testEvidence('src/core/utils/chart-up-down-bars.test.ts', [
 				'parses gap width and both shape-property branches',
@@ -179,11 +216,11 @@ const COVERAGE_OVERRIDES: Record<string, OpenXmlCoverageFacets> = {
 		],
 	},
 	'chart:complexType:CT_UpDownBar': {
-		parse: 'partial',
-		preserve: 'passthrough',
-		edit: 'partial',
-		serialize: 'partial',
-		note: 'Common fill and line properties are typed; other DrawingML shape properties are passthrough.',
+		parse: 'native',
+		preserve: 'native',
+		edit: 'native',
+		serialize: 'native',
+		note: 'Common fill and line properties are typed and round-trip; verified native during wave 3 (W3-D1).',
 		evidence: [
 			testEvidence('src/core/utils/chart-up-down-bars.test.ts', [
 				'updates formatting while preserving unsupported children',
@@ -223,12 +260,13 @@ const COVERAGE_OVERRIDES: Record<string, OpenXmlCoverageFacets> = {
 		preserve: 'passthrough',
 		edit: 'partial',
 		serialize: 'partial',
-		note: 'The r:id, name, and spid attributes are typed and editable; the placeholder pic and extLst children are preserved as passthrough. Not rendered by any binding.',
+		note: 'The r:id, name, and spid attributes are typed and editable; since wave 3 (W3-H), showAsIcon/imgW/imgH (activex-parser.ts/activex-serializer.ts) are also typed and round-trip through parse, edit, and serialize. The placeholder pic and extLst children are preserved as passthrough. Not rendered by any binding.',
 		evidence: [
 			testEvidence('src/core/utils/activex-serializer.test.ts', [
 				'round-trips typed ActiveX controls through parse and serialize',
 				'preserves the placeholder pic child during a typed write',
 				'serializes edited control attributes back into the slide',
+				'round-trips showAsIcon/imgW/imgH through parse, edit, and serialize',
 			]),
 		],
 	},
@@ -237,12 +275,13 @@ const COVERAGE_OVERRIDES: Record<string, OpenXmlCoverageFacets> = {
 		preserve: 'passthrough',
 		edit: 'partial',
 		serialize: 'partial',
-		note: 'The r:id, name, and spid attributes are typed and editable; the placeholder pic and extLst children are preserved as passthrough. Not rendered by any binding.',
+		note: 'The r:id, name, and spid attributes are typed and editable; since wave 3 (W3-H), showAsIcon/imgW/imgH are also typed and round-trip. The placeholder pic and extLst children are preserved as passthrough. Not rendered by any binding.',
 		evidence: [
 			testEvidence('src/core/utils/activex-serializer.test.ts', [
 				'preserves the placeholder pic child during a typed write',
 				'serializes edited control attributes back into the slide',
 				'emits a bare control node when only a relationship id is known',
+				'serializes showAsIcon/imgW/imgH into a freshly-built control node',
 			]),
 		],
 	},

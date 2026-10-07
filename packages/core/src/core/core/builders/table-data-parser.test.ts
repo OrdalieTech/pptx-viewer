@@ -73,7 +73,7 @@ function makeTableXml(opts: {
 // Grid column widths
 // ---------------------------------------------------------------------------
 
-describe('pptxTableDataParser — grid column widths', () => {
+describe('pptxTableDataParser - grid column widths', () => {
 	it('computes proportional widths for equal-width columns', () => {
 		const graphicData = makeTableXml({
 			gridCols: ['3048000', '3048000'],
@@ -124,7 +124,7 @@ describe('pptxTableDataParser — grid column widths', () => {
 // Row heights
 // ---------------------------------------------------------------------------
 
-describe('pptxTableDataParser — row heights', () => {
+describe('pptxTableDataParser - row heights', () => {
 	it('converts row height from EMU to rounded pixels', () => {
 		const graphicData = makeTableXml({
 			gridCols: ['9144000'],
@@ -161,7 +161,7 @@ describe('pptxTableDataParser — row heights', () => {
 // Cell text extraction
 // ---------------------------------------------------------------------------
 
-describe('pptxTableDataParser — cell text extraction', () => {
+describe('pptxTableDataParser - cell text extraction', () => {
 	it('extracts simple cell text', () => {
 		const graphicData = makeTableXml({
 			gridCols: ['9144000'],
@@ -239,7 +239,7 @@ describe('pptxTableDataParser — cell text extraction', () => {
 // Cell merge detection
 // ---------------------------------------------------------------------------
 
-describe('pptxTableDataParser — cell merge detection', () => {
+describe('pptxTableDataParser - cell merge detection', () => {
 	it('parses gridSpan for horizontal merge', () => {
 		const graphicData = makeTableXml({
 			gridCols: ['3048000', '3048000', '3048000'],
@@ -284,7 +284,7 @@ describe('pptxTableDataParser — cell merge detection', () => {
 // Table style properties
 // ---------------------------------------------------------------------------
 
-describe('pptxTableDataParser — table style properties', () => {
+describe('pptxTableDataParser - table style properties', () => {
 	it('parses firstRow, bandRow, and bandCol flags', () => {
 		const graphicData = makeTableXml({
 			gridCols: ['9144000'],
@@ -409,7 +409,7 @@ describe('pptxTableDataParser — table style properties', () => {
 // Edge cases
 // ---------------------------------------------------------------------------
 
-describe('pptxTableDataParser — edge cases', () => {
+describe('pptxTableDataParser - edge cases', () => {
 	it('returns undefined when a:tbl node is missing', () => {
 		const graphicData: XmlObject = {
 			'c:chart': { '@_r:id': 'rId1' },
@@ -464,5 +464,127 @@ describe('pptxTableDataParser — edge cases', () => {
 		expect(result!.columnWidths).toHaveLength(1);
 		expect(result!.columnWidths[0]).toBeCloseTo(1.0, 5);
 		expect(result!.rows[0].cells[0].text).toBe('Only cell');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// a:tblPr's OWN fill / effectLst, independent of a:tblStyleLst (issue G6).
+// ---------------------------------------------------------------------------
+
+describe('pptxTableDataParser - a:tblPr own fill/effectLst (issue G6)', () => {
+	it('parses an explicit sRGB a:solidFill directly on a:tblPr', () => {
+		const graphicData = makeTableXml({
+			gridCols: ['9144000'],
+			rows: [{ height: '370840', cells: [makeCell('X')] }],
+			tblPrAttrs: {
+				'a:solidFill': { 'a:srgbClr': { '@_val': 'FF8800' } },
+			},
+		});
+		const parser = new PptxTableDataParser(makeContext());
+		const result = parser.parseTableData(graphicData);
+
+		expect(result!.tableFill).toStrictEqual({ schemeColor: '', color: '#FF8800' });
+	});
+
+	it('parses a theme scheme colour a:solidFill directly on a:tblPr', () => {
+		const graphicData = makeTableXml({
+			gridCols: ['9144000'],
+			rows: [{ height: '370840', cells: [makeCell('X')] }],
+			tblPrAttrs: {
+				'a:solidFill': { 'a:schemeClr': { '@_val': 'accent2' } },
+			},
+		});
+		const parser = new PptxTableDataParser(makeContext());
+		const result = parser.parseTableData(graphicData);
+
+		// parseSolidFillStyle always carries explicit tint/shade keys (even when
+		// undefined), so this does not use toStrictEqual against a bare object.
+		expect(result!.tableFill?.schemeColor).toBe('accent2');
+		expect(result!.tableFill?.tint).toBeUndefined();
+		expect(result!.tableFill?.shade).toBeUndefined();
+	});
+
+	it('flags tableEffects when a:tblPr carries its own a:effectLst', () => {
+		const graphicData = makeTableXml({
+			gridCols: ['9144000'],
+			rows: [{ height: '370840', cells: [makeCell('X')] }],
+			tblPrAttrs: {
+				'a:effectLst': { 'a:outerShdw': { '@_blurRad': '40000' } },
+			},
+		});
+		const parser = new PptxTableDataParser(makeContext());
+		const result = parser.parseTableData(graphicData);
+
+		expect(result!.tableEffects).toBeTruthy();
+		expect(result!.tableEffects).toStrictEqual([
+			{ kind: 'outerShdw', xml: { '@_blurRad': '40000' } },
+		]);
+	});
+
+	it('leaves tableFill/tableEffects undefined when a:tblPr has neither', () => {
+		const graphicData = makeTableXml({
+			gridCols: ['9144000'],
+			rows: [{ height: '370840', cells: [makeCell('X')] }],
+		});
+		const parser = new PptxTableDataParser(makeContext());
+		const result = parser.parseTableData(graphicData);
+
+		expect(result!.tableFill).toBeUndefined();
+		expect(result!.tableEffects).toBeUndefined();
+	});
+
+	it('does not confuse a:tblPr fill with a:tblStyleLst/wholeTbl fill', () => {
+		// a:tblPr's own fill is independent of the referenced style; parsing it
+		// must not require or consult a tableStyleId at all.
+		const graphicData = makeTableXml({
+			gridCols: ['9144000'],
+			rows: [{ height: '370840', cells: [makeCell('X')] }],
+			tblPrAttrs: {
+				'a:tableStyleId': '{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}',
+				'a:solidFill': { 'a:srgbClr': { '@_val': '112233' } },
+			},
+		});
+		const parser = new PptxTableDataParser(makeContext());
+		const result = parser.parseTableData(graphicData);
+
+		expect(result!.tableStyleId).toBe('{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}');
+		expect(result!.tableFill).toStrictEqual({ schemeColor: '', color: '#112233' });
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cell image fill (a:tcPr/a:blipFill) - threads slidePath through to
+// resolveCellImagePath, end to end through the full parser.
+// ---------------------------------------------------------------------------
+
+describe('pptxTableDataParser - cell image fill', () => {
+	it('passes the slidePath argument through to resolveCellImagePath', () => {
+		const graphicData = makeTableXml({
+			gridCols: ['9144000'],
+			rows: [
+				{
+					height: '370840',
+					cells: [
+						makeCell('Photo', {
+							'a:tcPr': { 'a:blipFill': { 'a:blip': { '@_r:embed': 'rId7' } } },
+						}),
+					],
+				},
+			],
+		});
+		const resolveCellImagePath = (
+			rEmbed: string | undefined,
+			_rLink: string | undefined,
+			slidePath: string | undefined,
+		): string | undefined => {
+			expect(rEmbed).toBe('rId7');
+			expect(slidePath).toBe('ppt/slides/slide3.xml');
+			return 'ppt/media/photo.png';
+		};
+		const parser = new PptxTableDataParser(makeContext({ resolveCellImagePath }));
+		const result = parser.parseTableData(graphicData, 'ppt/slides/slide3.xml');
+
+		expect(result!.rows[0].cells[0].style?.fillMode).toBe('image');
+		expect(result!.rows[0].cells[0].style?.backgroundImageFillPath).toBe('ppt/media/photo.png');
 	});
 });

@@ -1,32 +1,23 @@
 import type { TextStyle, Text3DStyle, BevelPresetType, MaterialPresetType } from 'pptx-viewer-core';
-import { BEVEL_PRESETS, MATERIAL_PRESETS } from 'pptx-viewer-shared';
+import {
+	BEVEL_PRESETS,
+	MATERIAL_PRESETS,
+	text3dEmuToPt as emuToPt,
+	text3dPtToEmu as ptToEmu,
+	toggleText3dExtrusion,
+} from 'pptx-viewer-shared';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { normalizeHexColor } from '../../../utils';
+import { useRecentColors } from '../RecentColorsContext';
 
 const INPUT_CLS = 'bg-muted border border-border rounded px-2 py-1';
 const COLOR_CLS = 'h-8 bg-muted border border-border rounded px-1';
 
-/** EMU per typographic point (1pt = 12700 EMU). */
-const EMU_PER_PT = 12700;
-
 interface Text3DPropertiesProps {
 	ts: TextStyle | undefined;
 	onUpdateTextStyle: (updates: Partial<TextStyle>) => void;
-}
-
-/** Convert EMU to points for display. */
-function emuToPt(emu: number | undefined): number {
-	if (!emu) {
-		return 0;
-	}
-	return Math.round(emu / EMU_PER_PT);
-}
-
-/** Convert points to EMU for storage. */
-function ptToEmu(pt: number): number {
-	return Math.round(pt * EMU_PER_PT);
 }
 
 export function Text3DProperties({
@@ -34,6 +25,7 @@ export function Text3DProperties({
 	onUpdateTextStyle,
 }: Text3DPropertiesProps): React.ReactElement {
 	const { t } = useTranslation();
+	const { pushColor } = useRecentColors();
 	const t3d = ts?.text3d;
 	const hasExtrusion = Boolean(t3d?.extrusionHeight && t3d.extrusionHeight > 0);
 
@@ -42,12 +34,15 @@ export function Text3DProperties({
 		onUpdateTextStyle({ text3d: merged });
 	};
 
-	const clear3d = () => {
-		onUpdateTextStyle({ text3d: undefined });
+	// The EMU<->pt conversions and the seeded default depth live in
+	// `pptx-viewer-shared` so every binding writes the same values for the same
+	// gesture; see render/text-3d-fields.
+	const toggleExtrusion = (checked: boolean) => {
+		onUpdateTextStyle({ text3d: toggleText3dExtrusion(ts?.text3d, checked) });
 	};
 
 	return (
-		<div className='mt-2 rounded border border-border bg-card p-2 space-y-2'>
+		<div className='mt-2 rounded border border-border bg-card p-2 space-y-2' data-pptx-text-3d>
 			<div className='text-[11px] uppercase tracking-wide text-muted-foreground'>
 				{t('pptx.text3d.title')}
 			</div>
@@ -58,13 +53,7 @@ export function Text3DProperties({
 					<input
 						type='checkbox'
 						checked={hasExtrusion}
-						onChange={(e) => {
-							if (e.target.checked) {
-								update3d({ extrusionHeight: ptToEmu(6) });
-							} else {
-								clear3d();
-							}
-						}}
+						onChange={(e) => toggleExtrusion(e.target.checked)}
 					/>
 					{t('pptx.text3d.extrusion')}
 				</label>
@@ -94,7 +83,10 @@ export function Text3DProperties({
 							<input
 								type='color'
 								value={normalizeHexColor(t3d?.extrusionColor, '#888888')}
-								onChange={(e) => update3d({ extrusionColor: e.target.value })}
+								onChange={(e) => {
+									update3d({ extrusionColor: e.target.value });
+									pushColor(e.target.value);
+								}}
 								className={COLOR_CLS}
 							/>
 						</label>
@@ -143,6 +135,7 @@ export function Text3DProperties({
 				<label className='flex flex-col gap-1 pl-4'>
 					<span className='text-muted-foreground'>{t('pptx.text3d.material')}</span>
 					<select
+						aria-label={t('pptx.text3d.material')}
 						value={t3d?.presetMaterial ?? ''}
 						onChange={(e) => {
 							const v = e.target.value;
@@ -194,6 +187,7 @@ function BevelSection({
 				<label className='flex flex-col gap-1'>
 					<span className='text-muted-foreground'>{t('pptx.text3d.bevelType')}</span>
 					<select
+						aria-label={t('pptx.text3d.bevelType')}
 						value={bevelType ?? 'none'}
 						onChange={(e) => onTypeChange(e.target.value as BevelPresetType)}
 						className={INPUT_CLS}

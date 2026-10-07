@@ -40,7 +40,7 @@ function make(
 	save = vi.fn(async (_slides: PptxSlide[]) => new Uint8Array([1, 2, 3])),
 ) {
 	const onChange = vi.fn();
-	const handler = { save } as unknown as PptxHandler;
+	const handler = { save, getCompatibilityWarnings: () => [] } as unknown as PptxHandler;
 	const editor = new EditorState({
 		getCurrent: () => current,
 		getHandler: () => handler,
@@ -377,7 +377,21 @@ describe('editorState save', () => {
 
 		const bytes = await editor.save();
 		expect(bytes).toStrictEqual(new Uint8Array([1, 2, 3]));
-		expect(save).toHaveBeenCalledWith(editor.slides, { outputFormat: 'pptx' });
+		// `editor.embedFonts` defaults to true, so the shared
+		// `embeddedFontSaveOptions` helper always contributes `embedTrueTypeFonts`.
+		// `buildDeckSaveOptions` (shared by all five bindings) always passes
+		// `headerFooter`/`presentationProperties`/`slideMasters` even when empty
+		// (core no-ops on an empty/absent header-footer or presentation-properties
+		// patch, and an empty `slideMasters` array costs an untouched deck
+		// nothing), so this is the same save every other binding produces for an
+		// untouched deck, not merely "whatever Svelte omitted before".
+		expect(save).toHaveBeenCalledWith(editor.slides, {
+			embedTrueTypeFonts: true,
+			outputFormat: 'pptx',
+			headerFooter: {},
+			presentationProperties: {},
+			slideMasters: [],
+		});
 		expect(editor.dirty).toBeFalsy();
 	});
 
@@ -387,7 +401,13 @@ describe('editorState save', () => {
 
 		await editor.save('ppsx');
 
-		expect(save).toHaveBeenCalledWith(editor.slides, { outputFormat: 'ppsx' });
+		expect(save).toHaveBeenCalledWith(editor.slides, {
+			embedTrueTypeFonts: true,
+			outputFormat: 'ppsx',
+			headerFooter: {},
+			presentationProperties: {},
+			slideMasters: [],
+		});
 	});
 
 	it('rejects when no presentation is loaded', async () => {

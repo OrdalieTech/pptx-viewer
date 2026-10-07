@@ -1,16 +1,20 @@
 import { createEditorId, createShapeElement, createTextElement } from 'pptx-viewer-core';
-import type { PptxChartType, PptxElement, PptxHandler, PptxSlide } from 'pptx-viewer-core';
+import type { PptxElement, PptxHandler, PptxLayoutPreview, PptxSlide } from 'pptx-viewer-core';
 import {
+	classifyMediaType,
 	createDefaultChartElement,
 	newFieldElement,
 	newTableElement,
 	resolveInsertedFieldText,
 } from 'pptx-viewer-shared';
+import type { InsertChartKind } from 'pptx-viewer-shared';
 import { ref } from 'vue';
 import type { Ref, ShallowRef } from 'vue';
 
 import type { ShapePreset } from '../components/EditorToolbar.vue';
 import { buildActionButtonElement } from './action-buttons';
+import { partitionTemplateElements } from './template-editing';
+import type { TemplateElementMap } from './template-editing';
 import type { EditorOperations } from './useEditorOperations';
 
 export interface UseElementInsertionInput {
@@ -21,6 +25,12 @@ export interface UseElementInsertionInput {
 	activeSlideIndex: Ref<number>;
 	pushHistory: () => void;
 	handler: ShallowRef<PptxHandler | null>;
+	/**
+	 * The per-slide store of inherited layout / master artwork, refreshed when a
+	 * slide is re-mapped onto a different layout. Optional so callers that never
+	 * switch layouts (tests, read-only hosts) need not thread it through.
+	 */
+	templateElementsBySlideId?: Ref<TemplateElementMap>;
 }
 
 export interface UseElementInsertionResult {
@@ -29,7 +39,7 @@ export interface UseElementInsertionResult {
 	addText: () => void;
 	addShape: (preset: ShapePreset) => void;
 	addTable: () => void;
-	addChart: (chartType: PptxChartType) => void;
+	addChart: (chartKind: InsertChartKind) => void;
 	addField: (fieldType: string, value?: string) => void;
 	openImagePicker: () => void;
 	onImageFileSelected: (e: Event) => void;
@@ -37,6 +47,15 @@ export interface UseElementInsertionResult {
 	onMediaFileSelected: (e: Event) => void;
 	addActionButton: (shapeType: string) => void;
 	insertSlideFromLayout: (layoutPath: string, layoutName?: string) => Promise<void>;
+	/** Re-map the active slide onto another layout of its master. */
+	applyLayoutToActiveSlide: (layoutPath: string) => Promise<void>;
+	/**
+	 * Build the artwork thumbnails the New Slide / Layout galleries draw.
+	 *
+	 * A callback rather than state: parsing every layout is only worth doing
+	 * once the user opens one of those menus, and core memoises the result.
+	 */
+	loadLayoutPreviews: () => Promise<PptxLayoutPreview[]>;
 }
 
 /**
@@ -48,8 +67,16 @@ export interface UseElementInsertionResult {
  * and selected. Extracted verbatim from `PowerPointViewer.vue`.
  */
 export function useElementInsertion(input: UseElementInsertionInput): UseElementInsertionResult {
-	const { canvasSize, ops, selectedElementIds, slides, activeSlideIndex, pushHistory, handler } =
-		input;
+	const {
+		canvasSize,
+		ops,
+		selectedElementIds,
+		slides,
+		activeSlideIndex,
+		pushHistory,
+		handler,
+		templateElementsBySlideId,
+	} = input;
 
 	/** Centre a newly-created element (default box) on the slide. */
 	function centreNewElement(el: PptxElement, width: number, height: number): void {
@@ -84,9 +111,9 @@ export function useElementInsertion(input: UseElementInsertionInput): UseElement
 		selectedElementIds.value = [el.id];
 	}
 
-	/** Insert a default chart of the given type, centred on the slide. */
-	function addChart(chartType: PptxChartType): void {
-		const el = createDefaultChartElement(chartType) as PptxElement;
+	/** Insert a default chart of the given dropdown kind, centred on the slide. */
+	function addChart(chartKind: InsertChartKind): void {
+		const el = createDefaultChartElement(chartKind) as PptxElement;
 		centreNewElement(el, el.width, el.height);
 		ops.addElement(el);
 		selectedElementIds.value = [el.id];
@@ -157,11 +184,7 @@ export function useElementInsertion(input: UseElementInsertionInput): UseElement
 		if (!file) {
 			return;
 		}
-		const mediaType: 'audio' | 'video' | null = file.type.startsWith('audio/')
-			? 'audio'
-			: file.type.startsWith('video/')
-				? 'video'
-				: null;
+		const mediaType = classifyMediaType(file.type);
 		if (!mediaType) {
 			return;
 		}
@@ -229,6 +252,45 @@ export function useElementInsertion(input: UseElementInsertionInput): UseElement
 	 * walks the layout XML to populate background/placeholders (mirrors React's
 	 * `handleInsertSlideFromLayout`).
 	 */
+	/**
+	 * Re-map the ACTIVE slide onto `layoutPath`, keeping its content.
+	 *
+	 * The core call returns the slide with its placeholders moved onto the target
+	 * layout's geometry and the layout relationship rewritten; unlike
+	 * {@link insertSlideFromLayout} nothing is added to the deck.
+	 */
+	async function loadLayoutPreviews(): Promise<PptxLayoutPreview[]> {
+		return handler.value ? handler.value.getLayoutPreviews() : [];
+	}
+
+	async function applyLayoutToActiveSlide(layoutPath: string): Promise<void> {
+		const h = handler.value;
+		const index = activeSlideIndex.value;
+		const target = slides.value[index];
+		if (!h || !target) {
+			return;
+		}
+		const updated = await h.applyLayoutToSlide(index, layoutPath, slides.value).catch(() => null);
+		if (!updated || slides.value[index]?.id !== target.id) {
+			return;
+		}
+		pushHistory();
+		// Core returns the slide with the TARGET layout's inherited artwork merged
+		// in; this editor holds that artwork in its own store, so the result is
+		// partitioned again and the store entry REPLACED. Without that the canvas
+		// keeps painting the previous layout's decoration.
+		const partitioned = partitionTemplateElements([updated]);
+		const next = slides.value.slice();
+		next[index] = partitioned.slides[0]!;
+		slides.value = next;
+		if (templateElementsBySlideId) {
+			templateElementsBySlideId.value = {
+				...templateElementsBySlideId.value,
+				[updated.id]: partitioned.templateElementsBySlideId[updated.id] ?? [],
+			};
+		}
+	}
+
 	async function insertSlideFromLayout(layoutPath: string, layoutName?: string): Promise<void> {
 		const insertAt = activeSlideIndex.value + 1;
 		pushHistory();
@@ -273,5 +335,7 @@ export function useElementInsertion(input: UseElementInsertionInput): UseElement
 		onMediaFileSelected,
 		addActionButton,
 		insertSlideFromLayout,
+		applyLayoutToActiveSlide,
+		loadLayoutPreviews,
 	};
 }

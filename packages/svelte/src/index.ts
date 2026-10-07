@@ -24,6 +24,7 @@ export {
 export type {
 	CanvasSize,
 	CollaborationConfig,
+	CollaborationError,
 	CollaborationRole,
 	CollaborationTransport,
 	PowerPointViewerApi,
@@ -43,9 +44,24 @@ export type {
 	PptxAiWritePolicy,
 } from 'pptx-viewer-shared/ai';
 export type { AutosaveStatus } from './viewer/state/autosave.svelte';
-// Autosave recovery helpers (shared IndexedDB store), re-exported so a host can
-// offer restore-on-load. The viewer itself never auto-restores (see the
-// `autosave` prop docs); matching React/Vue, recovery is a host concern.
+export {
+	newImageElement,
+	newPresetShapeElement,
+	newShapeElement,
+	newTableElement,
+	newTextElement,
+} from './viewer/editor';
+export { toggleElementBullets } from 'pptx-viewer-shared';
+export { SHAPE_PRESET_DEFS } from 'pptx-viewer-shared';
+export {
+	glyphClassToTransform,
+	isStrokeGlyph,
+	shapeGlyphPath,
+} from './viewer/components/ribbon/insert/shape-glyphs';
+// Autosave recovery helpers (shared IndexedDB store). The viewer now OFFERS a
+// pre-crash snapshot back itself on load ("Recover unsaved changes?", see the
+// `autosave` prop docs); these stay exported for hosts that want to inspect,
+// list or drop snapshots on their own terms.
 export {
 	deleteAutosaveSnapshot,
 	getAutosaveSnapshot,
@@ -53,6 +69,17 @@ export {
 } from 'pptx-viewer-shared';
 export type { AutosaveRecord } from 'pptx-viewer-shared';
 export { loadPresentationDeck, parsePresentationSessionId } from 'pptx-viewer-shared';
+// Session restore (opt-in, host-driven): remember the deck the host has open,
+// per browser tab, so a page refresh reopens it instead of dropping the user
+// back on the file picker.
+export {
+	forgetSessionDeck,
+	getSessionTabId,
+	loadSessionDeck,
+	rememberSessionDeck,
+	restoreSessionDeck,
+} from 'pptx-viewer-shared';
+export type { SessionDeck } from 'pptx-viewer-shared';
 export {
 	defaultCssVars,
 	defaultRadius,
@@ -67,3 +94,28 @@ export {
 export type { ViewerThemeColors } from './theme';
 export { registerTranslations } from './i18n';
 export type { TranslationDictionary, Translator } from './i18n';
+
+// ── Openable-file allow list ───────────────────────────────────────────
+// The one answer to "can the viewer open this file?", so a host's drop target
+// and its `<input accept>` cannot disagree with the loader. Hand-rolled lists
+// drift: every demo in this repo shipped `.pptx,.ppt,.json`, which refused a
+// `.pptm` on drop that File > Open inside the viewer accepted without
+// complaint. Re-exported here so a host never has to reach into
+// `pptx-viewer-shared` (an internal, unpublished package) to get them.
+export {
+	PPTX_OPEN_ACCEPT,
+	PRESENTATION_OPEN_EXTENSIONS,
+	isSupportedPresentationFile,
+	isLegacyBinaryPresentation,
+	presentationBaseName,
+	savedPresentationFileName,
+} from 'pptx-viewer-shared';
+export type { SavedPresentationFormat } from 'pptx-viewer-shared';
+
+// ── Rasterisation escape hatch ─────────────────────────────────────────
+// The same `html2canvas-pro` wrapper the built-in export pipeline uses, so a
+// host building its own export gets the colour/CSS normalisation passes rather
+// than calling html2canvas raw (which cannot parse the `oklch()` the viewer's
+// theme tokens are authored in). React and Angular have always exported this;
+// the other three did not, which is the asymmetry this closes.
+export { renderToCanvas } from './viewer/export/render-to-canvas';

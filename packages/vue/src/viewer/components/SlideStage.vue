@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
-import { applyRenderedElementAccessibility, getSlideBackgroundStyle } from 'pptx-viewer-shared';
+import {
+	actionAffordanceLabels,
+	applyElementActionAffordances,
+	applyRenderedElementAccessibility,
+	getSlideBackgroundStyle,
+	visibleTemplateElements,
+} from 'pptx-viewer-shared';
 import type { CSSProperties } from 'vue';
 import { computed, ref, watchPostEffect } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import { provideSlideFieldContext } from '../composables/field-context';
+import { provideSlideElements } from '../composables/slide-elements';
 import { stripElementIdMarkers } from '../composables/stage-element-markers';
 import type { CanvasSize } from '../types';
 import ElementRenderer from './ElementRenderer.vue';
@@ -56,14 +64,58 @@ const props = withDefaults(
 		 * previews and transition snapshots so their media stays quiet.
 		 */
 		presenting?: boolean;
+		/**
+		 * Keep the `data-element-id` markers on an otherwise-static stage.
+		 *
+		 * Only the Morph transition layers set this: their per-element CSS is
+		 * keyed on those markers. It does not create a duplicate marked copy,
+		 * because the host hides its own stage while the overlay is mounted.
+		 */
+		preserveElementIds?: boolean;
+		/**
+		 * Render the elements with NO slide background at all.
+		 *
+		 * `getSlideBackgroundStyle` always resolves to an opaque paint (it falls
+		 * back to `DEFAULT_SLIDE_BACKGROUND` when the slide declares none), which is
+		 * right for a real surface and fatal for a stage stacked over another one.
+		 * The morph transition's departing-shape layer is exactly that: it sits on
+		 * top of the incoming slide, so its background would hide the whole morph
+		 * behind a flat slab for the entire transition.
+		 */
+		transparentBackground?: boolean;
+		/**
+		 * The element currently open in the element-level inline text editor
+		 * (mounted as a slotted overlay by the host), threaded down so
+		 * `ElementRenderer` can suppress its own text render for that one element
+		 * instead of duplicating it underneath the editor (issue #182).
+		 */
+		inlineEditingElementId?: string | null;
 	}>(),
 	{ scale: 1 },
 );
 const { t } = useI18n();
 const stageRef = ref<HTMLElement | null>(null);
 
-/** Template elements render behind the slide content; default to none. */
-const templateElements = computed<PptxElement[]>(() => props.templateElements ?? []);
+// Re-point the deck-wide field context at THIS stage's slide before the element
+// renderers read it: date / header / footer / document-property fields are
+// presentation-wide, but the slide number and title are not, so a thumbnail,
+// presenter preview or export stage must resolve them from the slide it paints
+// rather than from the active one.
+provideSlideFieldContext(() => props.slide);
+
+/**
+ * Template elements render behind the slide content; default to none, and
+ * empty out entirely when the slide has "Hide Background Graphics"
+ * (`showMasterShapes === false`) set.
+ */
+const templateElements = computed<PptxElement[]>(() => [
+	...visibleTemplateElements(props.slide, props.templateElements ?? []),
+]);
+
+// Publish THIS stage's sibling list so a text box in an `a:linkedTxbx` chain can
+// find the rest of its chain and render only its own slice of the overflow.
+// Template elements are included because a chain may be authored on a layout.
+provideSlideElements(() => [...templateElements.value, ...(props.slide?.elements ?? [])]);
 
 /** Number of template elements, used to offset the main layer's z-index above them. */
 const templateCount = computed(() => templateElements.value.length);
@@ -71,6 +123,16 @@ const accessibleElements = computed(() => [
 	...templateElements.value,
 	...(props.slide?.elements ?? []),
 ]);
+
+/**
+ * The template layer is interactive only when the canvas as a whole is
+ * interactive AND edit-template mode is on. Computed here (not inline in the
+ * template) so the SFC stays presentational. Declared above the post-render
+ * effect below, which reads it.
+ */
+const templateLayerInteractive = computed(
+	() => (props.interactive ?? false) && (props.editTemplateMode ?? false),
+);
 
 watchPostEffect(() => {
 	const stage = stageRef.value;
@@ -81,7 +143,30 @@ watchPostEffect(() => {
 		return;
 	}
 	if (props.interactive || props.presenting) {
-		applyRenderedElementAccessibility(stage, elements);
+		applyRenderedElementAccessibility(stage, elements, { presenting: props.presenting === true });
+		// The on-canvas action affordances (amber badge + hover link tooltip) are
+		// painted at the stage boundary rather than inside `ElementRenderer`,
+		// because that component dispatches straight to a per-type view whose root
+		// IS the element node, leaving no wrapper to hang the chrome off. A
+		// template-layer element is only decorated while it is actually editable,
+		// mirroring React's `canInteract` gate.
+		applyElementActionAffordances(
+			stage,
+			[
+				...(templateLayerInteractive.value ? templateElements.value : []),
+				...(props.slide?.elements ?? []),
+			],
+			{
+				canInteract: props.interactive === true,
+				presenting: props.presenting === true,
+				labels: actionAffordanceLabels((key) => t(key)),
+			},
+		);
+	} else if (props.preserveElementIds) {
+		// Morph drives per-element CSS keyed on `data-element-id`, so the two
+		// transition layers must keep their markers. Safe because the host hides
+		// its own stage while the overlay is mounted, so there is still exactly
+		// one marked copy of each element on the page.
 	} else {
 		// Static surface (thumbnail, sorter, preview, export stage): remove the
 		// `data-element-id` markers so only the real canvas / presentation stage
@@ -90,15 +175,6 @@ watchPostEffect(() => {
 	}
 });
 
-/**
- * The template layer is interactive only when the canvas as a whole is
- * interactive AND edit-template mode is on. Computed here (not inline in the
- * template) so the SFC stays presentational.
- */
-const templateLayerInteractive = computed(
-	() => (props.interactive ?? false) && (props.editTemplateMode ?? false),
-);
-
 const stageStyle = computed<CSSProperties>(() => ({
 	width: `${props.canvasSize.width}px`,
 	height: `${props.canvasSize.height}px`,
@@ -106,8 +182,20 @@ const stageStyle = computed<CSSProperties>(() => ({
 	transformOrigin: 'top left',
 	position: 'relative',
 	overflow: 'hidden',
+	// Motion-path keyframes translate by a fraction of the SLIDE, so the stage
+	// publishes its own size for those calc() offsets. Set on every stage (edit,
+	// presentation, thumbnails) because the path fractions are slide-relative
+	// regardless of the scale the stage happens to be drawn at.
+	'--pptx-slide-w': `${props.canvasSize.width}px`,
+	'--pptx-slide-h': `${props.canvasSize.height}px`,
 	// Resolved slide background: image -> gradient -> pattern -> solid colour.
-	...(getSlideBackgroundStyle(props.slide) as CSSProperties),
+	// A stacked overlay layer opts out entirely and stays see-through.
+	...(props.transparentBackground
+		? { background: 'none', backgroundColor: 'transparent' }
+		: (getSlideBackgroundStyle(props.slide, {
+				widthPx: props.canvasSize.width,
+				heightPx: props.canvasSize.height,
+			}) as CSSProperties)),
 }));
 </script>
 
@@ -121,7 +209,10 @@ const stageStyle = computed<CSSProperties>(() => ({
 		:aria-label="presenting ? t('pptx.canvas.slide') : undefined"
 		:aria-hidden="!interactive && !presenting ? 'true' : undefined"
 	>
-		<!-- Template (master/layout) layer: behind the slide content (lower z). -->
+		<!-- Template (master/layout) layer: behind the slide content (lower z).
+		     `marked` keeps the data-pptx-element contract on these elements even
+		     while they are interaction-locked (outside edit-template mode): the
+		     marker means "rendered slide element", not "editable right now". -->
 		<ElementRenderer
 			v-for="(element, index) in templateElements"
 			:key="element.id"
@@ -129,7 +220,9 @@ const stageStyle = computed<CSSProperties>(() => ({
 			:media-data-urls="mediaDataUrls"
 			:z-index="index"
 			:interactive="templateLayerInteractive"
+			:marked="interactive ?? false"
 			:template-editing="editTemplateMode ?? false"
+			:inline-editing-element-id="inlineEditingElementId"
 		/>
 		<!-- Slide content (template-free after the load-time partition). -->
 		<ElementRenderer
@@ -140,6 +233,7 @@ const stageStyle = computed<CSSProperties>(() => ({
 			:z-index="index + templateCount"
 			:interactive="interactive ?? false"
 			:presenting="presenting ?? false"
+			:inline-editing-element-id="inlineEditingElementId"
 		/>
 		<!-- Optional editing overlay (selection handles, etc.) shares this scaled space -->
 		<slot />

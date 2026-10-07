@@ -15,6 +15,26 @@ import type { TablePptxElement } from '../../core/types/elements';
  * `SAVE_ELEMENT_SKIPPED` warning. The saved slide had an empty `p:spTree`.
  */
 describe('sDK-created table survives save round-trip', () => {
+	it('resizing a loaded table scales its saved column grid', async () => {
+		const { handler, data, createSlide } = await PresentationBuilder.create();
+		data.slides.push(
+			createSlide('Blank')
+				.addTable(
+					{ rows: [{ cells: [{ text: 'A' }, { text: 'B' }, { text: 'C' }] }] },
+					{ x: 0, y: 0, width: 960, height: 100 },
+				)
+				.build(),
+		);
+		const reloader = new PptxHandler();
+		const loaded = await reloader.load((await handler.save(data.slides)).buffer as ArrayBuffer);
+		const table = loaded.slides[0].elements.find((e) => e.type === 'table') as TablePptxElement;
+		table.width = 600;
+		table.tableData!.columnWidths = [0.2, 0.3, 0.5];
+		const zip = await JSZip.loadAsync(await reloader.save(loaded.slides));
+		const xml = await zip.file('ppt/slides/slide1.xml')!.async('string');
+		const widths = [...xml.matchAll(/<a:gridCol\b[^>]*\bw="(\d+)"/g)].map((m) => Number(m[1]));
+		expect(widths).toEqual([120, 180, 300].map((w) => w * 9525));
+	});
 	it('addTable then save → reload preserves rows, columns, and cell text', async () => {
 		const { handler, data, createSlide } = await PresentationBuilder.create();
 		data.slides.push(

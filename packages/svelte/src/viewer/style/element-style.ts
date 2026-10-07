@@ -1,15 +1,17 @@
 import type { PptxElement, ShapeStyle } from 'pptx-viewer-core';
-import { getRoundRectRadiusPx, getShapeType, hasShapeProperties } from 'pptx-viewer-core';
+import { hasShapeProperties } from 'pptx-viewer-core';
 import type { CssStyleMap } from 'pptx-viewer-shared';
 import {
 	DEFAULT_STROKE_COLOR,
 	getComputed3dStyle,
 	getComputedEffectStyle,
 	getComputedFillStyle,
+	getComputedStrokeStyle,
 	getContainerStyle as sharedGetContainerStyle,
 	getCssBorderDashStyle,
 	getImageSrc as sharedGetImageSrc,
-	getResolvedShapeClipPath,
+	isHollowShapeElement,
+	resolveShapeGeometry,
 	px,
 } from 'pptx-viewer-shared';
 
@@ -43,6 +45,24 @@ export function getShapeFillStrokeStyle(
 	animatesFill?: boolean,
 	animatesStroke?: boolean,
 ): CssStyleMap {
+	if (el.type === 'group') {
+		// A group has no fill/stroke/geometry of its own (the branches below all
+		// read `el.shapeStyle`, which a group never has), but PowerPoint still
+		// lets `p:grpSpPr/a:effectLst` carry a shadow/glow/soft-edge for the
+		// group's own COMPOSITE raster (see shared `getComputedEffectStyle`).
+		// Reflection rides a separate mirrored sibling node (`ShapeEffectOverlay.svelte`),
+		// same as a shape, so only the container-level `filter` / `overflow`
+		// belong here.
+		const fx = getComputedEffectStyle(el);
+		const groupStyle: CssStyleMap = {};
+		if (fx.filter) {
+			groupStyle.filter = fx.filter;
+		}
+		if (fx.overflowVisible) {
+			groupStyle.overflow = 'visible';
+		}
+		return groupStyle;
+	}
 	if (!hasShapeProperties(el)) {
 		return {};
 	}
@@ -66,19 +86,41 @@ export function getShapeFillStrokeStyle(
 			if (fill.backgroundSize !== undefined) {
 				style.backgroundSize = fill.backgroundSize;
 			}
+			// Without the position a gradient `a:tileRect` (and an image fill's
+			// placement) stayed pinned at 0 0 while its `background-size` was
+			// applied, so an oversized tile painted the wrong region (issue #132).
+			if (fill.backgroundPosition !== undefined) {
+				style.backgroundPosition = fill.backgroundPosition;
+			}
 		}
 
-		const strokeWidth = Math.max(0, ss.strokeWidth ?? 0);
-		if (strokeWidth > 0) {
+		// Stroke: the whole `a:ln` -> CSS decision lives in shared
+		// `getComputedStrokeStyle` (painted width, dash, compound `@cmpd` lines as
+		// `border-style: double`, `strokeOpacity`, and the inherited join / cap /
+		// miter-limit), so this binding only maps it. It also drops the border for
+		// an outline the SVG overlay is painting instead - a gradient/pattern line
+		// or an open preset - rather than drawing the averaged solid underneath.
+		const stroke = getComputedStrokeStyle(el);
+		if (stroke.borderWidth > 0) {
 			if (animatesStroke) {
 				// Keep the width / dash; leave the colour to the animated keyframes.
-				style.borderWidth = px(strokeWidth);
-				style.borderStyle = getCssBorderDashStyle(ss.strokeDash) ?? 'solid';
+				style.borderWidth = px(stroke.borderWidth);
+				style.borderStyle = stroke.borderStyle ?? 'solid';
 			} else {
-				style.border = `${px(strokeWidth)} ${getCssBorderDashStyle(ss.strokeDash)} ${
-					ss.strokeColor ?? DEFAULT_STROKE_COLOR
-				}`;
+				style.border = stroke.border ?? '';
 			}
+		}
+		// SVG presentation properties are INHERITED, so writing them on the shape
+		// box is what carries `a:ln`'s join / cap / `a:miter/@lim` into the stroke
+		// overlay's `<path>` without the overlay restating them.
+		if (stroke.strokeLinejoin) {
+			style.strokeLinejoin = stroke.strokeLinejoin;
+		}
+		if (stroke.strokeLinecap) {
+			style.strokeLinecap = stroke.strokeLinecap;
+		}
+		if (stroke.strokeMiterlimit !== undefined) {
+			style.strokeMiterlimit = stroke.strokeMiterlimit;
 		}
 	}
 
@@ -91,9 +133,9 @@ export function getShapeFillStrokeStyle(
 	if (fx.filter) {
 		style.filter = fx.filter;
 	}
-	if (fx.webkitBoxReflect) {
-		style.WebkitBoxReflect = fx.webkitBoxReflect;
-	}
+	// Reflection is no longer a single CSS property (`-webkit-box-reflect`
+	// never worked in Firefox): `ShapeEffectOverlay.svelte` renders a mirrored
+	// sibling node instead, using shared's `getReflectionWrapperStyle` directly.
 	if (fx.mixBlendMode) {
 		style.mixBlendMode = fx.mixBlendMode;
 	}
@@ -114,49 +156,48 @@ export function getShapeFillStrokeStyle(
 
 	// Geometry priority cascade:
 	// connector -> roundRect -> ellipse -> clip-path -> line -> cylinder.
-	const normalizedShapeType = getShapeType(el.shapeType);
-
-	if (el.type === 'connector' || normalizedShapeType === 'connector') {
-		style.backgroundColor = 'transparent';
-		style.border = 'none';
-		return style;
+	// An unfilled, textless shape is a FRAME: PowerPoint hit-tests it on its
+	// outline only, so its interior must not swallow clicks meant for what it is
+	// drawn over. ShapeEffectOverlay paints a transparent pointer-events:stroke
+	// band that opts the outline back in.
+	if (isHollowShapeElement(el)) {
+		style.pointerEvents = 'none';
 	}
 
-	if (normalizedShapeType === 'roundRect') {
-		const radiusPx = getRoundRectRadiusPx(el);
-		if (radiusPx > 0.01) {
-			style.borderRadius = px(radiusPx);
-		}
-		return style;
+	// Geometry: the branch ORDER and every threshold live in shared
+	// `resolveShapeGeometry`, so this binding only maps the decision onto its
+	// own style map. Keeping the cascade in one place is what stops the copies
+	// drifting - Angular's had, four separate ways.
+	const geometry = resolveShapeGeometry(el);
+	switch (geometry.kind) {
+		case 'bare':
+			style.backgroundColor = 'transparent';
+			style.border = 'none';
+			return style;
+		case 'strokeOnly':
+			// An open preset has no region to fill and no box to outline:
+			// `ShapeEffectOverlay` strokes the evaluated geometry. The clip in
+			// particular encloses zero area and would clip that overlay away.
+			style.backgroundColor = 'transparent';
+			delete style.backgroundImage;
+			style.border = 'none';
+			return style;
+		case 'borderRadius':
+			style.borderRadius = geometry.radius;
+			return style;
+		case 'clipPath':
+			style.clipPath = geometry.clipPath;
+			return style;
+		case 'lineEdge':
+			style.backgroundColor = 'transparent';
+			style.border = 'none';
+			style.borderTop = `${px(geometry.strokeWidth)} ${getCssBorderDashStyle(
+				el.shapeStyle?.strokeDash,
+			)} ${el.shapeStyle?.strokeColor ?? DEFAULT_STROKE_COLOR}`;
+			return style;
+		default:
+			return style;
 	}
-
-	if (normalizedShapeType === 'ellipse') {
-		style.borderRadius = '9999px';
-		return style;
-	}
-
-	const clipPath = getResolvedShapeClipPath(el);
-	if (clipPath) {
-		style.clipPath = clipPath;
-		return style;
-	}
-
-	if (normalizedShapeType === 'line') {
-		const strokeWidth = Math.max(0, el.shapeStyle?.strokeWidth ?? 0);
-		style.backgroundColor = 'transparent';
-		style.border = 'none';
-		style.borderTop = `${px(Math.max(strokeWidth, 2))} ${getCssBorderDashStyle(
-			el.shapeStyle?.strokeDash,
-		)} ${el.shapeStyle?.strokeColor ?? DEFAULT_STROKE_COLOR}`;
-		return style;
-	}
-
-	if (normalizedShapeType === 'cylinder') {
-		style.borderRadius = '48% / 12%';
-		return style;
-	}
-
-	return style;
 }
 
 /**

@@ -1,4 +1,7 @@
 // oxlint-disable react-hooks/rules-of-hooks
+// oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+// (each spec sets up a couple of independent `const`s); merging them isn't a
+// style choice here.
 import type { PptxComment } from 'pptx-viewer-core';
 import { describe, expect, it } from 'vitest';
 import { ref } from 'vue';
@@ -149,5 +152,67 @@ describe('useComments', () => {
 			authorName: ref('Bob'),
 		});
 		expect(resolveComment('missing')).toBeNull();
+	});
+
+	it('addComment stitches mentions onto the created comment', () => {
+		const comments = ref<PptxComment[]>([comment()]);
+		const { addComment } = useComments({
+			comments,
+			activeSlideIndex: ref(0),
+			authorName: ref('Carol'),
+		});
+		const next = addComment('hey @Alice ', undefined, undefined, [
+			{ id: '{M}', personId: '{A}', authorName: 'Alice', startIndex: 4, length: 6 },
+		]);
+		expect(next?.[1]?.mentions).toStrictEqual([
+			{ id: '{M}', personId: '{A}', authorName: 'Alice', startIndex: 4, length: 6 },
+		]);
+		// the pre-existing comment is untouched
+		expect(next?.[0]).not.toHaveProperty('mentions');
+	});
+
+	it('addComment omits mentions when none are passed', () => {
+		const comments = ref<PptxComment[]>([]);
+		const { addComment } = useComments({
+			comments,
+			activeSlideIndex: ref(0),
+			authorName: ref('Carol'),
+		});
+		const next = addComment('plain text');
+		expect(next?.[0]).not.toHaveProperty('mentions');
+	});
+
+	it('replyToComment stitches mentions onto the created reply', () => {
+		const comments = ref<PptxComment[]>([comment()]);
+		const { replyToComment } = useComments({
+			comments,
+			activeSlideIndex: ref(0),
+			authorName: ref('Carol'),
+		});
+		const next = replyToComment('c1', 'hey @Bob ', [
+			{ id: '{M2}', personId: '{B}', authorName: 'Bob', startIndex: 4, length: 4 },
+		]);
+		expect(next?.[0]?.replies?.[0]?.mentions).toStrictEqual([
+			{ id: '{M2}', personId: '{B}', authorName: 'Bob', startIndex: 4, length: 4 },
+		]);
+	});
+
+	it('removeComment and resolveComment reach a nested reply (shared tree traversal)', () => {
+		const nested = comment({
+			replies: [{ id: 'r1', text: 'Reply', parentId: 'c1', resolved: false }],
+		});
+		const comments = ref<PptxComment[]>([nested]);
+		const { removeComment, resolveComment } = useComments({
+			comments,
+			activeSlideIndex: ref(0),
+			authorName: ref('Bob'),
+		});
+
+		const resolved = resolveComment('r1');
+		expect(resolved?.[0]?.replies?.[0]?.resolved).toBeTruthy();
+
+		comments.value = resolved ?? comments.value;
+		const removed = removeComment('r1');
+		expect(removed?.[0]?.replies).toStrictEqual([]);
 	});
 });

@@ -26,8 +26,15 @@ function makeSlide(overrides: Partial<PptxSlide> & { id: string; rId: string }):
 // ---------------------------------------------------------------------------
 
 describe('computeGridSpacingPx', () => {
-	it('returns GRID_SIZE when presentationGridSpacing is undefined', () => {
+	it('returns GRID_SIZE when documentGridSpacing is undefined', () => {
 		expect(computeGridSpacingPx(undefined)).toBe(GRID_SIZE);
+	});
+
+	it('reflects the real fixture value (anatidae-animation.pptx: viewProperties.gridSpacing = 72008 EMU)', () => {
+		// Regression: this value used to be read from `presentationProperties.gridSpacing`
+		// (p:gridSpacing under p:presentationPr), which real PowerPoint files never
+		// populate. It lives under p:viewPr in viewProps.xml -- PptxData.viewProperties.
+		expect(computeGridSpacingPx({ cx: 72008 })).toBe(Math.round(72008 / EMU_PER_PX));
 	});
 
 	it('converts EMU to pixels and rounds', () => {
@@ -97,17 +104,46 @@ describe('computeVisibleSlideIndexes', () => {
 		expect(result).toStrictEqual([0, 1]);
 	});
 
-	it('returns empty array when all slides are hidden', () => {
+	it('falls back to the whole deck when every slide is hidden', () => {
+		// The alternative is a show that opens on an inert black rectangle, which
+		// reads as a broken viewer. See `resolveShowSlideIndexes` in the shared
+		// package for the reasoning.
 		const slides = [
 			makeSlide({ id: 's1', rId: 'r1', hidden: true }),
 			makeSlide({ id: 's2', rId: 'r2', hidden: true }),
 		];
 		const result = computeVisibleSlideIndexes(slides, null, []);
-		expect(result).toStrictEqual([]);
+		expect(result).toStrictEqual([0, 1]);
 	});
 
 	it('returns empty array for empty slides', () => {
 		expect(computeVisibleSlideIndexes([], null, [])).toStrictEqual([]);
+	});
+
+	it('restricts to the authored p:sldRg range when no custom show is active', () => {
+		// `p:showPr/p:sldRg st="2" end="3"` -> 0-based [1, 2].
+		const slides = [
+			makeSlide({ id: 's1', rId: 'r1' }),
+			makeSlide({ id: 's2', rId: 'r2' }),
+			makeSlide({ id: 's3', rId: 'r3' }),
+			makeSlide({ id: 's4', rId: 'r4' }),
+		];
+		const result = computeVisibleSlideIndexes(slides, null, [], {
+			showSlidesMode: 'range',
+			showSlidesFrom: 2,
+			showSlidesTo: 3,
+		});
+		expect(result).toStrictEqual([1, 2]);
+	});
+
+	it('ignores the authored range outside range mode', () => {
+		const slides = [makeSlide({ id: 's1', rId: 'r1' }), makeSlide({ id: 's2', rId: 'r2' })];
+		const result = computeVisibleSlideIndexes(slides, null, [], {
+			showSlidesMode: 'all',
+			showSlidesFrom: 2,
+			showSlidesTo: 2,
+		});
+		expect(result).toStrictEqual([0, 1]);
 	});
 });
 
@@ -230,7 +266,9 @@ describe('computeMasterPseudoSlide', () => {
 		const result = computeMasterPseudoSlide('master', layout, master);
 		expect(result).toBeDefined();
 		expect(result!.id).toBe(layout.path);
-		expect(result!.elements).toBe(layout.elements);
+		// A layout is painted on top of its master, so the pseudo-slide holds a
+		// merged list rather than the layout's own array.
+		expect(result!.elements).toStrictEqual(layout.elements);
 		expect(result!.backgroundColor).toBe('#FFFFFF');
 		// Falls back to master's backgroundImage since layout has none
 		expect(result!.backgroundImage).toBe('data:image/png;base64,master');
@@ -265,8 +303,32 @@ describe('computeMasterPseudoSlide', () => {
 		const result = computeMasterPseudoSlide('master', undefined, master);
 		expect(result).toBeDefined();
 		expect(result!.id).toBe(master.path);
-		expect(result!.elements).toBe(master.elements);
+		expect(result!.elements).toStrictEqual(master.elements);
 		expect(result!.backgroundColor).toBe('#CCCCCC');
+	});
+
+	it('paints the master artwork behind the selected layout', () => {
+		// View > Slide Master used to show a layout on an empty canvas: the
+		// master's logo, divider and placeholder prompts vanished the moment a
+		// layout was selected, which is not what PowerPoint shows.
+		const master = {
+			path: 'ppt/slideMasters/slideMaster1.xml',
+			elements: [
+				{ id: 'slide-master-slideMaster1-shape-0', type: 'shape', x: 0, y: 0, width: 1, height: 1 },
+			] as unknown as PptxElement[],
+		} as PptxSlideMaster;
+		const layout: PptxSlideLayout = {
+			path: 'ppt/slideLayouts/slideLayout1.xml',
+			elements: [
+				{ id: 'slide-layout-slideLayout1-shape-0', type: 'shape', x: 0, y: 0, width: 1, height: 1 },
+			] as unknown as PptxElement[],
+		};
+
+		const result = computeMasterPseudoSlide('master', layout, master);
+		expect(result!.elements.map((el) => el.id)).toStrictEqual([
+			'slide-master-slideMaster1-shape-0',
+			'slide-layout-slideLayout1-shape-0',
+		]);
 	});
 
 	it('sets slideNumber to 0 and empty rId', () => {

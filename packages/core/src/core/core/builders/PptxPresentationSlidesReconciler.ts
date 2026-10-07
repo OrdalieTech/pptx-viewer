@@ -3,6 +3,7 @@ import type JSZip from 'jszip';
 
 import type { PptxSlide, XmlObject } from '../../types';
 import type { PptxSlideReferenceRemap } from '../../utils/presentation-collections';
+import { normalizeNamespaceUri } from '../../utils/strict-namespace-map';
 import type { PptxSaveState } from './PptxSaveSessionBuilder';
 import { buildSlideReferenceRemap } from './slide-reference-remap';
 
@@ -65,8 +66,18 @@ export class PptxPresentationSlidesReconciler implements IPptxPresentationSlides
 				usedRIds.add(relationshipId);
 			}
 
+			// A Strict-loaded file has its parser wrapped to auto-normalize every
+			// parsed `@_Type` to Transitional (see `detectAndSetStrictConformance`),
+			// but `input.slideRelationshipType` comes straight from
+			// `PptxSaveConstantsFactory` and stays Strict when the effective save
+			// conformance is Strict. Comparing them raw never matched on a Strict
+			// round-trip, so every existing slide relationship was misclassified as
+			// absent and got a brand-new rId/sldId minted on every resave. Normalize
+			// both sides so the comparison holds regardless of conformance.
 			if (
-				relationshipType === input.slideRelationshipType &&
+				typeof relationshipType === 'string' &&
+				normalizeNamespaceUri(relationshipType) ===
+					normalizeNamespaceUri(input.slideRelationshipType) &&
 				typeof relationshipId === 'string' &&
 				typeof relationshipTarget === 'string'
 			) {
@@ -276,6 +287,12 @@ export class PptxPresentationSlidesReconciler implements IPptxPresentationSlides
 			newSlideRelsPath,
 		});
 		if (!relationshipsCopied) {
+			const layoutTarget =
+				init.slide.layoutPath &&
+				/^ppt\/slideLayouts\/[^/]+\.xml$/u.test(init.slide.layoutPath) &&
+				init.input.zip.file(init.slide.layoutPath)
+					? `../slideLayouts/${init.slide.layoutPath.split('/').pop()}`
+					: '../slideLayouts/slideLayout1.xml';
 			const fallbackRels = {
 				Relationships: {
 					'@_xmlns': init.input.relationshipsNamespace,
@@ -283,16 +300,13 @@ export class PptxPresentationSlidesReconciler implements IPptxPresentationSlides
 						{
 							'@_Id': 'rId1',
 							'@_Type': init.input.slideLayoutRelationshipType,
-							'@_Target': '../slideLayouts/slideLayout1.xml',
+							'@_Target': layoutTarget,
 						},
 					],
 				},
 			} as XmlObject;
 			init.input.zip.file(newSlideRelsPath, init.input.xmlBuilder.build(fallbackRels));
-			init.input.slideRelsMap.set(
-				newSlidePath,
-				new Map<string, string>([['rId1', '../slideLayouts/slideLayout1.xml']]),
-			);
+			init.input.slideRelsMap.set(newSlidePath, new Map<string, string>([['rId1', layoutTarget]]));
 		}
 
 		init.slideTargetByRid.set(newSlideRid, init.input.toPresentationTarget(newSlidePath));

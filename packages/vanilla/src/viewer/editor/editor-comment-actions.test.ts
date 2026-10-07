@@ -1,3 +1,6 @@
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (each spec sets up a couple of independent `const`s); merging them isn't a
+   style choice here. */
 import type { PptxComment, PptxSlide } from 'pptx-viewer-core';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -115,5 +118,44 @@ describe('createCommentActions replies and edit-in-place', () => {
 
 		actions.deleteComment('r2');
 		expect(store.get().slides[0].comments?.[0].replies?.map(({ id }) => id)).toStrictEqual(['r1']);
+	});
+
+	it('addComment mints a shared-format id (parity with the other bindings)', () => {
+		const { actions } = makeActions([]);
+		const id = actions.addComment('Hello');
+		expect(id).toMatch(/^comment-/);
+	});
+
+	// B5: `addCommentToList` / `replyToCommentInList` (shared) have no `mentions`
+	// parameter, so the typeahead's picks are stitched onto the just-added
+	// comment/reply here, in the SAME history entry as the add.
+	it('addComment carries the mention list onto the new comment', () => {
+		const { store, actions } = makeActions([]);
+		const mentions = [{ personId: 'a1', authorName: 'Alice', startIndex: 0, length: 6 }];
+
+		const id = actions.addComment('@Alice look at this', undefined, mentions);
+
+		expect(store.get().slides[0].comments?.[0]).toMatchObject({ id, mentions });
+	});
+
+	it('addCommentReply carries the mention list onto the new reply', () => {
+		const { store, actions } = makeActions([{ id: 'c1', text: 'Parent' }]);
+		const mentions = [{ personId: 'a1', authorName: 'Alice', startIndex: 0, length: 6 }];
+
+		const id = actions.addCommentReply('c1', '@Alice thoughts?', mentions);
+
+		expect(store.get().slides[0].comments?.[0].replies?.[0]).toMatchObject({ id, mentions });
+	});
+
+	it('editComment, deleteComment, and toggleCommentResolved are no-ops for an unknown id: no history, no dirty flag', () => {
+		const { store, ops, actions } = makeActions([{ id: 'c1', text: 'Original' }]);
+
+		actions.editComment('missing', 'text');
+		actions.deleteComment('missing');
+		actions.toggleCommentResolved('missing');
+
+		expect(store.get().slides[0].comments?.[0].text).toBe('Original');
+		expect(store.get().dirty).toBeFalsy();
+		expect(ops.canUndo()).toBeFalsy();
 	});
 });

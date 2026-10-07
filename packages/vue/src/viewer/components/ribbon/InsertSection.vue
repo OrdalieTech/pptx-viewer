@@ -17,8 +17,8 @@ import {
 /**
  * InsertSection: the Vue 3 port of React's `toolbar/InsertSection.tsx`. Renders
  * the Insert ribbon tab: Text box, the Shape-type `<select>` + Add-shape cluster,
- * Image / Media / Table / SmartArt / Equation pills, and the hover-driven Action
- * Button and Insert Field dropdowns plus the Date/Time picker modal. A faithful,
+ * Image / Media / Table / SmartArt / Equation / Link pills, and the hover-driven
+ * Action Button and Insert Field dropdowns plus the Date/Time picker modal. A faithful,
  * mechanical port for visual + behavioral parity: class strings are copied
  * verbatim and the date-picker's `useState`/`useEffect(mousedown)` plumbing
  * becomes local `ref`s with a backdrop-click + outside-click guard.
@@ -31,27 +31,32 @@ import {
  * `group-hover` (no state), exactly as React; only the Date/Time modal keeps
  * reactive state.
  */
-import type { PptxChartType } from 'pptx-viewer-core';
 import {
 	ACTION_BUTTON_PRESETS,
-	DEFAULT_INSERT_CHART_TYPE,
+	DEFAULT_INSERT_CHART_KIND,
 	INSERT_CHART_TYPES,
 } from 'pptx-viewer-shared';
+import type { InsertChartKind } from 'pptx-viewer-shared';
 import { computed, ref } from 'vue';
 import type { Component } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import { vAnchoredPopup } from './anchored-popup';
+import InsertHyperlinkButton from './InsertHyperlinkButton.vue';
 import { grp, ic, pill } from './ribbon-constants';
 import type { SupportedShapeType } from './ribbon-types';
 
 interface Props {
 	canEdit: boolean;
+	/** Whether an element is selected; gates the Link button (see below). */
+	hasSelection: boolean;
+	onOpenHyperlinkDialog: () => void;
 	newShapeType: SupportedShapeType;
 	onSetNewShapeType: (type: SupportedShapeType) => void;
 	onAddTextBox: () => void;
 	onAddShape: () => void;
 	onAddTable: () => void;
-	onAddChart?: (chartType: PptxChartType) => void;
+	onAddChart?: (chartKind: InsertChartKind) => void;
 	onAddSmartArt: () => void;
 	onAddEquation: () => void;
 	onAddActionButton: (shapeType: string) => void;
@@ -211,9 +216,13 @@ const activeShapePreset = computed(() =>
 	SHAPE_PRESETS.find((sp) => sp.type === props.newShapeType),
 );
 
-/** The chart type chosen in the insert dropdown (mirrors React's `newChartType`). */
-const newChartType = ref<PptxChartType>(DEFAULT_INSERT_CHART_TYPE);
+/** The chart kind chosen in the insert dropdown (mirrors React's `newChartType`). */
+const newChartType = ref<InsertChartKind>(DEFAULT_INSERT_CHART_KIND);
 const chartTypes = INSERT_CHART_TYPES;
+
+/** Anchors for the hover-driven Action Button / Insert Field popups (see `anchored-popup.ts`). */
+const actionButtonTriggerRef = ref<HTMLButtonElement | null>(null);
+const insertFieldTriggerRef = ref<HTMLButtonElement | null>(null);
 
 /* Date/Time picker modal state: React's local `useState` + outside-click. */
 const datePickerOpen = ref(false);
@@ -309,7 +318,7 @@ function previewTime(): string {
 		@click="props.onAddTextBox()"
 	>
 		<Type :class="ic" />
-		{{ t('pptx.ribbon.text') }}
+		{{ t('pptx.ribbon.textBox') }}
 	</button>
 	<div :class="grp">
 		<select
@@ -371,10 +380,10 @@ function previewTime(): string {
 			:value="newChartType"
 			class="bg-transparent py-1.5 pl-2 pr-1 outline-none text-xs"
 			:title="t('pptx.ribbon.chartType')"
-			@change="newChartType = ($event.target as HTMLSelectElement).value as PptxChartType"
+			@change="newChartType = ($event.target as HTMLSelectElement).value as InsertChartKind"
 		>
-			<option v-for="ct in chartTypes" :key="ct.type" :value="ct.type" class="bg-background">
-				{{ ct.label }}
+			<option v-for="ct in chartTypes" :key="ct.id" :value="ct.id" class="bg-background">
+				{{ t(ct.labelKey) }}
 			</option>
 		</select>
 		<button
@@ -431,6 +440,7 @@ function previewTime(): string {
 	<!-- Action Buttons dropdown -->
 	<div class="relative group">
 		<button
+			ref="actionButtonTriggerRef"
 			type="button"
 			:disabled="!canEdit"
 			:class="pill"
@@ -451,7 +461,10 @@ function previewTime(): string {
 			{{ t('pptx.ribbon.action') }}
 			<ChevronDown class="w-3 h-3" />
 		</button>
-		<div class="absolute left-0 top-full z-50 hidden group-hover:flex flex-col w-40 pt-1">
+		<div
+			class="z-50 hidden group-hover:flex flex-col w-40 pt-1"
+			v-anchored-popup="{ anchor: actionButtonTriggerRef }"
+		>
 			<div class="rounded-lg border border-border bg-popover backdrop-blur-lg shadow-2xl py-1">
 				<button
 					v-for="preset in ACTION_BUTTON_PRESETS"
@@ -479,7 +492,13 @@ function previewTime(): string {
 	</div>
 	<!-- Insert Field dropdown -->
 	<div v-if="props.onInsertField" class="relative group">
-		<button type="button" :disabled="!canEdit" :class="pill" :title="t('pptx.field.insertField')">
+		<button
+			ref="insertFieldTriggerRef"
+			type="button"
+			:disabled="!canEdit"
+			:class="pill"
+			:title="t('pptx.field.insertField')"
+		>
 			<svg
 				:class="ic"
 				viewBox="0 0 24 24"
@@ -495,7 +514,10 @@ function previewTime(): string {
 			{{ t('pptx.field.field') }}
 			<ChevronDown class="w-3 h-3" />
 		</button>
-		<div class="absolute left-0 top-full z-50 hidden group-hover:flex flex-col w-44 pt-1">
+		<div
+			class="z-50 hidden group-hover:flex flex-col w-44 pt-1"
+			v-anchored-popup="{ anchor: insertFieldTriggerRef }"
+		>
 			<div class="rounded-lg border border-border bg-popover backdrop-blur-lg shadow-2xl py-1">
 				<button
 					type="button"
@@ -532,6 +554,10 @@ function previewTime(): string {
 			</div>
 		</div>
 	</div>
+	<InsertHyperlinkButton
+		:has-selection="props.hasSelection"
+		:on-open-hyperlink-dialog="props.onOpenHyperlinkDialog"
+	/>
 	<button
 		v-if="props.onOpenHeaderFooter"
 		type="button"

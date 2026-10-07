@@ -70,6 +70,42 @@ describe('chartPanel', () => {
 		expect(next.series).toHaveLength(1);
 	});
 
+	it('offers each of the six ChartEx types and emits the chosen one', async () => {
+		const wrapper = mount(ChartPanel, { props: { element: chartElement() } });
+		const select = wrapper.get('[data-testid="chart-type"]');
+		for (const chartType of [
+			'histogram',
+			'funnel',
+			'treemap',
+			'sunburst',
+			'boxWhisker',
+			'regionMap',
+		]) {
+			await select.setValue(chartType);
+			expect(lastChartData(wrapper.emitted('update')).chartType).toBe(chartType);
+		}
+	});
+
+	it('shows "pareto" (not "histogram") as selected for a histogram with a paretoLine series', () => {
+		const wrapper = mount(ChartPanel, {
+			props: {
+				element: chartElement({
+					chartType: 'histogram',
+					series: [
+						{ name: 'Frequency', values: [3, 5, 2] },
+						{
+							name: 'Cumulative %',
+							values: [30, 80, 100],
+							histogramOptions: { layout: 'pareto' },
+						},
+					],
+				}),
+			},
+		});
+		const select = wrapper.get('[data-testid="chart-type"]').element as HTMLSelectElement;
+		expect(select.value).toBe('pareto');
+	});
+
 	it('clears grouping when switching to a type that does not support it', async () => {
 		const wrapper = mount(ChartPanel, { props: { element: chartElement() } });
 		await wrapper.get('[data-testid="chart-type"]').setValue('pie');
@@ -88,6 +124,27 @@ describe('chartPanel', () => {
 		expect(next.title).toBe('New Title');
 		// Type is untouched by a title edit.
 		expect(next.chartType).toBe('bar');
+	});
+
+	// W4-D: a multi-run title collapses to one run in the dominant style
+	// instead of leaving a stale second run's text behind.
+	it('collapses a multi-run title to one run in the dominant style on edit', async () => {
+		const wrapper = mount(ChartPanel, {
+			props: {
+				element: chartElement({
+					titleRuns: [
+						{ text: 'Sales ', bold: true },
+						{ text: 'Q1 Numbers', italic: true, color: '#FF0000' },
+					],
+				}),
+			},
+		});
+		const input = wrapper.get('[data-testid="chart-title"]');
+		await input.setValue('New Title');
+
+		const next = lastChartData(wrapper.emitted('update'));
+		expect(next.title).toBe('New Title');
+		expect(next.titleRuns).toStrictEqual([{ text: 'New Title', italic: true, color: '#FF0000' }]);
 	});
 
 	it('shows the grouping control only for grouping-capable types', () => {

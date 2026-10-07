@@ -37,6 +37,9 @@
 import { hasTextProperties } from 'pptx-viewer-core';
 import type { PptxNativeAnimation, PptxSlide } from 'pptx-viewer-core';
 
+import { applyAfterAnimationFromEditorList } from './animation-after-effect';
+import { buildAnimationRenderContext } from './animation-render-context';
+import { resolveAnimationTargetId } from './animation-target-id';
 import type { ElementStatesOptions } from './animation-timeline-engine';
 import { TimelineEngine } from './animation-timeline-engine';
 import {
@@ -46,7 +49,10 @@ import {
 	TEXT_BUILD_ID_SEP,
 } from './animation-timeline-text-build';
 import type { TextBuildSegmentCounts } from './animation-timeline-text-build';
+import { expandTextRangeAnimations } from './animation-timeline-text-range';
 import type { ElementAnimationState, TimelineClickGroup } from './animation-timeline-types';
+import { motionPathNativeAnimations } from './motion-path-authoring';
+import { flattenSlideElements } from './presentation-action';
 
 /**
  * Options accepted by {@link PresentationAnimationController.computeStates} and
@@ -57,10 +63,32 @@ import type { ElementAnimationState, TimelineClickGroup } from './animation-time
 export type PresentationStatesOptions = ElementStatesOptions;
 
 /**
+ * Optional context {@link PresentationAnimationController.fromSlide} threads
+ * into the timeline builder so it can resolve a `p:anim` formula that needs
+ * the animated shape's REAL box (e.g. Grow And Turn's `-#ppt_w/2` fly-in) and
+ * a scheme-colour (`a:schemeClr`) stop in a `p:animClr` / colour ramp. Both
+ * fields are independently optional: a binding with only the slide's canvas
+ * size (no theme yet loaded) still gets geometry-formula resolution, and vice
+ * versa. Omitting the options object entirely keeps the previous behaviour
+ * (self-only formula resolution, scheme colours falling back), so this is a
+ * strictly additive, non-breaking change to `fromSlide`'s signature.
+ */
+export interface PresentationAnimationControllerOptions {
+	/** The slide canvas width, in the SAME px unit `PptxElement.x/width` are authored in. */
+	slideWidthPx?: number;
+	/** The slide canvas height, in the SAME px unit `PptxElement.y/height` are authored in. */
+	slideHeightPx?: number;
+	/** The deck's resolved theme colour map (`PptxData.themeColorMap`). */
+	themeColorMap?: Readonly<Record<string, string>>;
+}
+
+/**
  * Build the per-target text-build segment counts for a slide: for every
- * animation carrying a non-`allAtOnce` `buildType`, count the paragraphs / words
- * / chars of its target element's text so {@link expandTextBuildAnimations} can
- * stagger the reveal. Elements without text (or with an empty body) are skipped.
+ * animation carrying a non-`allAtOnce` `buildType` OR a `p:txEl` text-level
+ * target (`textTarget`), count the paragraphs / words / chars of its target
+ * element's text so {@link expandTextBuildAnimations} /
+ * {@link expandTextRangeAnimations} can split the reveal. Elements without
+ * text (or with an empty body) are skipped.
  */
 function buildSegmentCounts(
 	slide: PptxSlide,
@@ -68,7 +96,7 @@ function buildSegmentCounts(
 ): Map<string, TextBuildSegmentCounts> {
 	const segmentCounts = new Map<string, TextBuildSegmentCounts>();
 	for (const anim of nativeAnims) {
-		if (effectiveTextBuildType(anim) && anim.targetId) {
+		if ((effectiveTextBuildType(anim) || anim.textTarget) && anim.targetId) {
 			const el = slide.elements.find((e) => e.id === anim.targetId);
 			if (el && hasTextProperties(el) && el.textSegments && el.textSegments.length > 0) {
 				segmentCounts.set(anim.targetId, countTextSegments(el.textSegments));
@@ -103,18 +131,50 @@ export class PresentationAnimationController {
 	 * then caches the keyframes CSS, trigger-shape id sets, and the full element
 	 * id list (base element ids + text-build sub-element ids) to track.
 	 */
-	public static fromSlide(slide: PptxSlide): PresentationAnimationController {
-		const nativeAnims = slide.nativeAnimations ?? [];
+	public static fromSlide(
+		slide: PptxSlide,
+		options?: PresentationAnimationControllerOptions,
+	): PresentationAnimationController {
+		// Motion paths authored in this session live on the editor model until the
+		// deck is saved; project them in so pressing play right after applying one
+		// actually moves the shape.
+		const rawNativeAnims = [
+			...(slide.nativeAnimations ?? []),
+			...motionPathNativeAnimations(slide),
+		];
+		// Merge each element's authored "after animation" end-state in from the
+		// editor's per-element animation list before anything else touches the
+		// native list: both are already keyed by the same `element.id` (see
+		// `reconcileAnimationTargets`), and the native-timing parser has no
+		// single `p:cTn` attribute of its own to carry this.
+		const nativeAnims = applyAfterAnimationFromEditorList(rawNativeAnims, slide.animations);
 		const segmentCounts = buildSegmentCounts(slide, nativeAnims);
+		// Scope `p:txEl` (paragraph/character range) targets to their named
+		// sub-elements FIRST, then expand any remaining staged build: the two
+		// features are independent OOXML concepts and rarely combine, but running
+		// range-scoping first means a `p:bldP` build on a DIFFERENT (whole-shape)
+		// animation for the same slide is unaffected either way.
+		const rangedAnims =
+			segmentCounts.size > 0 ? expandTextRangeAnimations(nativeAnims, segmentCounts) : nativeAnims;
 		const expandedAnims =
-			segmentCounts.size > 0 ? expandTextBuildAnimations(nativeAnims, segmentCounts) : nativeAnims;
+			segmentCounts.size > 0 ? expandTextBuildAnimations(rangedAnims, segmentCounts) : rangedAnims;
 
-		const engine = TimelineEngine.fromAnimations(expandedAnims);
+		const renderContext = buildAnimationRenderContext(
+			slide,
+			options?.slideWidthPx !== undefined && options?.slideHeightPx !== undefined
+				? { heightPx: options.slideHeightPx, widthPx: options.slideWidthPx }
+				: undefined,
+			options?.themeColorMap,
+		);
+		const engine = TimelineEngine.fromAnimations(expandedAnims, renderContext);
 
-		const elementIds: string[] = slide.elements.map((element) => element.id);
+		// Animations may target a shape nested inside a group (`p:grpSp`), so
+		// track every descendant id, not just the top-level elements.
+		const elementIds: string[] = flattenSlideElements(slide.elements).map((element) => element.id);
 		for (const anim of expandedAnims) {
-			if (anim.targetId && anim.targetId.includes(TEXT_BUILD_ID_SEP)) {
-				elementIds.push(anim.targetId);
+			const targetId = resolveAnimationTargetId(anim);
+			if (targetId.includes(TEXT_BUILD_ID_SEP)) {
+				elementIds.push(targetId);
 			}
 		}
 
@@ -150,9 +210,13 @@ export class PresentationAnimationController {
 		return this.engine.hasMoreSteps();
 	}
 
-	/** Advance to the next click-group; `null` when none remain. */
-	public advance(): TimelineClickGroup | null {
-		return this.engine.advance();
+	/**
+	 * Advance to the next click-group; `null` when none remain, or when the
+	 * active group's `@concurrent`/`@nextAc` (ECMA-376 S19.5.60) swallow this
+	 * request instead. `nowMs` defaults to `Date.now()`.
+	 */
+	public advance(nowMs?: number): TimelineClickGroup | null {
+		return this.engine.advance(nowMs);
 	}
 
 	/** Peek at the next click-group without advancing. */
@@ -175,6 +239,15 @@ export class PresentationAnimationController {
 		this.engine.reset();
 	}
 
+	/**
+	 * Seed the slide as fully built: every group counted as played, nothing
+	 * animating. Bindings use it when the presenter steps BACKWARD onto a slide,
+	 * which PowerPoint shows with its builds already complete.
+	 */
+	public completeAll(): void {
+		this.engine.completeAll();
+	}
+
 	// -----------------------------------------------------------------------
 	// Interactive + hover sequences (delegated to the engine)
 	// -----------------------------------------------------------------------
@@ -184,9 +257,12 @@ export class PresentationAnimationController {
 		return this.engine.hasInteractiveSequence(shapeId);
 	}
 
-	/** Advance the interactive sequence for `shapeId`; `null` when exhausted. */
-	public advanceInteractive(shapeId: string): TimelineClickGroup | null {
-		return this.engine.advanceInteractive(shapeId);
+	/**
+	 * Advance the interactive sequence for `shapeId`; `null` when exhausted or
+	 * swallowed by `@concurrent`/`@nextAc` (see {@link advance}).
+	 */
+	public advanceInteractive(shapeId: string, nowMs?: number): TimelineClickGroup | null {
+		return this.engine.advanceInteractive(shapeId, nowMs);
 	}
 
 	/** True when `shapeId` triggers a hover sequence. */
@@ -194,14 +270,22 @@ export class PresentationAnimationController {
 		return this.engine.hasHoverSequence(shapeId);
 	}
 
-	/** Advance the hover sequence for `shapeId`; `null` when exhausted. */
-	public advanceHover(shapeId: string): TimelineClickGroup | null {
-		return this.engine.advanceHover(shapeId);
+	/**
+	 * Advance the hover sequence for `shapeId`; `null` when exhausted or
+	 * swallowed by `@concurrent`/`@nextAc` (see {@link advance}).
+	 */
+	public advanceHover(shapeId: string, nowMs?: number): TimelineClickGroup | null {
+		return this.engine.advanceHover(shapeId, nowMs);
 	}
 
-	/** Reset the hover sequence for `shapeId` so the next hover replays it. */
-	public resetHover(shapeId: string): void {
-		this.engine.resetHover(shapeId);
+	/**
+	 * Reset the hover sequence for `shapeId` so the next hover replays it,
+	 * unless its `@prevAc` says to defer the reset while still active (see
+	 * `shouldBlockReset` in `animation-sequence-gating`). `nowMs` defaults to
+	 * `Date.now()`.
+	 */
+	public resetHover(shapeId: string, nowMs?: number): void {
+		this.engine.resetHover(shapeId, nowMs);
 	}
 
 	// -----------------------------------------------------------------------

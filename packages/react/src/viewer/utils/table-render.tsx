@@ -14,6 +14,7 @@ import type {
  *   - table-render-data.tsx       - renderTableFromTableData (programmatic tables)
  *   - table-render.tsx            - renderTableElement (XML-based tables)
  */
+import { canDrillDown, DEFAULT_FONT_FAMILY, tableContainerCss } from 'pptx-viewer-shared';
 import { translationsEn } from 'pptx-viewer-shared/i18n';
 import React from 'react';
 
@@ -21,6 +22,7 @@ import { cn } from '../../utils';
 import { EMU_PER_PX } from '../constants';
 import type { TableCellEditorState } from '../types';
 import { ensureArrayValue } from './geometry';
+import { renderTableCellContent } from './table-cell-runs';
 import { getCellDiagonalBorders, TableCellDiagonalBorders } from './table-diagonal-borders';
 import { computeSelectionRect, isCellInRect, rectToCells } from './table-merge-utils';
 import type { CellRect } from './table-merge-utils';
@@ -65,7 +67,9 @@ export function renderTableElement(
 	}
 
 	const selectedCell = options?.selectedCell || null;
-	const isEditable = Boolean(options?.editable);
+	// G8: `a:graphicFrameLocks/@noDrilldown` forbids selecting/editing this
+	// table's individual cells, even on an otherwise-editable deck.
+	const isEditable = Boolean(options?.editable) && canDrillDown(element);
 	const hasCellSelectionHandler = typeof options?.onSelectCell === 'function';
 
 	// Compute multi-selection highlight rectangle for XML-based tables
@@ -103,7 +107,21 @@ export function renderTableElement(
 					isEditable && hasCellSelectionHandler ? 'pointer-events-auto' : 'pointer-events-none',
 				)}
 			>
-				<table className='w-full h-full border-collapse table-fixed'>
+				{/* The explicit family is load-bearing: an unstyled cell otherwise
+				    inherits the HOST chrome's font, so the same table measured a
+				    different stack (and different metrics) in every binding's demo.
+				    All five bindings declare the same shared default on the table
+				    root; authored cell/run/table-style fonts still win below it. */}
+				<table
+					className='w-full h-full border-collapse table-fixed'
+					style={
+						{
+							fontFamily: DEFAULT_FONT_FAMILY,
+							// `a:tblPr@rtl` mirrors the column order for RTL decks.
+							...tableContainerCss(tableEl.tableData),
+						} as React.CSSProperties
+					}
+				>
 					{parsedTable.columnPercentages.length > 0 ? (
 						<colgroup>
 							{parsedTable.columnPercentages.map((percentage, columnIndex) => (
@@ -159,7 +177,7 @@ export function renderTableElement(
 											tableEl.tableData?.rows[rowIndex]?.cells[cellIndex]?.style;
 										// Diagonal borders: an explicit per-cell diagonal (from a
 										// tableData override) merged with any inherited from the
-										// applicable table-style sections (a:tl2br / a:bl2tr).
+										// applicable table-style sections (a:tl2br / a:tr2bl).
 										const diag = getCellDiagonalBorders(
 											tdCellOverride,
 											tableEl.tableData,
@@ -173,6 +191,11 @@ export function renderTableElement(
 										);
 
 										const mergedStyle: React.CSSProperties = {
+											// Lowest-priority fallback: `xmlCellStyle` never carries a
+											// `color` of its own (see `extractTableCellStyle`), so this
+											// is the only source when neither the table style band nor
+											// an explicit run/cell colour applies.
+											color: textStyle.color,
 											...bandStyle,
 											...xmlCellStyle,
 											...(tdCellOverride ? cellStyleToCss(tdCellOverride) : undefined),
@@ -257,7 +280,10 @@ export function renderTableElement(
 														}}
 													/>
 												) : (
-													extractCellText(cell) || '\u00a0'
+													renderTableCellContent(
+														tableEl.tableData?.rows[rowIndex]?.cells[cellIndex],
+														extractCellText(cell) || '\u00a0',
+													)
 												)}
 											</td>
 										);

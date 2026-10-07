@@ -1,19 +1,31 @@
 <script setup lang="ts">
-import type { PptxElement, PptxElementAnimation } from 'pptx-viewer-core';
+import type {
+	ParsedTableStyleMap,
+	PptxAnimationTimelineAnchor,
+	PptxCustomShow,
+	PptxElement,
+	PptxElementAnimation,
+} from 'pptx-viewer-core';
 import { hasShapeProperties, hasTextProperties, isImageLikeElement } from 'pptx-viewer-core';
+import { shouldShowAccessibilitySection } from 'pptx-viewer-shared';
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
+import AccessibilityPanel from './AccessibilityPanel.vue';
 import ActionSettingsPanel from './ActionSettingsPanel.vue';
 import AnimationPanel from './AnimationPanel.vue';
 import ArrangePanel from './ArrangePanel.vue';
 import ChartPanel from './ChartPanel.vue';
+import ConnectorArrowsPanel from './ConnectorArrowsPanel.vue';
 import EffectsPanel from './EffectsPanel.vue';
 import FillPanel from './FillPanel.vue';
+import GroupInfoPanel from './GroupInfoPanel.vue';
 import ImagePanel from './ImagePanel.vue';
 import MediaPropertiesPanel from './MediaPropertiesPanel.vue';
+import OlePropertiesPanel from './OlePropertiesPanel.vue';
 import SmartArtPropertiesPanel from './SmartArtPropertiesPanel.vue';
 import StrokePanel from './StrokePanel.vue';
+import TableDataGrid from './TableDataGrid.vue';
 import TablePanel from './TablePanel.vue';
 import TextPanel from './TextPanel.vue';
 
@@ -36,10 +48,22 @@ const props = defineProps<{
 	mediaDataUrls?: Map<string, string>;
 	slideElements?: readonly PptxElement[];
 	slideAnimations?: readonly PptxElementAnimation[];
+	/** Read-only anchors for the deck's own effect groups; see {@link PptxAnimationTimelineAnchor}. */
+	animationTimelineAnchors?: readonly PptxAnimationTimelineAnchor[];
+	/** Named custom shows, for the Action Settings "Custom show" target picker. */
+	customShows?: readonly PptxCustomShow[];
+	/**
+	 * The deck's parsed `ppt/tableStyles.xml` map, needed by the table panel's
+	 * "Edit style...". See `TableStyleOptions.vue`'s docblock for why this is
+	 * optional.
+	 */
+	tableStyleMap?: ParsedTableStyleMap;
 }>();
 const emit = defineEmits<{
 	update: [patch: Partial<PptxElement>];
 	updateSlideAnimations: [animations: PptxElementAnimation[]];
+	tableStyleMapChange: [nextMap: ParsedTableStyleMap];
+	deleteTableStyle: [styleId: string];
 }>();
 
 const { t } = useI18n();
@@ -51,6 +75,17 @@ const isTable = computed(() => props.element.type === 'table');
 const isChart = computed(() => props.element.type === 'chart');
 const isSmartArt = computed(() => props.element.type === 'smartArt');
 const isMedia = computed(() => props.element.type === 'media');
+// Arrowheads are a connector-only concern: `a:headEnd`/`a:tailEnd` are written
+// on a `p:cxnSp`, so the card must not appear for any other element type.
+const isConnector = computed(() => props.element.type === 'connector');
+const isGroup = computed(() => props.element.type === 'group');
+const isOle = computed(() => props.element.type === 'ole');
+// Accessibility (alt text / title): a picture's own field lives in
+// `ImagePanel`; shared's `shouldShowAccessibilitySection` decides everything
+// else, a plain shape, text box, connector, and every graphic-frame kind
+// (table/chart/smartArt/media/ole), so this stays in sync with the other
+// four bindings without a hard-coded type list here.
+const showAccessibilitySection = computed(() => shouldShowAccessibilitySection(props.element));
 
 function relay(patch: Partial<PptxElement>): void {
 	emit('update', patch);
@@ -73,11 +108,30 @@ function relay(patch: Partial<PptxElement>): void {
 			<ArrangePanel :element="element" :can-edit="props.canEdit" @update="relay" />
 		</div>
 
+		<div v-if="isGroup" class="pptx-vue-inspector-section py-2 border-b border-border">
+			<h3
+				class="pptx-vue-inspector-title mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+			>
+				{{ t('pptx.elementType.group') }}
+			</h3>
+			<GroupInfoPanel :element="element" />
+		</div>
+
+		<div v-if="isOle" class="pptx-vue-inspector-section py-2 border-b border-border">
+			<h3
+				class="pptx-vue-inspector-title mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+			>
+				{{ t('pptx.ole.title') }}
+			</h3>
+			<OlePropertiesPanel :element="element" :can-edit="props.canEdit" @update="relay" />
+		</div>
+
 		<div class="pptx-vue-inspector-section py-2 border-b border-border">
 			<ActionSettingsPanel
 				:element="element"
 				:slide-count="props.slideCount"
 				:can-edit="props.canEdit"
+				:custom-shows="props.customShows"
 				@update="relay"
 			/>
 		</div>
@@ -106,7 +160,14 @@ function relay(patch: Partial<PptxElement>): void {
 			>
 				{{ t('pptx.inspector.table') }}
 			</h3>
-			<TablePanel :element="element" @update="relay" />
+			<TableDataGrid :element="element" :can-edit="props.canEdit" @update="relay" />
+			<TablePanel
+				:element="element"
+				:table-style-map="props.tableStyleMap"
+				@update="relay"
+				@table-style-map-change="emit('tableStyleMapChange', $event)"
+				@delete-table-style="emit('deleteTableStyle', $event)"
+			/>
 		</div>
 
 		<div v-if="isChart" class="pptx-vue-inspector-section py-2 border-b border-border">
@@ -140,8 +201,10 @@ function relay(patch: Partial<PptxElement>): void {
 			</h3>
 			<AnimationPanel
 				:element="element"
+				:can-edit="props.canEdit"
 				:slide-elements="props.slideElements"
 				:slide-animations="props.slideAnimations"
+				:animation-timeline-anchors="props.animationTimelineAnchors"
 				@update="relay"
 				@update-slide-animations="emit('updateSlideAnimations', $event)"
 			/>
@@ -174,6 +237,15 @@ function relay(patch: Partial<PptxElement>): void {
 			<StrokePanel :element="element" @update="relay" />
 		</div>
 
+		<div v-if="isConnector" class="pptx-vue-inspector-section py-2 border-b border-border">
+			<h3
+				class="pptx-vue-inspector-title mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+			>
+				{{ t('pptx.elementType.connector') }}
+			</h3>
+			<ConnectorArrowsPanel :element="element" :can-edit="props.canEdit" @update="relay" />
+		</div>
+
 		<div v-if="isShape" class="pptx-vue-inspector-section py-2 border-b border-border">
 			<h3
 				class="pptx-vue-inspector-title mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
@@ -181,6 +253,18 @@ function relay(patch: Partial<PptxElement>): void {
 				{{ t('pptx.inspector.effects') }}
 			</h3>
 			<EffectsPanel :element="element" @update="relay" />
+		</div>
+
+		<div
+			v-if="showAccessibilitySection"
+			class="pptx-vue-inspector-section py-2 border-b border-border"
+		>
+			<h3
+				class="pptx-vue-inspector-title mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+			>
+				{{ t('pptx.accessibility.heading') }}
+			</h3>
+			<AccessibilityPanel :element="element" :can-edit="props.canEdit" @update="relay" />
 		</div>
 	</aside>
 </template>

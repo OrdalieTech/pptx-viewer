@@ -77,10 +77,15 @@ describe('getTextLayoutStyle', () => {
 		expect(style.columnGap).toBe('20px');
 	});
 
-	it('uses default columnGap when no columnSpacing', () => {
+	// `a:bodyPr/@spcCol` is `ST_PositiveCoordinate32` with a schema default of 0,
+	// so an omitted attribute means "no gap", not a gap of the renderer's
+	// choosing. React used to invent `0.75em` here, which is neither the authored
+	// value nor the spec default, and which the other four bindings (now sharing
+	// this decision) would have had to reproduce to stay in parity.
+	it('uses the spec default gap of 0 when no columnSpacing is authored', () => {
 		const el = makeTextElement({ columnCount: 2 });
 		const style = getTextLayoutStyle(el);
-		expect(style.columnGap).toBe('0.75em');
+		expect(style.columnGap).toBe('0px');
 	});
 
 	// ── Writing mode ────────────────────────────────────────────
@@ -217,11 +222,11 @@ describe('getTextLayoutStyle', () => {
 	});
 
 	// ── Kinsoku line-breaking (CJK) ─────────────────────────────
-	it('applies lineBreak=normal and wordBreak=break-all when eaLineBreak is true', () => {
+	it('applies lineBreak=normal and keeps Latin words whole when eaLineBreak is true', () => {
 		const el = makeTextElement({ eaLineBreak: true });
 		const style = getTextLayoutStyle(el);
 		expect(style.lineBreak).toBe('normal');
-		expect(style.wordBreak).toBe('break-all');
+		expect(style.wordBreak).toBe('normal');
 		expect(style.overflowWrap).toBe('break-word');
 	});
 
@@ -252,7 +257,7 @@ describe('getTextLayoutStyle', () => {
 		const style = getTextLayoutStyle(el);
 		expect(style.display).toBe('block');
 		expect(style.lineBreak).toBe('normal');
-		expect(style.wordBreak).toBe('break-all');
+		expect(style.wordBreak).toBe('normal');
 		expect(style.hangingPunctuation).toBe('last');
 	});
 });

@@ -7,6 +7,7 @@ import type {
 	PptxHandoutMaster,
 	PptxHeaderFooter,
 	MasterViewTab,
+	PptxModernCommentAuthor,
 	PptxNotesMaster,
 	PptxSlide,
 	PptxSlideLayout,
@@ -17,9 +18,10 @@ import type {
 	PptxSection,
 	PptxPresentationProperties,
 	PptxTagCollection,
+	PptxViewProperties,
 	ParsedTableStyleMap,
 } from 'pptx-viewer-core';
-import type { CollaborationLivePatcher } from 'pptx-viewer-shared';
+import type { CollaborationLivePatcher, SlideSizeEmu } from 'pptx-viewer-shared';
 /**
  * Type definitions for the useViewerCoreState hook.
  *
@@ -94,6 +96,21 @@ export interface ViewerCoreState {
 	marqueeStateRef: React.MutableRefObject<MarqueeSelectionState | null>;
 	/** Whether the user is currently performing a freeform drawing stroke. */
 	isDrawingRef: React.MutableRefObject<boolean>;
+	/**
+	 * Set right after a drag/resize/adjustment gesture that actually moved the
+	 * element commits, and consumed by the next element click.
+	 *
+	 * A gesture that repositions an already-selected element (e.g. dragging its
+	 * body, or pulling an SE resize handle that visually tracks the pointer 1:1)
+	 * ends with the pointer back over the same DOM node it went down on, so the
+	 * browser still fires a native `click` there after `pointerup`. Without this
+	 * guard that click satisfies the "clicked an already-selected element again"
+	 * rule and silently opens the inline text editor, whose very next blur
+	 * rebuilds `textSegments` from plain text (dropping OOXML round-trip-only
+	 * fields like `endParaRunProperties`) and pushes a spurious extra undo step
+	 * that made a single Ctrl+Z look like it did nothing.
+	 */
+	justInteractedRef: React.MutableRefObject<boolean>;
 
 	// ── Collaboration ─────────────────────────────────────────────────
 
@@ -124,6 +141,15 @@ export interface ViewerCoreState {
 	/** Width and height of the slide canvas in CSS pixels. */
 	canvasSize: CanvasSize;
 	setCanvasSize: React.Dispatch<React.SetStateAction<CanvasSize>>;
+	/**
+	 * `p:sldSz` in EMU, seeded from the loaded deck and updated by Design >
+	 * Slide Size. It is what a save persists: the pixel `canvasSize` above
+	 * cannot round-trip a preset (Ledger's 12179300 EMU is 1278.5px, and the
+	 * integer pixel it rounds to costs the deck its `ppSlideSizeLedgerPaper`
+	 * identity). `undefined` until a deck loads or the user picks a preset.
+	 */
+	slideSizeEmu: SlideSizeEmu | undefined;
+	setSlideSizeEmu: React.Dispatch<React.SetStateAction<SlideSizeEmu | undefined>>;
 	/** Zero-based index of the currently active (visible) slide. */
 	activeSlideIndex: number;
 	setActiveSlideIndex: React.Dispatch<React.SetStateAction<number>>;
@@ -163,12 +189,28 @@ export interface ViewerCoreState {
 	/** All slide masters parsed from the presentation. */
 	slideMasters: PptxSlideMaster[];
 	setSlideMasters: React.Dispatch<React.SetStateAction<PptxSlideMaster[]>>;
+	/** Modern (`p188:person`) comment authors, for the `@`-mention typeahead. */
+	modernCommentAuthors: PptxModernCommentAuthor[];
+	setModernCommentAuthors: React.Dispatch<React.SetStateAction<PptxModernCommentAuthor[]>>;
+	/** The deck's "Recent Colors" row (`p:clrMru`), most-recent-first. */
+	recentColors: string[];
+	setRecentColors: React.Dispatch<React.SetStateAction<string[]>>;
 	/** The currently active theme applied to the presentation. */
 	theme: PptxTheme | undefined;
 	setTheme: React.Dispatch<React.SetStateAction<PptxTheme | undefined>>;
 	/** Parsed table style definitions from `ppt/tableStyles.xml`. */
 	tableStyleMap: ParsedTableStyleMap | undefined;
 	setTableStyleMap: React.Dispatch<React.SetStateAction<ParsedTableStyleMap | undefined>>;
+	/** `ppt/tableStyles.xml`'s `<a:tblStyleLst @def>` default style GUID. */
+	tableStylesDefaultId: string | undefined;
+	setTableStylesDefaultId: React.Dispatch<React.SetStateAction<string | undefined>>;
+	/**
+	 * Style GUIDs deleted from `tableStyleMap` via the table style editor,
+	 * pending removal from `ppt/tableStyles.xml` on the next save. See
+	 * `tableStyleSaveOptions` / `applyTableStyleDelete` in `pptx-viewer-shared`.
+	 */
+	tableStylesToDelete: string[];
+	setTableStylesToDelete: React.Dispatch<React.SetStateAction<string[]>>;
 	/** Available theme presets the user can switch between. */
 	themeOptions: PptxThemeOption[];
 	setThemeOptions: React.Dispatch<React.SetStateAction<PptxThemeOption[]>>;
@@ -184,6 +226,14 @@ export interface ViewerCoreState {
 	/** Presentation-level properties (loop, show type, subtitles, etc.). */
 	presentationProperties: PptxPresentationProperties;
 	setPresentationProperties: React.Dispatch<React.SetStateAction<PptxPresentationProperties>>;
+	/**
+	 * View properties parsed from `ppt/viewProps.xml` (`p:viewPr`): grid
+	 * spacing, snap/guide toggles, last view, splitter state, etc. This is the
+	 * ONLY correct source for `gridSpacing` -- `p:gridSpacing` lives under
+	 * `p:viewPr`, never under `p:presentationPr`.
+	 */
+	viewProperties: PptxViewProperties | undefined;
+	setViewProperties: React.Dispatch<React.SetStateAction<PptxViewProperties | undefined>>;
 	/** Notes master slide definition (background, elements, styles). */
 	notesMaster: PptxNotesMaster | undefined;
 	setNotesMaster: React.Dispatch<React.SetStateAction<PptxNotesMaster | undefined>>;

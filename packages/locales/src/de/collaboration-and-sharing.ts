@@ -114,7 +114,7 @@ export const translations = {
 	'pptx.broadcast.serverUrlPlaceholder': 'ws://localhost:1234',
 	'pptx.comments.unknownAuthor': 'Unbekannt',
 	'pptx.comments.reopen': 'Wieder öffnen',
-	'pptx.comments.remove': 'Entfernen',
+	'pptx.comments.remove': 'Löschen',
 	'pptx.comments.removeComment': 'Kommentar entfernen',
 	'pptx.comments.noneOnSlide': 'Zu dieser Folie gibt es noch keine Kommentare.',
 	'pptx.comments.commentingAs': 'Kommentieren als {{name}}',

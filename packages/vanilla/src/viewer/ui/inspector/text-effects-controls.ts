@@ -20,9 +20,12 @@ export function createTextEffectsControls(
 	const apply = (patch: Partial<TextStyle>): void =>
 		handlers.setTextStyle(patch, state?.selectedTextRange);
 	const applyBody = (patch: Partial<TextStyle>): void => handlers.setTextStyle(patch);
+	// The control is named explicitly: a wrapping `<label>` lends its whole text
+	// content, which for a `<select>` includes every option.
 	const field = (labelText: string, input: HTMLElement): void => {
 		const label = doc.createElement('label');
 		label.textContent = labelText;
+		input.setAttribute('aria-label', labelText);
 		label.appendChild(input);
 		el.appendChild(label);
 	};
@@ -40,6 +43,9 @@ export function createTextEffectsControls(
 		const input = doc.createElement('input');
 		input.type = 'color';
 		input.addEventListener('input', () => apply({ [key]: input.value }));
+		// B6: push into the "Recent colours" MRU list once the picker commits
+		// (native `change`), never on the continuous `input` a drag fires.
+		input.addEventListener('change', () => handlers.pushRecentColor(input.value));
 		field(label, input);
 		return input;
 	};
@@ -62,7 +68,7 @@ export function createTextEffectsControls(
 	const glowRadius = number(t('pptx.textEffects.glow'), 'textGlowRadius');
 	const reflection = toggle(t('pptx.textEffects.reflection'), 'textReflection');
 	const strike = toggle(t('pptx.textFormatting.strikethrough'), 'strikethrough');
-	const highlight = color(t('pptx.textFormatting.highlight'), 'highlightColor');
+	const highlight = color(t('pptx.text.highlightColor'), 'highlightColor');
 	const warp = doc.createElement('select');
 	for (const preset of TEXT_WARP_PRESETS) {
 		const option = doc.createElement('option');

@@ -13,6 +13,9 @@ export type IconName =
 	| 'fit'
 	| 'play'
 	| 'sidebar'
+	| 'menu'
+	| 'layers'
+	| 'sliders'
 	| 'undo'
 	| 'redo'
 	| 'save'
@@ -65,6 +68,7 @@ export type IconName =
 	| 'replace'
 	| 'new-slide'
 	| 'layout'
+	| 'slide-templates'
 	| 'table'
 	| 'image'
 	| 'video'
@@ -101,15 +105,31 @@ export type IconName =
 	| 'send'
 	| 'ellipsis'
 	| 'eye'
+	| 'eye-off'
 	| 'wrench'
 	| 'check'
 	| 'alert'
 	| 'close'
 	| 'crosshair'
+	| 'history'
+	| 'timer'
+	| 'link'
 	| 'git-merge'
 	| 'pin'
 	| 'pin-off'
-	| 'bug';
+	| 'bug'
+	| 'lock'
+	| 'lock-open'
+	// Presenter console strip (see render/presenter-chrome in the shared package).
+	| 'circle-pause'
+	| 'circle-play'
+	| 'rotate-ccw'
+	| 'grid-2x2'
+	| 'scan'
+	| 'mouse-pointer-2'
+	| 'captions'
+	| 'monitor-off'
+	| 'arrow-left-right';
 
 const ICON_PATHS: Record<IconName, string[]> = {
 	'chevron-left': ['M15 18l-6-6 6-6'],
@@ -231,6 +251,7 @@ const ICON_PATHS: Record<IconName, string[]> = {
 	replace: ['M4 7h11l-3-3', 'M4 7l3 3', 'M20 17H9l3-3', 'M20 17l-3 3'],
 	'new-slide': ['M4 4h16v16H4z', 'M12 8v8', 'M8 12h8'],
 	layout: ['M3 4h18v16H3z', 'M3 10h18', 'M9 10v10'],
+	'slide-templates': ['M3 3h18v7H3z', 'M3 14h9v7H3z', 'M16 14h5v7h-5z'],
 	table: ['M3 4h18v16H3z', 'M3 10h18', 'M3 16h18', 'M9 4v16', 'M15 4v16'],
 	image: ['M3 4h18v16H3z', 'M8 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z', 'M4 18l5-5 4 4 3-3 4 4'],
 	video: ['M3 5h13v14H3z', 'M16 10l5-3v10l-5-3z'],
@@ -266,6 +287,20 @@ const ICON_PATHS: Record<IconName, string[]> = {
 		'M22 21H7',
 		'M5 11l9 9',
 	],
+	// The mobile chrome's own three: React draws them with lucide's Menu,
+	// Layers and Settings2, so these are those paths.
+	menu: ['M4 6h16', 'M4 12h16', 'M4 18h16'],
+	layers: [
+		'M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z',
+		'M22 17.65l-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65',
+		'M22 12.65l-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65',
+	],
+	sliders: [
+		'M20 7h-9',
+		'M14 17H5',
+		'M17 14a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+		'M7 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+	],
 	'panel-left': ['M4 4h16v16H4z', 'M9 4v16'],
 	'panel-right': ['M4 4h16v16H4z', 'M15 4v16'],
 	'sticky-note': ['M5 4h14v10l-6 6H5z', 'M13 20v-6h6'],
@@ -289,6 +324,13 @@ const ICON_PATHS: Record<IconName, string[]> = {
 	],
 	send: ['M22 2L11 13', 'M22 2l-7 20-4-9-9-4 20-7z'],
 	eye: ['M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z', 'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z'],
+	// Struck-through eye: the hidden-slide badge, matching React's `LuEyeOff`.
+	'eye-off': [
+		'M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94',
+		'M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19',
+		'M14.12 14.12a3 3 0 1 1-4.24-4.24',
+		'M1 1l22 22',
+	],
 	wrench: [
 		'M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94z',
 	],
@@ -300,6 +342,17 @@ const ICON_PATHS: Record<IconName, string[]> = {
 	],
 	close: ['M18 6L6 18', 'M6 6l12 12'],
 	crosshair: ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M12 2v4', 'M12 18v4', 'M2 12h4', 'M18 12h4'],
+	// Clock with a counter-clockwise arrow (Lucide's `history`): the AI panel's
+	// saved-chats ("Chats") toggle.
+	history: ['M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8', 'M3 3v5h5', 'M12 7v5l4 2'],
+	// Stopwatch (Lucide's `timer`): the slide show's elapsed readout. The other
+	// bindings pull `LuTimer` from an icon package; this one has no such
+	// dependency, so the path data lives here like every other viewer icon.
+	timer: ['M10 2h4', 'M12 14l3-3', 'M12 22a8 8 0 1 0 0-16 8 8 0 0 0 0 16z'],
+	link: [
+		'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71',
+		'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
+	],
 	'git-merge': [
 		'M3 6a3 3 0 1 0 6 0 3 3 0 1 0 -6 0',
 		'M15 18a3 3 0 1 0 6 0 3 3 0 1 0 -6 0',
@@ -322,6 +375,22 @@ const ICON_PATHS: Record<IconName, string[]> = {
 		'M20 16h-2',
 		'M12 20v-8',
 	],
+	'circle-pause': ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M10 9v6', 'M14 9v6'],
+	'circle-play': ['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M10 8l6 4-6 4z'],
+	'rotate-ccw': ['M3 12a9 9 0 1 0 3-6.7L3 8', 'M3 3v5h5'],
+	'grid-2x2': ['M3 3h18v18H3z', 'M12 3v18', 'M3 12h18'],
+	scan: [
+		'M3 8V5a2 2 0 0 1 2-2h3',
+		'M16 3h3a2 2 0 0 1 2 2v3',
+		'M21 16v3a2 2 0 0 1-2 2h-3',
+		'M8 21H5a2 2 0 0 1-2-2v-3',
+	],
+	'mouse-pointer-2': ['M4 3l7 17 2.5-6.5L20 11z'],
+	captions: ['M3 5h18v14H3z', 'M7 12h3', 'M14 12h3'],
+	'monitor-off': ['M3 5h13', 'M21 5v9', 'M3 5v9h11', 'M8 21h8', 'M12 17v4', 'M3 3l18 18'],
+	'arrow-left-right': ['M8 3L4 7l4 4', 'M4 7h16', 'M16 13l4 4-4 4', 'M20 17H4'],
+	lock: ['M3 11h18v11H3z', 'M7 11V7a5 5 0 0 1 10 0v4'],
+	'lock-open': ['M3 11h18v11H3z', 'M7 11V7a5 5 0 0 1 9.9-1'],
 };
 
 const SVG_NS = 'http://www.w3.org/2000/svg';

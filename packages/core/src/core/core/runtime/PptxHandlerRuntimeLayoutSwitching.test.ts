@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+/* oxlint-disable eslint/one-var -- many independent it() blocks and helper
+   functions, each with unrelated locals; merging across them would hurt
+   readability. */
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 
 import type { PptxSlide, PptxLayoutOption, XmlObject, PptxElement } from '../../types';
 import { stripParentDirSegments } from '../../utils/strip-parent-dir-segments';
-import type { PlaceholderInfo } from './PptxHandlerRuntimeTypes';
 
 // ── Extracted logic matching PptxHandlerRuntimeLoadPipeline ──────────
 
@@ -374,178 +376,79 @@ describe('layout switching logic (GAP-E4)', () => {
 const EMU_PER_PX = 9525;
 
 /** Helper: build a placeholder info from a rawXml nvPr node. */
-function readPlaceholderInfoFromNvPr(nvPr: XmlObject | undefined): PlaceholderInfo | null {
-	if (!nvPr) {
-		return null;
-	}
-	const ph = nvPr['p:ph'] as XmlObject | undefined;
-	if (!ph) {
-		return null;
-	}
-	const idx = ph['@_idx'];
-	const type = ph['@_type'];
-	const sz = ph['@_sz'];
-	return {
-		idx: idx !== undefined ? String(idx) : undefined,
-		type: type !== undefined ? String(type).toLowerCase() : undefined,
-		sz: sz !== undefined ? String(sz).toLowerCase() : undefined,
+/**
+ * Drive the real mixin rather than a copy of it.
+ *
+ * This file used to reimplement the whole algorithm locally, so every
+ * assertion below passed against the copy while the shipping implementation
+ * was free to drift, and it did: the copy never exercised the placeholder
+ * scoring, the picture/graphic-frame slots, or the rawXml cloning.
+ *
+ * Two details make driving the real class awkward, and both are worked around
+ * here rather than in production code. Entering the mixin chain at this module
+ * trips a circular import (`SaveTableStyles` initialises before its base), so
+ * the package root is imported first to force the canonical order. And
+ * `remapElementsToNewLayout` is protected on a class whose constructor wants a
+ * loaded archive, so the harness builds a bare prototype instance and supplies
+ * the single helper the method actually reaches for.
+ */
+let remapImpl:
+	| ((elements: PptxElement[], newLayoutXml: XmlObject, layoutPath: string) => PptxElement[])
+	| undefined;
+let harnessSlideRelsMap: Map<string, Map<string, string>> | undefined;
+let harnessMasterXmlMap: Map<string, XmlObject> | undefined;
+
+beforeAll(async () => {
+	await import('../../../index');
+	const { PptxHandlerRuntime } = await import('./PptxHandlerRuntimeLayoutSwitching');
+	type Harness = {
+		ensureArray: (value: unknown) => unknown[];
+		slideRelsMap: Map<string, Map<string, string>>;
+		masterXmlMap: Map<string, XmlObject>;
+		remapElementsToNewLayout: (
+			elements: PptxElement[],
+			newLayoutXml: XmlObject,
+			layoutPath: string,
+		) => PptxElement[];
 	};
+	const harness = Object.create(PptxHandlerRuntime.prototype) as Harness;
+	harness.ensureArray = (value: unknown) =>
+		value === undefined || value === null ? [] : Array.isArray(value) ? value : [value];
+	harness.slideRelsMap = new Map();
+	harness.masterXmlMap = new Map();
+	harnessSlideRelsMap = harness.slideRelsMap;
+	harnessMasterXmlMap = harness.masterXmlMap;
+	remapImpl = (elements, newLayoutXml, layoutPath) =>
+		harness.remapElementsToNewLayout(elements, newLayoutXml, layoutPath);
+});
+
+beforeEach(() => {
+	harnessSlideRelsMap?.clear();
+	harnessMasterXmlMap?.clear();
+});
+
+function remapElementsToNewLayout(
+	elements: PptxElement[],
+	newLayoutXml: XmlObject,
+	layoutPath = 'ppt/slideLayouts/target.xml',
+): PptxElement[] {
+	if (!remapImpl) {
+		throw new Error('remapElementsToNewLayout harness was not initialised');
+	}
+	return remapImpl(elements, newLayoutXml, layoutPath);
 }
 
-/** Helper: extract placeholder info from an element's rawXml. */
-function getElementPlaceholderInfo(element: PptxElement): PlaceholderInfo | null {
-	const raw = element.rawXml;
-	if (!raw) {
-		return null;
+/** Register a layout->master relationship and the master's XML for the harness. */
+function registerMaster(layoutPath: string, masterPath: string, masterXml: XmlObject): void {
+	if (!harnessSlideRelsMap || !harnessMasterXmlMap) {
+		throw new Error('harness was not initialised');
 	}
-	const nvPr =
-		(raw['p:nvSpPr']?.['p:nvPr'] as XmlObject | undefined) ??
-		(raw['p:nvPicPr']?.['p:nvPr'] as XmlObject | undefined) ??
-		(raw['p:nvGraphicFramePr']?.['p:nvPr'] as XmlObject | undefined);
-	return readPlaceholderInfoFromNvPr(nvPr);
+	harnessSlideRelsMap.set(
+		layoutPath,
+		new Map([['rId1', `../slideMasters/${masterPath.split('/').pop()}`]]),
+	);
+	harnessMasterXmlMap.set(masterPath, masterXml);
 }
-
-/** Helper: build placeholder matching key. */
-function buildPlaceholderMatchKey(phInfo: PlaceholderInfo): string {
-	const type = phInfo.type || 'body';
-	if (phInfo.idx !== undefined) {
-		return `${type}:${phInfo.idx}`;
-	}
-	return type;
-}
-
-/** Helper: extract layout placeholders with transforms. */
-function extractLayoutPlaceholders(layoutXml: XmlObject): Array<{
-	phInfo: PlaceholderInfo;
-	xEmu: number;
-	yEmu: number;
-	cxEmu: number;
-	cyEmu: number;
-}> {
-	const sldLayout = layoutXml['p:sldLayout'] as XmlObject | undefined;
-	const spTree = sldLayout?.['p:cSld']?.['p:spTree'] as XmlObject | undefined;
-	if (!spTree) {
-		return [];
-	}
-
-	const result: Array<{
-		phInfo: PlaceholderInfo;
-		xEmu: number;
-		yEmu: number;
-		cxEmu: number;
-		cyEmu: number;
-	}> = [];
-
-	const rawShapes = spTree['p:sp'];
-	const shapes = !rawShapes ? [] : Array.isArray(rawShapes) ? rawShapes : [rawShapes];
-	for (const shape of shapes) {
-		const nvPr = shape?.['p:nvSpPr']?.['p:nvPr'] as XmlObject | undefined;
-		const phInfo = readPlaceholderInfoFromNvPr(nvPr);
-		if (!phInfo) {
-			continue;
-		}
-
-		const spPr = shape['p:spPr'] as XmlObject | undefined;
-		const xfrm = spPr?.['a:xfrm'] as XmlObject | undefined;
-		const off = xfrm?.['a:off'] as XmlObject | undefined;
-		const ext = xfrm?.['a:ext'] as XmlObject | undefined;
-
-		const xEmu = off ? Number(off['@_x'] || 0) : 0;
-		const yEmu = off ? Number(off['@_y'] || 0) : 0;
-		const cxEmu = ext ? Number(ext['@_cx'] || 0) : 0;
-		const cyEmu = ext ? Number(ext['@_cy'] || 0) : 0;
-
-		result.push({ phInfo, xEmu, yEmu, cxEmu, cyEmu });
-	}
-
-	return result;
-}
-
-/** Helper: re-map elements to a new layout (mirrors runtime logic). */
-function remapElementsToNewLayout(elements: PptxElement[], newLayoutXml: XmlObject): PptxElement[] {
-	const layoutPlaceholders = extractLayoutPlaceholders(newLayoutXml);
-
-	const layoutPhMap = new Map<
-		string,
-		{
-			phInfo: PlaceholderInfo;
-			xEmu: number;
-			yEmu: number;
-			cxEmu: number;
-			cyEmu: number;
-			matched: boolean;
-		}
-	>();
-	for (const lp of layoutPlaceholders) {
-		const key = buildPlaceholderMatchKey(lp.phInfo);
-		layoutPhMap.set(key, { ...lp, matched: false });
-	}
-
-	const resultElements: PptxElement[] = [];
-
-	for (const element of elements) {
-		const phInfo = getElementPlaceholderInfo(element);
-
-		if (!phInfo) {
-			resultElements.push(element);
-			continue;
-		}
-
-		const matchKey = buildPlaceholderMatchKey(phInfo);
-		const layoutPh = layoutPhMap.get(matchKey);
-
-		let resolvedLayoutPh = layoutPh;
-		if (!resolvedLayoutPh && phInfo.type) {
-			for (const [, lp] of layoutPhMap.entries()) {
-				if (!lp.matched && lp.phInfo.type === phInfo.type) {
-					resolvedLayoutPh = lp;
-					break;
-				}
-			}
-		}
-
-		if (resolvedLayoutPh) {
-			resolvedLayoutPh.matched = true;
-			const updatedElement = { ...element };
-			if (resolvedLayoutPh.cxEmu > 0 && resolvedLayoutPh.cyEmu > 0) {
-				updatedElement.x = Math.round(resolvedLayoutPh.xEmu / EMU_PER_PX);
-				updatedElement.y = Math.round(resolvedLayoutPh.yEmu / EMU_PER_PX);
-				updatedElement.width = Math.round(resolvedLayoutPh.cxEmu / EMU_PER_PX);
-				updatedElement.height = Math.round(resolvedLayoutPh.cyEmu / EMU_PER_PX);
-			}
-			resultElements.push(updatedElement);
-		}
-		// Else: no match -- drop placeholder element
-	}
-
-	// Add empty placeholders from the new layout that were not matched
-	const skipTypes = new Set(['dt', 'ftr', 'sldnum', 'hdr']);
-	for (const [, lp] of layoutPhMap) {
-		if (lp.matched) {
-			continue;
-		}
-		if (lp.phInfo.type && skipTypes.has(lp.phInfo.type)) {
-			continue;
-		}
-		if (lp.cxEmu <= 0 || lp.cyEmu <= 0) {
-			continue;
-		}
-
-		const element: PptxElement = {
-			type: 'text' as const,
-			id: `ph-${lp.phInfo.type || 'content'}-${lp.phInfo.idx || '0'}`,
-			x: Math.round(lp.xEmu / EMU_PER_PX),
-			y: Math.round(lp.yEmu / EMU_PER_PX),
-			width: Math.round(lp.cxEmu / EMU_PER_PX),
-			height: Math.round(lp.cyEmu / EMU_PER_PX),
-			text: '',
-		};
-		resultElements.push(element);
-	}
-
-	return resultElements;
-}
-
 /** Helper: create a text element with a placeholder rawXml. */
 function makePhElement(
 	id: string,
@@ -623,7 +526,11 @@ function makeLayoutXml(
 		yEmu: number;
 		cxEmu: number;
 		cyEmu: number;
+		/** Omit `a:xfrm` entirely, as a real layout does when it inherits
+		 * position/size from the matching master placeholder instead. */
+		noXfrm?: boolean;
 	}>,
+	layoutName = 'Test Layout',
 ): XmlObject {
 	const shapes = placeholders.map((ph) => {
 		const phNode: XmlObject = {};
@@ -639,6 +546,53 @@ function makeLayoutXml(
 				'p:cNvSpPr': {},
 				'p:nvPr': { 'p:ph': phNode },
 			},
+			'p:spPr': ph.noXfrm
+				? {}
+				: {
+						'a:xfrm': {
+							'a:off': { '@_x': String(ph.xEmu), '@_y': String(ph.yEmu) },
+							'a:ext': { '@_cx': String(ph.cxEmu), '@_cy': String(ph.cyEmu) },
+						},
+					},
+		};
+	});
+	return {
+		'p:sldLayout': {
+			'p:cSld': {
+				'@_name': layoutName,
+				'p:spTree': {
+					'p:sp': shapes.length === 1 ? shapes[0] : shapes,
+				},
+			},
+		},
+	};
+}
+
+/** Helper: a master's `p:spTree`, in the same shape as {@link makeLayoutXml}. */
+function makeMasterXml(
+	placeholders: Array<{
+		phType?: string;
+		phIdx?: string;
+		xEmu: number;
+		yEmu: number;
+		cxEmu: number;
+		cyEmu: number;
+	}>,
+): XmlObject {
+	const shapes = placeholders.map((ph) => {
+		const phNode: XmlObject = {};
+		if (ph.phType) {
+			phNode['@_type'] = ph.phType;
+		}
+		if (ph.phIdx !== undefined) {
+			phNode['@_idx'] = ph.phIdx;
+		}
+		return {
+			'p:nvSpPr': {
+				'p:cNvPr': { '@_id': '1', '@_name': 'Master PH' },
+				'p:cNvSpPr': {},
+				'p:nvPr': { 'p:ph': phNode },
+			},
 			'p:spPr': {
 				'a:xfrm': {
 					'a:off': { '@_x': String(ph.xEmu), '@_y': String(ph.yEmu) },
@@ -648,15 +602,39 @@ function makeLayoutXml(
 		};
 	});
 	return {
-		'p:sldLayout': {
+		'p:sldMaster': {
 			'p:cSld': {
-				'@_name': 'Test Layout',
 				'p:spTree': {
 					'p:sp': shapes.length === 1 ? shapes[0] : shapes,
 				},
 			},
 		},
 	};
+}
+
+/** Helper: a layout whose only placeholder is anchored on a `p:pic`. */
+function makePictureFramedLayoutXml(xEmu: number, yEmu: number, cxEmu: number, cyEmu: number) {
+	return {
+		'p:sldLayout': {
+			'p:cSld': {
+				'@_name': 'Picture Layout',
+				'p:spTree': {
+					'p:pic': {
+						'p:nvPicPr': {
+							'p:cNvPr': { '@_id': '2', '@_name': 'Picture Placeholder' },
+							'p:nvPr': { 'p:ph': { '@_type': 'pic', '@_idx': '1' } },
+						},
+						'p:spPr': {
+							'a:xfrm': {
+								'a:off': { '@_x': String(xEmu), '@_y': String(yEmu) },
+								'a:ext': { '@_cx': String(cxEmu), '@_cy': String(cyEmu) },
+							},
+						},
+					},
+				},
+			},
+		},
+	} satisfies XmlObject;
 }
 
 describe('placeholder re-mapping (GAP-E4 layout switching)', () => {
@@ -688,20 +666,66 @@ describe('placeholder re-mapping (GAP-E4 layout switching)', () => {
 		expect(body.y).toBe(Math.round(1524000 / EMU_PER_PX));
 	});
 
-	it("removes placeholder elements that don't exist in new layout", () => {
+	it('resolves geometry from the master when the layout placeholder omits a:xfrm', () => {
+		const layoutPath = 'ppt/slideLayouts/target.xml';
+		const masterPath = 'ppt/slideMasters/slideMaster1.xml';
+		registerMaster(
+			layoutPath,
+			masterPath,
+			makeMasterXml([
+				{ phType: 'title', xEmu: 500000, yEmu: 250000, cxEmu: 8000000, cyEmu: 1200000 },
+				{ phType: 'body', phIdx: '1', xEmu: 500000, yEmu: 1800000, cxEmu: 8000000, cyEmu: 4000000 },
+			]),
+		);
+
+		const titleEl = makePhElement('t1', 'title', undefined, 10, 10, 100, 50, 'My Title');
+		const newLayout = makeLayoutXml([
+			{ phType: 'title', xEmu: 0, yEmu: 0, cxEmu: 0, cyEmu: 0, noXfrm: true },
+		]);
+
+		const result = remapElementsToNewLayout([titleEl], newLayout, layoutPath);
+
+		const title = result.find((e) => e.id === 't1')!;
+		expect(title.x).toBe(Math.round(500000 / EMU_PER_PX));
+		expect(title.y).toBe(Math.round(250000 / EMU_PER_PX));
+		expect(title.width).toBe(Math.round(8000000 / EMU_PER_PX));
+		expect(title.height).toBe(Math.round(1200000 / EMU_PER_PX));
+	});
+
+	it('leaves the element at its own position when neither layout nor master has geometry', () => {
+		const titleEl = makePhElement('t1', 'title', undefined, 10, 10, 100, 50, 'My Title');
+		const newLayout = makeLayoutXml([
+			{ phType: 'title', xEmu: 0, yEmu: 0, cxEmu: 0, cyEmu: 0, noXfrm: true },
+		]);
+
+		const result = remapElementsToNewLayout([titleEl], newLayout);
+
+		const title = result.find((e) => e.id === 't1')!;
+		expect(title.x).toBe(10);
+		expect(title.y).toBe(10);
+		expect(title.width).toBe(100);
+		expect(title.height).toBe(50);
+	});
+
+	it('keeps placeholder content the new layout has no slot for', () => {
 		const titleEl = makePhElement('t1', 'title', undefined, 10, 10, 100, 50, 'Title');
 		const subtitleEl = makePhElement('s1', 'subTitle', undefined, 10, 70, 100, 50, 'Subtitle');
+		const pictureEl = makePhElement('p1', 'pic', undefined, 10, 130, 100, 100, 'Picture');
 
-		// New layout only has title, no subtitle
+		// New layout offers a single title slot. The title claims it; the other
+		// two have nowhere to go, and must survive as free-standing content
+		// rather than being deleted along with the user's words.
 		const newLayout = makeLayoutXml([
 			{ phType: 'title', xEmu: 100000, yEmu: 100000, cxEmu: 5000000, cyEmu: 1000000 },
 		]);
 
-		const result = remapElementsToNewLayout([titleEl, subtitleEl], newLayout);
+		const result = remapElementsToNewLayout([titleEl, subtitleEl, pictureEl], newLayout);
 
-		expect(result).toHaveLength(1);
-		expect(result[0].id).toBe('t1');
-		expect(result[0].text).toBe('Title');
+		expect(result.map((e) => e.id)).toStrictEqual(['t1', 's1', 'p1']);
+		expect(result.find((e) => e.id === 't1')?.x).toBe(Math.round(100000 / EMU_PER_PX));
+		// Unmatched content keeps its own position untouched.
+		expect(result.find((e) => e.id === 's1')).toMatchObject({ text: 'Subtitle', x: 10, y: 70 });
+		expect(result.find((e) => e.id === 'p1')).toMatchObject({ x: 10, y: 130 });
 	});
 
 	it('adds empty placeholders from new layout that are missing in slide', () => {
@@ -721,6 +745,67 @@ describe('placeholder re-mapping (GAP-E4 layout switching)', () => {
 		expect(newBody.text).toBe(''); // empty placeholder
 		expect(newBody.x).toBe(Math.round(100000 / EMU_PER_PX));
 		expect(newBody.width).toBe(Math.round(5000000 / EMU_PER_PX));
+	});
+
+	it('drops an untouched empty placeholder left over from a previous switch when its slot disappears', () => {
+		// Layout A: title + body only. Layout B: title + body + subtitle.
+		const layoutA = makeLayoutXml([
+			{ phType: 'title', xEmu: 100000, yEmu: 100000, cxEmu: 5000000, cyEmu: 1000000 },
+			{ phType: 'body', xEmu: 100000, yEmu: 1500000, cxEmu: 5000000, cyEmu: 3000000 },
+		]);
+		const layoutB = makeLayoutXml([
+			{ phType: 'title', xEmu: 200000, yEmu: 200000, cxEmu: 6000000, cyEmu: 1200000 },
+			{ phType: 'body', xEmu: 200000, yEmu: 1700000, cxEmu: 6000000, cyEmu: 3200000 },
+			{ phType: 'subTitle', xEmu: 200000, yEmu: 5200000, cxEmu: 6000000, cyEmu: 800000 },
+		]);
+
+		const titleEl = makePhElement('t1', 'title', undefined, 10, 10, 100, 50, 'My Title');
+		const bodyEl = makePhElement('b1', 'body', undefined, 10, 70, 100, 200, 'Body text');
+
+		// A -> B: title and body claim their slots; B's subtitle slot has no
+		// matching content, so an empty placeholder is generated for it.
+		const afterSwitchToB = remapElementsToNewLayout([titleEl, bodyEl], layoutB);
+		expect(afterSwitchToB).toHaveLength(3);
+		const emptySubtitle = afterSwitchToB.find((e) => e.id !== 't1' && e.id !== 'b1')!;
+		expect(emptySubtitle.text).toBe('');
+
+		// B -> A: title and body claim A's slots again; A has no subtitle slot,
+		// and the leftover subtitle is still untouched, so it must vanish
+		// instead of surviving as orphaned free-standing content.
+		const afterSwitchBackToA = remapElementsToNewLayout(afterSwitchToB, layoutA);
+		expect(afterSwitchBackToA.map((e) => e.id)).toStrictEqual(['t1', 'b1']);
+
+		const title = afterSwitchBackToA.find((e) => e.id === 't1')!;
+		expect(title.x).toBe(Math.round(100000 / EMU_PER_PX));
+		expect(title.y).toBe(Math.round(100000 / EMU_PER_PX));
+		const body = afterSwitchBackToA.find((e) => e.id === 'b1')!;
+		expect(body.x).toBe(Math.round(100000 / EMU_PER_PX));
+		expect(body.y).toBe(Math.round(1500000 / EMU_PER_PX));
+	});
+
+	it('keeps an edited placeholder as free-standing content even when its slot disappears', () => {
+		const layoutB = makeLayoutXml([
+			{ phType: 'title', xEmu: 200000, yEmu: 200000, cxEmu: 6000000, cyEmu: 1200000 },
+		]);
+
+		const titleEl = makePhElement('t1', 'title', undefined, 10, 10, 100, 50, 'My Title');
+		const subtitleEl = makePhElement(
+			's1',
+			'subTitle',
+			undefined,
+			10,
+			70,
+			100,
+			50,
+			'Real subtitle text',
+		);
+
+		const result = remapElementsToNewLayout([titleEl, subtitleEl], layoutB);
+
+		// The subtitle has real user content and layout B has no subtitle slot,
+		// so it must survive as free-standing content, not be dropped.
+		expect(result.map((e) => e.id)).toStrictEqual(['t1', 's1']);
+		expect(result.find((e) => e.id === 's1')?.text).toBe('Real subtitle text');
 	});
 
 	it('keeps non-placeholder elements at their current positions', () => {
@@ -817,9 +902,91 @@ describe('placeholder re-mapping (GAP-E4 layout switching)', () => {
 
 		const result = remapElementsToNewLayout([titleEl, freeform], blankLayout);
 
-		// Placeholder dropped, non-placeholder kept
+		// Switching to Blank must not erase the slide. PowerPoint keeps both the
+		// former placeholder content and the free-form shape.
+		expect(result.map((e) => e.id)).toStrictEqual(['t1', 'f1']);
+		expect(result.find((e) => e.id === 't1')?.text).toBe('Title');
+	});
+
+	it('keeps every slot when a layout repeats a placeholder family', () => {
+		const left = makePhElement('l1', 'body', '1', 10, 10, 100, 50, 'Left');
+		const right = makePhElement('r1', 'body', '2', 10, 70, 100, 50, 'Right');
+
+		// Two content boxes. Keying targets by family collapsed these onto one
+		// entry, so the second element found nothing to move into.
+		const twoContent = makeLayoutXml([
+			{ phType: 'body', phIdx: '1', xEmu: 100000, yEmu: 200000, cxEmu: 3000000, cyEmu: 2000000 },
+			{ phType: 'body', phIdx: '2', xEmu: 4000000, yEmu: 200000, cxEmu: 3000000, cyEmu: 2000000 },
+		]);
+
+		const result = remapElementsToNewLayout([left, right], twoContent);
+
+		expect(result).toHaveLength(2);
+		expect(result.find((e) => e.id === 'l1')?.x).toBe(Math.round(100000 / EMU_PER_PX));
+		expect(result.find((e) => e.id === 'r1')?.x).toBe(Math.round(4000000 / EMU_PER_PX));
+	});
+
+	it('prefers a dedicated picture slot over the generic content box', () => {
+		const body = makePhElement('b1', 'body', '1', 10, 10, 100, 50, 'Prose');
+		const picture: PptxElement = {
+			...makePhElement('i1', 'pic', '2', 10, 70, 100, 100, ''),
+			type: 'image',
+			src: 'data:image/png;base64,AAAA',
+		} as PptxElement;
+
+		const mixed = makeLayoutXml([
+			{ phType: 'body', phIdx: '1', xEmu: 100000, yEmu: 200000, cxEmu: 3000000, cyEmu: 2000000 },
+			{ phType: 'pic', phIdx: '2', xEmu: 4000000, yEmu: 200000, cxEmu: 3000000, cyEmu: 2000000 },
+		]);
+
+		const result = remapElementsToNewLayout([body, picture], mixed);
+
+		// The image must land in the picture frame, not in the prose box.
+		expect(result.find((e) => e.id === 'i1')?.x).toBe(Math.round(4000000 / EMU_PER_PX));
+		expect(result.find((e) => e.id === 'b1')?.x).toBe(Math.round(100000 / EMU_PER_PX));
+	});
+
+	it('matches placeholders anchored on a p:pic in the target layout', () => {
+		const picture = makePhElement('i1', 'pic', '1', 10, 10, 100, 100, '');
+		const layout = makePictureFramedLayoutXml(500000, 600000, 2000000, 1500000);
+
+		const result = remapElementsToNewLayout([picture], layout);
+
 		expect(result).toHaveLength(1);
-		expect(result[0].id).toBe('f1');
+		expect(result[0].x).toBe(Math.round(500000 / EMU_PER_PX));
+		expect(result[0].y).toBe(Math.round(600000 / EMU_PER_PX));
+	});
+
+	it('rewrites the moved element p:ph to name its new slot', () => {
+		// The source deck numbered its body slot 14; the target layout calls the
+		// equivalent slot 1. Leaving 14 behind made the saved deck reference a
+		// placeholder the new layout does not define.
+		const body = makePhElement('b1', 'body', '14', 10, 10, 100, 50, 'Body');
+		const layout = makeLayoutXml([
+			{ phType: 'body', phIdx: '1', xEmu: 100000, yEmu: 200000, cxEmu: 3000000, cyEmu: 2000000 },
+		]);
+
+		const result = remapElementsToNewLayout([body], layout);
+
+		const ph = result[0].rawXml?.['p:nvSpPr']?.['p:nvPr']?.['p:ph'] as XmlObject;
+		expect(ph['@_idx']).toBe('1');
+		expect(ph['@_type']).toBe('body');
+	});
+
+	it('does not mutate the caller rawXml when repositioning', () => {
+		const body = makePhElement('b1', 'body', '1', 10, 10, 100, 50, 'Body');
+		const layout = makeLayoutXml([
+			{ phType: 'body', phIdx: '1', xEmu: 100000, yEmu: 200000, cxEmu: 3000000, cyEmu: 2000000 },
+		]);
+
+		const result = remapElementsToNewLayout([body], layout);
+
+		// The original element is still referenced by undo history and by the
+		// caller's own slide model; writing the new transform into its shared
+		// rawXml corrupted both.
+		expect(body.rawXml?.['p:spPr']).toStrictEqual({});
+		expect(result[0].rawXml).not.toBe(body.rawXml);
+		expect((result[0].rawXml?.['p:spPr'] as XmlObject)?.['a:xfrm']).toBeDefined();
 	});
 
 	it('handles element without rawXml as non-placeholder', () => {

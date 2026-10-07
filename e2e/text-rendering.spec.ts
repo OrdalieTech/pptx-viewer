@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
+import { resetTabSession } from './support/deck';
+
 const fixturePath = resolve(fileURLToPath(new URL('./fixtures/sample-deck.pptx', import.meta.url)));
 
 /**
@@ -26,6 +28,9 @@ const fixturePath = resolve(fileURLToPath(new URL('./fixtures/sample-deck.pptx',
 
 /** Upload the sample deck and wait for slide 1's title to render. */
 async function openDeck(page: Page): Promise<void> {
+	// Forget any restored session first, or the deck reopens and the landing
+	// dropzone (the only place #file-input exists) never mounts.
+	await resetTabSession(page);
 	await page.goto('/');
 	await page.locator('#file-input').setInputFiles(fixturePath);
 	await page.locator('[data-pptx-element="true"]').filter({ hasText: 'Project' }).first().waitFor();
@@ -67,7 +72,7 @@ test.describe('text rendering (font-size parity)', () => {
 		// 54pt-as-px title. The pt-inflation bug rendered this at 72px.
 		expect(await largestFontPx(page, 'Project')).toBeCloseTo(54, 0);
 		// Subtitle + caption confirm the whole text scale (not just the title) is
-		// in px — an inflated binding would scale all three up by 96/72.
+		// in px - an inflated binding would scale all three up by 96/72.
 		expect(await largestFontPx(page, 'Product Overview')).toBeCloseTo(20, 0);
 		expect(await largestFontPx(page, 'Q2 2026')).toBeCloseTo(16, 0);
 	});

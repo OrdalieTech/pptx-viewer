@@ -1,22 +1,28 @@
-import type { InkPoint } from 'pptx-viewer-shared';
-import { pointsToSvgPathD, strokeToInkElement } from 'pptx-viewer-shared';
+import type { InkPoint, InkStrokeView } from 'pptx-viewer-shared';
+import {
+	buildLiveInkStrokeView,
+	findEraserHitElementId,
+	pointsToSvgPathD,
+	removeElement,
+	strokeToInkElement,
+} from 'pptx-viewer-shared';
 
-import { removeElement } from './editor-mutations';
+import { strokeToFreeformShape } from './editor-freeform';
 import type { EditorState } from './editor-state.svelte';
 
 /**
  * The ribbon Draw tab's active tool. `'select'` means "not drawing": the
  * stage's normal selection/drag/resize gestures own the pointer, matching
- * React's `DrawingTool` / Angular's `DrawTool` conventions (minus `freeform`,
- * out of scope for this wave; see the Draw tab's JSDoc).
+ * React's `DrawingTool` / Angular's `DrawTool`.
+ *
+ * `freeform` shares the pen's gesture but commits a closed custom-geometry
+ * SHAPE rather than an ink stroke, so the result is editable/fillable like any
+ * other shape; see `editor-freeform.ts`.
  */
-export type InkDrawTool = 'select' | 'pen' | 'highlighter' | 'eraser';
+export type InkDrawTool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'freeform';
 
 const DEFAULT_INK_COLOR = '#000000';
 const DEFAULT_INK_WIDTH = 3;
-
-/** Bounding-box hit-test radius (element px) for the eraser tool; mirrors the React/Angular drawing overlays. */
-const ERASER_HIT_RADIUS = 15;
 
 /**
  * EditorInkController: the ribbon Draw tab's tool/colour/width state plus the
@@ -42,6 +48,14 @@ export class EditorInkController {
 	width = $state(DEFAULT_INK_WIDTH);
 	/** SVG path `d` for the in-progress stroke's live preview, or `''` when idle. */
 	livePathD = $state('');
+	/**
+	 * The in-progress stroke's render view (plain path, pressure circles, or
+	 * tilt nib marks), from the shared `buildLiveInkStrokeView`: the same
+	 * decision `InkView.svelte` makes for a committed stroke (via
+	 * `buildInkStrokes`), fed the SAME accumulated points {@link commitStroke}
+	 * hands to `strokeToInkElement`. `null` while idle.
+	 */
+	liveStrokeView: InkStrokeView | null = $state(null);
 
 	constructor(editor: EditorState) {
 		this.#editor = editor;
@@ -61,6 +75,7 @@ export class EditorInkController {
 	setTool(tool: InkDrawTool): void {
 		this.tool = tool;
 		this.livePathD = '';
+		this.liveStrokeView = null;
 		if (tool !== 'select') {
 			this.#editor.select(null);
 		}
@@ -74,18 +89,41 @@ export class EditorInkController {
 		this.width = width;
 	}
 
-	/** Update the live preview path while a pen/highlighter stroke is in progress. */
+	/**
+	 * Update the live preview while a pen/highlighter/freeform stroke is in
+	 * progress: both the plain `livePathD` (kept for existing consumers) and
+	 * `liveStrokeView`, the same plain-path/pressure-circle/tilt-nib decision
+	 * a committed stroke gets from `buildInkStrokes`, built from the identical
+	 * accumulated points.
+	 */
 	previewStroke(points: readonly InkPoint[]): void {
-		this.livePathD = pointsToSvgPathD([...points]);
+		const pts = [...points];
+		this.livePathD = pointsToSvgPathD(pts);
+		this.liveStrokeView = buildLiveInkStrokeView({
+			points: pts,
+			color: this.color,
+			width: this.width,
+			tool:
+				this.tool === 'highlighter' ? 'highlighter' : this.tool === 'freeform' ? 'freeform' : 'pen',
+		});
 	}
 
 	/**
-	 * Finalise the in-progress stroke into a new `ink` element (undoable via
-	 * `EditorState.insertElement`), or discard it silently when too short (a
-	 * plain tap) or the tool changed mid-gesture.
+	 * Finalise the in-progress stroke (undoable via `EditorState.insertElement`),
+	 * or discard it silently when too short (a plain tap) or the tool changed
+	 * mid-gesture. Pen/highlighter commit an `ink` element; freeform commits a
+	 * closed custom-geometry `shape`.
 	 */
 	commitStroke(points: readonly InkPoint[]): void {
 		this.livePathD = '';
+		this.liveStrokeView = null;
+		if (this.tool === 'freeform') {
+			const shape = strokeToFreeformShape(points, this.color, this.width);
+			if (shape) {
+				this.#editor.insertElement(shape);
+			}
+			return;
+		}
 		if (this.tool !== 'pen' && this.tool !== 'highlighter') {
 			return;
 		}
@@ -101,26 +139,18 @@ export class EditorInkController {
 	}
 
 	/**
-	 * Hit-test `ink` elements on the current slide at `point` (topmost first)
-	 * and delete the first match, with history. No-op when nothing is hit.
+	 * Hit-test `ink`/`contentPart` elements on the current slide at `point`
+	 * (topmost first) and delete the first match, with history. `contentPart`
+	 * is included because ink saved via the Draw tab reloads in that shape, so
+	 * it must stay erasable after a save/reload round-trip. No-op when nothing
+	 * is hit.
 	 */
 	eraseElementAt(point: InkPoint): void {
 		const current = this.#editor.currentSlideIndex;
 		const elements = this.#editor.slides[current]?.elements ?? [];
-		for (let i = elements.length - 1; i >= 0; i--) {
-			const el = elements[i];
-			if (el.type !== 'ink') {
-				continue;
-			}
-			if (
-				point.x >= el.x - ERASER_HIT_RADIUS &&
-				point.x <= el.x + el.width + ERASER_HIT_RADIUS &&
-				point.y >= el.y - ERASER_HIT_RADIUS &&
-				point.y <= el.y + el.height + ERASER_HIT_RADIUS
-			) {
-				this.#editor.commitSlides(removeElement(this.#editor.slides, current, el.id));
-				return;
-			}
+		const hitId = findEraserHitElementId(elements, point);
+		if (hitId) {
+			this.#editor.commitSlides(removeElement(this.#editor.slides, current, hitId));
 		}
 	}
 }

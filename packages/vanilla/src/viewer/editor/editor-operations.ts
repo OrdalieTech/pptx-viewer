@@ -14,14 +14,21 @@ import type {
 	PptxSlide,
 	PptxSlideMaster,
 	TextSegment,
+	TextStyle,
 } from 'pptx-viewer-core';
 import { duplicateElement } from 'pptx-viewer-core';
+import type { ElementBoxPatch } from 'pptx-viewer-shared';
 import {
 	applyFormatToElement,
+	buildDeckSaveOptions,
 	buildSaveSlides,
+	cloneSlides,
 	cloneTemplateElementsBySlideId,
 	copyFormatFromElement,
 	EditorHistory,
+	resolveSlideSizeSelection,
+	saveDeckWithPassword,
+	updateSlideNotes,
 } from 'pptx-viewer-shared';
 
 import type { Store, ViewerState } from '../state';
@@ -31,11 +38,13 @@ import {
 	replaceActiveElements,
 } from './editor-active-elements';
 import { setHandoutSlidesPerPage } from './editor-master-actions';
-import type { ElementBoxPatch } from './editor-mutations';
-import { cloneSlides, updateSlideNotes } from './editor-mutations';
 import { selectionState } from './editor-selection-state';
 import { createStructuredEditorOperations } from './editor-structured-operations';
-import { remapInlineText } from './inline-text-editor';
+import {
+	remapInlineText,
+	resolveInlineTextAutoFitHeight,
+	resolveInlineTextNormAutofitShrink,
+} from './inline-text-editor';
 
 /**
  * History-tracked editing operations over the viewer store: the vanilla
@@ -51,6 +60,8 @@ export interface EditorOpsDeps {
 	onChange?: () => void;
 	/** Fired whenever canUndo/canRedo may have changed (toolbar refresh). */
 	onHistoryChange(): void;
+	/** Options > Proofing > AutoCorrect, applied to committed inline-edit text. */
+	transformCommittedText?: (text: string) => string;
 }
 
 export interface EditorOps {
@@ -184,7 +195,12 @@ export function createEditorOps(deps: EditorOpsDeps): EditorOps {
 		});
 		commitChange();
 	};
-	const structured = createStructuredEditorOperations({ store, pushHistory, commitChange });
+	const structured = createStructuredEditorOperations({
+		store,
+		pushHistory,
+		commitChange,
+		transformCommittedText: deps.transformCommittedText,
+	});
 
 	return {
 		selectedElement,
@@ -261,19 +277,47 @@ export function createEditorOps(deps: EditorOpsDeps): EditorOps {
 			commitChange();
 		},
 
-		commitInlineText(id, text) {
+		commitInlineText(id, rawText) {
 			const state = store.get();
 			const target = findActiveElement(state, id);
 			if (!target) {
 				return;
 			}
+			const text = deps.transformCommittedText ? deps.transformCommittedText(rawText) : rawText;
 			pushHistory();
+			// `a:spAutoFit`: grow/shrink the shape to the text's natural content
+			// height, the way PowerPoint does. See `resolveInlineTextAutoFitHeight`
+			// for why the editor DOM node is still resolvable here.
+			const editorEl =
+				typeof document !== 'undefined'
+					? document.querySelector<HTMLElement>('[data-inline-editor]')
+					: null;
+			const newHeight = resolveInlineTextAutoFitHeight(target, editorEl);
+			// `a:normAutofit` ("Shrink text on overflow"): recompute the font
+			// scale/line-spacing reduction so the (possibly now longer or
+			// shorter) text still fits the shape. Mutually exclusive with the
+			// `spAutoFit` resize above (both read `autoFitMode`, only one mode is
+			// ever set).
+			const shrink = resolveInlineTextNormAutofitShrink(target, editorEl);
 			store.set(
 				replaceActiveElements(
 					state,
 					getActiveElements(state).map((element) =>
 						element.id === id
-							? ({ ...element, ...remapInlineText(target, text) } as PptxElement)
+							? ({
+									...element,
+									...remapInlineText(target, text),
+									...(newHeight !== undefined ? { height: newHeight } : {}),
+									...(shrink !== 'unchanged'
+										? {
+												textStyle: {
+													...(target as { textStyle?: TextStyle }).textStyle,
+													autoFitFontScale: shrink.fontScale,
+													autoFitLineSpacingReduction: shrink.lnSpcReduction,
+												},
+											}
+										: {}),
+								} as PptxElement)
 							: element,
 					),
 				),
@@ -394,20 +438,52 @@ export function createEditorOps(deps: EditorOpsDeps): EditorOps {
 				throw new Error('No presentation is loaded.');
 			}
 			const state = store.get();
-			const bytes = await handler.save(
+			// File > Info > Protect Presentation: the shared decision routes a
+			// protected deck through `saveEncrypted`, so the downloaded file is an
+			// encrypted OLE2 container rather than a plain ZIP.
+			const bytes = await saveDeckWithPassword(
+				handler,
 				buildSaveSlides(state.slides, state.templateElementsBySlideId),
-				{
-					sections: state.sections.length > 0 ? state.sections : undefined,
+				buildDeckSaveOptions({
+					sections: state.sections,
 					coreProperties: state.coreProperties,
 					appProperties: state.appProperties,
-					customProperties: state.customProperties.length > 0 ? state.customProperties : undefined,
+					customProperties: state.customProperties,
 					headerFooter: state.headerFooter,
 					presentationProperties: state.presentationProperties,
-					customShows: state.customShows.length ? state.customShows : undefined,
+					// Deck view preferences (grid/snap/guide toggles, `p:viewPr`): without
+					// this the serialiser fell back to whatever `ppt/viewProps.xml` said
+					// at load time, so a toggle flipped in the ribbon never reached a
+					// saved file (see `viewPropertiesPatchFromPreferences` write-back in
+					// `editor-edit-ops.ts`'s `toggleViewOption`).
+					viewProperties: state.viewProperties,
+					customShows: state.customShows,
+					tagCollections: state.tagCollections,
 					slideMasters: state.slideMasters,
 					notesMaster: state.notesMaster,
 					handoutMaster: state.handoutMaster,
+					tableStyleMap: state.tableStyleMap,
+					tableStylesDefaultId: state.tableStylesDefaultId,
+					tableStylesToDelete: state.tableStylesToDelete,
 					outputFormat: format,
+					// Design > Slide Size. Omitting the option makes core re-emit the
+					// load-time `p:sldSz` verbatim, so a preset or orientation pick made
+					// in the inspector never reached the written file. The EMU state
+					// wins wherever it still agrees with the pixel canvas (a pixel
+					// round-trip would cost Ledger its preset identity); once the raw
+					// W/H inputs disagree, the pixels win.
+					slideSize: resolveSlideSizeSelection({
+						current: state.slideSize,
+						canvas: state.canvasSize,
+					}).size,
+					// File > Fonts > "Embed fonts in the file": off strips the deck's
+					// embedded font data from the written package. The toggle reached
+					// no save call at all before this, so it changed nothing.
+					embedFonts: state.embedFonts,
+				}),
+				{
+					password: state.presentationPassword,
+					passwordProtected: state.presentationPassword !== null,
 				},
 			);
 			store.set({ dirty: false });

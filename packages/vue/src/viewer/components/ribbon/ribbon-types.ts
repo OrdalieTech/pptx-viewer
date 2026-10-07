@@ -10,14 +10,22 @@
  * them, so the ribbon degrades gracefully during the incremental wire-up.
  */
 import type {
-	PptxChartType,
 	PptxCustomShow,
 	PptxElement,
+	PptxLayoutPreview,
+	PptxPresentationProperties,
 	PptxSlide,
 	PptxSlideTransition,
+	ShapeStyle,
 	TextStyle,
 } from 'pptx-viewer-core';
-import type { ChangeCaseMode, ToolbarActionId } from 'pptx-viewer-shared';
+import type {
+	AnimationApplyGroup,
+	ChangeCaseMode,
+	InsertChartKind,
+	SlideTemplateId,
+	ToolbarActionId,
+} from 'pptx-viewer-shared';
 
 /** Viewer interaction mode. Mirrors React `ViewerMode`. */
 export type ViewerMode = 'preview' | 'edit' | 'present' | 'master';
@@ -86,6 +94,25 @@ export interface TableCellEditorState {
 	columnIndex: number;
 }
 
+/**
+ * The custom-show picker's whole contract.
+ *
+ * Named as one object because two places now render the same picker (the
+ * quick-access row and the Slide Show tab's popover), and passing nine props
+ * twice is nine chances for the two copies to drift apart.
+ */
+export interface CustomShowsControlsProps {
+	customShows: PptxCustomShow[];
+	activeCustomShowId: string | null;
+	canEdit: boolean;
+	isCurrentSlideInActiveShow: boolean;
+	onSetActiveCustomShowId: (id: string | null) => void;
+	onCreateCustomShow: () => void;
+	onRenameActiveCustomShow: () => void;
+	onDeleteActiveCustomShow: () => void;
+	onToggleCurrentSlideInActiveShow: () => void;
+}
+
 /** A `{ path, name }` layout option for the New-Slide dropdown. */
 export interface LayoutOption {
 	path: string;
@@ -112,6 +139,10 @@ export interface RibbonProps {
 	redoLabel?: string;
 	findReplaceOpen: boolean;
 	selectedElement: PptxElement | null;
+	/** How many elements the multi-select holds; Group needs two. */
+	selectedCount: number;
+	/** Whether every selected element allows `a:spLocks/@noGrp` grouping. */
+	selectionGroupable: boolean;
 	tableEditorState?: TableCellEditorState | null;
 	editTemplateMode: boolean;
 	newShapeType: SupportedShapeType;
@@ -122,10 +153,26 @@ export interface RibbonProps {
 	spellCheckEnabled: boolean;
 	showGrid: boolean;
 	showRulers: boolean;
+	/**
+	 * Guide-overlay visibility. Separate from `snapToShape`: hiding the guides
+	 * must not stop the editor snapping, and the guides stay in the model either
+	 * way so snapping and save still see the full list.
+	 */
+	showGuides: boolean;
 	snapToGrid: boolean;
 	snapToShape: boolean;
 	isOverflowMenuOpen: boolean;
 	layoutOptions: LayoutOption[];
+	/** `layoutPath` of the active slide, marking the current gallery tile. */
+	currentLayoutPath?: string;
+	/** Builds the New Slide / Layout gallery artwork on first menu open. */
+	loadLayoutPreviews?: () => Promise<PptxLayoutPreview[]>;
+	/** Theme major/minor latin faces, leading the font dropdown. */
+	themeFonts?: { heading?: string; body?: string };
+	/** Families the deck embeds, offered as their own dropdown group. */
+	embeddedFontFamilies?: readonly string[];
+	/** Families registered this session via File > Options > Fonts. */
+	customFontFamilies?: readonly string[];
 	customShows: PptxCustomShow[];
 	activeCustomShowId: string | null;
 	isCurrentSlideInActiveShow: boolean;
@@ -146,6 +193,8 @@ export interface RibbonProps {
 	collaboratorCount?: number;
 	/** Toolbar buttons / ribbon tabs the host has asked to hide. Undefined/empty hides nothing. */
 	hiddenActions?: ToolbarActionId[];
+	/** File > Options > Advanced > "Quickly access this number of Recent Documents". */
+	recentPresentationsCount?: number;
 	/** True when the host opted into the AI assistant (the `ai` prop is set). */
 	aiEnabled?: boolean;
 	/** Whether the AI chat panel is currently open (drives the toggle's active state). */
@@ -154,10 +203,13 @@ export interface RibbonProps {
 	onToggleAiPanel?: () => void;
 
 	onSetMode: (mode: ViewerMode) => void;
+	/** Slide Show > Start > From Beginning: the show's first slide, unconditionally. */
+	onPresentFromBeginning: () => void;
 	onToggleSidebar: () => void;
 	onToggleInspector: () => void;
 	onOpenAnimationPanel: () => void;
-	onAddAnimation?: (preset: string, group: 'entrance' | 'emphasis' | 'exit') => void;
+	/** `motionPath` carries a motion-path catalogue id in `preset`, not a preset name. */
+	onAddAnimation?: (preset: string, group: AnimationApplyGroup) => void;
 	onRemoveAnimation?: () => void;
 	onToggleCompactToolbar: () => void;
 	onSetToolbarSection: (section: ToolbarSection) => void;
@@ -172,7 +224,7 @@ export interface RibbonProps {
 	onAddTextBox: () => void;
 	onAddShape: () => void;
 	onAddTable: () => void;
-	onAddChart?: (chartType: PptxChartType) => void;
+	onAddChart?: (chartKind: InsertChartKind) => void;
 	onAddSmartArt: () => void;
 	onAddEquation: () => void;
 	onAddActionButton: (shapeType: string) => void;
@@ -187,6 +239,7 @@ export interface RibbonProps {
 	onSetSpellCheckEnabled: (enabled: boolean) => void;
 	onSetShowGrid: (enabled: boolean) => void;
 	onSetShowRulers: (enabled: boolean) => void;
+	onSetShowGuides: (enabled: boolean) => void;
 	onSetSnapToGrid: (enabled: boolean) => void;
 	onSetSnapToShape: (enabled: boolean) => void;
 	onAddGuide: (axis: 'h' | 'v') => void;
@@ -199,6 +252,12 @@ export interface RibbonProps {
 	onFlip: (direction: 'horizontal' | 'vertical') => void;
 	onMoveLayer: (direction: string) => void;
 	onMoveLayerToEdge: (direction: string) => void;
+	onGroupElements: () => void;
+	onUngroupElement: () => void;
+	/** Patch the selection's `shapeStyle` (the Arrange group's outline width). */
+	onUpdateElementStyle: (updates: Partial<ShapeStyle>) => void;
+	/** Open the hyperlink editor for the selection (Insert > Link). */
+	onOpenHyperlinkDialog: () => void;
 	onDuplicate: () => void;
 	onDelete: () => void;
 	/** Open another presentation (File ▸ Open). Hidden when not provided. */
@@ -209,7 +268,8 @@ export interface RibbonProps {
 	onExportPdf: () => void;
 	onExportVideo: () => void;
 	onExportGif: () => void;
-	onPackageForSharing: () => void;
+	/** Serialise the deck to pptx-viewer-json and download it (Export page card). */
+	onExportJson: () => void;
 	onOpenShareDialog?: () => void;
 	onSaveAsPptx: () => void;
 	onSaveAsPpsx: () => void;
@@ -220,11 +280,19 @@ export interface RibbonProps {
 	onOpenSettings?: () => void;
 	onRunAccessibilityCheck: () => void;
 	onToggleSlideSorter: () => void;
+	/** Open the windowed Reading View (NOT the fullscreen slide show). */
+	onOpenReadingView: () => void;
+	/** Enter PowerPoint's Outline view: the deck as editable indented text. */
+	onOpenOutlineView: () => void;
 	onUpdateTextStyle: (updates: Partial<TextStyle>) => void;
 	/** Rewrite the selected text's characters (PowerPoint's Aa "Change Case" dropdown). */
 	onTransformTextCase: (mode: ChangeCaseMode) => void;
 	onSetOverflowMenuOpen: (open: boolean) => void;
 	onInsertSlideFromLayout: (path: string, name?: string) => void;
+	/** Insert a pre-designed slide template after the active slide (Home ▸ Slide Templates). */
+	onInsertSlideFromTemplate?: (templateId: SlideTemplateId) => void;
+	/** Deck scheme map so template gallery previews show the deck's theme colours. */
+	templateScheme?: Record<string, string>;
 	onApplyLayout?: (path: string) => void;
 	onResetSlide?: () => void;
 	onAddSection?: () => void;
@@ -236,6 +304,8 @@ export interface RibbonProps {
 	onToggleVersionHistory?: () => void;
 	onOpenPasswordProtection?: () => void;
 	onOpenDocumentProperties?: () => void;
+	/** Design > Slide Size: reveal the inspector card that owns the size. */
+	onOpenSlideSize?: () => void;
 	onOpenFontEmbedding?: () => void;
 	onOpenDigitalSignatures?: () => void;
 	onEnterMasterView: () => void;
@@ -250,8 +320,16 @@ export interface RibbonProps {
 	onToggleSelectionPane?: () => void;
 	onToggleEyedropper?: () => void;
 	onOpenSetUpSlideShow?: () => void;
+	/** PowerPoint's Hide Slide toggle for the active slide (Slide Show tab). */
+	onToggleHideSlide?: () => void;
+	/** Whether the active slide is hidden, for Hide Slide's pressed state. */
+	activeSlideHidden?: boolean;
 	onOpenBroadcastDialog?: () => void;
 	onToggleSubtitles?: () => void;
 	onTransitionChange: (updates: Partial<PptxSlideTransition>) => void;
 	onApplyTransitionToAll: () => void;
+	/** Deck presentation properties backing the Slide Show tab's Options checkboxes. */
+	presentationProperties?: PptxPresentationProperties;
+	/** Commit an Options checkbox onto the deck's presentation properties. */
+	onPresentationPropertiesChange?: (updates: Partial<PptxPresentationProperties>) => void;
 }

@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
+import { resetTabSession } from './support/deck';
+import { presentingStageText } from './support/slide-text';
+
 /**
  * Slide-show behaviour every binding must share (issue #106).
  *
@@ -14,12 +17,19 @@ import type { Page } from '@playwright/test';
  * transition overlay (which fitted the whole canvas area) play at a different
  * size from the slide underneath it. These lock in the corrected behaviour and
  * PowerPoint's navigation keys.
+ *
+ * They also pin the chrome rule: a running show shows no editing chrome in any
+ * binding. See 'a running show carries no editor chrome' for what that means and
+ * why "covered by an opaque overlay" is not the same thing.
  */
 
 const deck = resolve(fileURLToPath(new URL('./fixtures/sample-deck.pptx', import.meta.url)));
 
 /** Load the fixture and start the slide show. */
 async function startShow(page: Page): Promise<void> {
+	// Forget any restored session first, or the deck reopens and the landing
+	// dropzone (the only place #file-input exists) never mounts.
+	await resetTabSession(page);
 	await page.goto('/');
 	await page.locator('#file-input').setInputFiles(deck);
 	await page.locator('[data-pptx-element="true"]').first().waitFor();
@@ -33,17 +43,15 @@ async function startShow(page: Page): Promise<void> {
 }
 
 /**
- * Text of the largest painted slide surface, used as a binding-neutral
- * "which slide is showing" probe (slide counters differ per binding, and deck
- * text can contain "n / m" strings of its own).
+ * Text of the RUNNING SHOW's slide surface, used as a binding-neutral
+ * "which slide is showing" probe.
+ *
+ * See {@link presentingStageText}: the scrape has to skip the stage's own
+ * `<style>` children, or it reads the injected hit-test / morph-keyframe CSS
+ * as the slide's text and reports the same string on every slide.
  */
 async function visibleSlideText(page: Page): Promise<string> {
-	return page.evaluate(() => {
-		const stage = [...document.querySelectorAll('[aria-roledescription="slide"]')]
-			.filter((node) => node.getBoundingClientRect().width > 200)
-			.sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
-		return stage ? (stage.textContent ?? '').replace(/\s+/gu, ' ').trim().slice(0, 40) : '';
-	});
+	return presentingStageText(page);
 }
 
 test('the slide show fills the display instead of sitting at native size', async ({ page }) => {
@@ -81,6 +89,38 @@ test('slide content is inert while presenting', async ({ page }) => {
 			}).length,
 	);
 	expect(draggable).toBe(0);
+});
+
+test('a running show carries no editor chrome', async ({ page }) => {
+	await startShow(page);
+
+	// PowerPoint's slide show replaces the editor; it does not float over a live
+	// one. Every binding must therefore take its chrome out of the layout, the
+	// focus order and the accessibility tree while a show runs. Unmounting
+	// (react, vue, angular, svelte) and `display: none` (vanilla) both satisfy
+	// that; an opaque full-screen overlay with the editor still mounted behind it
+	// does NOT, which is what Vue and Angular used to do: their inspector, slide
+	// rail, notes pane and status bar stayed tab-focusable underneath the show,
+	// so a keyboard or screen-reader user was walked through the whole editor
+	// mid-presentation and could re-press the button that started the show.
+	//
+	// `visible` is the right test for all five: it is false both for a node that
+	// was never rendered and for one hidden with `display: none`.
+	await expect(page.locator('[data-pptx-inspector]').filter({ visible: true })).toHaveCount(0);
+
+	// The ribbon, by its File tab. NOT by `role=toolbar` named "Presentation
+	// toolbar": the show's own floating toolbar answers to that same name in
+	// every binding (both read `pptx.toolbar.presentationToolbarAria`), so the
+	// role would match show chrome as well as editor chrome.
+	await expect(
+		page.getByRole('tab', { name: 'File', exact: true }).filter({ visible: true }),
+	).toHaveCount(0);
+
+	// And the control that STARTED the show must not still be offering to start
+	// it: this is the status bar / mobile top bar, which carry their own copy.
+	await expect(
+		page.getByRole('button', { name: /^present$|slide show/iu }).filter({ visible: true }),
+	).toHaveCount(0);
 });
 
 test('PowerPoint navigation keys drive the show', async ({ page }) => {

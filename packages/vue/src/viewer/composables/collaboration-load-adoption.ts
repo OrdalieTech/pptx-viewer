@@ -12,8 +12,12 @@
  * client is the seeder and its loaded deck stands.
  */
 import type { PptxSlide } from 'pptx-viewer-core';
-import type { YDocLike } from 'pptx-viewer-shared';
-import { readSlidesFromYDoc } from 'pptx-viewer-shared';
+import type { CollabLoadOrigin, YDocLike } from 'pptx-viewer-shared';
+import {
+	readSlidesFromYDoc,
+	registerCollaborationSource,
+	shouldRoomSlidesReplaceLoad,
+} from 'pptx-viewer-shared';
 import { watch } from 'vue';
 import type { Ref, WatchStopHandle } from 'vue';
 
@@ -22,8 +26,15 @@ export interface LoadAdoptionContext {
 	loadVersion: Ref<number>;
 	/** The session's live Y.Doc, or null once the session stopped. */
 	getYDoc: () => YDocLike | null;
+	getSourceSlides?: () => readonly PptxSlide[];
+	onError?: (error: unknown) => void;
 	/** Whether the session currently reports a connection. */
 	isConnected: () => boolean;
+	/**
+	 * Why the load that just finished ran. Only a `bootstrap` deck yields to the
+	 * room: a file the user opened mid-session is what they asked for.
+	 */
+	getLoadOrigin?: () => CollabLoadOrigin;
 	/** Apply the doc's slides locally (sets the applying-remote guard + dedupe). */
 	adoptDocSlides: (docSlides: PptxSlide[]) => void;
 }
@@ -41,11 +52,23 @@ export function watchLoadAdoption(ctx: LoadAdoptionContext): WatchStopHandle {
 		ctx.loadVersion,
 		() => {
 			const doc = ctx.getYDoc();
+			if (doc && ctx.getSourceSlides) {
+				registerCollaborationSource(doc, ctx.getSourceSlides());
+			}
 			if (!doc || !ctx.isConnected()) {
 				return;
 			}
-			const docSlides = readSlidesFromYDoc(doc);
-			if (docSlides.length === 0) {
+			let docSlides: PptxSlide[];
+			try {
+				docSlides = readSlidesFromYDoc(doc);
+			} catch (error) {
+				if (!ctx.onError) {
+					throw error;
+				}
+				ctx.onError(error);
+				return;
+			}
+			if (!shouldRoomSlidesReplaceLoad(ctx.getLoadOrigin?.(), docSlides.length)) {
 				return;
 			}
 			ctx.adoptDocSlides(docSlides);

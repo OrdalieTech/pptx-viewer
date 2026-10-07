@@ -21,6 +21,16 @@ export const OPTIONS_DIALOG_CSS = `
 .pptxv-options-section { margin: 0 0 16px; }
 .pptxv-options-section > h3 { margin: 0 0 4px; padding-bottom: 3px; border-bottom: 1px solid var(--pptx-border); color: var(--pptx-muted-foreground); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .pptxv-options-section-desc { margin: 0 0 8px; color: var(--pptx-muted-foreground); font-size: 11px; }
+/* File > Options > General > Fonts: families added from a local file. */
+.pptxv-options-font-list {
+	margin: 4px 0 0;
+	padding: 0;
+	list-style: none;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	font-size: 12px;
+}
 .pptxv-options-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; padding: 2px 0; }
 .pptxv-options-row.is-indent { padding-left: 22px; }
 label.pptxv-options-row { cursor: pointer; }
@@ -85,5 +95,9 @@ label.pptxv-options-row { cursor: pointer; }
 .pptxv.pptxv-no-show-popup .pptxv-presentation-touch-prev,
 .pptxv.pptxv-no-show-popup .pptxv-presentation-touch-next,
 .pptxv.pptxv-no-show-popup .pptxv-presentation-touch-counter { display: none !important; }
+/* The desktop hover toolbar (createPresentationToolbar) sets its own inline
+   opacity/pointer-events on mousemove; !important here is required to win
+   over that inline style regardless of the JS auto-show timer. */
+.pptxv.pptxv-no-show-popup .pptxv-present-toolbar-wrap { opacity: 0 !important; pointer-events: none !important; }
 @media (max-width: 767px) { .pptxv-options-body { flex-direction: column; } .pptxv-options-nav { flex-direction: row; width: 100%; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--pptx-border); } }
 `;

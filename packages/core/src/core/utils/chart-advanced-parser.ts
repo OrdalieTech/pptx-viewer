@@ -5,7 +5,6 @@ import type {
 	PptxChartErrBarDir,
 	PptxChartErrBarType,
 	PptxChartErrValType,
-	PptxChartDataTable,
 	PptxChartLineStyle,
 	XmlObject,
 } from '../types';
@@ -122,9 +121,18 @@ export function parseSeriesTrendlines(
 			}
 
 			const spPr = xmlLookup.getChildByLocalName(node, 'spPr');
-			const lineColor = colorParser.parseColor(xmlLookup.getChildByLocalName(spPr, 'solidFill'));
+			const ln = xmlLookup.getChildByLocalName(spPr, 'ln');
+			const lineColor = colorParser.parseColor(xmlLookup.getChildByLocalName(ln, 'solidFill'));
 			if (lineColor) {
 				result.color = lineColor;
+			}
+			const widthEmu = safeInt(ln?.['@_w']);
+			if (widthEmu !== undefined) {
+				result.lineWidth = widthEmu / 12700;
+			}
+			const prstDash = xmlLookup.getChildByLocalName(ln, 'prstDash');
+			if (prstDash?.['@_val']) {
+				result.lineDashStyle = String(prstDash['@_val']);
 			}
 			const labelNode = xmlLookup.getChildByLocalName(node, 'trendlineLbl');
 			if (labelNode) {
@@ -194,43 +202,23 @@ export function parseSeriesErrBars(
 				}
 			}
 			const spPr = xmlLookup.getChildByLocalName(node, 'spPr');
-			const lineColor = colorParser?.parseColor(
-				xmlLookup.getChildByLocalName(xmlLookup.getChildByLocalName(spPr, 'ln'), 'solidFill'),
-			);
+			const ln = xmlLookup.getChildByLocalName(spPr, 'ln');
+			const lineColor = colorParser?.parseColor(xmlLookup.getChildByLocalName(ln, 'solidFill'));
 			if (lineColor) {
 				result.color = lineColor;
+			}
+			const widthEmu = safeInt(ln?.['@_w']);
+			if (widthEmu !== undefined) {
+				result.width = widthEmu / 12700;
+			}
+			const prstDash = xmlLookup.getChildByLocalName(ln, 'prstDash');
+			if (prstDash?.['@_val']) {
+				result.dashStyle = String(prstDash['@_val']);
 			}
 
 			return result;
 		})
 		.filter((e): e is PptxChartErrBars => e !== undefined);
-}
-
-export function parseDataTable(
-	plotArea: XmlObject,
-	xmlLookup: XmlLookupLike,
-): PptxChartDataTable | undefined {
-	const dTable = xmlLookup.getChildByLocalName(plotArea, 'dTable');
-	if (!dTable) {
-		return undefined;
-	}
-
-	const result: PptxChartDataTable = {};
-	const flags = ['showHorzBorder', 'showVertBorder', 'showOutline', 'showKeys'] as const;
-	for (const flag of flags) {
-		const node = xmlLookup.getChildByLocalName(dTable, flag);
-		if (!node) {
-			continue;
-		}
-		const value = node['@_val'];
-		// CT_Boolean defaults val to true when the attribute is omitted.
-		if (value === undefined || value === 'true' || value === '1') {
-			result[flag] = true;
-		} else if (value === 'false' || value === '0') {
-			result[flag] = false;
-		}
-	}
-	return result;
 }
 
 export function parseLineStyle(

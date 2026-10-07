@@ -16,6 +16,19 @@
 		switchSmartArtLayout,
 		updateSmartArtNodeText,
 	} from 'pptx-viewer-core';
+	import {
+		addSiblingAfter,
+		canRemoveTopLevelNode,
+		countTopLevel,
+		demote,
+		promote,
+		reflowSmartArtData,
+		removeEmptyNode,
+		schemaLabel,
+		SMARTART_COLOR_SCHEME_LABEL_KEYS,
+		SMARTART_STYLE_LABEL_KEYS,
+	} from 'pptx-viewer-shared';
+	import { tick } from 'svelte';
 
 	import { useTranslator } from '../../../i18n/context';
 	import type { EditorState } from '../../editor/editor-state.svelte';
@@ -27,6 +40,9 @@
 	let selectedNodeId = $state<string | null>(null);
 	const selectedNode = $derived(data?.nodes.find((node) => node.id === selectedNodeId));
 
+	// `dgm:colorsDef` / `dgm:styleDef` family tokens. Both lists stay explicit so
+	// spelling them out through the shared tables cannot change which variations
+	// the editor offers.
 	const colorSchemes: readonly SmartArtColorScheme[] = [
 		'colorful1',
 		'colorful2',
@@ -34,26 +50,35 @@
 		'monochromatic1',
 		'monochromatic2',
 	];
+	const diagramStyles: readonly SmartArtStyle[] = ['flat', 'moderate', 'intense'];
 
 	function setNodeText(nodeId: string, text: string): void {
 		if (data) {
-			editor.applyElementPatch(el.id, { smartArtData: updateSmartArtNodeText(data, nodeId, text) });
+			applyData(updateSmartArtNodeText(data, nodeId, text));
 		}
 	}
 
 	function setLayout(layout: SmartArtLayoutType): void {
 		if (data && layout !== data.resolvedLayoutType) {
-			editor.applyElementPatch(el.id, { smartArtData: switchSmartArtLayout(data, layout) });
+			applyData(switchSmartArtLayout(data, layout));
 		}
 	}
 
 	function setColorScheme(scheme: SmartArtColorScheme): void {
 		if (data) {
-			editor.applyElementPatch(el.id, { smartArtData: { ...data, colorScheme: scheme } });
+			applyData({ ...data, colorScheme: scheme });
 		}
 	}
+	/**
+	 * Single commit funnel, mirroring React's `applySmartArtData`. Every edit
+	 * here can clear the cached `dsp` drawing (add / remove / promote / demote /
+	 * reorder / style / layout switch all do), so each one is reflowed: without
+	 * it the diagram fell back to the crude family approximation. The reflow is
+	 * a no-op while the cached drawing survives, so it never overrides it.
+	 */
 	function applyData(next: NonNullable<typeof data>): void {
-		editor.applyElementPatch(el.id, { smartArtData: next });
+		const box = { width: el.width, height: el.height };
+		editor.applyElementPatch(el.id, { smartArtData: reflowSmartArtData(next, el.id, box) });
 	}
 	function setDiagramStyle(style: SmartArtStyle): void {
 		if (data) {
@@ -63,6 +88,94 @@
 	function nodeStyle(patch: Parameters<typeof setSmartArtNodeStyle>[2]): void {
 		if (data && selectedNodeId) {
 			applyData(setSmartArtNodeStyle(data, selectedNodeId, patch));
+		}
+	}
+	function nodeColorStyle(patch: Parameters<typeof setSmartArtNodeStyle>[2], color: string): void {
+		nodeStyle(patch);
+		editor.recordRecentColor(color);
+	}
+
+	/** Focus the text input for `nodeId` once the DOM has updated. */
+	async function focusNodeInput(nodeId: string): Promise<void> {
+		await tick();
+		const input = document.querySelector<HTMLInputElement>(
+			`.pptx-svelte-smartart-node[data-node-id="${nodeId}"] input`,
+		);
+		input?.focus();
+	}
+
+	/**
+	 * Text-pane keyboard editing, matching React's SmartArtPropertiesPanel:
+	 * Enter inserts a sibling after the current node, Backspace/Delete on an
+	 * empty node removes it, Tab demotes, Shift+Tab promotes. All four go
+	 * through the shared smartart-node-pane-handlers so the behaviour (and its
+	 * focus-follows-edit affordance) can't drift from React/Vue/Angular.
+	 */
+	function handleNodeKeydown(event: KeyboardEvent, nodeId: string): void {
+		if (!data) {
+			return;
+		}
+		const node = data.nodes.find((n) => n.id === nodeId);
+		// The input commits via `onchange` (blur-triggered), so `data` can be
+		// stale while the user is still typing: the emptiness check reads the
+		// live DOM value directly, and Enter/Tab/Shift+Tab commit it into a
+		// fresh copy of `data` first, since each of those keys fires the
+		// mutation WITHOUT the browser ever blurring the input (a demote/promote
+		// that ran on stale data silently dropped whatever the user had just
+		// typed).
+		const liveValue = (event.currentTarget as HTMLInputElement).value;
+		const isEmpty = !liveValue;
+		// `updateSmartArtNodeText` always returns a NEW object (even when the
+		// text is unchanged), so a plain reference check cannot tell "nothing to
+		// commit" from "committed"; compare against the last-known text instead,
+		// and only fold the edit in when a structural op no-ops (demoting the
+		// very first node has nothing to nest under) so a bare Tab press cannot
+		// still push a no-op history entry.
+		const committed = updateSmartArtNodeText(data, nodeId, liveValue);
+		const textChanged = liveValue !== node?.text;
+
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			const result = addSiblingAfter(committed, nodeId);
+			if (result) {
+				applyData(result.data);
+				if (result.focusNodeId) {
+					void focusNodeInput(result.focusNodeId);
+				}
+			} else if (textChanged) {
+				applyData(committed);
+			}
+		} else if ((event.key === 'Backspace' || event.key === 'Delete') && isEmpty) {
+			const isTop = !node?.parentId;
+			if (isTop && !canRemoveTopLevelNode(data.resolvedLayoutType, countTopLevel(data))) {
+				return;
+			}
+			event.preventDefault();
+			const result = removeEmptyNode(data, nodeId);
+			if (result) {
+				applyData(result.data);
+				if (result.focusNodeId) {
+					void focusNodeInput(result.focusNodeId);
+				}
+			}
+		} else if (event.key === 'Tab' && !event.shiftKey) {
+			event.preventDefault();
+			const next = demote(committed, nodeId);
+			if (next) {
+				applyData(next);
+				void focusNodeInput(nodeId);
+			} else if (textChanged) {
+				applyData(committed);
+			}
+		} else if (event.key === 'Tab' && event.shiftKey) {
+			event.preventDefault();
+			const next = promote(committed, nodeId);
+			if (next) {
+				applyData(next);
+				void focusNodeInput(nodeId);
+			} else if (textChanged) {
+				applyData(committed);
+			}
 		}
 	}
 </script>
@@ -86,21 +199,22 @@
 	<label class="pptx-svelte-smartart-field">
 		<span>{t('pptx.smartart.colorScheme')}</span>
 		<select
+			aria-label={t('pptx.smartart.colorScheme')}
 			data-testid="smartart-color-scheme"
 			value={data.colorScheme ?? 'colorful1'}
 			onchange={(event) => setColorScheme(event.currentTarget.value as SmartArtColorScheme)}
 		>
 			{#each colorSchemes as scheme}
-				<option value={scheme}>{scheme}</option>
+				<option value={scheme}>{schemaLabel(SMARTART_COLOR_SCHEME_LABEL_KEYS, scheme, t)}</option>
 			{/each}
 		</select>
 	</label>
-	<label class="pptx-svelte-smartart-field"><span>Diagram style</span><select value={data.style ?? 'moderate'} onchange={(event) => setDiagramStyle(event.currentTarget.value as SmartArtStyle)}><option value="flat">Flat</option><option value="moderate">Moderate</option><option value="intense">Intense</option></select></label>
+	<label class="pptx-svelte-smartart-field"><span>Diagram style</span><select aria-label="Diagram style" value={data.style ?? 'moderate'} onchange={(event) => setDiagramStyle(event.currentTarget.value as SmartArtStyle)}>{#each diagramStyles as diagramStyle}<option value={diagramStyle}>{schemaLabel(SMARTART_STYLE_LABEL_KEYS, diagramStyle, t)}</option>{/each}</select></label>
 
 	<span class="pptx-svelte-smartart-label">{t('pptx.smartart.textPane')}</span>
 	<div class="pptx-svelte-smartart-nodes">
 		{#each data.nodes as node, index (node.id)}
-			<div class="pptx-svelte-smartart-node" class:active={node.id === selectedNodeId}>
+			<div class="pptx-svelte-smartart-node" class:active={node.id === selectedNodeId} data-node-id={node.id}>
 				<button type="button" aria-label={`Select item ${index + 1}`} onclick={() => (selectedNodeId = node.id)}>{index + 1}</button>
 				<input
 					type="text"
@@ -108,12 +222,13 @@
 					aria-label={`${t('pptx.smartart.item')} ${index + 1}`}
 					data-testid="smartart-node-text"
 					onchange={(event) => setNodeText(node.id, event.currentTarget.value)}
+					onkeydown={(event) => handleNodeKeydown(event, node.id)}
 				/>
 			</div>
 		{/each}
 	</div>
 	<div class="pptx-svelte-smartart-actions"><button type="button" onclick={() => { if (data) applyData(addSmartArtNode(data, 'New item', selectedNodeId ?? undefined)); }}>Add</button><button type="button" disabled={!selectedNodeId || data.nodes.length <= 1} onclick={() => { if (data && selectedNodeId) { applyData(removeSmartArtNode(data, selectedNodeId)); selectedNodeId = null; } }}>Remove</button><button type="button" disabled={!selectedNodeId} onclick={() => { if (data && selectedNodeId) applyData(reorderSmartArtNode(data, selectedNodeId, -1)); }}>Up</button><button type="button" disabled={!selectedNodeId} onclick={() => { if (data && selectedNodeId) applyData(reorderSmartArtNode(data, selectedNodeId, 1)); }}>Down</button><button type="button" disabled={!selectedNodeId} onclick={() => { if (data && selectedNodeId) applyData(promoteSmartArtNode(data, selectedNodeId)); }}>Promote</button><button type="button" disabled={!selectedNodeId} onclick={() => { if (data && selectedNodeId) applyData(demoteSmartArtNode(data, selectedNodeId)); }}>Demote</button></div>
-	{#if selectedNode}<div class="pptx-svelte-smartart-style"><label>Fill<input type="color" value={selectedNode.style?.fillColor ?? '#4472c4'} onchange={(event) => nodeStyle({ fillColor: event.currentTarget.value })} /></label><label>Font<input type="color" value={selectedNode.style?.fontColor ?? '#ffffff'} onchange={(event) => nodeStyle({ fontColor: event.currentTarget.value })} /></label><button type="button" class:active={selectedNode.style?.bold} onclick={() => nodeStyle({ bold: !selectedNode.style?.bold })}>Bold</button><button type="button" class:active={selectedNode.style?.italic} onclick={() => nodeStyle({ italic: !selectedNode.style?.italic })}>Italic</button></div>{/if}
+	{#if selectedNode}<div class="pptx-svelte-smartart-style"><label>Fill<input type="color" value={selectedNode.style?.fillColor ?? '#4472c4'} onchange={(event) => nodeColorStyle({ fillColor: event.currentTarget.value }, event.currentTarget.value)} /></label><label>Font<input type="color" value={selectedNode.style?.fontColor ?? '#ffffff'} onchange={(event) => nodeColorStyle({ fontColor: event.currentTarget.value }, event.currentTarget.value)} /></label><button type="button" class:active={selectedNode.style?.bold} onclick={() => nodeStyle({ bold: !selectedNode.style?.bold })}>Bold</button><button type="button" class:active={selectedNode.style?.italic} onclick={() => nodeStyle({ italic: !selectedNode.style?.italic })}>Italic</button></div>{/if}
 {/if}
 
 <style>

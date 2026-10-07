@@ -35,11 +35,23 @@ export function makeSlideId(idGenerator?: () => string): string {
  * @param slideNumber - 1-based slide number for the new slide.
  * @param idGenerator - Optional id override forwarded to {@link makeSlideId}.
  */
-export function createBlankSlide(slideNumber: number, idGenerator?: () => string): PptxSlide {
+export function createBlankSlide(
+	slideNumber: number,
+	idGenerator?: () => string,
+	reference?: PptxSlide,
+): PptxSlide {
 	return {
 		id: makeSlideId(idGenerator),
 		rId: '',
 		slideNumber,
 		elements: [],
+		// ponytail: a new slide uses its neighbour's layout and resolved background.
+		layoutPath: reference?.layoutPath,
+		showMasterShapes: reference?.showMasterShapes,
+		backgroundColor: reference?.backgroundColor,
+		backgroundGradient: reference?.backgroundGradient,
+		backgroundImage: reference?.backgroundImage,
+		backgroundImageProperties: reference?.backgroundImageProperties,
+		backgroundPattern: reference?.backgroundPattern,
 	};
 }

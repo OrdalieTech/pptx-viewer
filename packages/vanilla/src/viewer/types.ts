@@ -8,6 +8,7 @@ import type {
 	CollaborationTransport,
 	ConnectionStatus,
 	PowerPointViewerAPI,
+	RulerUnit,
 	ThemeCatalogEntry,
 	ToolbarActionId,
 	ViewerFontSource,
@@ -173,6 +174,12 @@ export interface PptxViewerOptions extends PptxViewerCallbacks {
 	 */
 	registry?: ElementRendererRegistry;
 	/**
+	 * Unit system for the View > Rulers tick labels (default `'inches'`, as
+	 * PowerPoint does). Mirrors React's `rulerUnit` prop; the tick generator is
+	 * shared with every other binding, so `'centimetres'` labels identically.
+	 */
+	rulerUnit?: RulerUnit;
+	/**
 	 * Opt-in WebGL SmartArt renderer (default `false`): renders `smartArt`
 	 * elements as an extruded Three.js scene instead of the flat SVG layout.
 	 * `three` is an optional peer dependency, lazily imported only when this is
@@ -182,16 +189,104 @@ export interface PptxViewerOptions extends PptxViewerCallbacks {
 	 */
 	smartArt3D?: boolean;
 	/**
-	 * Enable debounced autosave (default `false`): after each local edit the deck
-	 * is re-serialized and stashed in the shared IndexedDB recovery store as a
-	 * crash-safety net (it never replaces the user's real Save). The toolbar shows
-	 * a small status pill; a snapshot from a prior session is offered through
+	 * Opt in to the interactive Three.js surface-chart renderer (default
+	 * `false`). When `true`, `surface`/`surface3D` charts render as a
+	 * camera-orbitable WebGL mesh (drag to rotate, scroll to zoom) instead of
+	 * the static SVG isometric projection. Chart marks are not
+	 * selectable/draggable in this mode. `three` is an optional peer
+	 * dependency, lazily imported only when this is `true`; when it is
+	 * unavailable or the chart has no plottable grid, the SVG renderer is used
+	 * instead. Set once at construction (no runtime setter, mirroring the
+	 * Vue/React/Angular/Svelte bindings).
+	 */
+	surfaceChart3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js bar3D-chart renderer (default
+	 * `false`). When `true`, `bar3D` charts render as camera-orbitable real
+	 * box meshes (drag to rotate, scroll to zoom) instead of the flat SVG
+	 * oblique-projection illusion. Chart marks are not selectable/draggable in
+	 * this mode. `three` is an optional peer dependency, lazily imported only
+	 * when this is `true`; when it is unavailable, the chart has no plottable
+	 * grid, or it is a horizontal 3-D Bar, the SVG renderer is used instead.
+	 * Set once at construction (no runtime setter, mirroring the
+	 * Vue/React/Angular/Svelte bindings).
+	 */
+	barChart3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js line3D-chart renderer (default
+	 * `false`). When `true`, `line3D` charts render as camera-orbitable real
+	 * tube-path meshes, one per depth ("series") plane (drag to rotate, scroll
+	 * to zoom), instead of the flat SVG oblique-projection illusion. Chart
+	 * marks are not selectable/draggable in this mode. `three` is an optional
+	 * peer dependency, lazily imported only when this is `true`; when it is
+	 * unavailable or the chart has no plottable grid, the SVG renderer is used
+	 * instead. Set once at construction (no runtime setter, mirroring the
+	 * Vue/React/Angular/Svelte bindings).
+	 */
+	lineChart3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js area3D-chart renderer (default
+	 * `false`). When `true`, `area3D` charts render as camera-orbitable real
+	 * tube-path meshes plus a filled ribbon mesh per series, one per depth
+	 * ("series") plane (drag to rotate, scroll to zoom), instead of the flat
+	 * SVG oblique-projection illusion. Chart marks are not selectable/draggable
+	 * in this mode. `three` is an optional peer dependency, lazily imported
+	 * only when this is `true`; when it is unavailable or the chart has no
+	 * plottable grid, the SVG renderer is used instead. Set once at
+	 * construction (no runtime setter, mirroring the Vue/React/Angular/Svelte
+	 * bindings).
+	 */
+	areaChart3D?: boolean;
+	/**
+	 * Opt in to the interactive Three.js pie3D-chart renderer (default
+	 * `false`). When `true`, `pie3D` charts render as camera-orbitable real
+	 * wedge meshes (drag to rotate, scroll to zoom) instead of the flat SVG
+	 * oblique-projection illusion. Chart marks are not selectable/draggable in
+	 * this mode. `three` is an optional peer dependency, lazily imported only
+	 * when this is `true`; when it is unavailable or the chart has no
+	 * plottable series, the SVG renderer is used instead. Set once at
+	 * construction (no runtime setter, mirroring the
+	 * Vue/React/Angular/Svelte bindings).
+	 */
+	pieChart3D?: boolean;
+	/**
+	 * Whether this application PERMITS recovery autosave (`@default true`).
+	 *
+	 * This is a policy ceiling, not the user's setting: the title-bar AutoSave
+	 * switch (and File > Options > Save > AutoSave) is the preference expressed
+	 * inside it, and it defaults to on.
+	 *
+	 *  - `false` turns recovery autosave off AND renders the switch inert, so a
+	 *    user cannot enable what the application forbade.
+	 *  - `true`, or omitting it, permits autosave and lets the user decide.
+	 *
+	 * When active, each local edit re-serializes the deck into the shared
+	 * IndexedDB recovery store as a crash-safety net (it never replaces the
+	 * user's real Save, and never clears the unsaved-changes flag). The toolbar
+	 * shows a small status pill, and a snapshot left by a previous session
+	 * raises the built-in recovery prompt as well as
 	 * {@link PptxViewerCallbacks.onAutosaveRecovery}.
+	 *
+	 * Autosave additionally requires an editable viewer and an
+	 * {@link PptxViewerOptions.autosaveFilePath} key, since there is otherwise
+	 * nothing to write or nowhere to write it.
+	 *
+	 * @default true
 	 */
 	autosave?: boolean;
 	/** Fired when the title-bar AutoSave control enables or disables recovery autosave. */
 	onToggleAutosave?: (enabled: boolean) => void;
-	/** Debounce window (ms) between an edit and the persisted snapshot (default 2000). */
+	/**
+	 * Explicit cadence (ms) between the first unsaved edit and the persisted
+	 * snapshot. Like {@link PptxViewerOptions.autosave} this is host policy, so
+	 * it OUTRANKS the user's File > Options > Save > "Save AutoRecover
+	 * information every N minutes". Omit it to leave the cadence to the user,
+	 * which is the default: that Options value decides, falling back to the
+	 * shared two-minute AutoRecover default.
+	 *
+	 * The debounce also has a ceiling: continuous editing still produces a
+	 * snapshot once per interval instead of deferring one forever.
+	 */
 	autosaveIntervalMs?: number;
 	/** IndexedDB recovery key for autosave (default `'presentation.pptx'`). */
 	autosaveFilePath?: string;
@@ -271,8 +366,6 @@ export interface PptxViewerInstance extends PowerPointViewerAPI {
 	save(format?: PptxSaveFormat): Promise<Uint8Array>;
 	/** Save and download a presentation in a supported OpenXML format. */
 	downloadAs(format: PptxSaveFormat, fileName?: string): Promise<void>;
-	/** Bundle the current presentation and usage notes in a shareable ZIP. */
-	packageForSharing(fileName?: string): Promise<void>;
 	/** `save()` + trigger a browser download (default `presentation.pptx`). */
 	downloadPptx(fileName?: string): Promise<void>;
 	/** Delete the selected element (no-op without a selection). */
@@ -312,6 +405,12 @@ export interface PptxViewerInstance extends PowerPointViewerAPI {
 	 * `openPrintWindow` that writes into an iframe you own).
 	 */
 	print(options?: PrintOptions): Promise<boolean>;
+	/**
+	 * Serialize the deck to `pptx-viewer-json` and trigger a browser download
+	 * (the File > Export > "Export as JSON" backstage card). Synchronous: the
+	 * JSON is built from the live viewer state, no rasterisation involved.
+	 */
+	exportJson(): void;
 	/** The element-renderer registry in effect (extension point). */
 	getRegistry(): ElementRendererRegistry;
 	/**

@@ -18,8 +18,10 @@
 	 * (so the toolbar's comments/inspector toggles stay in sync); standalone
 	 * mounts fall back to local state.
 	 */
+	import { getContext } from 'svelte';
 	import { hasShapeProperties, hasTextProperties, isImageLikeElement } from 'pptx-viewer-core';
 	import type { PptxHandler, PptxTheme } from 'pptx-viewer-core';
+	import { shouldShowAccessibilitySection } from 'pptx-viewer-shared';
 	import type { CanvasSize } from 'pptx-viewer-shared';
 
 	import { useTranslator } from '../../../i18n/context';
@@ -27,16 +29,20 @@
 	import type { ChromeUiState, InspectorTabId } from '../../state/chrome-ui.svelte';
 	import { useInspectorDeck } from '../../state/inspector-deck';
 	import ReviewCommentsPanel from '../ribbon/review/ReviewCommentsPanel.svelte';
+	import ActionSettingsPanel from './ActionSettingsPanel.svelte';
+	import AltTextSection from './AltTextSection.svelte';
 	import AnimationPanel from './AnimationPanel.svelte';
-	import FillStrokeSection from './FillStrokeSection.svelte';
 	import ChartSection from './ChartSection.svelte';
 	import ElementsListSection from './ElementsListSection.svelte';
+	import GroupInfoSection from './GroupInfoSection.svelte';
 	import ImageSection from './ImageSection.svelte';
+	import OlePropertiesSection from './OlePropertiesSection.svelte';
 	import PositionSection from './PositionSection.svelte';
 	import PresentationPropertiesPanel from './PresentationPropertiesPanel.svelte';
-	import ShapeSection from './ShapeSection.svelte';
+	import ShapeInspectorSections from './ShapeInspectorSections.svelte';
 	import SmartArtSection from './SmartArtSection.svelte';
 	import MediaSection from './MediaSection.svelte';
+	import TableDataGrid from './TableDataGrid.svelte';
 	import TableSection from './TableSection.svelte';
 	import TextSection from './TextSection.svelte';
 
@@ -48,7 +54,9 @@
 
 	// Standalone fallbacks when no ChromeUiState is provided (tests, hosts).
 	let localTab = $state<InspectorTabId>('properties');
-	const activeTab = $derived(ui ? ui.inspectorTab : localTab);
+	const hideProperties = getContext<(() => boolean) | undefined>('pptx-hide-inspector-properties');
+	const requestedTab = $derived(ui ? ui.inspectorTab : localTab);
+	const activeTab = $derived(hideProperties?.() && requestedTab === 'properties' ? 'elements' : requestedTab);
 	function setTab(tab: InspectorTabId): void {
 		if (ui) {
 			ui.setInspectorTab(tab);
@@ -57,10 +65,10 @@
 		}
 	}
 
-	// React's INSPECTOR_TABS labels 'Elements' literally (no dictionary key).
+	// Same dictionary key the vanilla inspector uses for its Elements tab.
 	const tabs = $derived<Array<{ id: InspectorTabId; label: string }>>([
-		{ id: 'elements', label: 'Elements' },
-		{ id: 'properties', label: t('pptx.inspector.properties') },
+		{ id: 'elements', label: t('pptx.documentProperties.statistics.elements') },
+		...(hideProperties?.() ? [] : [{ id: 'properties' as const, label: t('pptx.inspector.properties') }]),
 		{ id: 'comments', label: t('pptx.toolbar.comments') },
 	]);
 
@@ -73,6 +81,17 @@
 	const isSmartArt = $derived(el?.type === 'smartArt');
 	const isChart = $derived(el?.type === 'chart');
 	const isMedia = $derived(el?.type === 'media');
+	const isGroup = $derived(el?.type === 'group');
+	const isOle = $derived(el?.type === 'ole');
+	// React gates Quick Styles on shape/text (FillStrokeProperties): the presets
+	// are shape-fill recipes and mean nothing on a picture or a table.
+	const canQuickStyle = $derived(el?.type === 'shape' || el?.type === 'text');
+	// A picture's own alt text/title editor is mounted below under `isImage`;
+	// shared's `shouldShowAccessibilitySection` decides everything else, a
+	// plain shape, text box, connector, and every graphic-frame kind
+	// (table/chart/smartArt/media/ole), so this stays in sync with the other
+	// four bindings without a hard-coded type list here.
+	const showAccessibilitySection = $derived(el !== undefined && shouldShowAccessibilitySection(el));
 </script>
 
 <aside
@@ -106,12 +125,22 @@
 					<PositionSection {editor} {el} />
 				</div>
 
-				{#if canShape}
+				{#if isGroup}
 					<div class="pptx-svelte-inspector-section">
-						<h4>{t('pptx.inspector.fillStroke')}</h4>
-						<ShapeSection {editor} {el} />
-						<FillStrokeSection {editor} {el} />
+						<h4>{t('pptx.elementType.group')}</h4>
+						<GroupInfoSection {el} />
 					</div>
+				{/if}
+
+				{#if isOle}
+					<div class="pptx-svelte-inspector-section">
+						<h4>{t('pptx.ole.title')}</h4>
+						<OlePropertiesSection {editor} {el} />
+					</div>
+				{/if}
+
+				{#if canShape}
+					<ShapeInspectorSections {editor} {el} {canQuickStyle} />
 				{/if}
 
 				{#if canText}
@@ -125,13 +154,33 @@
 					<div class="pptx-svelte-inspector-section">
 						<h4>{t('pptx.inspector.image')}</h4>
 						<ImageSection {editor} {el} />
+						<AltTextSection {editor} {el} />
+					</div>
+				{/if}
+
+				{#if showAccessibilitySection}
+					<div class="pptx-svelte-inspector-section">
+						<h4>{t('pptx.accessibility.heading')}</h4>
+						<AltTextSection {editor} {el} />
 					</div>
 				{/if}
 
 				{#if isTable}
+					<!-- Cell text first (React's ElementInspectorBody renders the data
+					     grid before the table properties panel), then the structure and
+					     styling controls. -->
+					<div class="pptx-svelte-inspector-section">
+						<TableDataGrid {editor} {el} />
+					</div>
 					<div class="pptx-svelte-inspector-section">
 						<h4>{t('pptx.inspector.table')}</h4>
-						<TableSection {editor} {el} />
+						<TableSection
+							{editor}
+							{el}
+							tableStyleMap={deck?.tableStyleMap}
+							onTableStyleMapChange={deck?.updateTableStyleMap}
+							onDeleteTableStyle={deck?.deleteTableStyle}
+						/>
 					</div>
 				{/if}
 
@@ -141,8 +190,15 @@
 						<SmartArtSection {editor} {el} />
 					</div>
 				{/if}
-				{#if isChart}<div class="pptx-svelte-inspector-section"><h4>Chart</h4><ChartSection {editor} /></div>{/if}
-				{#if isMedia}<div class="pptx-svelte-inspector-section"><h4>Media</h4><MediaSection {editor} {mediaDataUrls} /></div>{/if}
+				{#if isChart}<div class="pptx-svelte-inspector-section"><h4>{t('pptx.inspector.chart')}</h4><ChartSection {editor} /></div>{/if}
+				{#if isMedia}<div class="pptx-svelte-inspector-section"><h4>{t('pptx.inspector.media')}</h4><MediaSection {editor} {mediaDataUrls} /></div>{/if}
+
+				<!-- Click / hover actions apply to every element type (React's
+				     ElementInspectorBody renders ActionSettingsPanel unconditionally). -->
+				<div class="pptx-svelte-inspector-section">
+					<h4>{t('pptx.action.title')}</h4>
+					<ActionSettingsPanel {editor} {el} />
+				</div>
 			{:else}
 				<PresentationPropertiesPanel {editor} {deck} {canvasSize} {handler} {presentationTheme} {onthemechange} />
 				{#if !activeSlide}
@@ -165,7 +221,7 @@
 		border-left: 1px solid var(--pptx-border, #33334d);
 		background: var(--pptx-card, #1e1e2e);
 		color: var(--pptx-card-foreground, #e2e8f0);
-		font-family: system-ui, sans-serif;
+		font-family: inherit;
 		font-size: 12px;
 		overflow: hidden;
 		min-height: 0;

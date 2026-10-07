@@ -1,4 +1,8 @@
 import type { XmlObject, TextStyle } from '../../types';
+import {
+	positiveFixedAngleAttribute,
+	shadowOffsetToDistanceAndDirection,
+} from '../../utils/positive-fixed-angle';
 
 const EMU_PER_PX = 9525;
 
@@ -104,20 +108,14 @@ function buildShadowColorNode(hex: string, opacity: number | undefined): XmlObje
 	};
 }
 
-function distAndDir(ox: number, oy: number): { dist: number; dir: number } {
-	const dist = Math.sqrt(ox * ox + oy * oy);
-	const dir = (Math.atan2(oy, ox) * 180) / Math.PI;
-	return { dist, dir };
-}
-
 function buildOuterShadowNode(style: TextStyle): XmlObject {
 	const ox = style.textShadowOffsetX ?? 0;
 	const oy = style.textShadowOffsetY ?? 0;
-	const { dist, dir } = distAndDir(ox, oy);
+	const { distance, directionDegrees } = shadowOffsetToDistanceAndDirection(ox, oy);
 	return {
 		'@_blurRad': String(Math.round((style.textShadowBlur ?? 4) * EMU_PER_PX)),
-		'@_dist': String(Math.round(dist * EMU_PER_PX)),
-		'@_dir': String(Math.round(dir * 60000)),
+		'@_dist': String(Math.round(distance * EMU_PER_PX)),
+		'@_dir': positiveFixedAngleAttribute(directionDegrees),
 		'a:srgbClr': buildShadowColorNode(style.textShadowColor || '#000000', style.textShadowOpacity),
 	};
 }
@@ -125,11 +123,11 @@ function buildOuterShadowNode(style: TextStyle): XmlObject {
 function buildInnerShadowNode(style: TextStyle): XmlObject {
 	const ox = style.textInnerShadowOffsetX ?? 0;
 	const oy = style.textInnerShadowOffsetY ?? 0;
-	const { dist, dir } = distAndDir(ox, oy);
+	const { distance, directionDegrees } = shadowOffsetToDistanceAndDirection(ox, oy);
 	return {
 		'@_blurRad': String(Math.round((style.textInnerShadowBlur ?? 3) * EMU_PER_PX)),
-		'@_dist': String(Math.round(dist * EMU_PER_PX)),
-		'@_dir': String(Math.round(dir * 60000)),
+		'@_dist': String(Math.round(distance * EMU_PER_PX)),
+		'@_dir': positiveFixedAngleAttribute(directionDegrees),
 		'a:srgbClr': buildShadowColorNode(
 			style.textInnerShadowColor || '#000000',
 			style.textInnerShadowOpacity,
@@ -145,7 +143,7 @@ function buildPresetShadowNode(style: TextStyle): XmlObject {
 		node['@_dist'] = String(Math.round(style.textPresetShadowDistance * EMU_PER_PX));
 	}
 	if (typeof style.textPresetShadowDirection === 'number') {
-		node['@_dir'] = String(Math.round(style.textPresetShadowDirection * 60000));
+		node['@_dir'] = positiveFixedAngleAttribute(style.textPresetShadowDirection);
 	}
 	if (style.textPresetShadowColor) {
 		node['a:srgbClr'] = buildShadowColorNode(
@@ -176,6 +174,32 @@ function buildReflectionNode(style: TextStyle): XmlObject {
 	}
 	if (typeof style.textReflectionOffset === 'number') {
 		refl['@_dist'] = String(Math.round(style.textReflectionOffset * EMU_PER_PX));
+	}
+	// The five attributes the shape-level reflection writer
+	// (`buildReflectionXml`) already emits: scale, skew, independent rotation,
+	// fade direction and anchor. Same units/conventions as `ShapeStyle`'s
+	// equivalents so a value survives load -> save -> reload identically for
+	// both a shape and a text run.
+	if (typeof style.textReflectionScaleX === 'number') {
+		refl['@_sx'] = String(Math.round(style.textReflectionScaleX));
+	}
+	if (typeof style.textReflectionScaleY === 'number') {
+		refl['@_sy'] = String(Math.round(style.textReflectionScaleY));
+	}
+	if (typeof style.textReflectionSkewX === 'number') {
+		refl['@_kx'] = String(Math.round(style.textReflectionSkewX));
+	}
+	if (typeof style.textReflectionSkewY === 'number') {
+		refl['@_ky'] = String(Math.round(style.textReflectionSkewY));
+	}
+	if (typeof style.textReflectionRotation === 'number') {
+		refl['@_rot'] = String(Math.round(style.textReflectionRotation * 60000));
+	}
+	if (typeof style.textReflectionFadeDirection === 'number') {
+		refl['@_fadeDir'] = positiveFixedAngleAttribute(style.textReflectionFadeDirection);
+	}
+	if (style.textReflectionAlignment) {
+		refl['@_algn'] = style.textReflectionAlignment;
 	}
 	return refl;
 }

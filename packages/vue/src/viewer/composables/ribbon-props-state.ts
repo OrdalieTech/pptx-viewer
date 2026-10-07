@@ -1,3 +1,5 @@
+import { canInteractWithElement, templateSchemeFromTheme } from 'pptx-viewer-shared';
+
 import type { UseRibbonPropsInput } from './ribbon-props-types';
 
 /**
@@ -25,6 +27,14 @@ export function buildRibbonPropsState(input: UseRibbonPropsInput) {
 		redoLabel: undefined,
 		findReplaceOpen: input.findOpen.value,
 		selectedElement: input.selectedElements.value[0] ?? null,
+		selectedCount: input.selectedElements.value.length,
+		// G10: drives the ribbon's Group button (and, via the shared context-menu
+		// builder, the right-click menu's Group/Ungroup entries); mirrors the
+		// `a:spLocks/@noGrp` guard `useAlignGroup`'s `onGroup`/`onUngroup` already
+		// enforce on the commands themselves.
+		selectionGroupable: input.selectedElements.value.every((el) =>
+			canInteractWithElement(el, 'group'),
+		),
 		tableEditorState: input.activeTableSelection.value,
 		editTemplateMode: input.editTemplateMode.value,
 		newShapeType: input.newShapeType.value,
@@ -35,10 +45,19 @@ export function buildRibbonPropsState(input: UseRibbonPropsInput) {
 		spellCheckEnabled: input.spellCheckEnabled.value,
 		showGrid: input.showGrid.value,
 		showRulers: input.showRulers.value,
+		showGuides: input.showGuides.value,
 		snapToGrid: input.snapToGrid.value,
 		snapToShape: input.snapToShape.value,
 		isOverflowMenuOpen: input.overflowOpen.value,
 		layoutOptions: input.layoutOptions.value,
+		currentLayoutPath: input.activeSlide.value?.layoutPath,
+		themeFonts: {
+			heading: input.theme.value?.fontScheme?.majorFont?.latin,
+			body: input.theme.value?.fontScheme?.minorFont?.latin,
+		},
+		embeddedFontFamilies: input.embeddedFontFamilies.value,
+		customFontFamilies: input.customFontFamilies.value,
+		templateScheme: templateSchemeFromTheme(input.theme.value?.colorScheme),
 		customShows: input.customShows.value,
 		activeCustomShowId: input.activeCustomShowId.value,
 		isCurrentSlideInActiveShow: input.isCurrentSlideInActiveShow.value,
@@ -53,6 +72,8 @@ export function buildRibbonPropsState(input: UseRibbonPropsInput) {
 		eyedropperActive: input.eyedropperActive.value,
 		showSubtitles: input.showSubtitles.value,
 		activeSlide: input.activeSlide.value,
+		activeSlideHidden: Boolean(input.activeSlide.value?.hidden),
+		presentationProperties: input.presentationProperties.value,
 		isCollaborating: input.collab.status.value === 'connected',
 		collaboratorCount: input.collab.connectedCount.value,
 	};

@@ -1,8 +1,17 @@
 <script setup lang="ts">
 import type { PptxSlide, PptxSlideTransition } from 'pptx-viewer-core';
+import {
+	applySlideTransitionSound,
+	buildMorphScopedCss,
+	buildMorphTransitionPlan,
+	MORPH_CROSSFADE_GROUP_STYLE,
+	MORPH_CROSSFADE_HALF_BLEND_MODE,
+	morphOptionToMode,
+} from 'pptx-viewer-shared';
 import type { CSSProperties } from 'vue';
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
+import { playAnimationSound, stopAnimationSound } from '../composables/animation-sound';
 import {
 	resolveSlideTransition,
 	resolveTransitionDurationMs,
@@ -60,18 +69,150 @@ const animations = computed(() => resolveSlideTransition(props.transition));
 /** Effective duration (ms); `0` for instant (none/cut). */
 const durationMs = computed(() => resolveTransitionDurationMs(props.transition));
 
+// ---------------------------------------------------------------------------
+// Morph
+// ---------------------------------------------------------------------------
+
+/**
+ * Morph is not a whole-slide wipe: individual shapes travel from where they sat
+ * on the outgoing slide to where they sit on the incoming one. So when the
+ * transition is `morph` the two stacked layers are re-purposed - the incoming
+ * layer plays per-element keyframes (scoped by `data-pptx-morph-incoming`), and
+ * the outgoing layer paints a moving copy of the outgoing slide, each shape
+ * gliding onto its counterpart (dissolving into it when its appearance changed)
+ * or fading out in place when it has none.
+ */
+const morphPlan = computed(() =>
+	props.transition?.type === 'morph'
+		? buildMorphTransitionPlan(
+				props.outgoingSlide,
+				props.incomingSlide,
+				durationMs.value,
+				morphOptionToMode(props.transition.morphOption),
+			)
+		: undefined,
+);
+
+/** The outgoing slide's shapes, rendered as the morph's departing layer. */
+const morphOutgoingSlide = computed<PptxSlide | undefined>(() => {
+	const plan = morphPlan.value;
+	if (!plan || !props.outgoingSlide) {
+		return undefined;
+	}
+	return { ...props.outgoingSlide, elements: plan.outgoingElements };
+});
+
+/**
+ * The arriving shapes a ghost above them would otherwise hide for the whole
+ * morph, painted in their own layer over the departing one (issue #146). Their
+ * copy on the incoming layer is held invisible by the plan, so the two never
+ * composite with each other.
+ */
+const morphLiftedSlide = computed<PptxSlide | undefined>(() => {
+	const plan = morphPlan.value;
+	if (!plan || !props.incomingSlide || plan.overlayIncomingElements.length === 0) {
+		return undefined;
+	}
+	return { ...props.incomingSlide, elements: plan.overlayIncomingElements };
+});
+
+/** Both halves of a grouped pair blend additively, and only with each other. */
+const crossfadeHalfStyle: CSSProperties = { mixBlendMode: MORPH_CROSSFADE_HALF_BLEND_MODE };
+
+/**
+ * The pairs whose two halves the overlay paints itself, as one isolated group
+ * each so they can be SUMMED rather than stacked.
+ *
+ * Two source-over fades leave the ink the halves share dipped toward the
+ * backdrop (0.75 of full strength at the midpoint), which bites chunks out of
+ * glyphs crossing during a text dissolve; PowerPoint's own render holds the two
+ * coefficients at a sum of 1.0 throughout (issue #161).
+ */
+const morphCrossfadeGroups = computed(() => {
+	const plan = morphPlan.value;
+	if (!plan || !props.outgoingSlide || !props.incomingSlide) {
+		return [];
+	}
+	const outgoing = props.outgoingSlide;
+	const incoming = props.incomingSlide;
+	return plan.crossfadeGroups.map((group, index) => ({
+		key: group.incoming.id,
+		// `isolation` makes the group a stacking context, so it needs its own
+		// z-index to stay above the ghosts its halves used to sit among.
+		style: { ...MORPH_CROSSFADE_GROUP_STYLE, zIndex: 4 + index } as CSSProperties,
+		// The dissolve rides these WRAPPERS, not the elements: a pair dissolving
+		// in place never moves, and an animation on the small element box gives it
+		// a compositing layer whose raster snaps to whole device pixels, painting
+		// the wording a fraction of a pixel off the live stage (issue #161).
+		outgoingStyle: { ...crossfadeHalfStyle, animation: group.outgoingAnimation } as CSSProperties,
+		incomingStyle: { ...crossfadeHalfStyle, animation: group.incomingAnimation } as CSSProperties,
+		outgoingSlide: { ...outgoing, elements: [group.outgoing] },
+		incomingSlide: { ...incoming, elements: [group.incoming] },
+	}));
+});
+
+const morphCss = computed(() => {
+	const plan = morphPlan.value;
+	if (!plan) {
+		return '';
+	}
+	return [
+		buildMorphScopedCss(plan, 'data-pptx-morph-incoming', 'incoming'),
+		buildMorphScopedCss(plan, 'data-pptx-morph-outgoing', 'outgoing'),
+		buildMorphScopedCss(plan, 'data-pptx-morph-lifted', 'lifted'),
+	].join('\n');
+});
+
 const outgoingZIndex = computed(() => (animations.value.outgoingOnTop ? 2 : 1));
 const incomingZIndex = computed(() => (animations.value.outgoingOnTop ? 1 : 2));
 
 const outgoingLayerStyle = computed<CSSProperties>(() => ({
-	zIndex: outgoingZIndex.value,
-	animation: animations.value.outgoing !== 'none' ? animations.value.outgoing : undefined,
+	zIndex: morphPlan.value ? 2 : outgoingZIndex.value,
+	// Morph animates each shape individually; a layer-wide animation on top of
+	// that would drag the whole slide and cancel the effect.
+	animation: morphPlan.value
+		? undefined
+		: animations.value.outgoing !== 'none'
+			? animations.value.outgoing
+			: undefined,
 }));
 
+const liftedLayerStyle = computed<CSSProperties>(() => ({ zIndex: 3 }));
+
 const incomingLayerStyle = computed<CSSProperties>(() => ({
-	zIndex: incomingZIndex.value,
-	animation: animations.value.incoming !== 'none' ? animations.value.incoming : undefined,
+	zIndex: morphPlan.value ? 1 : incomingZIndex.value,
+	animation: morphPlan.value
+		? undefined
+		: animations.value.incoming !== 'none'
+			? animations.value.incoming
+			: undefined,
 }));
+
+// ---------------------------------------------------------------------------
+// Sound (`p:sndAc/p:stSnd`/`p:endSnd`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Play or stop this transition's sound action the instant it starts.
+ *
+ * `transition.soundPath` is a raw in-archive path; `mediaDataUrls` is the
+ * same Blob-URL cache the load pipeline pre-populates for it (via
+ * `collectAnimationSoundPaths`, extended to also collect a slide transition's
+ * own sound alongside per-effect animation sounds). Reuses the per-effect
+ * sound singleton (`animation-sound.ts`) so a transition sound and an
+ * animation sound cannot talk over each other, matching PowerPoint's "one
+ * sound plays at a time" behaviour.
+ */
+watch(
+	() => props.transition,
+	(transition) => {
+		applySlideTransitionSound(transition, (soundPath) => props.mediaDataUrls.get(soundPath), {
+			play: playAnimationSound,
+			stop: stopAnimationSound,
+		});
+	},
+	{ immediate: true },
+);
 
 // ---------------------------------------------------------------------------
 // Completion timer
@@ -96,6 +237,10 @@ onMounted(() => {
 	}, wait);
 });
 
+// NOT stopped here: a "Loop Until Next Sound" transition sound must keep
+// playing across the (much longer) static period between this overlay
+// tearing down and the NEXT transition's own sound action, exactly as
+// PowerPoint does. `PresentationMode.vue` stops it on leaving the show.
 onBeforeUnmount(clearTimer);
 </script>
 
@@ -103,18 +248,26 @@ onBeforeUnmount(clearTimer);
 	<div class="pptx-vue-transition-overlay" data-pptx-transition-overlay>
 		<!-- Inject the transition @keyframes once for this overlay. -->
 		<component :is="'style'">{{ SLIDE_TRANSITION_KEYFRAMES_CSS }}</component>
+		<component :is="'style'" v-if="morphPlan">{{ morphCss }}</component>
 
-		<!-- Outgoing (old) slide snapshot. -->
+		<!-- Outgoing (old) slide snapshot. During a morph this carries only the
+		     shapes with no incoming counterpart, so the ones that persist stay
+		     visible on the incoming layer while they travel - and it must stay
+		     BACKGROUND-FREE, or the departing layer's opaque slide fill covers the
+		     morph underneath it for the whole transition. -->
 		<div
 			class="pptx-vue-transition-layer"
 			data-pptx-transition-layer="outgoing"
+			:data-pptx-morph-outgoing="morphPlan ? 'true' : undefined"
 			:style="outgoingLayerStyle"
 		>
 			<SlideStage
-				:slide="outgoingSlide"
+				:slide="morphPlan ? morphOutgoingSlide : outgoingSlide"
 				:canvas-size="canvasSize"
 				:media-data-urls="mediaDataUrls"
 				:scale="scale"
+				:preserve-element-ids="Boolean(morphPlan)"
+				:transparent-background="Boolean(morphPlan)"
 			/>
 		</div>
 
@@ -122,6 +275,7 @@ onBeforeUnmount(clearTimer);
 		<div
 			class="pptx-vue-transition-layer"
 			data-pptx-transition-layer="incoming"
+			:data-pptx-morph-incoming="morphPlan ? 'true' : undefined"
 			:style="incomingLayerStyle"
 		>
 			<SlideStage
@@ -129,7 +283,68 @@ onBeforeUnmount(clearTimer);
 				:canvas-size="canvasSize"
 				:media-data-urls="mediaDataUrls"
 				:scale="scale"
+				:preserve-element-ids="Boolean(morphPlan)"
 			/>
+		</div>
+
+		<!-- The arriving shapes that dissolve in ABOVE a departing one. They live
+		     on the incoming slide, so the layer below draws them under the
+		     departing layer, where nobody would see them. -->
+		<div
+			v-if="morphLiftedSlide"
+			class="pptx-vue-transition-layer"
+			data-pptx-transition-layer="lifted"
+			data-pptx-morph-lifted="true"
+			:style="liftedLayerStyle"
+		>
+			<SlideStage
+				:slide="morphLiftedSlide"
+				:canvas-size="canvasSize"
+				:media-data-urls="mediaDataUrls"
+				:scale="scale"
+				preserve-element-ids
+				transparent-background
+			/>
+		</div>
+
+		<!-- A pair dissolving in place, painted as ONE isolated group whose two
+		     halves sum instead of stacking (issue #161). -->
+		<div
+			v-for="group in morphCrossfadeGroups"
+			:key="group.key"
+			:data-pptx-morph-crossfade="group.key"
+			:style="group.style"
+		>
+			<div
+				class="pptx-vue-transition-layer"
+				data-pptx-transition-layer="outgoing"
+				data-pptx-morph-outgoing="true"
+				:style="group.outgoingStyle"
+			>
+				<SlideStage
+					:slide="group.outgoingSlide"
+					:canvas-size="canvasSize"
+					:media-data-urls="mediaDataUrls"
+					:scale="scale"
+					preserve-element-ids
+					transparent-background
+				/>
+			</div>
+			<div
+				class="pptx-vue-transition-layer"
+				data-pptx-transition-layer="lifted"
+				data-pptx-morph-lifted="true"
+				:style="group.incomingStyle"
+			>
+				<SlideStage
+					:slide="group.incomingSlide"
+					:canvas-size="canvasSize"
+					:media-data-urls="mediaDataUrls"
+					:scale="scale"
+					preserve-element-ids
+					transparent-background
+				/>
+			</div>
 		</div>
 	</div>
 </template>
@@ -142,10 +357,22 @@ onBeforeUnmount(clearTimer);
 	pointer-events: none;
 }
 
+/*
+ * The layer must FILL the overlay, not shrink-wrap its child.
+ *
+ * `SlideStage` scales with `transform`, which never changes its laid-out box, so
+ * an auto-sized absolute layer measures the deck's NATIVE size (e.g. 1280x720)
+ * while the stage paints at `canvasSize * scale`. Combined with `overflow:
+ * hidden` that cropped every transition to the top-left native-size corner of
+ * the show whenever the display was bigger than the deck: on a 1920x1080 screen
+ * a 1280x720 deck lost the outer third of the animation and the morph read as a
+ * hard-edged slab rather than a transition. `inset: 0` pins the layer to the
+ * overlay (itself the frame's scaled footprint), so the clip lands exactly on
+ * the slide edge, as intended.
+ */
 .pptx-vue-transition-layer {
 	position: absolute;
-	top: 0;
-	left: 0;
+	inset: 0;
 	overflow: hidden;
 	will-change: transform, opacity, clip-path, filter;
 }

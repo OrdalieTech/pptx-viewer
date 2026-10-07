@@ -2,12 +2,21 @@ import { XmlObject } from '../../types';
 import type { PptxPresentationProperties, PptxChartStyle, PptxViewProperties } from '../../types';
 import { parseChartDataLabelOptions } from '../../utils/chart-data-label-parser';
 import { parseChartLegendEntries } from '../../utils/chart-legend-serializer';
+import { parseChartTitleStyle } from '../../utils/chart-title-style-parser';
 import { parseShowProperties } from './pptx-presentation-props-helpers';
 import { findChildByLocalName, parsePrintProperties } from './pptx-print-properties';
 import { parseViewProperties } from './pptx-view-props-helpers';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSlideMasters';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
+	/**
+	 * Forward declaration - implemented in PptxHandlerRuntimeTextStyleUtils.
+	 * Resolves `+mj-lt` / `+mn-lt` theme font tokens to the theme typeface.
+	 */
+	protected resolveThemeTypeface(_typeface: string | undefined): string | undefined {
+		throw new Error('resolveThemeTypeface not yet initialised');
+	}
+
 	/**
 	 * Parse presentation properties from `presentationPr.xml`.
 	 * Extracts show type, loop, narration, animation, and print settings.
@@ -50,7 +59,10 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			// Show properties (p:showPr)
 			const showPr = presProps['p:showPr'] as XmlObject | undefined;
 			if (showPr) {
-				Object.assign(props, parseShowProperties(showPr));
+				Object.assign(
+					props,
+					parseShowProperties(showPr, (node) => this.parseColor(node)),
+				);
 			}
 
 			// Print properties (p:prnPr)
@@ -74,15 +86,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				}
 			}
 
-			// Grid spacing (p:gridSpacing)
-			const gridSpacing = presProps['p:gridSpacing'] as XmlObject | undefined;
-			if (gridSpacing) {
-				const cx = parseInt(String(gridSpacing['@_cx'] ?? '0'), 10);
-				const cy = parseInt(String(gridSpacing['@_cy'] ?? '0'), 10);
-				if (cx > 0 && cy > 0) {
-					props.gridSpacing = { cx, cy };
-				}
-			}
+			// NOTE: `p:gridSpacing` does NOT live under `p:presentationPr` in real
+			// PowerPoint files; it lives under `p:viewPr` in `ppt/viewProps.xml`.
+			// It used to be (incorrectly) read here, which meant this field was
+			// always `undefined` for real decks. See `parseViewProperties` below
+			// and `pptx-view-props-helpers.ts` for the correct read; consumers
+			// must use `PptxData.viewProperties.gridSpacing`.
 
 			return props;
 		} catch (e) {
@@ -116,6 +125,33 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	}
 
 	/**
+	 * Resolve the `c:spPr` fill of a chart container (`c:chartSpace` or
+	 * `c:plotArea`) to a colour string, or the literal `'none'` for
+	 * `<a:noFill/>`. Returns `undefined` when the container declares no fill at
+	 * all, which leaves the choice to the renderer.
+	 *
+	 * `<a:noFill/>` parses to the empty STRING, so presence - not truthiness -
+	 * has to decide.
+	 */
+	private parseChartContainerFill(container: XmlObject | undefined): string | undefined {
+		const shapeProperties = this.xmlLookupService.getChildByLocalName(container, 'spPr');
+		if (!shapeProperties) {
+			return undefined;
+		}
+		// `getChildByLocalName` returns undefined for non-object values, and
+		// `<a:noFill/>` parses to the empty STRING, so presence has to be checked
+		// against the keys directly.
+		const hasNoFill = Object.keys(shapeProperties).some(
+			(key) => this.compatibilityService.getXmlLocalName(key) === 'noFill',
+		);
+		if (hasNoFill) {
+			return 'none';
+		}
+		const solidFill = this.xmlLookupService.getChildByLocalName(shapeProperties, 'solidFill');
+		return solidFill ? this.parseColor(solidFill) : undefined;
+	}
+
+	/**
 	 * Extract chart style metadata from chart XML.
 	 */
 	protected extractChartStyle(
@@ -135,20 +171,36 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			hasStyle = true;
 		}
 
+		// Chart-area fill (`c:chartSpace/c:spPr`). `<a:noFill/>` is the common
+		// case and means the chart floats on the slide background; recording it as
+		// `'none'` stops renderers painting their own panel behind it.
+		const chartAreaFill = this.parseChartContainerFill(chartSpace);
+		if (chartAreaFill) {
+			style.chartAreaFill = chartAreaFill;
+			hasStyle = true;
+		}
+
 		if (chartRoot) {
 			// Legend
 			const legend = this.xmlLookupService.getChildByLocalName(chartRoot, 'legend');
 			if (legend) {
 				style.hasLegend = true;
 				hasStyle = true;
+				// Classic charts nest position in a child (`c:legend/c:legendPos/@val`);
+				// ChartEx (`cx:`) charts put it directly on the element
+				// (`cx:legend/@pos`). Fall back to the attribute when the child lookup
+				// misses so a `cx:legend pos="t"` isn't silently ignored (it used to
+				// always fall through to renderers' `?? 'b'` default).
 				const legendPos = this.xmlLookupService.getChildByLocalName(legend, 'legendPos');
-				if (legendPos?.['@_val']) {
-					style.legendPosition = String(legendPos['@_val']);
+				const legendPosVal = legendPos?.['@_val'] ?? legend['@_pos'];
+				if (legendPosVal) {
+					style.legendPosition = String(legendPosVal);
 				}
 				const entries = parseChartLegendEntries(
 					legend,
 					(key) => this.compatibilityService.getXmlLocalName(key),
 					(node) => this.parseColor(node),
+					(raw) => this.resolveThemeTypeface(raw) ?? raw,
 				);
 				if (entries.length > 0) {
 					style.legendEntries = entries;
@@ -160,11 +212,25 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			if (title) {
 				style.hasTitle = true;
 				hasStyle = true;
+				Object.assign(
+					style,
+					parseChartTitleStyle(
+						title,
+						this.xmlLookupService,
+						{ parseColor: (node, placeholder) => this.parseColor(node, placeholder) },
+						(raw) => this.resolveThemeTypeface(raw) ?? raw,
+					),
+				);
 			}
 
 			// Plot area gridlines
 			const plotArea = this.xmlLookupService.getChildByLocalName(chartRoot, 'plotArea');
 			if (plotArea) {
+				const plotAreaFill = this.parseChartContainerFill(plotArea);
+				if (plotAreaFill) {
+					style.plotAreaFill = plotAreaFill;
+					hasStyle = true;
+				}
 				const valAx = this.xmlLookupService.getChildByLocalName(plotArea, 'valAx');
 				if (valAx) {
 					const majorGridlines = this.xmlLookupService.getChildByLocalName(valAx, 'majorGridlines');
@@ -189,7 +255,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					if (chartDLbls && !style.dataLabels) {
 						const deleted = this.xmlLookupService.getChildByLocalName(chartDLbls, 'delete');
 						style.hasDataLabels = !(deleted?.['@_val'] === '1' || deleted?.['@_val'] === 'true');
-						style.dataLabels = parseChartDataLabelOptions(chartDLbls, this.xmlLookupService);
+						style.dataLabels = parseChartDataLabelOptions(
+							chartDLbls,
+							this.xmlLookupService,
+							{ parseColor: (node, placeholder) => this.parseColor(node, placeholder) },
+							(raw) => this.resolveThemeTypeface(raw) ?? raw,
+						);
 						hasStyle = true;
 					}
 

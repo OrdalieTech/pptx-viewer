@@ -3,6 +3,96 @@
 All notable changes to this project are documented here.
 This file is generated from [Conventional Commits](https://www.conventionalcommits.org)
 by [git-cliff](https://git-cliff.org); do not edit it by hand.
+A release listed with no entries carried no Conventional Commit in this package's
+scope: scripts/release-plan.mjs re-releases a package whenever any of its files
+change, not only on conventional ones.
+
+## [2.4.1](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.4.1) - 2026-09-06
+
+### Bug Fixes
+
+- **tools:** Report the displayed chart type (Pareto, filtered) in list_elements (by @ChristopherVR) ([c9ece87](https://github.com/ChristopherVR/pptx-viewer/commit/c9ece873c4fea307df3ab41faa79223ec5c5fa5e))
+
+## [2.4.0](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.4.0) - 2026-09-05
+
+### Features
+
+- **tools:** Alt text and title on shape, text and connector elements (by @ChristopherVR) ([781992b](https://github.com/ChristopherVR/pptx-viewer/commit/781992be91fb9d07f10e6dcd1bd8aa431a6114d1))
+
+## [2.3.0](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.3.0) - 2026-09-05
+
+### Features
+
+- **tools:** Chart formatting and table style MCP tools (by @ChristopherVR) ([c2094ee](https://github.com/ChristopherVR/pptx-viewer/commit/c2094ee67a06a9358f52c3e38ba6a3612a9cb3ce))
+
+## [2.2.0](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.2.0) - 2026-09-05
+
+### Features
+
+- **tools:** Chart userShapes MCP tools (by @ChristopherVR) ([bf851eb](https://github.com/ChristopherVR/pptx-viewer/commit/bf851eb9fd29bfbe447157d8b1e7340644d5d921))
+
+## [2.1.7](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.1.7) - 2026-08-26
+
+### Dependencies
+
+- **deps:** Update fast-xml-parser requirement from ^5.10.1 to ^5.11.0 ([#177](https://github.com/ChristopherVR/pptx-viewer/issues/177)) (by @dependabot[bot]) ([a876e0f](https://github.com/ChristopherVR/pptx-viewer/commit/a876e0f5fd07fd2e7063619882313cc23c4a0162))
+
+## [2.1.6](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.1.6) - 2026-08-22
+
+### Bug Fixes
+
+- **tools:** Widen the core dependency range to the new major (by @ChristopherVR) ([0221c2b](https://github.com/ChristopherVR/pptx-viewer/commit/0221c2b05b7bf2ff0d87034a1564673eee574c45))
+
+## [2.1.5](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.1.5) - 2026-08-22
+
+## [2.1.4](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.1.4) - 2026-08-21
+
+### Bug Fixes
+
+- **tools:** Normalize MCP chartType "pareto" to histogram+cumulative (by @ChristopherVR) ([c36411a](https://github.com/ChristopherVR/pptx-viewer/commit/c36411a8372d7f6a3aa89d2d3e0e67ba4baaab66))
+
+## [2.1.3](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.1.3) - 2026-08-20
+
+### Bug Fixes
+
+- **ci:** Stop the hourly release writing an empty changelog section (by @ChristopherVR) ([d53c0fe](https://github.com/ChristopherVR/pptx-viewer/commit/d53c0feffa2c2d9c67dfc495cb8dbefdf23638ae))
+- **ci:** Turn off oxlint's React Compiler rule family and fix the last irregular-whitespace hits (by @ChristopherVR) ([30c6bd8](https://github.com/ChristopherVR/pptx-viewer/commit/30c6bd84de19bd4168b8b3f1035ae8d6de16efe1))
+
+## [2.1.2](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.1.2) - 2026-08-13
+
+### Testing
+
+- **e2e:** Add the corpus round-trip harness and a COM acceptance gate (by @ChristopherVR) ([edf6dd5](https://github.com/ChristopherVR/pptx-viewer/commit/edf6dd5f23d2644bae5ad290c9f755055537ae51))
+
+## [2.1.1](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.1.1) - 2026-08-10
+
+### Dependencies
+
+- **deps:** Update yjs requirement from ^13.6.31 to ^13.6.32 ([#152](https://github.com/ChristopherVR/pptx-viewer/issues/152)) (by @dependabot[bot]) ([456fdb8](https://github.com/ChristopherVR/pptx-viewer/commit/456fdb8493487ab3e346714755239a90698f6b4d))
+- **deps:** Update @modelcontextprotocol/sdk requirement ([#153](https://github.com/ChristopherVR/pptx-viewer/issues/153)) (by @dependabot[bot]) ([974413f](https://github.com/ChristopherVR/pptx-viewer/commit/974413f162851d16dc1816ce6d94d3d80a5ff817))
+
+## [2.1.0](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.1.0) - 2026-08-07
+
+### Features
+
+- **core:** Export and import decks as portable JSON (by @ChristopherVR) ([965fc05](https://github.com/ChristopherVR/pptx-viewer/commit/965fc05ce0993d97a15d6199c8763eada99fa646))
+- **shared:** Blackboard mode, element rename and column charts (by @ChristopherVR) ([a69ffce](https://github.com/ChristopherVR/pptx-viewer/commit/a69ffce0a7635632cf19cb060b329a8ff5d19422))
+
+## [2.0.2](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.0.2) - 2026-07-27
+
+### Bug Fixes
+
+- **ci:** Resolve workspace: ranges in every published manifest (by @ChristopherVR) ([ea35290](https://github.com/ChristopherVR/pptx-viewer/commit/ea35290721ba679571f71708933ed718e65e3942))
+
+## [2.0.1](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.0.1) - 2026-07-25
+
+### Bug Fixes
+
+- **tools:** Resolve pptx-viewer-core to the workspace copy (by @ChristopherVR) ([1d4e3ff](https://github.com/ChristopherVR/pptx-viewer/commit/1d4e3ff00694d12606245de7726210d675d713f6))
+
+### Chores
+
+- **deps-dev:** Update tsdown requirement ([#109](https://github.com/ChristopherVR/pptx-viewer/issues/109)) (by @dependabot[bot]) ([f83aa0a](https://github.com/ChristopherVR/pptx-viewer/commit/f83aa0a0012d9678cb1fcbef3bbf45b04f179755))
 
 ## [2.0.6](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@2.0.6) - 2026-07-26
 
@@ -333,7 +423,24 @@ when the release is tagged.)
 
 ## [1.2.1](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@1.2.1) - 2026-07-11
 
+### Bug Fixes
+
+- **tools:** Derive codec field lists from the canonical core schema (by @ChristopherVR) ([d594bd1](https://github.com/ChristopherVR/pptx-viewer/commit/d594bd14f46a61257e7d73cb707c7b540225e3ff))
+
 ## [1.2.0](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@1.2.0) - 2026-07-06
+
+### Features
+
+- **tools:** Add 26 new MCP tools expanding coverage to 51 total (by @ChristopherVR) ([c784579](https://github.com/ChristopherVR/pptx-viewer/commit/c784579cf91431eac28bb40c874b4e2cbb6d7a20))
+
+### Bug Fixes
+
+- **vue,react:** Resolve lint warnings and TableRenderer interactive-prop default (by @ChristopherVR) ([6a69635](https://github.com/ChristopherVR/pptx-viewer/commit/6a69635214f389dea16ceafe37b10cfcbb236540))
+- **core:** Cast xmldom Element to Node for xml-crypto canonicalization (by @ChristopherVR) ([8fbd97e](https://github.com/ChristopherVR/pptx-viewer/commit/8fbd97eb1221f66650a7bcb45e089ee08034439f))
+
+### Documentation
+
+- **tools:** Note the codec schema diverges from the viewer sync layout (by @ChristopherVR) ([7ba5d9e](https://github.com/ChristopherVR/pptx-viewer/commit/7ba5d9ef76e95cb255f591b1483fcdab9fc824b9))
 
 ## [1.1.26](https://github.com/ChristopherVR/pptx-viewer/releases/tag/pptx-viewer-mcp@1.1.26) - 2026-06-21
 

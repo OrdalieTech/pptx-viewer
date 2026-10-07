@@ -1,9 +1,12 @@
 import { XmlObject, PptxSlide } from '../../types';
+import type { PptxHeaderFooter, PptxSlideSize } from '../../types';
 import type { OoxmlConformanceClass } from '../../utils';
 import { persistModernCommentPackage } from '../../utils/modern-comment-package';
 import { PptxSaveStateBuilder } from '../builders';
 import { createPptxSaveConstants } from '../factories';
 import type { PptxHandlerSaveOptions } from '../types';
+import { forkChartPartsSharedBetweenSlides } from './chart-part-ownership';
+import { applyHeaderFooterToMaster } from './header-footer-parts';
 import { slidesPerPageToPrintOutput } from './pptx-print-properties';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveHandoutInfrastructure';
 
@@ -53,6 +56,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		});
 		await this.ensureNotesMasterForAuthoredNotes(slides, saveConstants);
 		await this.ensureHandoutMasterInfrastructure(options?.handoutMaster, saveConstants);
+		await this.isolateNotesMasterThemes();
 
 		// Process each slide (this may embed new media files that register
 		// extensions in usedMediaPaths, so content-types must be updated after).
@@ -87,8 +91,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		}
 
 		// Comment authors
-		const hasCommentAuthors = saveSession.hasUsedCommentAuthors();
-		if (hasCommentAuthors) {
+		const usedCommentAuthors = saveSession.hasUsedCommentAuthors();
+		// ponytail: post-save truth — an orphan part present in the source zip is
+		// removed below, so it must not keep its content-type Override alive.
+		const hasCommentAuthors = usedCommentAuthors;
+		if (usedCommentAuthors) {
 			this.zip.file(
 				'ppt/commentAuthors.xml',
 				this.builder.build(
@@ -99,6 +106,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 				),
 			);
 		} else {
+			// ponytail: restore orphan removal dropped by the collaboration edit.
 			this.zip.remove('ppt/commentAuthors.xml');
 			// Strip the matching Relationship from presentation.xml.rels; otherwise
 			// the dangling reference causes PowerPoint to flag the file as corrupted
@@ -142,13 +150,39 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// §19.3.1.40.)
 		this.applySlideMasterChanges(options?.slideMasters);
 		this.applySlideLayoutChanges(options?.slideLayouts);
+		// Header & Footer. Runs AFTER the per-master writer so an explicit
+		// `slideMasters[n].headerFooter` stays the more specific instruction
+		// only where the dialog said nothing.
+		this.applyPresentationHeaderFooter(options?.headerFooter);
+		// Slide Master view shape-tree edits. Rewrites only the parts whose
+		// element list differs from the one parsed at load, so an untouched
+		// master keeps its verbatim passthrough below.
+		await this.applySlideMasterElementChanges(
+			options?.slideMasters,
+			options?.slideLayouts,
+			saveSession,
+			saveConstants,
+		);
 
-		// Persist template/master updates
+		// Persist template/master updates. `withTemplateSpTreeOrder` puts the
+		// shape tree back into document order (= paint order) on a clone; both
+		// the passthrough and the rebuilt-from-elements route reach the ZIP
+		// tag-bucketed otherwise.
 		for (const [layoutPath, layoutXmlObj] of this.layoutXmlMap.entries()) {
-			this.zip.file(layoutPath, this.builder.build(layoutXmlObj));
+			const source = await this.zip.file(layoutPath)?.async('string');
+			const ordered = await this.withTemplateSpTreeOrder(layoutPath, layoutXmlObj, 'p:sldLayout');
+			const rebuilt = this.builder.build(ordered);
+			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
+				this.zip.file(layoutPath, rebuilt);
+			}
 		}
 		for (const [masterPath, masterXmlObj] of this.masterXmlMap.entries()) {
-			this.zip.file(masterPath, this.builder.build(masterXmlObj));
+			const source = await this.zip.file(masterPath)?.async('string');
+			const ordered = await this.withTemplateSpTreeOrder(masterPath, masterXmlObj, 'p:sldMaster');
+			const rebuilt = this.builder.build(ordered);
+			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
+				this.zip.file(masterPath, rebuilt);
+			}
 		}
 
 		// Theme parts. Re-emit dirty themes from in-memory state; clean themes
@@ -160,7 +194,15 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// because it modifies p:embeddedFontLst on presentationData)
 		await this.applyEmbeddedFontPreservation(options?.embeddedFonts, options?.embeddedFontList);
 
-		// Presentation save
+		// Presentation save.
+		//
+		// A slide-size edit is adopted into the runtime state BEFORE the
+		// builder runs, so a second save of the same handler (and every
+		// EMU-derived consumer such as the layout previews) sees the new
+		// dimensions rather than the ones the file was loaded with.
+		if (options?.slideSize) {
+			this.adoptSlideSize(options.slideSize);
+		}
 		if (this.presentationData) {
 			this.presentationSaveBuilder.applySaveOptions({
 				presentationData: this.presentationData,
@@ -172,6 +214,9 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 					photoAlbum: options?.photoAlbum,
 					kinsoku: options?.kinsoku,
 					modifyVerifier: options?.modifyVerifier,
+					slideSize: options?.slideSize,
+					embedTrueTypeFonts: options?.embedTrueTypeFonts,
+					defaultTextStyle: options?.defaultTextStyle,
 				},
 				rawSlideWidthEmu: this.rawSlideWidthEmu,
 				rawSlideHeightEmu: this.rawSlideHeightEmu,
@@ -214,7 +259,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// #90) so an unmodified load -> save round-trips the typed viewProps and
 		// edits still persist when the caller does not override them.
 		await this.applyViewPropertiesPart(options?.viewProperties ?? this.loadedViewProperties);
-		await this.applyTableStylesPart(options?.tableStyles);
+		await this.applyTableStylesPart(
+			options?.tableStyles,
+			options?.tableStylesDefaultId,
+			options?.tableStylesToDelete,
+		);
 
 		await this.documentPropertiesUpdater.updateOnSave(slides, {
 			coreProperties: options?.coreProperties,
@@ -232,6 +281,12 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			saveConstants,
 		);
 		await this.processPendingChartUpdates();
+		await forkChartPartsSharedBetweenSlides({
+			zip: this.zip,
+			parser: this.parser,
+			builder: this.builder,
+			getLocalName: (key) => key.split(':').pop() ?? key,
+		});
 		await this.ensureChartPartContentTypes();
 		await this.ensureOleEmbeddingContentTypes();
 		await this.ensureDiagramPartContentTypes();
@@ -283,7 +338,58 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			}
 		}
 
-		return await this.zip.generateAsync({ type: 'uint8array' });
+		// JSZip defaults to STORE, which writes every part verbatim and turns a
+		// 4.9 MB deck into 7.5 MB on a no-op open-and-save. PowerPoint DEFLATEs
+		// its own packages, so matching it keeps the file the user downloads the
+		// same size as the one they opened. Level 6 is zlib's default: the knee
+		// of the ratio/time curve, and near-free next to the XML re-serialization
+		// that already dominates a save.
+		return await this.zip.generateAsync({
+			type: 'uint8array',
+			compression: 'DEFLATE',
+			compressionOptions: { level: 6 },
+		});
+	}
+
+	/**
+	 * Apply the Header & Footer dialog's state to every slide master.
+	 *
+	 * `p:hf` is not a legal child of `p:presentation`, so the option used to
+	 * be dropped on the floor and the dialog was decorative. "Apply to All"
+	 * means the slide masters, which is where PowerPoint keeps both the flags
+	 * and the footer/date text.
+	 */
+	private applyPresentationHeaderFooter(headerFooter: PptxHeaderFooter | undefined): void {
+		if (!headerFooter || Object.keys(headerFooter).length === 0) {
+			return;
+		}
+		for (const [masterPath, masterXmlObj] of this.masterXmlMap.entries()) {
+			const root = masterXmlObj['p:sldMaster'];
+			if (typeof root !== 'object' || root === null) {
+				continue;
+			}
+			applyHeaderFooterToMaster(root as XmlObject, headerFooter);
+			this.masterXmlMap.set(masterPath, masterXmlObj);
+		}
+	}
+
+	/**
+	 * Adopt a requested `p:sldSz` into the runtime's load-time state.
+	 *
+	 * `rawSlideWidthEmu` / `rawSlideHeightEmu` / `rawSlideSizeType` used to be
+	 * write-once-at-load, which is why a Slide Size edit could never reach the
+	 * file: the builder wrote the load-time values straight back.
+	 */
+	private adoptSlideSize(slideSize: PptxSlideSize): void {
+		if (slideSize.widthEmu !== undefined && slideSize.widthEmu > 0) {
+			this.rawSlideWidthEmu = slideSize.widthEmu;
+		}
+		if (slideSize.heightEmu !== undefined && slideSize.heightEmu > 0) {
+			this.rawSlideHeightEmu = slideSize.heightEmu;
+		}
+		if (slideSize.type !== undefined) {
+			this.rawSlideSizeType = slideSize.type.length > 0 ? slideSize.type : undefined;
+		}
 	}
 
 	/**

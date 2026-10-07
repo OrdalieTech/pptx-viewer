@@ -10,7 +10,12 @@
 	 * Disabled (greyed) whenever the selection has no text properties.
 	 */
 	import { hasTextProperties } from 'pptx-viewer-core';
-	import { fontSizeOf, isBold, isItalic, isUnderline } from 'pptx-viewer-shared';
+	import {
+		fontSizeOf,
+		isBold,
+		isItalic,
+		isUnderline,
+	} from 'pptx-viewer-shared';
 
 	import { useTranslator } from '../../i18n/context';
 	import type { EditorState } from '../editor/editor-state.svelte';
@@ -96,15 +101,19 @@
 	>
 		<span aria-hidden="true">A-</span>
 	</button>
+	<!-- Never disabled, matching React: the size box shows the ribbon's current
+	     type size whether or not something is selected, and `setSize` is a
+	     no-op without a text element. Greying it out made Svelte the only
+	     binding whose Font group looked dead on an empty selection. -->
 	<input
 		class="pptx-svelte-fmt-size"
 		type="number"
 		min="1"
 		max="400"
-		disabled={!active}
+		step="any"
 		aria-label={t('pptx.ribbon.fontSize')}
 		title={t('pptx.ribbon.fontSize')}
-		value={Math.round(fontSize)}
+		value={fontSize}
 		onchange={(e) => setSize(e.currentTarget.value)}
 	/>
 	<button

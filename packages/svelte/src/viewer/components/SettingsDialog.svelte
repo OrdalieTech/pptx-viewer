@@ -2,10 +2,13 @@
 	import Settings from '@lucide/svelte/icons/settings';
 	import X from '@lucide/svelte/icons/x';
 	import { untrack } from 'svelte';
-	import { DEFAULT_QUICK_ACCESS_COMMAND_IDS, VIEWER_OPTIONS_TABS } from 'pptx-viewer-shared';
+	import {
+		DEFAULT_QUICK_ACCESS_COMMAND_IDS,
+		VIEWER_OPTIONS_TABS,
+		resolveViewerAddinStatus,
+	} from 'pptx-viewer-shared';
 	import type {
 		ThemeCatalogEntry,
-		ViewerAddinStatus,
 		ViewerOptions,
 		ViewerOptionsSection,
 		ViewerOptionsTabId,
@@ -15,6 +18,7 @@
 	import type { ViewerOptionsState } from '../state/viewer-options.svelte';
 	import SettingsAiSection from './ai/SettingsAiSection.svelte';
 	import SettingsAppearanceTab from './SettingsAppearanceTab.svelte';
+	import SettingsCustomFontsSection from './SettingsCustomFontsSection.svelte';
 	import SettingsLanguageTab from './SettingsLanguageTab.svelte';
 	import OptionsAddInsPane from './settings/OptionsAddInsPane.svelte';
 	import OptionsPane from './settings/OptionsPane.svelte';
@@ -30,8 +34,10 @@
 		locale,
 		availableLocales,
 		onsetlocale,
-		addinStatus,
 		aiEnabled = false,
+		collabActive = false,
+		customFontFamilies = [],
+		oncustomfont = () => {},
 	}: {
 		/** The shared File > Options state (store + behavior projections). */
 		optionsState: ViewerOptionsState;
@@ -42,9 +48,14 @@
 		locale: string;
 		availableLocales?: readonly LocaleCatalogEntry[];
 		onsetlocale: (code: string) => void;
-		addinStatus?: ViewerAddinStatus;
 		/** When true, an "AI" section is shown for exporting detailed chat logs. */
 		aiEnabled?: boolean;
+		/** Live collaboration session state, for the Add-ins pane's status column. */
+		collabActive?: boolean;
+		/** Families registered this session via the Fonts section. */
+		customFontFamilies?: readonly string[];
+		/** A font file was registered; the ribbon adds the family to its list. */
+		oncustomfont?: (family: string) => void;
 	} = $props();
 
 	const t = useTranslator();
@@ -56,6 +67,14 @@
 		VIEWER_OPTIONS_TABS.find((entry) => entry.id === activeTabId) ?? VIEWER_OPTIONS_TABS[0],
 	);
 	const options = $derived<ViewerOptions>(optionsState.options);
+	// Real runtime signals for the Add-ins pane's active/inactive split: the two
+	// three.js-backed renderers follow Advanced > "Disable 3D rendering", and
+	// the collaboration module follows the live session. The rest of the
+	// catalog (EMF/MTX converters, locales) has no on/off switch, so it keeps
+	// `resolveViewerAddinRows`'s `active: true` fallback.
+	const addinStatus = $derived(
+		resolveViewerAddinStatus(options.advanced.disable3DRendering, collabActive),
+	);
 
 	// Snapshot taken when the dialog mounts; Cancel restores it wholesale.
 	// Deliberately the value at open time, so read outside reactive tracking.
@@ -69,7 +88,11 @@
 		onclose();
 	}
 	function isSpecial(section: ViewerOptionsSection): boolean {
-		return section.special === 'themePicker' || section.special === 'clearCache';
+		return (
+			section.special === 'themePicker' ||
+			section.special === 'clearCache' ||
+			section.special === 'customFonts'
+		);
 	}
 </script>
 
@@ -112,6 +135,12 @@
 						{#snippet special(section)}
 							{#if section.special === 'themePicker'}
 								<SettingsAppearanceTab {themeKey} {themeCatalog} onselect={onsetthemekey} />
+							{:else if section.special === 'customFonts'}
+								<SettingsCustomFontsSection
+									enabled={options.general.enableCustomFontUpload}
+									families={customFontFamilies}
+									onregistered={oncustomfont}
+								/>
 							{:else if section.special === 'clearCache'}
 								<p class="hint">{t('pptx.options.save.clearCacheDescription')}</p>
 								<button type="button" class="ghost" onclick={() => void optionsState.clearCache()}>{t('pptx.options.save.clearCacheNow')}</button>

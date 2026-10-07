@@ -1,4 +1,8 @@
-import type { PptxSlide } from 'pptx-viewer-core';
+/* oxlint-disable eslint/one-var -- pervasive pre-existing pattern in this file
+   (many independent short-lived `const`s per test case); merging them isn't a
+   style choice here. */
+import type { PptxHandoutMaster, PptxSlide } from 'pptx-viewer-core';
+import { buildHandoutsHtml, computeColorFilter, computeSlideIndices } from 'pptx-viewer-shared';
 import { describe, it, expect, vi, expectTypeOf } from 'vitest';
 
 import { escapeHtml } from '../utils/dom-helpers';
@@ -6,37 +10,20 @@ import type { PrintHandlersResult } from './usePrintHandlers';
 
 // ---------------------------------------------------------------------------
 // usePrintHandlers is a complex hook with DOM-heavy logic (window.open,
-// html2canvas, etc.). We test the pure logic that can be extracted:
-//   1. Slide index range computation from PrintSettings.
-//   2. Color filter generation.
+// html2canvas, etc.). We test the pure logic it delegates to:
+//   1. Slide index range computation from PrintSettings (shared
+//      `computeSlideIndices`, imported directly by usePrintHandlers.ts).
+//   2. Color filter generation (shared `computeColorFilter`, imported
+//      directly by usePrintHandlers.ts).
 //   3. Outline HTML generation.
 //   4. Handout layout grid computation.
 //   5. escapeHtml (used in print output).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Slide index computation (extracted from handlePrintWithSettings)
+// Slide index computation (usePrintHandlers.ts calls the shared helper
+// directly; this exercises the same function to guard against regressions).
 // ---------------------------------------------------------------------------
-
-type SlideRange = 'all' | 'current' | 'custom';
-
-function computeSlideIndices(
-	slideRange: SlideRange,
-	activeSlideIndex: number,
-	slideCount: number,
-	customRangeFrom: number,
-	customRangeTo: number,
-): number[] {
-	if (slideRange === 'current') {
-		return [activeSlideIndex];
-	}
-	if (slideRange === 'custom') {
-		const from = Math.max(0, customRangeFrom - 1);
-		const to = Math.min(slideCount - 1, customRangeTo - 1);
-		return Array.from({ length: to - from + 1 }, (_, i) => from + i);
-	}
-	return Array.from({ length: slideCount }, (_, i) => i);
-}
 
 describe('computeSlideIndices', () => {
 	it('returns all indices for "all" range', () => {
@@ -73,20 +60,9 @@ describe('computeSlideIndices', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Color filter generation (extracted from handlePrintWithSettings)
+// Color filter generation (usePrintHandlers.ts calls the shared helper
+// directly; this exercises the same function to guard against regressions).
 // ---------------------------------------------------------------------------
-
-type ColorMode = 'color' | 'grayscale' | 'blackAndWhite';
-
-function computeColorFilter(colorMode: ColorMode): string {
-	if (colorMode === 'grayscale') {
-		return 'filter: grayscale(1);';
-	}
-	if (colorMode === 'blackAndWhite') {
-		return 'filter: grayscale(1) contrast(2);';
-	}
-	return '';
-}
 
 describe('computeColorFilter', () => {
 	it('returns empty string for "color" mode', () => {
@@ -316,5 +292,71 @@ describe('handout pagination', () => {
 
 	it('handles zero slides', () => {
 		expect(computePageCount(0, 6)).toBe(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Handout master chrome: `handlePrintWithSettings`'s handouts branch passes
+// `pptxData?.handoutMaster` as `buildHandoutsHtml`'s 4th argument (see
+// `usePrintHandlers.ts`). This pins that the shared builder actually paints
+// the master's footer text when its `<p:hf>` flag leaves it enabled.
+// ---------------------------------------------------------------------------
+
+describe('buildHandoutsHtml with a handout master (usePrintHandlers wiring)', () => {
+	it('renders the handout master footer text when ftr is enabled', () => {
+		const handoutMaster: PptxHandoutMaster = {
+			path: 'ppt/handoutMasters/handoutMaster1.xml',
+			slidesPerPage: 4,
+			headerFooter: { hasFooter: true },
+			elements: [
+				{
+					id: 'ftr1',
+					type: 'text',
+					placeholderType: 'ftr',
+					x: 0,
+					y: 0,
+					width: 100,
+					height: 20,
+					text: 'Confidential - Acme Corp',
+				} as unknown as PptxSlide['elements'][number],
+			],
+		};
+
+		const html = buildHandoutsHtml(['data:image/png;base64,AA=='], [0], 4, handoutMaster);
+		expect(html).toContain('Confidential - Acme Corp');
+	});
+
+	it('omits the footer text when ftr is explicitly disabled', () => {
+		const handoutMaster: PptxHandoutMaster = {
+			path: 'ppt/handoutMasters/handoutMaster1.xml',
+			slidesPerPage: 4,
+			headerFooter: { hasFooter: false },
+			elements: [
+				{
+					id: 'ftr1',
+					type: 'text',
+					placeholderType: 'ftr',
+					x: 0,
+					y: 0,
+					width: 100,
+					height: 20,
+					text: 'Confidential - Acme Corp',
+				} as unknown as PptxSlide['elements'][number],
+			],
+		};
+
+		const html = buildHandoutsHtml(['data:image/png;base64,AA=='], [0], 4, handoutMaster);
+		expect(html).not.toContain('Confidential - Acme Corp');
+	});
+
+	it('renders byte-identical output when no handout master is passed', () => {
+		const withoutMaster = buildHandoutsHtml(['data:image/png;base64,AA=='], [0], 4);
+		const withUndefinedMaster = buildHandoutsHtml(
+			['data:image/png;base64,AA=='],
+			[0],
+			4,
+			undefined,
+		);
+		expect(withUndefinedMaster).toBe(withoutMaster);
 	});
 });

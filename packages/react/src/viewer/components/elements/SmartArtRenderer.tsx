@@ -1,8 +1,12 @@
-import type { PptxElement, PptxSmartArtNode, SmartArtStyle } from 'pptx-viewer-core';
+import type { PptxElement } from 'pptx-viewer-core';
 import { updateSmartArtNodeText, setSmartArtNodeStyle } from 'pptx-viewer-core';
 import {
 	buildSmartArtA11y,
-	revealedSmartArtNodeCount,
+	canDrillDown,
+	computeSmartArtElementLayout,
+	flattenNodes,
+	resolveRevealedDrawingShapes,
+	resolveRevealedSmartArtNodes,
 	shouldCommitSmartArtNodeText,
 	rebuildDrawingShapesIfCleared,
 } from 'pptx-viewer-shared';
@@ -14,61 +18,39 @@ import {
 	resolvePalette,
 	resolveSmartArtDataPalette,
 	resolveStyle,
-	layoutToCategory,
 } from '../../utils/smartart-helpers';
-import {
-	renderStepDownProcess,
-	renderAlternatingFlow,
-	renderDescendingProcess,
-	renderPictureAccentList,
-	renderVerticalBlockList,
-	renderGroupedList,
-	renderPyramidList,
-	renderHorizontalPictureList,
-	renderAccentProcess,
-	renderVerticalChevronList,
-} from '../../utils/smartart-layouts-extra';
 import { DrawingShapeRenderer } from './smartart-drawing-shape-renderer';
-import {
-	ListRenderer,
-	ProcessRenderer,
-	CycleRenderer,
-	MatrixRenderer,
-} from './smartart-layout-renderers';
-import {
-	PyramidRenderer,
-	VennRenderer,
-	FunnelRenderer,
-	TargetRenderer,
-} from './smartart-layout-renderers-secondary';
-import {
-	HierarchyRenderer,
-	GearRenderer,
-	TimelineRenderer,
-	BendingProcessRenderer,
-} from './smartart-layout-renderers-tertiary';
 // Sub-module imports
 import { wrapChrome, fitFontSize, chevronPoints } from './smartart-renderer-utils';
 import { SmartArtEditableLayer } from './SmartArtEditableLayer';
+import { SmartArtLayoutSvg } from './SmartArtLayoutSvg';
 
 /**
- * SmartArtRenderer: Phase 2 Implementation
+ * SmartArtRenderer.
  *
- * Renders SmartArt diagrams with proper positioned shapes, styling,
- * connector lines between nodes, and layout-specific shape rendering.
+ * Renders a SmartArt diagram, preferring PowerPoint's own cached geometry and
+ * falling back to the shared layout engine when the deck has none.
  *
- * Features:
- * - Pre-computed drawing shape rendering (from PowerPoint's layout engine)
- * - Proper SVG-based rendering for all layout categories
- * - Connector lines between parent-child nodes in hierarchy layouts
- * - Chevron/arrow shapes for process layouts
- * - Concentric rings for cycle/radial layouts
- * - Pyramid trapezoids for pyramid layouts
- * - Rounded rectangles with shadows for professional appearance
- * - Text scaled to fit within each node
- * - Chrome wrapper for background/outline styling
- * - Support for all layout categories: list, process, cycle, hierarchy,
- *   relationship, matrix, pyramid, funnel, target, gear, timeline, venn
+ * Two render paths, in order:
+ *
+ * 1. **Cached `dsp` drawing shapes** (`smartArtData.drawingShapes`, extracted
+ *    from `ppt/diagrams/drawing*.xml`). These are PowerPoint's actual layout
+ *    output and are always preferred. A text edit patches them in place, so the
+ *    path stays current.
+ * 2. **Shared layout engine** (`computeSmartArtElementLayout`), used only when
+ *    the cached drawing is absent (freshly inserted SmartArt, or a diagram
+ *    whose structural edit cleared it). That engine runs the real DiagramML
+ *    interpreter over the file's `dgm:layoutDef` first and only then falls back
+ *    to a family approximation, and it is the same call Vue, Angular, Svelte
+ *    and Vanilla make, so all five bindings draw the same diagram (including
+ *    the `colorsDef @meth="span"` colour-interpolation it derives from
+ *    `smartArtData.colorTransform`).
+ *
+ * React used to own a private JSX tree of ~20 hand-written layout pictures for
+ * path 2 which never consulted `dgm:layoutDef` at all. It has been deleted; the
+ * three arrangements it genuinely had that the shared engine did not (gear,
+ * timeline, bending/snake) were lifted into shared instead, so all five
+ * bindings gained them.
  */
 
 interface SmartArtRendererProps {
@@ -123,19 +105,17 @@ function SmartArtRendererImpl({
 	const { nodes, drawingShapes, chrome } = smartArtData;
 
 	// Staged diagram build (p:bldDgm): reveal only the leading nodes / shapes for
-	// the current playback progress. Non-diagram / absent state reveals all.
-	const diagramBuild = animationState?.build?.kind === 'diagram' ? animationState.build : undefined;
-	const shownNodeCount = diagramBuild
-		? revealedSmartArtNodeCount(nodes, diagramBuild)
-		: nodes.length;
-	const isPartialBuild = diagramBuild !== undefined && shownNodeCount < nodes.length;
-	const revealedNodes = isPartialBuild ? nodes.slice(0, shownNodeCount) : nodes;
+	// the current playback progress, preferring the AUTHORED per-node
+	// `p:graphicEl/@id` reveal set (animationState.diagramReveal) over the
+	// click-count estimate when available. Non-diagram / absent state reveals all.
+	const { nodes: revealedNodes } = resolveRevealedSmartArtNodes(
+		nodes,
+		animationState,
+		smartArtData.presLayoutVars,
+	);
 	const revealedShapes =
-		isPartialBuild && drawingShapes && drawingShapes.length > 0
-			? drawingShapes.slice(
-					0,
-					Math.ceil((shownNodeCount / Math.max(nodes.length, 1)) * drawingShapes.length),
-				)
+		drawingShapes && drawingShapes.length > 0
+			? resolveRevealedDrawingShapes(drawingShapes, nodes, animationState)
 			: drawingShapes;
 
 	if (nodes.length === 0) {
@@ -155,7 +135,9 @@ function SmartArtRendererImpl({
 	const a11y = buildSmartArtA11y(smartArtData);
 	const nodeLabels = new Map(a11y.nodes.map((n) => [n.id, n.label]));
 
-	const editable = canEdit && Boolean(onUpdateElement);
+	// G8: `a:graphicFrameLocks/@noDrilldown` forbids entering this SmartArt's
+	// individual nodes for editing.
+	const editable = canEdit && Boolean(onUpdateElement) && canDrillDown(element);
 
 	// Commit an inline node text edit through the host's element-update path,
 	// reusing the same core op the inspector uses (undo/redo + save round-trip).
@@ -204,6 +186,7 @@ function SmartArtRendererImpl({
 			<DrawingShapeRenderer
 				elementId={element.id}
 				shapes={revealedShapes}
+				allShapes={drawingShapes}
 				style={style}
 				palette={palette}
 				nodes={nodes}
@@ -211,16 +194,23 @@ function SmartArtRendererImpl({
 			/>
 		);
 	} else {
-		// Determine the layout category for algorithmic rendering. With a staged
-		// build, `revealedNodes` may be empty (progress 0) or a leading prefix; the
-		// layout renderers render nothing for an empty node list, which is exactly
-		// the "not built yet" state while the wrapper is still fading in.
-		const namedLayout = smartArtData.layout;
-		const layoutType = namedLayout
-			? layoutToCategory(namedLayout)
-			: (smartArtData.resolvedLayoutType ?? smartArtData.layoutType ?? 'list').toLowerCase();
-
-		content = renderLayout(layoutType, element, revealedNodes, palette, style, nodeLabels);
+		// No cached drawing: run the shared engine (DiagramML interpreter first,
+		// family approximation second). With a staged build, `revealedNodes` may
+		// be empty (progress 0) or a leading prefix; an empty node list yields an
+		// empty layout, which is exactly the "not built yet" state while the
+		// wrapper is still fading in.
+		const layout = computeSmartArtElementLayout(
+			smartArtData,
+			revealedNodes,
+			{ width: element.width, height: element.height },
+			palette,
+			style,
+			element.id,
+		);
+		// Rendered nodes are index-aligned with the flattened source nodes, which
+		// is how every binding maps a rendered shape back to a model node id.
+		const nodeIds = flattenNodes(revealedNodes).map((n) => n.id);
+		content = <SmartArtLayoutSvg layout={layout} nodeIds={nodeIds} nodeLabels={nodeLabels} />;
 	}
 
 	const body = editable ? (
@@ -238,132 +228,6 @@ function SmartArtRendererImpl({
 	);
 
 	return wrapChrome(chrome, body, className, { role: a11y.role, label: a11y.label });
-}
-
-// ── Layout dispatch ─────────────────────────────────────────────────────────
-
-/**
- * Dispatch to the appropriate layout renderer based on the resolved layout type.
- *
- * @param layoutType - Normalised layout category string (e.g. "hierarchy", "process").
- * @param element    - The parent SmartArt element.
- * @param nodes      - The SmartArt nodes to render.
- * @param palette    - Resolved colour palette.
- * @param style      - Resolved SmartArt style.
- * @returns A React element for the chosen layout.
- */
-function renderLayout(
-	layoutType: string,
-	element: PptxElement,
-	nodes: PptxSmartArtNode[],
-	palette: string[],
-	style: SmartArtStyle,
-	nodeLabels: Map<string, string>,
-): React.ReactElement {
-	if (layoutType.includes('hierarchy') || layoutType.includes('org')) {
-		return <HierarchyRenderer element={element} nodes={nodes} palette={palette} style={style} />;
-	}
-	if (
-		layoutType.includes('process') ||
-		layoutType.includes('chevron') ||
-		layoutType.includes('arrow')
-	) {
-		return (
-			<ProcessRenderer
-				element={element}
-				nodes={nodes}
-				palette={palette}
-				style={style}
-				nodeLabels={nodeLabels}
-			/>
-		);
-	}
-	if (layoutType.includes('cycle') || layoutType.includes('radial')) {
-		return (
-			<CycleRenderer
-				element={element}
-				nodes={nodes}
-				palette={palette}
-				style={style}
-				nodeLabels={nodeLabels}
-			/>
-		);
-	}
-	if (layoutType.includes('matrix')) {
-		return (
-			<MatrixRenderer
-				element={element}
-				nodes={nodes}
-				palette={palette}
-				style={style}
-				nodeLabels={nodeLabels}
-			/>
-		);
-	}
-	if (layoutType.includes('pyramid')) {
-		return <PyramidRenderer element={element} nodes={nodes} palette={palette} style={style} />;
-	}
-	if (layoutType.includes('venn')) {
-		return <VennRenderer element={element} nodes={nodes} palette={palette} style={style} />;
-	}
-	if (layoutType.includes('funnel')) {
-		return <FunnelRenderer element={element} nodes={nodes} palette={palette} style={style} />;
-	}
-	if (layoutType.includes('target') || layoutType.includes('bullseye')) {
-		return <TargetRenderer element={element} nodes={nodes} palette={palette} style={style} />;
-	}
-	if (layoutType.includes('gear')) {
-		return <GearRenderer element={element} nodes={nodes} palette={palette} style={style} />;
-	}
-	if (layoutType.includes('timeline') || layoutType.includes('linear')) {
-		return <TimelineRenderer element={element} nodes={nodes} palette={palette} style={style} />;
-	}
-	if (layoutType.includes('bending') || layoutType.includes('snake')) {
-		return (
-			<BendingProcessRenderer element={element} nodes={nodes} palette={palette} style={style} />
-		);
-	}
-	// ── Extra layout types (delegated to smartart-layouts-extra) ────────────
-	if (layoutType.includes('stepdown')) {
-		return <>{renderStepDownProcess(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('alternatingflow') || layoutType.includes('alternating')) {
-		return <>{renderAlternatingFlow(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('descending')) {
-		return <>{renderDescendingProcess(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('pictureaccent')) {
-		return <>{renderPictureAccentList(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('verticalblock')) {
-		return <>{renderVerticalBlockList(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('grouped')) {
-		return <>{renderGroupedList(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('pyramidlist')) {
-		return <>{renderPyramidList(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('horizontalpicture')) {
-		return <>{renderHorizontalPictureList(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('accentprocess')) {
-		return <>{renderAccentProcess(element, nodes, palette, style)}</>;
-	}
-	if (layoutType.includes('verticalchevron')) {
-		return <>{renderVerticalChevronList(element, nodes, palette, style)}</>;
-	}
-	// Default: list layout
-	return (
-		<ListRenderer
-			element={element}
-			nodes={nodes}
-			palette={palette}
-			style={style}
-			nodeLabels={nodeLabels}
-		/>
-	);
 }
 
 // ── Memoized export ─────────────────────────────────────────────────────────
@@ -411,6 +275,41 @@ function arePropsEqual(prev: SmartArtRendererProps, next: SmartArtRendererProps)
 		prevBuild?.progress !== nextBuild?.progress
 	) {
 		return false;
+	}
+	// The authored per-node reveal set (`p:graphicEl/@id`) arrives WITHOUT a
+	// `build` descriptor before the first click (nothing has fired yet, so the
+	// engine hands out an empty node set and no active step). Comparing `build`
+	// alone kept the fully-populated first render on screen behind the hidden
+	// wrapper, so the show stage still carried every node in the DOM.
+	return sameDiagramReveal(prev.animationState?.diagramReveal, next.animationState?.diagramReveal);
+}
+
+/**
+ * Structural equality for two reveal descriptors: the engine allocates a fresh
+ * descriptor on every state snapshot, so identity alone would defeat the memo.
+ */
+function sameDiagramReveal(
+	prev: ElementAnimationState['diagramReveal'],
+	next: ElementAnimationState['diagramReveal'],
+): boolean {
+	if (prev === next) {
+		return true;
+	}
+	if (!prev || !next) {
+		return false;
+	}
+	if (prev.mode !== next.mode || prev.descriptor.background !== next.descriptor.background) {
+		return false;
+	}
+	const prevIds = prev.descriptor.nodeIds;
+	const nextIds = next.descriptor.nodeIds;
+	if (prevIds.size !== nextIds.size) {
+		return false;
+	}
+	for (const id of prevIds) {
+		if (!nextIds.has(id)) {
+			return false;
+		}
 	}
 	return true;
 }

@@ -1,15 +1,20 @@
-import { createEditorId } from 'pptx-viewer-core';
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
-import { applyDragDelta, isTemplateElementId } from 'pptx-viewer-shared';
-import { ref } from 'vue';
+import {
+	canInteractWithElement,
+	createGestureController,
+	isTemplateElementId,
+	resolveElementInteractivity,
+} from 'pptx-viewer-shared';
+import type { ElementInteractivity, GestureController } from 'pptx-viewer-shared';
 import type { ComputedRef, Ref } from 'vue';
 
-import { createGuide, moveGuide, removeGuide } from './guides';
-import type { Guide } from './guides';
+import { useConnectorReroute } from './connector-reroute-store';
+import { applyGeometryLocks, geometryOf } from './element-lock-guards';
+import type { GeometryBox } from './element-lock-guards';
+import { useElementStorePatch } from './element-store-patch';
 import { snapBox } from './snap';
-import { computeSnapToShape } from './snap-shape';
-import { setTemplateElements } from './template-editing';
 import type { TemplateElementMap } from './template-editing';
+import { useSnapGuides } from './useSnapGuides';
 
 /** Geometry patch emitted by the selection overlay during a drag/resize/rotate. */
 export interface TransformPayload {
@@ -32,10 +37,18 @@ export interface UseElementDragInput {
 	templateElementsBySlideId: Ref<TemplateElementMap>;
 	canvasSize: Ref<{ width: number; height: number }>;
 	enterInlineEdit: (id: string) => void;
+	/**
+	 * Grid spacing in CSS px, derived from the deck's authored
+	 * `viewProperties.gridSpacing` via the shared `computeGridSpacingPx`
+	 * (falls back to `DEFAULT_GRID_SIZE` when the deck has none or hasn't
+	 * loaded yet). A `ComputedRef` like `effectiveZoom`, so a later deck load
+	 * is picked up without re-creating this composable.
+	 */
+	gridSpacingPx?: ComputedRef<number>;
 }
 
-/** Grid spacing in px (matches React's GRID_SIZE). */
-const GRID_SIZE = 8;
+/** Grid spacing fallback in px, used when the deck has no authored grid spacing. */
+const DEFAULT_GRID_SIZE = 8;
 
 /**
  * useElementDrag: canvas pointer-drag-to-move, resize/rotate transform, shape
@@ -43,6 +56,9 @@ const GRID_SIZE = 8;
  * consume. One history entry is snapshotted at gesture start; live patches during
  * the gesture bypass history. Extracted verbatim from `PowerPointViewer.vue`.
  */
+/** The drag/transform/adjust surface, inferred so it cannot drift from the impl. */
+export type UseElementDragResult = ReturnType<typeof useElementDrag>;
+
 export function useElementDrag(input: UseElementDragInput) {
 	const {
 		findActiveElement,
@@ -55,164 +71,105 @@ export function useElementDrag(input: UseElementDragInput) {
 		templateElementsBySlideId,
 		canvasSize,
 		enterInlineEdit,
+		gridSpacingPx,
 	} = input;
 
-	/** View ▸ Snap to Shape: snap dragged elements to other elements' edges/centres. */
-	const snapToShape = ref(false);
-	/** View ▸ Snap to Grid: round position + size to the grid during drag/resize. */
-	const snapToGrid = ref(false);
-	/** Transient red snap-alignment lines shown during a snap-to-shape drag. */
-	const snapLines = ref<Array<{ axis: 'x' | 'y'; position: number }>>([]);
-	/** View ▸ H/V Guides: draggable alignment guides (authored slide px). */
-	const guides = ref<Guide[]>([]);
+	const snap = useSnapGuides(canvasSize);
+	const { snapToShape, snapToGrid, snapLines, guides } = snap;
 
-	/** Add a centred horizontal/vertical guide (View ▸ H/V Guide buttons). */
-	function addGuide(axis: 'h' | 'v'): void {
-		guides.value = [...guides.value, createGuide(createEditorId('guide'), axis, canvasSize.value)];
-	}
-	/** Drag a guide to a new (clamped) position. */
-	function onMoveGuide(payload: { id: string; position: number }): void {
-		guides.value = moveGuide(guides.value, payload.id, payload.position, canvasSize.value);
-	}
-	/** Double-click removes a guide. */
-	function onRemoveGuide(id: string): void {
-		guides.value = removeGuide(guides.value, id);
-	}
+	const stores = { slides, activeSlideIndex, templateElementsBySlideId };
+	/** Live element write, routed to the slide or the template store by id. */
+	const patchElementInStore = useElementStorePatch(stores);
+	/** Recompute the connectors glued to shapes that just finished moving. */
+	const rerouteConnectorsFor = useConnectorReroute(stores);
 
 	// ── Element drag-to-move + tap-to-edit (driven from the element) ──────
-	interface ElementDragState {
-		id: string;
-		startClientX: number;
-		startClientY: number;
-		startBox: { x: number; y: number; width: number; height: number; rotation: number };
-		moved: boolean;
-		wasSelected: boolean;
-	}
-	let elementDrag: ElementDragState | null = null;
-	function startElementDrag(id: string, event: PointerEvent, wasSelected: boolean): void {
-		const el = findActiveElement(id);
-		if (!el) {
-			return;
-		}
-		elementDrag = {
-			id,
-			startClientX: event.clientX,
-			startClientY: event.clientY,
-			startBox: {
-				x: el.x,
-				y: el.y,
-				width: el.width,
-				height: el.height,
-				rotation: el.rotation ?? 0,
-			},
-			moved: false,
-			wasSelected,
-		};
-		window.addEventListener('pointermove', onElementDragMove);
-		window.addEventListener('pointerup', onElementDragUp);
-		window.addEventListener('pointercancel', onElementDragUp);
-	}
-	function onElementDragMove(event: PointerEvent): void {
-		const drag = elementDrag;
-		if (!drag) {
-			return;
-		}
-		const dx = event.clientX - drag.startClientX;
-		const dy = event.clientY - drag.startClientY;
-		if (!drag.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
-			drag.moved = true;
-			pushHistory();
-		}
-		if (!drag.moved) {
-			return;
-		}
-		const box = applyDragDelta(drag.startBox, dx, dy, effectiveZoom.value);
-		let nextX = box.x;
-		let nextY = box.y;
-		// Snap to other shapes' edges/centres (+ user guides), with visual snap lines.
-		if (snapToShape.value && !box.rotation) {
+	//
+	// The dead zone, `window` pointer listener lifecycle and drag math (incl.
+	// snap-to-shape) are the shared `createGestureController` (only the 'move'
+	// kind is ever used here); grid-snap stays a separate step applied by
+	// `patchActiveElementGeometry` below, AFTER the controller's own
+	// snap-to-shape result, matching the pre-repoint chain order.
+	//
+	// `dragId`/`dragMovable`/`dragWasSelected` are captured once per gesture at
+	// `startElementDrag`, since the shared deps callbacks below take no such
+	// per-gesture context of their own.
+	let dragId: string | null = null;
+	let dragMovable = true;
+	let dragWasSelected = false;
+
+	const elementDragController: GestureController = createGestureController({
+		getScale: () => effectiveZoom.value,
+		getElementBox: (id) => {
+			const el = findActiveElement(id);
+			return el ? geometryOf(el) : undefined;
+		},
+		getSiblings: () => {
+			if (!dragId) {
+				return [];
+			}
 			// Snap against siblings in the same store as the dragged element (slide
 			// content, or the template layer when dragging a template element).
-			const dragSiblings = isTemplateElementId(drag.id)
+			const dragSiblings = isTemplateElementId(dragId)
 				? activeTemplateElements.value
 				: (activeSlide.value?.elements ?? []);
-			const siblings = dragSiblings.map((el) => ({
+			return dragSiblings.map((el) => ({
 				id: el.id,
 				x: el.x,
 				y: el.y,
 				width: el.width,
 				height: el.height,
 			}));
-			const result = computeSnapToShape(
-				box.x,
-				box.y,
-				box.width,
-				box.height,
-				siblings,
-				new Set([drag.id]),
-				guides.value,
-			);
-			nextX = result.x;
-			nextY = result.y;
-			snapLines.value = result.lines.map((line) => ({
+		},
+		getSnapToShape: () => snapToShape.value,
+		getSnapToGrid: () => false,
+		getGuides: () => guides.value,
+		getStageOrigin: () => ({ left: 0, top: 0 }), // unused: this controller only ever runs 'move'
+		onStart: () => {
+			// A pinned shape still ARMS the gesture, because releasing without a
+			// drag is what opens the inline editor; it just never travels, and no
+			// geometry will change for it, so taking a history snapshot would leave
+			// an undo step that undoes nothing.
+			if (dragMovable) {
+				pushHistory();
+			}
+		},
+		onPreview: (transform, lines) => {
+			snapLines.value = lines.map((line) => ({
 				axis: line.axis === 'v' ? 'x' : 'y',
 				position: line.position,
 			}));
-		} else if (snapLines.value.length > 0) {
-			snapLines.value = [];
-		}
-		patchActiveElementGeometry({
-			id: drag.id,
-			x: nextX,
-			y: nextY,
-			width: box.width,
-			height: box.height,
-			rotation: box.rotation ?? 0,
-		});
-	}
-	function onElementDragUp(): void {
-		const drag = elementDrag;
-		elementDrag = null;
-		if (snapLines.value.length > 0) {
-			snapLines.value = [];
-		}
-		window.removeEventListener('pointermove', onElementDragMove);
-		window.removeEventListener('pointerup', onElementDragUp);
-		window.removeEventListener('pointercancel', onElementDragUp);
-		// A tap (no drag) on an already-selected element enters inline edit.
-		if (drag && !drag.moved && drag.wasSelected) {
-			enterInlineEdit(drag.id);
-		}
-	}
-
-	/**
-	 * Map one element in its current store (slide content, or the active slide's
-	 * template layer for `master-` / `layout-` ids) WITHOUT a history entry. Used by
-	 * the live drag/resize/adjust patches (history is snapshotted at gesture start).
-	 */
-	function patchElementInStore(id: string, mapElement: (el: PptxElement) => PptxElement): void {
-		const index = activeSlideIndex.value;
-		const slide = slides.value[index];
-		if (!slide) {
-			return;
-		}
-		if (isTemplateElementId(id)) {
-			const current = templateElementsBySlideId.value[slide.id];
-			if (!current) {
+			if (!dragMovable) {
 				return;
 			}
-			const next = current.map((el) => (el.id === id ? mapElement(el) : el));
-			templateElementsBySlideId.value = setTemplateElements(
-				templateElementsBySlideId.value,
-				slide.id,
-				next,
-			);
+			patchActiveElementGeometry(transform);
+		},
+		onEnd: (transform, moved, id) => {
+			if (snapLines.value.length > 0) {
+				snapLines.value = [];
+			}
+			// A tap (no drag) on an already-selected element enters inline edit.
+			if (!moved && dragWasSelected) {
+				enterInlineEdit(id);
+			}
+			// The shape has landed: every connector glued to it has to catch up. Vue
+			// never called the shared reroute, so a connector stayed put while the box
+			// it points at walked off.
+			if (moved && dragMovable) {
+				rerouteConnectorsFor(new Set([id]));
+			}
+		},
+	});
+
+	function startElementDrag(id: string, event: PointerEvent, wasSelected: boolean): void {
+		const el = findActiveElement(id);
+		if (!el) {
 			return;
 		}
-		const nextElements = slide.elements.map((el) => (el.id === id ? mapElement(el) : el));
-		const nextSlides = slides.value.slice();
-		nextSlides[index] = { ...slide, elements: nextElements };
-		slides.value = nextSlides;
+		dragId = id;
+		dragMovable = canInteractWithElement(el, 'move');
+		dragWasSelected = wasSelected;
+		elementDragController.begin('move', id, event);
 	}
 
 	/** Patch one element's geometry in its store WITHOUT a history entry. */
@@ -221,7 +178,7 @@ export function useElementDrag(input: UseElementDragInput) {
 		// rotating (rounding a rotated box's x/y fights the rotation).
 		const useSnap = snapToGrid.value && !payload.rotation;
 		const { x, y, width, height } = useSnap
-			? snapBox(payload, GRID_SIZE)
+			? snapBox(payload, gridSpacingPx?.value ?? DEFAULT_GRID_SIZE)
 			: { x: payload.x, y: payload.y, width: payload.width, height: payload.height };
 		patchElementInStore(payload.id, (el) => ({
 			...el,
@@ -233,20 +190,40 @@ export function useElementDrag(input: UseElementDragInput) {
 		}));
 	}
 
+	// Locks + start geometry resolved once at gesture start, so a locked axis can
+	// be folded back to where it began on every frame. Comparing against the LIVE
+	// element instead would only ever block the first frame, since the live
+	// element is patched on every pointermove.
+	let transformLocks: ElementInteractivity | null = null;
+	let transformStartBox: GeometryBox | null = null;
+
+	/** The payload with any axis the element's `a:spLocks` forbid folded back. */
+	function guardTransform(payload: TransformPayload): TransformPayload {
+		return transformLocks && transformStartBox
+			? applyGeometryLocks(transformLocks, transformStartBox, payload)
+			: payload;
+	}
+
 	// One history entry per gesture: snapshot on start, live-patch (no history)
 	// during the drag and on commit.
-	function onTransformStart(): void {
+	function onTransformStart(payload?: { id: string }): void {
+		const el = payload ? findActiveElement(payload.id) : undefined;
+		transformLocks = el ? resolveElementInteractivity(el) : null;
+		transformStartBox = el ? geometryOf(el) : null;
 		pushHistory();
 	}
 	function onTransform(payload: TransformPayload): void {
-		patchActiveElementGeometry(payload);
+		patchActiveElementGeometry(guardTransform(payload));
 	}
 	function onTransformEnd(payload: TransformPayload): void {
-		patchActiveElementGeometry(payload);
+		patchActiveElementGeometry(guardTransform(payload));
+		// Resizing or rotating a shape moves its connection sites just as a drag
+		// does, so the connectors glued to it are rerouted from here too.
+		rerouteConnectorsFor(new Set([payload.id]));
 	}
 
-	/** Patch an element's round-rect corner-radius adjustment WITHOUT a history entry. */
-	function patchActiveElementAdjustment(id: string, value: number): void {
+	/** Patch an element's `a:avLst` adjustments WITHOUT a history entry. */
+	function patchActiveElementAdjustment(id: string, adjustments: Record<string, number>): void {
 		patchElementInStore(
 			id,
 			(el) =>
@@ -254,7 +231,7 @@ export function useElementDrag(input: UseElementDragInput) {
 					...el,
 					shapeAdjustments: {
 						...(el as { shapeAdjustments?: Record<string, number> }).shapeAdjustments,
-						adj: value,
+						...adjustments,
 					},
 				}) as PptxElement,
 		);
@@ -262,21 +239,25 @@ export function useElementDrag(input: UseElementDragInput) {
 	function onAdjustStart(): void {
 		pushHistory();
 	}
-	function onAdjust(payload: { id: string; value: number }): void {
-		patchActiveElementAdjustment(payload.id, payload.value);
+
+	/**
+	 * Commit a connector endpoint that was dragged onto a connection site (or
+	 * off one). Shared decided the geometry AND the `a:stCxn`/`a:endCxn`
+	 * bindings; this only writes the element and takes the history entry.
+	 */
+	function onConnectorEndpoint(payload: { id: string; element: PptxElement }): void {
+		pushHistory();
+		patchElementInStore(payload.id, () => payload.element);
 	}
-	function onAdjustEnd(payload: { id: string; value: number }): void {
-		patchActiveElementAdjustment(payload.id, payload.value);
+	function onAdjust(payload: { id: string; adjustments: Record<string, number> }): void {
+		patchActiveElementAdjustment(payload.id, payload.adjustments);
+	}
+	function onAdjustEnd(payload: { id: string; adjustments: Record<string, number> }): void {
+		patchActiveElementAdjustment(payload.id, payload.adjustments);
 	}
 
 	return {
-		snapToShape,
-		snapToGrid,
-		snapLines,
-		guides,
-		addGuide,
-		onMoveGuide,
-		onRemoveGuide,
+		...snap,
 		startElementDrag,
 		onTransformStart,
 		onTransform,
@@ -284,5 +265,6 @@ export function useElementDrag(input: UseElementDragInput) {
 		onAdjustStart,
 		onAdjust,
 		onAdjustEnd,
+		onConnectorEndpoint,
 	};
 }

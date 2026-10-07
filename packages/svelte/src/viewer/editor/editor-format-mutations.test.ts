@@ -63,10 +63,10 @@ describe('text format patches', () => {
 	});
 
 	it('sets and adjusts font size (clamped)', () => {
-		expect(setFontSizePatch(textEl(), 32).textStyle).toMatchObject({ fontSize: 32 });
-		expect(setFontSizePatch(textEl(), 0).textStyle).toMatchObject({ fontSize: 1 });
-		expect(adjustFontSizePatch(textEl(), 4).textStyle).toMatchObject({ fontSize: 22 });
-		expect(adjustFontSizePatch(textEl(), -100).textStyle).toMatchObject({ fontSize: 1 });
+		expect(setFontSizePatch(textEl(), 32).textStyle?.fontSize).toBeCloseTo(32 * (96 / 72));
+		expect(setFontSizePatch(textEl(), 0).textStyle?.fontSize).toBeCloseTo(1 * (96 / 72));
+		expect(adjustFontSizePatch(textEl(), 4).textStyle?.fontSize).toBeCloseTo(17.5 * (96 / 72));
+		expect(adjustFontSizePatch(textEl(), -100).textStyle?.fontSize).toBeCloseTo(1 * (96 / 72));
 	});
 
 	it('sets text colour and highlight colour', () => {
@@ -130,5 +130,31 @@ describe('shape format patches', () => {
 			fillMode: 'solid',
 			strokeColor: '#000000',
 		});
+	});
+});
+
+describe('theme colour refs (W3-G2)', () => {
+	it('a theme-swatch pick commits BOTH the hex and the ref for fill, stroke, and text', () => {
+		const ref = { scheme: 'accent1' as const };
+		expect(setSolidFillPatch(shapeEl(), '#4472c4', ref).shapeStyle).toMatchObject({
+			fillColor: '#4472c4',
+			fillColorRef: ref,
+		});
+		expect(setStrokeColorPatch(shapeEl(), '#4472c4', ref).shapeStyle).toMatchObject({
+			strokeColor: '#4472c4',
+			strokeColorRef: ref,
+		});
+		expect(setTextColorPatch(textEl(), '#4472c4', ref).textStyle).toMatchObject({
+			color: '#4472c4',
+			colorRef: ref,
+		});
+	});
+
+	it('a plain hex commit (no ref argument) explicitly clears a previously-stored ref', () => {
+		const withRef = shapeEl({
+			shapeStyle: { fillColor: '#4472c4', fillColorRef: { scheme: 'accent1' } },
+		});
+		const patch = setSolidFillPatch(withRef, '#ff0000');
+		expect(patch.shapeStyle).toMatchObject({ fillColor: '#ff0000', fillColorRef: undefined });
 	});
 });
