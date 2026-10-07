@@ -83,6 +83,7 @@
 		"ai": ">=6 <8",
 		"happy-dom": "^20.11.12",
 		"pptx-viewer-core": "workspace:*",
+		"pptx-viewer-locales": "workspace:*",
 		"pptx-viewer-shared": "workspace:*",
 		"rollup": "^4.63.0",
 		"rollup-plugin-dts": "^6.5.1",

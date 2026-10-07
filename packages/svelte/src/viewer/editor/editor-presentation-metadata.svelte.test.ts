@@ -29,7 +29,7 @@ describe('editor presentation metadata', () => {
 		const save = vi.fn(async () => new Uint8Array([1]));
 		const editor = new EditorState({
 			getCurrent: () => 0,
-			getHandler: () => ({ save }) as unknown as PptxHandler,
+			getHandler: () => ({ save, getCompatibilityWarnings: () => [] }) as unknown as PptxHandler,
 		});
 		editor.editable = true;
 		editor.setSlides(

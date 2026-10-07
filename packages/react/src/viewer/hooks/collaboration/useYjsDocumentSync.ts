@@ -24,7 +24,6 @@ import {
 	registerCollaborationSource,
 	failCollaborationSession,
 	observeYDocSlides,
-	shouldRoomSlidesReplaceLoad,
 } from 'pptx-viewer-shared';
 import { useCallback, useEffect, useRef } from 'react';
 import type { Doc as YDoc } from 'yjs';
@@ -95,7 +94,6 @@ export function useYjsDocumentSync({
 	getSourceBytes,
 	getSaveOptions,
 	loadVersion = 0,
-	loadOrigin = 'user',
 }: UseYjsDocumentSyncInput): void {
 	const isApplyingRemoteRef = useRef(false);
 	const lastSyncedRef = useRef('');
@@ -181,7 +179,7 @@ export function useYjsDocumentSync({
 				/* write-back failures are non-fatal */
 			}
 		}, debounceMs);
-	}, [doc, config, getSourceBytes, templateElementsBySlideId, readRemoteSlides]);
+	}, [doc, config, getSourceBytes, getSaveOptions, templateElementsBySlideId, readRemoteSlides]);
 
 	useEffect(() => {
 		if (loadVersion === lastLoadVersionRef.current) {

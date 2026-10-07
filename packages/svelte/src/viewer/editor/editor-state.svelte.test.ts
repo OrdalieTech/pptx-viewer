@@ -40,7 +40,7 @@ function make(
 	save = vi.fn(async (_slides: PptxSlide[]) => new Uint8Array([1, 2, 3])),
 ) {
 	const onChange = vi.fn();
-	const handler = { save } as unknown as PptxHandler;
+	const handler = { save, getCompatibilityWarnings: () => [] } as unknown as PptxHandler;
 	const editor = new EditorState({
 		getCurrent: () => current,
 		getHandler: () => handler,

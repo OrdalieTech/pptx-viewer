@@ -199,7 +199,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			paragraphGeometry,
 			textSegmentsForSave,
 			resolveHyperlinkRelationshipId,
-			existingTextSegments,
+			loadedTextSegments(this, el.id) ?? existingTextSegments,
 		);
 		// A bullet the source paragraph inherited (layout or list style) stays inherited unless it was edited.
 		const loadedSegments = loadedTextSegments(this, el.id);

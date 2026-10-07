@@ -60,7 +60,7 @@ function makeLiveBundle() {
 		},
 	};
 	const slidesArray = { observeDeep: vi.fn(), unobserveDeep: vi.fn(), length: 0 };
-	const doc = { getArray: () => slidesArray, destroy: vi.fn() };
+	const doc = { getArray: () => slidesArray, getMap: () => new Map(), destroy: vi.fn() };
 	const provider = { awareness, disconnect: vi.fn(), destroy: vi.fn(), on: vi.fn() };
 	return {
 		bundle: {

@@ -170,14 +170,16 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// tag-bucketed otherwise.
 		for (const [layoutPath, layoutXmlObj] of this.layoutXmlMap.entries()) {
 			const source = await this.zip.file(layoutPath)?.async('string');
-			const rebuilt = this.builder.build(layoutXmlObj);
+			const ordered = await this.withTemplateSpTreeOrder(layoutPath, layoutXmlObj, 'p:sldLayout');
+			const rebuilt = this.builder.build(ordered);
 			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
 				this.zip.file(layoutPath, rebuilt);
 			}
 		}
 		for (const [masterPath, masterXmlObj] of this.masterXmlMap.entries()) {
 			const source = await this.zip.file(masterPath)?.async('string');
-			const rebuilt = this.builder.build(masterXmlObj);
+			const ordered = await this.withTemplateSpTreeOrder(masterPath, masterXmlObj, 'p:sldMaster');
+			const rebuilt = this.builder.build(ordered);
 			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
 				this.zip.file(masterPath, rebuilt);
 			}

@@ -100,11 +100,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	 * lock-container bug, and it shares the fix rather than restating it.
 	 */
 	protected getCnvPrNode(shape: XmlObject, key: string): XmlObject | undefined {
-		if (key === 'p:grpSp') {
-			return xmlPath(shape, 'p:nvGrpSpPr', 'p:cNvPr');
-		}
-		if (key === 'p:pic') {
-			return xmlPath(shape, 'p:nvPicPr', 'p:cNvPr');
+		// `p:contentPart` (ink) carries no lock container, so it is not in
+		// SHAPE_LOCK_CONTAINERS and has to be recognised here.
+		const contentPart = xmlPath(shape, 'p:nvContentPartPr', 'p:cNvPr');
+		if (contentPart) {
+			return contentPart;
 		}
 		const spec = resolveShapeLockContainer(shape, key);
 		return xmlPath(shape, spec?.nvKey ?? 'p:nvSpPr', 'p:cNvPr');

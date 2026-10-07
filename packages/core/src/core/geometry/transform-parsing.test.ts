@@ -413,11 +413,15 @@ describe('pptxElementTransformUpdater.applyTransform', () => {
 		expect(xfrm['@_flipV']).toBe('1');
 	});
 
-	it('does not modify shape when no xfrm element exists', () => {
+	it('preserves an inherited transform when the loaded geometry is unchanged', () => {
 		const shape: XmlObject = {
 			'p:spPr': {},
 		};
 		const element = makePptxElement({ x: 100, y: 200 });
+		element.xEmu = element.x * EMU_PER_PX;
+		element.yEmu = element.y * EMU_PER_PX;
+		element.widthEmu = element.width * EMU_PER_PX;
+		element.heightEmu = element.height * EMU_PER_PX;
 		updater.applyTransform(shape, element, EMU_PER_PX);
 
 		// Should not throw and should not create xfrm

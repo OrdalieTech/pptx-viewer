@@ -243,12 +243,24 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			return;
 		}
 		const body = (xmlCell['a:txBody'] ?? { 'a:bodyPr': {}, 'a:lstStyle': {} }) as XmlObject;
-		const original = this.parseTableCellSegments(
-			body,
-			textContext?.slide.id,
-			textContext?.getSlideRelationshipMap(),
-		);
-		if (JSON.stringify(original) === JSON.stringify(segments)) return;
+		const original = (
+			this as unknown as {
+				parseTableCellSegments(
+					body: XmlObject,
+					slidePath?: string,
+					rels?: Map<string, string>,
+				): TextSegment[];
+			}
+		).parseTableCellSegments(body, textContext?.slide.id, textContext?.getSlideRelationshipMap());
+		if (JSON.stringify(original) === JSON.stringify(segments)) {
+			const originalText = original
+				.map((segment) => (segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text))
+				.join('');
+			if (text !== originalText) {
+				this.writeTableCellText(xmlCell, text);
+			}
+			return;
+		}
 		body['a:p'] = this.createParagraphsFromTextContent(
 			text,
 			undefined,

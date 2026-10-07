@@ -358,10 +358,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const parsedShapes: PptxElement[] = [];
 		shapes.forEach((shape, shapeIndex) => {
 			const txBody = shape?.['p:txBody'] as XmlObject | undefined;
-			const placeholder = (
-				(shape?.['p:nvSpPr'] as XmlObject | undefined)?.['p:nvPr'] as XmlObject | undefined
-			)?.['p:ph'] as XmlObject | undefined;
-			const isNotesBody = String(placeholder?.['@_type'] ?? '').toLowerCase() === 'body';
+			const isNotesBody = bodyShapes.has(shape);
 			if (isNotesBody) {
 				const text = this.extractTextFromTxBody(txBody);
 				if (text.length > 0) {

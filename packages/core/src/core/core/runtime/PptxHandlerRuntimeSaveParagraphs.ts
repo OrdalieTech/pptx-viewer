@@ -198,7 +198,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 
 		if (textSegments && textSegments.length > 0) {
 			const uniformSegmentOverrides = computeUniformSegmentOverrides(
-				textStyle,
+				runScopedTextStyle,
 				textSegments,
 				originalSegments,
 			);

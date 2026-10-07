@@ -294,6 +294,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		const slides = await this.loadSlidesForPresentation(presentationState.sectionBySlideId);
 		const slidesWithWarnings = this.attachSlideWarnings(slides);
 		this.resetElementIdCounter(slides);
+		recordSlideFingerprints(this.savedSlideFingerprints, slidesWithWarnings);
 		rememberLoadedShapes(
 			this,
 			slides.flatMap((slide) => slide.elements),

@@ -33,6 +33,7 @@ interface FakeHandlerCalls {
 function makeFakeHandler(): { handler: PptxHandler; calls: FakeHandlerCalls } {
 	const calls: FakeHandlerCalls = { setTheme: [], saves: 0 };
 	const fake = {
+		getCompatibilityWarnings: () => [],
 		setPresentationTheme: (themePath: string, applyToAllMasters = true): Promise<void> => {
 			calls.setTheme.push([themePath, applyToAllMasters]);
 			return Promise.resolve();

@@ -30,6 +30,7 @@ afterEach(() => {
 /** Mount an element with a measurable "stage" as its offset parent. */
 function mountTarget(id: string): HTMLElement {
 	const stage = document.createElement('div');
+	stage.className = 'pptx-svelte-stage';
 	const el = document.createElement('div');
 	el.dataset.elementId = id;
 	stage.appendChild(el);
