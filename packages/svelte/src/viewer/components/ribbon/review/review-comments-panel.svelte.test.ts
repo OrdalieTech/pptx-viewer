@@ -109,7 +109,11 @@ describe('reviewCommentsPanel', () => {
 		flushSync();
 
 		expect(editor.slides[0]?.comments?.map((comment) => comment.author)).toEqual(['Alice', 'Bob']);
-		expect(Array.from(target.querySelectorAll('.pptx-svelte-comment-meta strong')).map((element) => element.textContent)).toEqual(['Alice', 'Bob']);
+		expect(
+			Array.from(target.querySelectorAll('.pptx-svelte-comment-meta strong')).map(
+				(element) => element.textContent,
+			),
+		).toEqual(['Alice', 'Bob']);
 		const replyBox = target.querySelector(
 			'.pptx-svelte-comment-reply-compose textarea',
 		) as HTMLTextAreaElement;

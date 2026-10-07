@@ -61,9 +61,7 @@ function isLegacyTableCell(
 		Object.keys((segments[0].style as RecordValue | undefined) ?? {}).length === 0 &&
 		!segments[0].paragraphProperties &&
 		runs
-			.map((run) =>
-				run.isParagraphBreak || run.isLineBreak ? '\n' : String(run.text ?? ''),
-			)
+			.map((run) => (run.isParagraphBreak || run.isLineBreak ? '\n' : String(run.text ?? '')))
 			.join('') === text.toString()
 	);
 }
@@ -74,9 +72,7 @@ function reconcileTableText(
 ): void {
 	const segments = tableSegments(cell);
 	const rendered = segments
-		.map((segment) =>
-			segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text,
-		)
+		.map((segment) => (segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text))
 		.join('');
 	if (rendered === cell.text) {
 		mergeDeltaIntoYText(text, encodeSegmentsToDelta(segments));
@@ -284,7 +280,9 @@ export function readTableData(elementMap: YMapLike): PptxTableData | undefined {
 						...cellMetadata,
 						collaborationId: String(cell.get('id')),
 						...(!legacy ? { textSegments: segments as unknown as TextSegment[] } : {}),
-						textRuns: legacy ? cellMetadata.textRuns : tableRuns(segments as unknown as TextSegment[]),
+						textRuns: legacy
+							? cellMetadata.textRuns
+							: tableRuns(segments as unknown as TextSegment[]),
 						text: segments
 							.map((segment) =>
 								segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text,

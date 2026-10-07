@@ -6,6 +6,7 @@ import type {
 	TextSegment,
 	XmlObject,
 } from '../../types';
+import { xmlText } from '../../utils/xml-access';
 import { parseTableEffectChain } from '../runtime/table-style-effect-parse';
 import { parseTablePropertiesFill } from '../runtime/table-style-fill-parse';
 import { applyCell3DStyle } from './table-cell-3d-helpers';
@@ -15,7 +16,6 @@ import {
 	applyCellMarginStyle,
 } from './table-cell-fill-border-helpers';
 import { extractTableCellTextRuns } from './table-cell-runs';
-import { xmlText } from '../../utils/xml-access';
 import { applyCellAlignmentStyle, applyCellTextFormat } from './table-cell-text-style-helpers';
 
 export interface PptxTableDataParserContext {

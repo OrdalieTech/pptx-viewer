@@ -44,7 +44,9 @@ export class EditorSlidesController {
 		if (reference) {
 			this.#editor.templateElementsBySlideId = {
 				...this.#editor.templateElementsBySlideId,
-				[slides[newIndex].id]: (this.#editor.templateElementsBySlideId[reference.id] ?? []).map(cloneElement),
+				[slides[newIndex].id]: (this.#editor.templateElementsBySlideId[reference.id] ?? []).map(
+					cloneElement,
+				),
 			};
 		}
 		return newIndex;

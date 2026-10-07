@@ -148,8 +148,8 @@ export function decodeDelta(delta: DeltaOp[]): Record<string, unknown>[] {
 	for (const op of delta) {
 		if (
 			(op.attributes?.pb === '1' || op.attributes?.lb === '1') &&
-		typeof op.insert === 'string' &&
-		/^\n{2,}$/u.test(op.insert)
+			typeof op.insert === 'string' &&
+			/^\n{2,}$/u.test(op.insert)
 		) {
 			segments.push(...decodeDelta([...op.insert].map((insert) => ({ ...op, insert }))));
 			continue;

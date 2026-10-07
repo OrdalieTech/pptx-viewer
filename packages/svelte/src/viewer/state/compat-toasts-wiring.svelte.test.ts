@@ -11,8 +11,8 @@ import { PptxHandler } from 'pptx-viewer-core';
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { ViewerStateBag } from './create-viewer-state-types';
 import type { ViewerLoadDetail } from '../types';
+import type { ViewerStateBag } from './create-viewer-state-types';
 import CreateViewerStateHarness from './CreateViewerStateHarness.svelte';
 
 let cleanup: (() => void) | undefined;
@@ -30,7 +30,10 @@ async function buildDeck(): Promise<Uint8Array> {
 	}
 }
 
-async function loadHarness(source: Uint8Array, onload?: (detail: ViewerLoadDetail) => void): Promise<ViewerStateBag> {
+async function loadHarness(
+	source: Uint8Array,
+	onload?: (detail: ViewerLoadDetail) => void,
+): Promise<ViewerStateBag> {
 	let captured: ViewerStateBag | undefined;
 	const target = document.createElement('div');
 	const instance = mount(CreateViewerStateHarness, {
@@ -66,7 +69,9 @@ describe('svelte compat toasts wiring', () => {
 		const state = await loadHarness(await buildDeck(), onload);
 
 		expect(Array.isArray(state.loader.compatibilityWarnings)).toBeTruthy();
-		expect(onload).toHaveBeenCalledWith(expect.objectContaining({ compatibilityWarnings: state.loader.compatibilityWarnings }));
+		expect(onload).toHaveBeenCalledWith(
+			expect.objectContaining({ compatibilityWarnings: state.loader.compatibilityWarnings }),
+		);
 		expect(state.compatToasts.visibleToasts).toStrictEqual([]);
 		expect(state.compatToasts.overflowCount).toBe(0);
 	}, 60_000);
