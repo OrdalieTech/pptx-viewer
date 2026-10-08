@@ -26,6 +26,9 @@ export {
 	writeTableData,
 	reconcileTableData,
 	readTableData,
+	readTableHeight,
+	alignTableColumns,
+	resolveTableCell,
 } from 'pptx-viewer-shared/collaboration';
 export type {
 	YDocLike,

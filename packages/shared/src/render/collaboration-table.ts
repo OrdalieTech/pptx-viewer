@@ -6,8 +6,10 @@ import type {
 	TextSegment,
 } from 'pptx-viewer-core';
 
-import { orderedYMaps, reorderYArray } from './collaboration-order';
+import { orderedYMaps } from './collaboration-order';
 import type { YArrayLike, YjsFactories, YMapLike } from './collaboration-sync';
+import { alignTableColumns, reconcileTableColumns } from './collaboration-table-columns';
+import { reconcileItems } from './collaboration-table-items';
 import {
 	decodeTextBody,
 	encodeSegmentsToDelta,
@@ -173,32 +175,6 @@ export function writeTableData(
 	elementMap.set('tableData', table);
 }
 
-/** Missing IDs mean new objects, never an instruction to overwrite the same position. */
-function reconcileItems<T extends { collaborationId?: string }>(
-	items: T[],
-	array: YArrayLike,
-	factories: YjsFactories,
-	update: (item: T, map: YMapLike) => void,
-): void {
-	const ids = items.map((item) => item.collaborationId ?? crypto.randomUUID());
-	if (new Set(ids).size !== ids.length || ids.some((id) => !id))
-		throw new Error('Duplicate or empty PPTX table collaboration ID');
-	const wanted = new Set(ids);
-	const existing = new Map(orderedYMaps(array).map((map) => [String(map.get('id')), map]));
-	for (let i = array.length - 1; i >= 0; i--)
-		if (!wanted.has(String((array.get(i) as YMapLike).get('id')))) array.delete(i, 1);
-	items.forEach((item, index) => {
-		let map = existing.get(ids[index]);
-		if (!map) {
-			map = factories.createMap();
-			map.set('id', ids[index]);
-			array.push([map]);
-		}
-		update(item, map);
-	});
-	reorderYArray(array, ids);
-}
-
 export function reconcileTableData(
 	data: PptxTableData,
 	elementMap: YMapLike,
@@ -208,13 +184,22 @@ export function reconcileTableData(
 	validateIds(data);
 	const table = elementMap.get('tableData') as YMapLike | undefined;
 	if (!table) return writeTableData(data, elementMap, factories, elementId);
+	const columns = reconcileTableColumns(data, table, elementId);
 	setMetadata(table, metadata(data as unknown as RecordValue, ['rows']));
 	const rows = table.get('rows') as YArrayLike;
+	const rowIds = new Set(orderedYMaps(rows).map((row) => String(row.get('id'))));
+	if (
+		data.rows.length !== rows.length ||
+		data.rows.some((row) => !rowIds.has(row.collaborationId ?? ''))
+	) {
+		table.set('_heightFromRows', true);
+	}
 	reconcileItems(data.rows, rows, factories, (row, rowMap) => {
 		if (!rowMap.get('cells')) rowMap.set('cells', factories.createArray());
 		setMetadata(rowMap, metadata(row as unknown as RecordValue, ['cells', 'collaborationId']));
 		const cells = rowMap.get('cells') as YArrayLike;
-		reconcileItems(row.cells, cells, factories, (cell, cellMap) => {
+		reconcileItems(row.cells, cells, factories, (cell, cellMap, index) => {
+			if (cellMap.get('_column') !== columns[index]) cellMap.set('_column', columns[index]);
 			const text = cellMap.get('textBody');
 			const previous = JSON.parse(String(cellMap.get('_data') ?? '{}')) as RecordValue;
 			if (
@@ -257,40 +242,57 @@ export function reconcileTableData(
 	});
 }
 
+/** Imported frame sizes stay authored until the row structure is edited. */
+export function readTableHeight(elementMap: YMapLike): number | undefined {
+	const table = elementMap.get('tableData') as YMapLike | undefined;
+	if (table?.get('_heightFromRows')) {
+		const heights = orderedYMaps(table.get('rows') as YArrayLike).map(
+			(row) => JSON.parse(String(row.get('_data') ?? '{}')).height as number,
+		);
+		if (heights.length && heights.every((height) => Number.isFinite(height) && height > 0)) {
+			return heights.reduce((sum, height) => sum + height, 0);
+		}
+	}
+	return elementMap.get('height') as number | undefined;
+}
+
 export function readTableData(elementMap: YMapLike): PptxTableData | undefined {
 	const table = elementMap.get('tableData') as YMapLike | undefined;
 	if (!table) return undefined;
 	const readMetadata = <T extends object>(map: YMapLike): T =>
 		JSON.parse(map.get('_data') as string);
 	const rows = table.get('rows') as YArrayLike;
-	return {
-		...readMetadata<Omit<PptxTableData, 'rows'>>(table),
-		rows: orderedYMaps(rows).map((row) => {
-			const cells = row.get('cells') as YArrayLike;
-			return {
-				...readMetadata<Omit<PptxTableRow, 'cells'>>(row),
-				collaborationId: String(row.get('id')),
-				cells: orderedYMaps(cells).map((cell) => {
-					const text = cell.get('textBody');
-					if (!isYTextLike(text)) throw new Error('Incompatible PPTX table cell text');
-					const segments = decodeTextBody(text);
-					const cellMetadata = readMetadata<Omit<PptxTableCell, 'text'>>(cell);
-					const legacy = isLegacyTableCell(cellMetadata as RecordValue, text, segments);
-					return {
-						...cellMetadata,
-						collaborationId: String(cell.get('id')),
-						...(!legacy ? { textSegments: segments as unknown as TextSegment[] } : {}),
-						textRuns: legacy
-							? cellMetadata.textRuns
-							: tableRuns(segments as unknown as TextSegment[]),
-						text: segments
-							.map((segment) =>
-								segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text,
-							)
-							.join(''),
-					};
-				}),
-			};
-		}),
-	};
+	return alignTableColumns(
+		{
+			...readMetadata<Omit<PptxTableData, 'rows'>>(table),
+			rows: orderedYMaps(rows).map((row) => {
+				const cells = row.get('cells') as YArrayLike;
+				return {
+					...readMetadata<Omit<PptxTableRow, 'cells'>>(row),
+					collaborationId: String(row.get('id')),
+					cells: orderedYMaps(cells).map((cell) => {
+						const text = cell.get('textBody');
+						if (!isYTextLike(text)) throw new Error('Incompatible PPTX table cell text');
+						const segments = decodeTextBody(text);
+						const cellMetadata = readMetadata<Omit<PptxTableCell, 'text'>>(cell);
+						const legacy = isLegacyTableCell(cellMetadata as RecordValue, text, segments);
+						return {
+							...cellMetadata,
+							collaborationId: String(cell.get('id')),
+							...(!legacy ? { textSegments: segments as unknown as TextSegment[] } : {}),
+							textRuns: legacy
+								? cellMetadata.textRuns
+								: tableRuns(segments as unknown as TextSegment[]),
+							text: segments
+								.map((segment) =>
+									segment.isParagraphBreak || segment.isLineBreak ? '\n' : segment.text,
+								)
+								.join(''),
+						};
+					}),
+				};
+			}),
+		},
+		table,
+	);
 }

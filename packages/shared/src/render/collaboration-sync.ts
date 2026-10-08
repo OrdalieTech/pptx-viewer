@@ -54,7 +54,7 @@ import type {
 	YDeepObserver,
 } from './collaboration-schema';
 import { mapSourceAssets } from './collaboration-source';
-import { readTableData, writeTableData } from './collaboration-table';
+import { readTableData, readTableHeight, writeTableData } from './collaboration-table';
 import { encodeTextBody, decodeTextBody, isYTextLike } from './collaboration-text-codec';
 
 export * from './collaboration-assets';
@@ -148,6 +148,7 @@ export function readElementFromYMap(ymap: YMapLike, assets: YMapLike): PptxEleme
 		}
 	});
 	readAssetFields(ymap, assets, element);
+	if (element.type === 'table') element.height = readTableHeight(ymap);
 	if (Array.isArray(element.textSegments)) {
 		element.text = element.textSegments
 			.map((segment: { text: string; isParagraphBreak?: boolean; isLineBreak?: boolean }) =>
