@@ -146,11 +146,12 @@ export async function fetchUrlToBytes(
 			return null;
 		}
 
-		const arrayBuffer = await response.arrayBuffer();
+		// Bun lazily reads blob response headers; consuming the body first loses its MIME type.
 		const contentType = (response.headers.get('Content-Type') ?? 'application/octet-stream')
 			.split(';')[0]
 			.trim()
 			.toLowerCase();
+		const arrayBuffer = await response.arrayBuffer();
 
 		// Try to infer extension from Content-Type header
 		let extension = extensionByResponseMime[contentType];

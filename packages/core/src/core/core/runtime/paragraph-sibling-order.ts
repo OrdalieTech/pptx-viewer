@@ -28,10 +28,8 @@
  * parse, where the object identity is still the parser's own. The SAVE
  * direction does use the key markers: see `assembleParagraphXml`.
  *
- * Only paragraphs whose children are NOT already grouped by tag are recorded.
- * The grouped case (the overwhelming majority) needs no correction, so leaving
- * it unrecorded keeps the map small and keeps the consumer on its existing,
- * well-tested key iteration.
+ * Record grouped paragraphs too: their order is known, so consumers must not
+ * run the legacy line-break repair reserved for paragraphs without source XML.
  *
  * @module paragraph-sibling-order
  */
@@ -41,7 +39,6 @@ import type { XmlObject } from '../../types';
 import {
 	ensureItems,
 	extractElementInnerXml,
-	isGroupedByTag,
 	isXmlObject,
 	localName,
 	scanDirectChildren,
@@ -120,7 +117,7 @@ function collectParsedParagraphs(root: unknown): XmlObject[] {
 }
 
 /**
- * Record the authored child order of every interleaved paragraph in a part.
+ * Record the authored child order of each paragraph in a scanned part.
  *
  * Paragraphs are paired to source orders by SIGNATURE bucket rather than by
  * index, because the parsed tree cannot be walked in document order: a group
@@ -156,7 +153,7 @@ export function annotateParagraphSiblingOrder(xml: string, parsed: unknown): voi
 
 	for (const paragraph of collectParsedParagraphs(parsed)) {
 		const order = bySignature.get(parsedParagraphSignature(paragraph))?.shift();
-		if (order && !isGroupedByTag(order)) {
+		if (order) {
 			childOrder.set(paragraph, order);
 		}
 	}
@@ -177,9 +174,8 @@ export interface ParagraphContentEntries {
 
 /**
  * A paragraph's content children in the order they were authored, falling back
- * to fast-xml-parser's key order when nothing was recorded for it (either the
- * paragraph was already grouped by tag, or it was built by the SDK rather than
- * parsed and so never went past the annotator).
+ * to fast-xml-parser's key order when nothing was recorded for it (a text-only
+ * part skipped by the prefilter, or an SDK-built paragraph without source XML).
  */
 export function paragraphContentEntries(
 	paragraph: XmlObject,

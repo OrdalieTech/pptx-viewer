@@ -1,6 +1,19 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, test, expect } from 'vitest';
 
-import { parseDataUrlToBytes } from './data-url-utils';
+import { fetchUrlToBytes, parseDataUrlToBytes } from './data-url-utils';
+
+test.each([
+	['image/jpeg', 'jpg'],
+	['image/png', 'png'],
+])('keeps the type and bytes of a %s blob when reading its body', async (type, extension) => {
+	const bytes = new Uint8Array([1, 2, 3]);
+	const url = URL.createObjectURL(new Blob([bytes], { type }));
+	try {
+		await expect(fetchUrlToBytes(url)).resolves.toStrictEqual({ bytes, extension });
+	} finally {
+		URL.revokeObjectURL(url);
+	}
+});
 
 // ---------------------------------------------------------------------------
 // parseDataUrlToBytes
@@ -16,6 +29,7 @@ describe('parseDataUrlToBytes', () => {
 		expect(result && new TextDecoder().decode(result.bytes)).toBe(svg);
 		expect(parseDataUrlToBytes('data:image/svg+xml;charset=utf-8,%broken')).toBeNull();
 	});
+
 	it('returns null for non-data-url strings', () => {
 		expect(parseDataUrlToBytes('https://example.com/image.png')).toBeNull();
 	});

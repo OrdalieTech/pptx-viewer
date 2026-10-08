@@ -291,7 +291,7 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// only then both fields, i.e. every inline field jumped to the end of
 		// its paragraph. `paragraphContentEntries` replays the order recovered
 		// from the raw XML at parse time, and reports `authored: false` when
-		// there was nothing to recover (already grouped, or SDK-built).
+		// there was no source order recorded (for example, SDK-built content).
 		const { entries, authored } = paragraphContentEntries(p, PARAGRAPH_CONTENT_TAGS, (value) =>
 			this.ensureArray(value),
 		);

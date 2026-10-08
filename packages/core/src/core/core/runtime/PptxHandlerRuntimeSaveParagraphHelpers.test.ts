@@ -675,6 +675,26 @@ describe('assembleParagraphXml', () => {
 // computeUniformSegmentOverrides
 // ---------------------------------------------------------------------------
 describe('computeUniformSegmentOverrides', () => {
+	it('keeps explicit run formatting when the parent still carries the inherited style', () => {
+		const segments: TextSegment[] = [
+			{
+				text: 'Section heading',
+				style: {
+					fontSize: 32,
+					color: '#112233',
+					inheritedRunStyle: { fontSize: 40, color: '#445566' },
+				},
+			},
+		];
+		// A prior export has already materialised the run edit in the source XML.
+		expect(
+			computeUniformSegmentOverrides({ fontSize: 40, color: '#445566' }, segments, segments),
+		).toStrictEqual({});
+		// An actual parent edit must still override uniform runs.
+		expect(
+			computeUniformSegmentOverrides({ fontSize: 48, color: '#778899' }, segments, segments),
+		).toMatchObject({ fontSize: 48, color: '#778899' });
+	});
 	it('should return empty object when textStyle is undefined', () => {
 		const segments: TextSegment[] = [
 			{ text: 'a', style: { bold: true } },

@@ -36,6 +36,14 @@ export function computeUniformSegmentOverrides(
 		if (nextValue === undefined) {
 			return;
 		}
+		// An unchanged inherited parent is not an edit of its explicitly styled runs.
+		// This remains true after a previous export materialises those runs in XML.
+		if (
+			textSegments.length > 0 &&
+			textSegments.every((segment) => segment.style?.inheritedRunStyle?.[styleKey] === nextValue)
+		) {
+			return;
+		}
 		const firstValue = textSegments[0]?.style?.[styleKey];
 		if (
 			originalSegments?.length &&
