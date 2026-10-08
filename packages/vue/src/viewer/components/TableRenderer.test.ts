@@ -8,7 +8,7 @@ import type {
 	PptxThemeColorScheme,
 } from 'pptx-viewer-core';
 import type { CellTextRun } from 'pptx-viewer-shared';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, test, vi } from 'vitest';
 import { ref } from 'vue';
 
 import type { TableCellEditContext } from '../composables/table-edit';
@@ -723,4 +723,29 @@ describe('tableRenderer', () => {
 		const wrapper = mount(TableRenderer, { props: { element: table(basicGrid), zIndex: 0 } });
 		expect(wrapper.find('.pptx-vue-table-resize__col').exists()).toBeFalsy();
 	});
+});
+
+test('table typography uses deck spacing and font fallbacks', () => {
+	const wrapper = mount(TableRenderer, {
+		props: {
+			element: table({
+				columnWidths: [1],
+				rows: [
+					{
+						cells: [
+							{
+								text: 'Row',
+								style: { fontFamily: 'Segoe UI Light' },
+								textSegments: [{ text: 'Row', paragraphProperties: { lineSpacing: 1.15 } }],
+							},
+						],
+					},
+				],
+			}),
+			zIndex: 0,
+		},
+	});
+	expect(wrapper.find('td').attributes('style')).toContain('line-height: 1.15');
+	expect(wrapper.find('td').attributes('style')).toContain('sans-serif');
+	wrapper.unmount();
 });

@@ -1,8 +1,9 @@
 import type { PptxTableCell, PptxTableData } from 'pptx-viewer-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, test } from 'vitest';
 
 import { DEFAULT_TEXT_COLOR } from '../constants';
 import { tableCellCss } from './table-cell-css';
+import { cellRunStyle } from './table-style';
 
 /**
  * A programmatically inserted table: exactly what `newTableElement` produces
@@ -79,4 +80,37 @@ describe('tableCellCss', () => {
 		const css = tableCellCss(insertedTable(), cell, POS);
 		expect(css.paddingLeft).toBe('0px');
 	});
+});
+
+describe('table typography stays independent of host CSS', () => {
+	it('uses authored percentage and exact spacing, otherwise a neutral default', () => {
+		const cell: PptxTableCell = {
+			text: 'Row',
+			textSegments: [{ text: 'Row', paragraphProperties: { lineSpacing: 1.15 } }],
+		};
+		expect(tableCellCss(undefined, cell, POS).lineHeight).toBe(1.15);
+		cell.textSegments![0].paragraphProperties!.lineSpacingExactPt = 18;
+		expect(tableCellCss(undefined, cell, POS).lineHeight).toBe('18pt');
+		expect(tableCellCss(undefined, { text: 'Row' }, POS).lineHeight).toBe('normal');
+	});
+
+	it('keeps the authored font first and provides family-specific fallbacks', () => {
+		const cell = { text: 'Row', style: { fontFamily: 'Segoe UI Light' } };
+		const css = tableCellCss(undefined, cell, POS);
+		expect(css.fontFamily).toMatch(/^"Segoe UI Light",.*sans-serif$/u);
+		expect(cellRunStyle({ text: 'Row', fontFamily: 'Cambria' }).fontFamily).toMatch(
+			/^"Cambria",.* serif$/u,
+		);
+		expect(cell.style.fontFamily).toBe('Segoe UI Light');
+	});
+});
+
+test('adds fallbacks for a font inherited from the table theme', () => {
+	const css = tableCellCss(
+		{ ...insertedTable(), tableStyleId: '{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}' },
+		undefined,
+		POS,
+		{ fontScheme: { majorFont: { latin: 'Segoe UI' }, minorFont: { latin: 'Segoe UI Light' } } },
+	);
+	expect(css.fontFamily).toMatch(/^"Segoe UI Light",.*sans-serif$/u);
 });

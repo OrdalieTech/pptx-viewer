@@ -17,7 +17,7 @@
 import type { TablePptxElement } from 'pptx-viewer-core';
 import { translationsEn } from 'pptx-viewer-shared/i18n';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, test, vi } from 'vitest';
 
 import { renderTableElement } from './table-render';
 
@@ -89,4 +89,16 @@ describe('programmatic table banding', () => {
 		const markup = renderToStaticMarkup(renderTableElement(element, {}));
 		expect(cellStyles(markup)[0]).toContain('color:#111827');
 	});
+});
+
+test('table typography uses deck spacing and font fallbacks', () => {
+	const element = insertedTable();
+	element.tableData!.rows[0].cells[0] = {
+		text: 'Row',
+		style: { fontFamily: 'Segoe UI Light' },
+		textSegments: [{ text: 'Row', paragraphProperties: { lineSpacing: 1.15 } }],
+	};
+	const markup = renderToStaticMarkup(renderTableElement(element, {}));
+	expect(cellStyles(markup)[0]).toContain('line-height:1.15');
+	expect(cellStyles(markup)[0]).toContain('sans-serif');
 });

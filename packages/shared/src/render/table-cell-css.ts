@@ -31,6 +31,7 @@
  * @module render/table-cell-css
  */
 import type { PptxTableCell, PptxTableData } from 'pptx-viewer-core';
+import { getSubstituteFontFamily } from 'pptx-viewer-core';
 
 import { DEFAULT_TEXT_COLOR } from '../constants';
 import type { TableCellCss, TableStyleContext } from './table-style';
@@ -73,7 +74,23 @@ export function tableCellCss(
 		position.columnCount,
 		context,
 	);
-	const css: TableCellCss = { ...base, ...band, ...cellStyleToCss(cell?.style) };
+	const css: TableCellCss = {
+		lineHeight: 'normal',
+		...base,
+		...band,
+		...cellStyleToCss(cell?.style),
+	};
+	// Cell paragraphs already carry the authored spacing. Do not inherit the host page's leading.
+	const paragraph = cell?.textSegments?.[0]?.paragraphProperties;
+	if (paragraph?.lineSpacingExactPt !== undefined) {
+		css.lineHeight = `${paragraph.lineSpacingExactPt}pt`;
+	} else if (paragraph?.lineSpacing !== undefined) {
+		css.lineHeight = paragraph.lineSpacing;
+	}
+	const family = cell?.style?.fontFamily ?? band?.fontFamily;
+	if (typeof family === 'string' && family) {
+		css.fontFamily = getSubstituteFontFamily(family);
+	}
 	// The floor: without it an unstyled cell inherits whatever `color` the host
 	// page cascades onto the viewer, which on the dark chrome is near-white and
 	// invisible on a light table. Per-run colours still win, because a run is a

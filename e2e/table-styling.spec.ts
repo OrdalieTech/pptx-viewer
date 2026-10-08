@@ -352,6 +352,64 @@ test.describe('table styling', () => {
 		expect(bold!.fontFamily).toContain('Georgia');
 	});
 
+	test('keeps every row inside its frame when the host uses a larger line height', async ({
+		page,
+	}) => {
+		const zip = await JSZip.loadAsync(await readFile(fixturePath));
+		const path = 'ppt/slides/slide4.xml';
+		const xml = await zip.file(path)!.async('string');
+		const rows = Array.from(
+			{ length: 8 },
+			(_, row) =>
+				`<a:tr h="${21 * 9525}">${[0, 1]
+					.map(
+						(col) =>
+							`<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:lnSpc><a:spcPct val="115000"/></a:lnSpc></a:pPr><a:r><a:rPr sz="1200"><a:latin typeface="Arial"/></a:rPr><a:t>Row ${row + 1} cell ${col + 1}</a:t></a:r></a:p></a:txBody><a:tcPr marT="0" marB="0" marL="0" marR="0"/></a:tc>`,
+					)
+					.join('')}</a:tr>`,
+		).join('');
+		zip.file(
+			path,
+			xml.replace(/<p:graphicFrame>[\s\S]*?<\/p:graphicFrame>/, (frame) =>
+				frame
+					.replace(/(<a:ext cx="[^"]+" cy=")[^"]+/, `$1${168 * 9525}`)
+					.replace(
+						/<a:tbl>[\s\S]*?<\/a:tbl>/,
+						`<a:tbl><a:tblPr/><a:tblGrid><a:gridCol w="4064000"/><a:gridCol w="4064000"/></a:tblGrid>${rows}</a:tbl>`,
+					),
+			),
+		);
+		await loadDeck(page, {
+			name: 'table-line-spacing.pptx',
+			mimeType: PPTX_MIME,
+			buffer: Buffer.from(await zip.generateAsync({ type: 'uint8array' })),
+		});
+		await page.addStyleTag({ content: 'body { line-height: 1.5; }' });
+		await gotoSlide(page, 4);
+		const table = page
+			.locator('[aria-roledescription="slide"]')
+			.first()
+			.locator('table')
+			.filter({ hasText: 'Row 8 cell 2' });
+		await expect(table).toBeVisible();
+		const bounds = await table.evaluate((node) => {
+			const frame = node.closest('[data-pptx-element="true"]')!;
+			const frameRect = frame.getBoundingClientRect();
+			return {
+				frame: { top: frameRect.top, bottom: frameRect.bottom },
+				rows: Array.from(node.rows).map((row) => {
+					const rect = row.getBoundingClientRect();
+					return { top: rect.top, bottom: rect.bottom };
+				}),
+			};
+		});
+		expect(bounds.rows).toHaveLength(8);
+		for (const row of bounds.rows) {
+			expect(row.top).toBeGreaterThanOrEqual(bounds.frame.top - 1);
+			expect(row.bottom).toBeLessThanOrEqual(bounds.frame.bottom + 1);
+		}
+	});
+
 	test('keeps the authored font size after editing a rich-text cell', async ({ page }) => {
 		await gotoSlide(page, 4);
 		const original = await measureTable(page);

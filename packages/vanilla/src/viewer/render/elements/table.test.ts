@@ -1,7 +1,7 @@
 import type { PptxElement, PptxTableCell, PptxTableData } from 'pptx-viewer-core';
 import type { CellTextRun } from 'pptx-viewer-shared';
 import { DEFAULT_FONT_FAMILY } from 'pptx-viewer-shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, test } from 'vitest';
 
 import { createTranslator } from '../../i18n';
 import { createElementRendererRegistry } from '../registry';
@@ -225,4 +225,25 @@ describe('renderTableElement', () => {
 		expect(td.style.paddingLeft).toBe('0px');
 		expect(td.style.paddingTop).toBe('0px');
 	});
+});
+
+test('table typography uses deck spacing and font fallbacks', () => {
+	const node = renderTable(
+		buildTableElement({
+			columnWidths: [1],
+			rows: [
+				{
+					cells: [
+						{
+							text: 'Row',
+							style: { fontFamily: 'Segoe UI Light' },
+							textSegments: [{ text: 'Row', paragraphProperties: { lineSpacing: 1.15 } }],
+						},
+					],
+				},
+			],
+		}),
+	);
+	expect(node.querySelector('td')!.style.lineHeight).toBe('1.15');
+	expect(node.querySelector('td')!.style.fontFamily).toContain('sans-serif');
 });

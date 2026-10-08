@@ -15,7 +15,7 @@ import type {
 	PptxTableCellStyle,
 	TablePptxElement,
 } from 'pptx-viewer-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, test } from 'vitest';
 
 import {
 	buildCellParagraphs,
@@ -663,10 +663,14 @@ describe('buildCellParagraphs', () => {
 		expect(paras[0]).toHaveLength(2);
 		expect(paras[0][0].text).toBe('Revenue ');
 		expect(paras[0][0].style['font-weight']).toBeUndefined();
-		expect(paras[0][0].style['font-family']).toBe('Arial');
+		expect(paras[0][0].style['font-family']).toBe(
+			'"Arial", "Liberation Sans", "Helvetica", sans-serif',
+		);
 		expect(paras[0][1].style['font-weight']).toBe('bold');
 		expect(paras[0][1].style['color']).toBe('#C00000');
-		expect(paras[0][1].style['font-family']).toBe('Georgia');
+		expect(paras[0][1].style['font-family']).toBe(
+			'"Georgia", "Liberation Serif", "Times New Roman", serif',
+		);
 		expect(paras[0][1].style['font-size']).toBe('24pt');
 	});
 
@@ -864,4 +868,16 @@ describe('buildTableViewModel - default cell text colour', () => {
 			rows[1].cells[0].tdStyle['background-color'],
 		);
 	});
+});
+
+test('table typography uses deck spacing and font fallbacks', () => {
+	const element = tableElement([{ cells: [{ text: 'Row' }] }]) as TablePptxElement;
+	element.tableData!.rows[0].cells[0] = {
+		text: 'Row',
+		style: { fontFamily: 'Segoe UI Light' },
+		textSegments: [{ text: 'Row', paragraphProperties: { lineSpacing: 1.15 } }],
+	};
+	const rows = buildTableViewModel(element);
+	expect(rows[0].cells[0].tdStyle['line-height']).toBe('1.15');
+	expect(rows[0].cells[0].tdStyle['font-family']).toContain('sans-serif');
 });

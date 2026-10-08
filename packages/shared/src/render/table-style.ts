@@ -28,6 +28,7 @@ import type {
 	PptxThemeColorScheme,
 	PptxThemeFontScheme,
 } from 'pptx-viewer-core';
+import { getSubstituteFontFamily } from 'pptx-viewer-core';
 
 import { getPatternSvg, normalizeHexColor } from './fill-style';
 import type { CellBorderPosition } from './table-style-borders';
@@ -91,7 +92,7 @@ export interface CellTextRun {
 export function cellRunStyle(run: CellTextRun): TableCellCss {
 	const css: TableCellCss = {};
 	if (run.fontFamily) {
-		css.fontFamily = run.fontFamily;
+		css.fontFamily = getSubstituteFontFamily(run.fontFamily);
 	}
 	if (typeof run.fontSize === 'number') {
 		css.fontSize = `${run.fontSize}pt`;

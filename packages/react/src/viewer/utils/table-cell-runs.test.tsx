@@ -30,7 +30,9 @@ describe('renderTableCellContent', () => {
 		expect(html).toContain('font-weight:bold');
 		expect(html).toContain('color:#C00000');
 		expect(html).toContain('font-size:18pt');
-		expect(html).toContain('font-family:Georgia');
+		expect(html).toContain(
+			'font-family:&quot;Georgia&quot;, &quot;Liberation Serif&quot;, &quot;Times New Roman&quot;, serif',
+		);
 	});
 
 	it('renders a soft break as <br> and a paragraph boundary as a block div', () => {

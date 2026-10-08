@@ -14,7 +14,12 @@ import type {
  *   - table-render-data.tsx       - renderTableFromTableData (programmatic tables)
  *   - table-render.tsx            - renderTableElement (XML-based tables)
  */
-import { canDrillDown, DEFAULT_FONT_FAMILY, tableContainerCss } from 'pptx-viewer-shared';
+import {
+	canDrillDown,
+	DEFAULT_FONT_FAMILY,
+	tableCellCss,
+	tableContainerCss,
+} from 'pptx-viewer-shared';
 import { translationsEn } from 'pptx-viewer-shared/i18n';
 import React from 'react';
 
@@ -200,6 +205,16 @@ export function renderTableElement(
 											...xmlCellStyle,
 											...(tdCellOverride ? cellStyleToCss(tdCellOverride) : undefined),
 											...(diag ? { position: 'relative' } : undefined),
+											lineHeight: tableCellCss(
+												undefined,
+												tableEl.tableData?.rows[rowIndex]?.cells[cellIndex],
+												{
+													rowIndex,
+													cellIndex,
+													rowCount: parsedTable.rowCount,
+													columnCount: parsedTable.columnCount,
+												},
+											).lineHeight,
 										};
 
 										return (
