@@ -27,6 +27,7 @@ export {
 	reconcileTableData,
 	readTableData,
 	readTableHeight,
+	tableRows,
 	alignTableColumns,
 	resolveTableCell,
 } from 'pptx-viewer-shared/collaboration';

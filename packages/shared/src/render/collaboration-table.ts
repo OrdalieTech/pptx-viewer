@@ -9,7 +9,7 @@ import type {
 import { orderedYMaps } from './collaboration-order';
 import type { YArrayLike, YjsFactories, YMapLike } from './collaboration-sync';
 import { alignTableColumns, reconcileTableColumns } from './collaboration-table-columns';
-import { reconcileItems } from './collaboration-table-items';
+import { reconcileItems, tableRows } from './collaboration-table-items';
 import {
 	decodeTextBody,
 	encodeSegmentsToDelta,
@@ -187,74 +187,68 @@ export function reconcileTableData(
 	const columns = reconcileTableColumns(data, table, elementId);
 	setMetadata(table, metadata(data as unknown as RecordValue, ['rows']));
 	const rows = table.get('rows') as YArrayLike;
-	const rowIds = new Set(orderedYMaps(rows).map((row) => String(row.get('id'))));
+	const rowIds = new Set(tableRows(rows).map((row) => String(row.get('id'))));
 	if (
-		data.rows.length !== rows.length ||
+		data.rows.length !== rowIds.size ||
 		data.rows.some((row) => !rowIds.has(row.collaborationId ?? ''))
 	) {
 		table.set('_heightFromRows', true);
 	}
-	reconcileItems(data.rows, rows, factories, (row, rowMap) => {
-		if (!rowMap.get('cells')) rowMap.set('cells', factories.createArray());
-		setMetadata(rowMap, metadata(row as unknown as RecordValue, ['cells', 'collaborationId']));
-		const cells = rowMap.get('cells') as YArrayLike;
-		reconcileItems(row.cells, cells, factories, (cell, cellMap, index) => {
-			if (cellMap.get('_column') !== columns[index]) cellMap.set('_column', columns[index]);
-			const text = cellMap.get('textBody');
-			const previous = JSON.parse(String(cellMap.get('_data') ?? '{}')) as RecordValue;
-			if (
-				!Array.isArray(cell.textSegments) &&
-				Array.isArray(previous.textRuns) &&
-				JSON.stringify(cell.textRuns) === JSON.stringify(previous.textRuns) &&
-				isYTextEditable(text) &&
-				cell.text === text.toString()
-			) {
-				const retained = JSON.parse(
+	reconcileItems(
+		data.rows,
+		rows,
+		factories,
+		(row, rowMap) => {
+			if (!rowMap.get('cells')) rowMap.set('cells', factories.createArray());
+			setMetadata(rowMap, metadata(row as unknown as RecordValue, ['cells', 'collaborationId']));
+			const cells = rowMap.get('cells') as YArrayLike;
+			reconcileItems(row.cells, cells, factories, (cell, cellMap, index) => {
+				if (cellMap.get('_column') !== columns[index]) cellMap.set('_column', columns[index]);
+				const text = cellMap.get('textBody');
+				const previous = JSON.parse(String(cellMap.get('_data') ?? '{}')) as RecordValue;
+				if (
+					!Array.isArray(cell.textSegments) &&
+					Array.isArray(previous.textRuns) &&
+					JSON.stringify(cell.textRuns) === JSON.stringify(previous.textRuns) &&
+					isYTextEditable(text) &&
+					cell.text === text.toString()
+				) {
+					const retained = JSON.parse(
+						metadata(cell as unknown as RecordValue, [
+							'text',
+							'textSegments',
+							'textRuns',
+							'collaborationId',
+						]),
+					) as RecordValue;
+					retained.textRuns = previous.textRuns;
+					setMetadata(cellMap, JSON.stringify(retained));
+					return;
+				}
+				setMetadata(
+					cellMap,
 					metadata(cell as unknown as RecordValue, [
 						'text',
 						'textSegments',
 						'textRuns',
 						'collaborationId',
 					]),
-				) as RecordValue;
-				retained.textRuns = previous.textRuns;
-				setMetadata(cellMap, JSON.stringify(retained));
-				return;
-			}
-			setMetadata(
-				cellMap,
-				metadata(cell as unknown as RecordValue, [
-					'text',
-					'textSegments',
-					'textRuns',
-					'collaborationId',
-				]),
-			);
-			const segments = tableSegments(cell);
-			if (isYTextEditable(text)) {
-				reconcileTableText(text, cell);
-			} else {
-				const next = factories.createText();
-				encodeTextBody(segments, next);
-				cellMap.set('textBody', next);
-			}
-		});
-	});
+				);
+				const segments = tableSegments(cell);
+				if (isYTextEditable(text)) {
+					reconcileTableText(text, cell);
+				} else {
+					const next = factories.createText();
+					encodeTextBody(segments, next);
+					cellMap.set('textBody', next);
+				}
+			});
+		},
+		true,
+	);
 }
 
-/** Imported frame sizes stay authored until the row structure is edited. */
-export function readTableHeight(elementMap: YMapLike): number | undefined {
-	const table = elementMap.get('tableData') as YMapLike | undefined;
-	if (table?.get('_heightFromRows')) {
-		const heights = orderedYMaps(table.get('rows') as YArrayLike).map(
-			(row) => JSON.parse(String(row.get('_data') ?? '{}')).height as number,
-		);
-		if (heights.length && heights.every((height) => Number.isFinite(height) && height > 0)) {
-			return heights.reduce((sum, height) => sum + height, 0);
-		}
-	}
-	return elementMap.get('height') as number | undefined;
-}
+export { readTableHeight } from './collaboration-table-items';
 
 export function readTableData(elementMap: YMapLike): PptxTableData | undefined {
 	const table = elementMap.get('tableData') as YMapLike | undefined;
@@ -265,7 +259,7 @@ export function readTableData(elementMap: YMapLike): PptxTableData | undefined {
 	return alignTableColumns(
 		{
 			...readMetadata<Omit<PptxTableData, 'rows'>>(table),
-			rows: orderedYMaps(rows).map((row) => {
+			rows: tableRows(rows).map((row) => {
 				const cells = row.get('cells') as YArrayLike;
 				return {
 					...readMetadata<Omit<PptxTableRow, 'cells'>>(row),

@@ -2,6 +2,7 @@ import type { PptxTableData } from 'pptx-viewer-core';
 
 import { orderedYMaps } from './collaboration-order';
 import type { YArrayLike, YMapLike, YjsFactories } from './collaboration-schema';
+import { tableRows } from './collaboration-table-items';
 
 interface Column {
 	id: string;
@@ -19,7 +20,7 @@ export function resolveTableCell(
 	const table = element.get('tableData') as YMapLike | undefined;
 	if (!table) return undefined;
 	const columns = tableColumns(table);
-	for (const row of orderedYMaps(table.get('rows') as YArrayLike)) {
+	for (const row of tableRows(table.get('rows') as YArrayLike)) {
 		const cells = row.get('cells') as YArrayLike;
 		// Concurrent first writes can create the same logical cell. Match the renderer's winner.
 		const existing = orderedYMaps(cells)
@@ -74,7 +75,7 @@ export function reconcileTableColumns(
 		}
 	}
 	const cellColumns = new Map<string, string>();
-	for (const row of orderedYMaps(rows)) {
+	for (const row of tableRows(rows)) {
 		orderedYMaps(row.get('cells') as YArrayLike).forEach((cell, index) => {
 			const id = cell.get('_column') ?? columns[index]?.id;
 			if (typeof id === 'string') {
@@ -129,7 +130,7 @@ export function alignTableColumns(data: PptxTableData, table: YMapLike): PptxTab
 	if (!columns.length) {
 		return data;
 	}
-	const rows = orderedYMaps(table.get('rows') as YArrayLike);
+	const rows = tableRows(table.get('rows') as YArrayLike);
 	const total = columns.reduce((sum, column) => sum + column.width, 0);
 	const authoredTotal = data.columnWidths.reduce((sum, width) => sum + width, 0);
 	return {

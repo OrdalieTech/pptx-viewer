@@ -267,3 +267,52 @@ it('preserves imported frame height until rows change, then reads height from th
 	expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
 	doc.destroy();
 });
+
+it('retains a row and concurrent text when all rows are deleted by separate clients', () => {
+	const doc = new Y.Doc();
+	const element = doc.getMap('element');
+	writeTableData(
+		{
+			columnWidths: [100],
+			rows: [
+				{ height: 30, cells: [{ text: 'A' }] },
+				{ height: 30, cells: [{ text: 'B' }] },
+			],
+		},
+		element,
+		factories,
+		'table',
+	);
+	const before = readTableData(element)!;
+	const peer = new Y.Doc();
+	Y.applyUpdate(peer, Y.encodeStateAsUpdate(doc));
+	for (const [replica, index] of [
+		[doc, 0],
+		[peer, 1],
+	] as const) {
+		const map = replica.getMap('element');
+		const data = readTableData(map)!;
+		data.rows.splice(index, 1);
+		reconcileTableData(data, map, factories, 'table');
+		(
+			resolveTableCell(map, data.rows[0].cells[0].collaborationId!, factories)!.get(
+				'textBody',
+			) as Y.Text
+		).insert(1, '!');
+	}
+	const updates = [Y.encodeStateAsUpdate(doc), Y.encodeStateAsUpdate(peer)];
+	Y.applyUpdate(doc, updates[1]);
+	Y.applyUpdate(peer, updates[0]);
+	const after = readTableData(element)!;
+	expect(after.rows).toHaveLength(1);
+	const retained = before.rows.find(
+		(row) => row.collaborationId === after.rows[0].collaborationId,
+	)!;
+	expect(after.rows[0].cells[0]).toMatchObject({
+		collaborationId: retained.cells[0].collaborationId,
+		text: `${retained.cells[0].text}!`,
+	});
+	expect(readTableData(peer.getMap('element'))).toEqual(after);
+	doc.destroy();
+	peer.destroy();
+});
