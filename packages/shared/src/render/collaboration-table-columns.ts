@@ -25,20 +25,26 @@ export function resolveTableCell(
 		// Concurrent first writes can create the same logical cell. Match the renderer's winner.
 		const candidates = orderedYMaps(cells).reverse();
 		const existing = candidates.find((cell) => cell.get('id') === cellId);
+		let cell = existing;
 		if (
-			existing &&
-			(!columns.length || columns.some((column) => column.id === existing.get('_column')))
-		)
-			return existing;
-		const column = columns.find((column) => `${row.get('id')}:${column.id}` === cellId);
-		if (!column) continue;
-		if (candidates.some((cell) => cell.get('_column') === column.id)) return undefined;
-		const cell = factories.createMap();
-		cell.set('id', cellId);
-		cell.set('_column', column.id);
-		cell.set('_data', '{}');
-		cell.set('textBody', factories.createText());
-		cells.push([cell]);
+			!cell ||
+			(columns.length && !columns.some((column) => column.id === cell!.get('_column')))
+		) {
+			const column = columns.find((column) => `${row.get('id')}:${column.id}` === cellId);
+			if (!column) continue;
+			if (candidates.some((candidate) => candidate.get('_column') === column.id)) return undefined;
+			cell = factories.createMap();
+			cell.set('id', cellId);
+			cell.set('_column', column.id);
+			cell.set('_data', '{}');
+			cell.set('textBody', factories.createText());
+			cells.push([cell]);
+		}
+		// Editing the fallback makes it live before a delayed insertion can hide it.
+		if (row.get('_deleted')) row.delete('_deleted');
+		if (cell.get('_deleted')) cell.delete('_deleted');
+		const marker = `_deletedColumn:${cell.get('_column')}`;
+		if (table.get(marker)) table.delete(marker);
 		return cell;
 	}
 	return undefined;
