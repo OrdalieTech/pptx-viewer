@@ -14,6 +14,7 @@ import type {
 	TextSegment,
 } from 'pptx-viewer-core';
 import {
+	mergeElement,
 	armEditorKeyboard,
 	downloadBlob,
 	moveGuide,
@@ -487,7 +488,7 @@ export function createEditorController(deps: EditorControllerDeps): EditorContro
 				replaceActiveElements(
 					state,
 					getActiveElements(state).map((element) =>
-						element.id === id ? ({ ...element, ...patch } as PptxElement) : element,
+						element.id === id ? mergeElement(element, patch) : element,
 					),
 				),
 			);

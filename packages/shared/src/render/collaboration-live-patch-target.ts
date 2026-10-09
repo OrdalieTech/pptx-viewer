@@ -10,9 +10,12 @@
 
 import type { TextSegment, TextStyle } from 'pptx-viewer-core';
 
+import { getAssetsMap } from './collaboration-assets';
 import { reconcileElementTextBody } from './collaboration-reconcile';
+import { readElementFromYMap, YDOC_SLIDES_KEY } from './collaboration-sync';
 import type { YArrayLike, YDocLike, YjsFactories, YMapLike } from './collaboration-sync';
-import { YDOC_SLIDES_KEY } from './collaboration-sync';
+import { reconcileTableData } from './collaboration-table';
+import { mergeElement } from './element-operations';
 import { remapTextToSegments } from './remap-text';
 
 /** Interim geometry for an element mid-gesture. All fields optional. */
@@ -113,6 +116,18 @@ export function applyLivePatch(
 		return;
 	}
 	if (patch.geometry) {
+		if (ymap.get('type') === 'table' && patch.geometry.height !== undefined) {
+			const before = readElementFromYMap(ymap, getAssetsMap(doc));
+			const after = mergeElement(before, patch.geometry);
+			if (
+				before.type === 'table' &&
+				after.type === 'table' &&
+				after.tableData &&
+				after.tableData !== before.tableData
+			) {
+				reconcileTableData(after.tableData, ymap, factories, patch.elementId);
+			}
+		}
 		for (const key of GEOMETRY_KEYS) {
 			const next = patch.geometry[key];
 			if (typeof next === 'number' && ymap.get(key) !== next) {

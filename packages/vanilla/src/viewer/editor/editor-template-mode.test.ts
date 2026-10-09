@@ -1,5 +1,5 @@
 import type { PptxElement, PptxHandler, PptxSlide } from 'pptx-viewer-core';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, test, vi } from 'vitest';
 
 import { createTranslator } from '../i18n';
 import { createInitialViewerState, createStore } from '../state';
@@ -111,4 +111,38 @@ describe('vanilla template editing', () => {
 		ops.undo();
 		expect(store.get().slideMasters[0].layouts?.[0].elements?.[0].x).toBe(8);
 	});
+});
+
+test('resizing a table scales its rows with the frame', () => {
+	const store = createStore({
+		...createInitialViewerState(),
+		slides: [
+			{
+				...slide(),
+				elements: [
+					{
+						id: 't',
+						type: 'table',
+						x: 0,
+						y: 0,
+						width: 200,
+						height: 90,
+						tableData: {
+							columnWidths: [1],
+							rows: [30, 60].map((height) => ({ height, cells: [{ text: 'keep' }] })),
+						},
+					} as PptxElement,
+				],
+			},
+		],
+		editable: true,
+	});
+	const ops = createEditorOps({ store, getHandler: () => null, onHistoryChange: vi.fn() });
+	ops.patchGeometry('t', { x: 0, y: 0, width: 200, height: 180, rotation: 0 });
+	const result = store.get().slides[0].elements[0];
+	if (result.type !== 'table') {
+		throw new Error('Expected table');
+	}
+	expect(result.height).toBe(180);
+	expect(result.tableData!.rows.map((r) => r.height)).toStrictEqual([60, 120]);
 });

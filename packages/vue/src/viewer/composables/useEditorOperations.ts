@@ -6,6 +6,7 @@ import {
 } from 'pptx-viewer-core';
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 import {
+	mergeElement,
 	bringForward as sharedBringForward,
 	bringToFront as sharedBringToFront,
 	isTemplateElementId,
@@ -221,9 +222,7 @@ export function useEditorOperations(input: UseEditorOperationsInput): EditorOper
 
 	const updateElement = (elementId: string, updates: Partial<PptxElement>): void => {
 		commitForId(elementId, (elements) =>
-			elements.map((el) =>
-				el.id === elementId ? ({ ...cloneElement(el), ...updates } as PptxElement) : el,
-			),
+			elements.map((el) => (el.id === elementId ? mergeElement(cloneElement(el), updates) : el)),
 		);
 	};
 

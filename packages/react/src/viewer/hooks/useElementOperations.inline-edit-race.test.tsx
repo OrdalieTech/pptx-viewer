@@ -21,7 +21,7 @@ import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, test, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { EditorHistoryResult } from './useEditorHistory';
 import { useElementOperations } from './useElementOperations';
@@ -65,10 +65,12 @@ interface Harness {
  * in-progress edit session where the user has typed past what `textSegments`
  * on the model still reflects.
  */
-function mount(inlineEditingElementId: string | null, inlineEditingText: string): Harness {
-	let slides: PptxSlide[] = [
-		{ id: 'slide-1', rId: 'rId2', slideNumber: 1, elements: [textElement()] },
-	];
+function mount(
+	inlineEditingElementId: string | null,
+	inlineEditingText: string,
+	initial = textElement(),
+): Harness {
+	let slides: PptxSlide[] = [{ id: 'slide-1', rId: 'rId2', slideNumber: 1, elements: [initial] }];
 	let latest: ElementOperations | undefined;
 
 	function Probe(): null {
@@ -131,4 +133,25 @@ describe('updateSelectedTextStyle mid-edit race', () => {
 		// Not mid-edit: the stale "text" field is untouched, only style/segments change.
 		expect(el.text).toBe('Hello');
 	});
+});
+
+test('resizing a table scales its rows with the frame', () => {
+	const h = mount(null, '', {
+		id: 't',
+		type: 'table',
+		x: 0,
+		y: 0,
+		width: 200,
+		height: 90,
+		tableData: {
+			columnWidths: [1],
+			rows: [30, 60].map((height) => ({ height, cells: [{ text: 'keep' }] })),
+		},
+	} as PptxElement);
+	act(() => h.ops().updateElementById('t', { height: 180 }));
+	const result = h.slides()[0].elements[0];
+	if (result.type !== 'table') {
+		throw new Error('Expected table');
+	}
+	expect(result.tableData!.rows.map((r) => r.height)).toStrictEqual([60, 120]);
 });

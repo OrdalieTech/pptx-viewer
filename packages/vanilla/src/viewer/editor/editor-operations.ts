@@ -17,8 +17,8 @@ import type {
 	TextStyle,
 } from 'pptx-viewer-core';
 import { duplicateElement } from 'pptx-viewer-core';
-import type { ElementBoxPatch } from 'pptx-viewer-shared';
 import {
+	mergeElement,
 	applyFormatToElement,
 	buildDeckSaveOptions,
 	buildSaveSlides,
@@ -30,6 +30,7 @@ import {
 	saveDeckWithPassword,
 	updateSlideNotes,
 } from 'pptx-viewer-shared';
+import type { ElementBoxPatch } from 'pptx-viewer-shared';
 
 import type { Store, ViewerState } from '../state';
 import {
@@ -168,7 +169,7 @@ export function createEditorOps(deps: EditorOpsDeps): EditorOps {
 	const patchGeometry = (id: string, box: ElementBoxPatch): void => {
 		const state = store.get();
 		const elements = getActiveElements(state).map((element) =>
-			element.id === id ? ({ ...element, ...box } as PptxElement) : element,
+			element.id === id ? mergeElement(element, box) : element,
 		);
 		store.set(replaceActiveElements(state, elements));
 	};

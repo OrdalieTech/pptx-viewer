@@ -1,6 +1,8 @@
 import type { PptxElement, PptxSlide, TextSegment } from 'pptx-viewer-core';
 import { cloneElement, cloneSlide, duplicateElement } from 'pptx-viewer-core';
 
+import { mergeElement } from './element-operations';
+
 /**
  * Pure, immutable slide-array mutations for the editor.
  *
@@ -53,9 +55,7 @@ export function updateElement(
 	updates: Partial<PptxElement>,
 ): PptxSlide[] {
 	return mapSlideElements(slides, slideIndex, (elements) =>
-		elements.map((el) =>
-			el.id === elementId ? ({ ...cloneElement(el), ...updates } as PptxElement) : el,
-		),
+		elements.map((el) => (el.id === elementId ? mergeElement(cloneElement(el), updates) : el)),
 	);
 }
 

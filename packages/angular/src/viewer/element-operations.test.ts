@@ -1,5 +1,5 @@
 import type { PptxElement } from 'pptx-viewer-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, test } from 'vitest';
 
 import {
 	updateElementById,
@@ -464,4 +464,30 @@ describe('all ops are immutable', () => {
 		const result = sendBackward(els, 'b');
 		expect(result).not.toBe(els);
 	});
+});
+
+test('resizing a table scales its rows with the frame', () => {
+	const result = updateElementById(
+		[
+			{
+				id: 't',
+				type: 'table',
+				x: 0,
+				y: 0,
+				width: 200,
+				height: 90,
+				tableData: {
+					columnWidths: [1],
+					rows: [30, 60].map((height) => ({ height, cells: [{ text: 'keep' }] })),
+				},
+			} as PptxElement,
+		],
+		't',
+		{ height: 180 },
+	)[0];
+	if (result.type !== 'table') {
+		throw new Error('Expected table');
+	}
+	expect(result.height).toBe(180);
+	expect(result.tableData!.rows.map((r) => r.height)).toStrictEqual([60, 120]);
 });

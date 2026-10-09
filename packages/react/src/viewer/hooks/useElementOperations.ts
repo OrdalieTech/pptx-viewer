@@ -10,6 +10,7 @@ import type {
 	TextStyle,
 } from 'pptx-viewer-core';
 import {
+	mergeElement,
 	masterViewElements as resolveMasterViewElements,
 	remapTextToSegments,
 	replaceMasterViewElements,
@@ -221,7 +222,7 @@ export function useElementOperations(input: UseElementOperationsInput): ElementO
 					setTemplateElementsBySlideId((prev) => ({
 						...prev,
 						[slideId]: (prev[slideId] ?? []).map((el) =>
-							el.id === elementId ? ({ ...el, ...updates } as PptxElement) : el,
+							el.id === elementId ? mergeElement(el, updates) : el,
 						),
 					}));
 				}

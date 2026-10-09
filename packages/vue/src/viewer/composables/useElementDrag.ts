@@ -1,5 +1,6 @@
 import type { PptxElement, PptxSlide } from 'pptx-viewer-core';
 import {
+	mergeElement,
 	canInteractWithElement,
 	createGestureController,
 	isTemplateElementId,
@@ -180,14 +181,15 @@ export function useElementDrag(input: UseElementDragInput) {
 		const { x, y, width, height } = useSnap
 			? snapBox(payload, gridSpacingPx?.value ?? DEFAULT_GRID_SIZE)
 			: { x: payload.x, y: payload.y, width: payload.width, height: payload.height };
-		patchElementInStore(payload.id, (el) => ({
-			...el,
-			x,
-			y,
-			width,
-			height,
-			rotation: payload.rotation,
-		}));
+		patchElementInStore(payload.id, (el) =>
+			mergeElement(el, {
+				x,
+				y,
+				width,
+				height,
+				rotation: payload.rotation,
+			}),
+		);
 	}
 
 	// Locks + start geometry resolved once at gesture start, so a locked axis can

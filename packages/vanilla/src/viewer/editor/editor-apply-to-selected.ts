@@ -1,4 +1,5 @@
 import type { PptxElement } from 'pptx-viewer-core';
+import { mergeElement } from 'pptx-viewer-shared';
 
 import type { Store, ViewerState } from '../state';
 import { getActiveElements, replaceActiveElements } from './editor-active-elements';
@@ -30,7 +31,7 @@ export function createApplyToSelected(store: Store<ViewerState>, ops: EditorOps)
 			replaceActiveElements(
 				state,
 				getActiveElements(state).map((element) =>
-					element.id === id ? ({ ...element, ...patch } as PptxElement) : element,
+					element.id === id ? mergeElement(element, patch) : element,
 				),
 			),
 		);

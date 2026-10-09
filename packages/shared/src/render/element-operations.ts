@@ -31,8 +31,30 @@ const DEFAULT_DUPLICATE_OFFSET = 20;
  * discriminant `type` field even if `patch` accidentally carries a different
  * one (the cast is safe because we re-assert the original type).
  */
-function mergeElement(el: PptxElement, patch: Partial<PptxElement>): PptxElement {
-	return { ...el, ...patch, type: el.type } as PptxElement;
+export function mergeElement(el: PptxElement, patch: Partial<PptxElement>): PptxElement {
+	const next = { ...el, ...patch, type: el.type } as PptxElement;
+	if (
+		next.type === 'table' &&
+		next.tableData?.rows.length &&
+		!('tableData' in patch) &&
+		next.height !== el.height &&
+		Number.isFinite(next.height) &&
+		next.height > 0
+	) {
+		// Keep the frame and row sizes in sync during geometry-only resizes.
+		const heights = next.tableData.rows.map((row) =>
+			row.height && row.height > 0 ? row.height : 1,
+		);
+		const total = heights.reduce((sum, height) => sum + height, 0);
+		next.tableData = {
+			...next.tableData,
+			rows: next.tableData.rows.map((row, i) => ({
+				...row,
+				height: (next.height * heights[i]) / total,
+			})),
+		};
+	}
+	return next;
 }
 
 /**

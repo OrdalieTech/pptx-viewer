@@ -1,6 +1,6 @@
 import type { PptxElement, TextSegment, TextStyle } from 'pptx-viewer-core';
+import { mergeElement, cloneElementForPaste, updateSlideNotes } from 'pptx-viewer-shared';
 import type { ElementBoxPatch } from 'pptx-viewer-shared';
-import { cloneElementForPaste, updateSlideNotes } from 'pptx-viewer-shared';
 
 import { appendElement, newElementId } from './editor-insert';
 import type { EditorState } from './editor-state.svelte';
@@ -30,7 +30,7 @@ export class EditorElementController {
 	patchGeometry(id: string, box: ElementBoxPatch): void {
 		this.#editor.replaceActiveElements(
 			this.#editor.activeElements.map((element) =>
-				element.id === id ? ({ ...element, ...box } as PptxElement) : element,
+				element.id === id ? mergeElement(element, box) : element,
 			),
 		);
 	}
@@ -71,7 +71,7 @@ export class EditorElementController {
 		this.#editor.pushHistory();
 		this.#editor.replaceActiveElements(
 			this.#editor.activeElements.map((element) =>
-				element.id === id ? ({ ...element, ...patch } as PptxElement) : element,
+				element.id === id ? mergeElement(element, patch) : element,
 			),
 		);
 		this.#editor.commitChange();

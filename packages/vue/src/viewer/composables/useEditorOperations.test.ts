@@ -2,7 +2,7 @@
 // rule misfires on the `useX` naming when invoked inside a test `setup` fn.
 // oxlint-disable react-hooks/rules-of-hooks
 import type { PptxElement, PptxSlide, SmartArtPptxElement } from 'pptx-viewer-core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, test } from 'vitest';
 import { ref, shallowRef } from 'vue';
 
 import { useEditorHistory } from './useEditorHistory';
@@ -235,4 +235,28 @@ describe('useEditorOperations - history integration', () => {
 		expect(selection.value).toStrictEqual(['b']);
 		expect(ops.selectedElementIds).toBe(selection);
 	});
+});
+
+test('resizing a table scales its rows with the frame', () => {
+	const { ops, slides } = setup([
+		{
+			id: 't',
+			type: 'table',
+			x: 0,
+			y: 0,
+			width: 200,
+			height: 90,
+			tableData: {
+				columnWidths: [1],
+				rows: [30, 60].map((height) => ({ height, cells: [{ text: 'keep' }] })),
+			},
+		} as PptxElement,
+	]);
+	ops.transformElement('t', { height: 180 });
+	const result = slides.value[0].elements[0];
+	if (result.type !== 'table') {
+		throw new Error('Expected table');
+	}
+	expect(result.height).toBe(180);
+	expect(result.tableData!.rows.map((r) => r.height)).toStrictEqual([60, 120]);
 });
