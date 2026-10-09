@@ -202,47 +202,53 @@ export function reconcileTableData(
 			if (!rowMap.get('cells')) rowMap.set('cells', factories.createArray());
 			setMetadata(rowMap, metadata(row as unknown as RecordValue, ['cells', 'collaborationId']));
 			const cells = rowMap.get('cells') as YArrayLike;
-			reconcileItems(row.cells, cells, factories, (cell, cellMap, index) => {
-				if (cellMap.get('_column') !== columns[index]) cellMap.set('_column', columns[index]);
-				const text = cellMap.get('textBody');
-				const previous = JSON.parse(String(cellMap.get('_data') ?? '{}')) as RecordValue;
-				if (
-					!Array.isArray(cell.textSegments) &&
-					Array.isArray(previous.textRuns) &&
-					JSON.stringify(cell.textRuns) === JSON.stringify(previous.textRuns) &&
-					isYTextEditable(text) &&
-					cell.text === text.toString()
-				) {
-					const retained = JSON.parse(
+			reconcileItems(
+				row.cells,
+				cells,
+				factories,
+				(cell, cellMap, index) => {
+					if (cellMap.get('_column') !== columns[index]) cellMap.set('_column', columns[index]);
+					const text = cellMap.get('textBody');
+					const previous = JSON.parse(String(cellMap.get('_data') ?? '{}')) as RecordValue;
+					if (
+						!Array.isArray(cell.textSegments) &&
+						Array.isArray(previous.textRuns) &&
+						JSON.stringify(cell.textRuns) === JSON.stringify(previous.textRuns) &&
+						isYTextEditable(text) &&
+						cell.text === text.toString()
+					) {
+						const retained = JSON.parse(
+							metadata(cell as unknown as RecordValue, [
+								'text',
+								'textSegments',
+								'textRuns',
+								'collaborationId',
+							]),
+						) as RecordValue;
+						retained.textRuns = previous.textRuns;
+						setMetadata(cellMap, JSON.stringify(retained));
+						return;
+					}
+					setMetadata(
+						cellMap,
 						metadata(cell as unknown as RecordValue, [
 							'text',
 							'textSegments',
 							'textRuns',
 							'collaborationId',
 						]),
-					) as RecordValue;
-					retained.textRuns = previous.textRuns;
-					setMetadata(cellMap, JSON.stringify(retained));
-					return;
-				}
-				setMetadata(
-					cellMap,
-					metadata(cell as unknown as RecordValue, [
-						'text',
-						'textSegments',
-						'textRuns',
-						'collaborationId',
-					]),
-				);
-				const segments = tableSegments(cell);
-				if (isYTextEditable(text)) {
-					reconcileTableText(text, cell);
-				} else {
-					const next = factories.createText();
-					encodeTextBody(segments, next);
-					cellMap.set('textBody', next);
-				}
-			});
+					);
+					const segments = tableSegments(cell);
+					if (isYTextEditable(text)) {
+						reconcileTableText(text, cell);
+					} else {
+						const next = factories.createText();
+						encodeTextBody(segments, next);
+						cellMap.set('textBody', next);
+					}
+				},
+				true,
+			);
 		},
 		true,
 	);

@@ -23,12 +23,16 @@ export function resolveTableCell(
 	for (const row of tableRows(table.get('rows') as YArrayLike)) {
 		const cells = row.get('cells') as YArrayLike;
 		// Concurrent first writes can create the same logical cell. Match the renderer's winner.
-		const existing = orderedYMaps(cells)
-			.reverse()
-			.find((cell) => cell.get('id') === cellId);
-		if (existing) return existing;
+		const candidates = orderedYMaps(cells).reverse();
+		const existing = candidates.find((cell) => cell.get('id') === cellId);
+		if (
+			existing &&
+			(!columns.length || columns.some((column) => column.id === existing.get('_column')))
+		)
+			return existing;
 		const column = columns.find((column) => `${row.get('id')}:${column.id}` === cellId);
 		if (!column) continue;
+		if (candidates.some((cell) => cell.get('_column') === column.id)) return undefined;
 		const cell = factories.createMap();
 		cell.set('id', cellId);
 		cell.set('_column', column.id);
@@ -44,15 +48,17 @@ export function resolveTableCell(
 export function tableColumns(table: YMapLike): Column[] {
 	const columns: Column[] = [];
 	table.forEach((value, key) => {
-		if (
-			key.startsWith(PREFIX) &&
-			typeof value === 'string' &&
-			!table.get(`_deletedColumn:${key.slice(PREFIX.length)}`)
-		) {
+		if (key.startsWith(PREFIX) && typeof value === 'string') {
 			columns.push({ id: key.slice(PREFIX.length), ...JSON.parse(value) });
 		}
 	});
-	return columns.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+	columns.sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+	const deleted = (column: Column) => Number(table.get(`_deletedColumn:${column.id}`) ?? 0);
+	const visible = columns.filter((column) => !deleted(column));
+	if (visible.length) return visible;
+	// Prefer the latest deletion batch, never a column deleted before this conflict.
+	const latest = Math.max(...columns.map(deleted));
+	return columns.filter((column) => deleted(column) === latest).slice(0, 1);
 }
 
 export function reconcileTableColumns(
@@ -96,12 +102,17 @@ export function reconcileTableColumns(
 		throw new Error('PPTX table columns must have distinct identities');
 	}
 	const wanted = new Set(ids);
+	let deletion = 1;
+	table.forEach((value, key) => {
+		if (key.startsWith('_deletedColumn:')) deletion = Math.max(deletion, Number(value) + 1);
+	});
 	for (const column of columns) {
-		if (!wanted.has(column.id)) table.set(`_deletedColumn:${column.id}`, true);
+		if (!wanted.has(column.id)) table.set(`_deletedColumn:${column.id}`, deletion);
 	}
 	const total = data.columnWidths.reduce((sum, width) => sum + width, 0);
 	let previous = -Infinity;
 	ids.forEach((id, index) => {
+		if (table.get(`_deletedColumn:${id}`)) table.delete(`_deletedColumn:${id}`);
 		const existing = columns.find((column) => column.id === id);
 		const following = ids
 			.slice(index + 1)
