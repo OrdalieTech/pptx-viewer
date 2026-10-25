@@ -113,9 +113,9 @@ function childTags(xml: string, containerTag: string, index = 0): string[] {
 }
 
 /** Load the scaffold deck with the authored layout, save it, return the layout. */
-async function roundTripLayout(): Promise<string> {
+async function roundTripLayout(layoutXml = LAYOUT_XML): Promise<string> {
 	const zip = await JSZip.loadAsync(readFileSync(fixture));
-	zip.file(LAYOUT_PART, LAYOUT_XML);
+	zip.file(LAYOUT_PART, layoutXml);
 	const bytes = await zip.generateAsync({ type: 'uint8array' });
 
 	const handler = new PptxHandler();
@@ -153,6 +153,19 @@ describe('a saved slide layout keeps its authored shape-tree order', () => {
 		expect(childTags(saved, 'p:grpSp')).toStrictEqual(childTags(LAYOUT_XML, 'p:grpSp'));
 		expect(childTags(saved, 'p:grpSp')).toContain('p:cxnSp');
 		expect(childTags(saved, 'p:grpSp').indexOf('p:cxnSp')).toBe(3);
+	}, 60_000);
+
+	it('keeps an untouched layout verbatim, freeform path commands included', async () => {
+		// Re-serialized, the path would come back moveTo,moveTo,lnTo,lnTo,close.
+		const path =
+			'<a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="0"/></a:lnTo><a:close/>' +
+			'<a:moveTo><a:pt x="0" y="100"/></a:moveTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo>';
+		const freeform =
+			'<p:sp><p:nvSpPr><p:cNvPr id="5" name="Freeform"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>' +
+			`<p:spPr>${XFRM}<a:custGeom><a:pathLst><a:path w="100" h="100">${path}</a:path></a:pathLst></a:custGeom></p:spPr></p:sp>`;
+		const layoutXml = LAYOUT_XML.replace(sp(5, 'Gamma'), freeform);
+
+		await expect(roundTripLayout(layoutXml)).resolves.toBe(layoutXml);
 	}, 60_000);
 });
 
