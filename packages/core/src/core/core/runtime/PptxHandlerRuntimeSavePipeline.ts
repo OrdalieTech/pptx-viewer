@@ -9,6 +9,7 @@ import { forkChartPartsSharedBetweenSlides } from './chart-part-ownership';
 import { applyHeaderFooterToMaster } from './header-footer-parts';
 import { slidesPerPageToPrintOutput } from './pptx-print-properties';
 import { PptxHandlerRuntime as PptxHandlerRuntimeBase } from './PptxHandlerRuntimeSaveHandoutInfrastructure';
+import { isTemplateSpTreeRebuilt } from './template-sp-tree-order';
 
 export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 	/**
@@ -167,12 +168,19 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 		// Persist template/master updates. `withTemplateSpTreeOrder` puts the
 		// shape tree back into document order (= paint order) on a clone; both
 		// the passthrough and the rebuilt-from-elements route reach the ZIP
-		// tag-bucketed otherwise.
+		// tag-bucketed otherwise. A part that was neither rebuilt nor edited
+		// keeps its original bytes, so it is compared before ordering (the
+		// source parse is bucketed too): a rewrite also buckets mixed content
+		// the shape-tree order does not cover, such as `a:path` commands.
 		for (const [layoutPath, layoutXmlObj] of this.layoutXmlMap.entries()) {
 			const source = await this.zip.file(layoutPath)?.async('string');
 			const ordered = await this.withTemplateSpTreeOrder(layoutPath, layoutXmlObj, 'p:sldLayout');
 			const rebuilt = this.builder.build(ordered);
-			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
+			if (
+				!source ||
+				isTemplateSpTreeRebuilt(this, layoutPath) ||
+				this.builder.build(this.parser.parse(source)) !== this.builder.build(layoutXmlObj)
+			) {
 				this.zip.file(layoutPath, rebuilt);
 			}
 		}
@@ -180,7 +188,11 @@ export class PptxHandlerRuntime extends PptxHandlerRuntimeBase {
 			const source = await this.zip.file(masterPath)?.async('string');
 			const ordered = await this.withTemplateSpTreeOrder(masterPath, masterXmlObj, 'p:sldMaster');
 			const rebuilt = this.builder.build(ordered);
-			if (!source || this.builder.build(this.parser.parse(source)) !== rebuilt) {
+			if (
+				!source ||
+				isTemplateSpTreeRebuilt(this, masterPath) ||
+				this.builder.build(this.parser.parse(source)) !== this.builder.build(masterXmlObj)
+			) {
 				this.zip.file(masterPath, rebuilt);
 			}
 		}

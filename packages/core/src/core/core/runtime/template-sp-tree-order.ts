@@ -92,6 +92,11 @@ export function rememberTemplateSpTreePositions(
 	byPart.set(partPath, positions);
 }
 
+/** Whether the save pipeline rebuilt this part's shape tree from the typed model. */
+export function isTemplateSpTreeRebuilt(runtime: object, partPath: string): boolean {
+	return positionsByRuntime.get(runtime)?.has(partPath) ?? false;
+}
+
 /**
  * Replace one entry of `container[tag]` without touching the input.
  *
