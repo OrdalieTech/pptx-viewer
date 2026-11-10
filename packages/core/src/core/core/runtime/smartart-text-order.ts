@@ -68,14 +68,52 @@ function directChildOrder(xml: string): string[] {
 	return order;
 }
 
+/**
+ * The direct-child order of every `<prefix:name ...> ... </prefix:name>` span,
+ * exactly as one global match of
+ * `<(prefix:)?name\b[^>]*>([\s\S]*?)<\/\1name\s*>` finds them. That regex
+ * rescans to the end of the part from each start tag that has no closing tag
+ * (`<p:sp>` reads as an element `p`, `<a:br/>` never closes), which is
+ * quadratic in the part size; this walk stops looking for a closing tag once
+ * none is left.
+ */
 function extractElementOrders(xml: string, elementName: string): string[][] {
 	const orders: string[][] = [];
-	const pattern = new RegExp(
-		`<([A-Za-z_][\\w.-]*:)?${elementName}\\b[^>]*>([\\s\\S]*?)<\\/\\1${elementName}\\s*>`,
-		'gu',
-	);
-	for (const match of xml.matchAll(pattern)) {
-		orders.push(directChildOrder(match[2]));
+	const starts = [
+		new RegExp(`<([A-Za-z_][\\w.-]*:)${elementName}\\b[^>]*>`, 'uy'),
+		new RegExp(`<${elementName}\\b[^>]*>`, 'uy'),
+	];
+	const tail = /\s*>/uy;
+	const unclosed = new Set<string>();
+	// The first closing tag of `prefix` at or after `from`: [index, end].
+	const closing = (prefix: string, from: number): [number, number] | undefined => {
+		if (unclosed.has(prefix)) {
+			return undefined;
+		}
+		const tag = `</${prefix}${elementName}`;
+		for (let index = xml.indexOf(tag, from); index >= 0; index = xml.indexOf(tag, index + 1)) {
+			tail.lastIndex = index + tag.length;
+			if (tail.test(xml)) {
+				return [index, tail.lastIndex];
+			}
+		}
+		unclosed.add(prefix);
+		return undefined;
+	};
+	let at = xml.indexOf('<');
+	while (at >= 0) {
+		let next = at + 1;
+		for (const start of starts) {
+			start.lastIndex = at;
+			const open = start.exec(xml);
+			const close = open ? closing(open[1] ?? '', at + open[0].length) : undefined;
+			if (open && close) {
+				orders.push(directChildOrder(xml.slice(at + open[0].length, close[0])));
+				next = close[1];
+				break;
+			}
+		}
+		at = xml.indexOf('<', next);
 	}
 	return orders;
 }
