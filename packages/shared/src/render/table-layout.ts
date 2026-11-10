@@ -36,6 +36,55 @@ function createDefaultCell(): PptxTableCell {
 /** Default pixel height assigned to a freshly-inserted row. */
 export const DEFAULT_INSERTED_ROW_HEIGHT = 40;
 
+interface MergeAnchor {
+	row: number;
+	col: number;
+	rowSpan: number;
+	gridSpan: number;
+}
+
+/** Every merge anchor of the table, with the rectangle it covers. */
+function mergeAnchors(tableData: PptxTableData): MergeAnchor[] {
+	const anchors: MergeAnchor[] = [];
+	tableData.rows.forEach((row, r) => {
+		row.cells.forEach((cell, c) => {
+			const rowSpan = Math.max(1, cell.rowSpan ?? 1);
+			const gridSpan = Math.max(1, cell.gridSpan ?? 1);
+			if (!cell.hMerge && !cell.vMerge && (rowSpan > 1 || gridSpan > 1)) {
+				anchors.push({ row: r, col: c, rowSpan, gridSpan });
+			}
+		});
+	});
+	return anchors;
+}
+
+/**
+ * The cell that takes over a merge whose anchor is deleted: the surviving
+ * cell with the anchor's content. The rich text goes with the flat text, or
+ * the renderers and the save writer would keep the survivor's own (empty) runs
+ * and lose the anchor's formatting.
+ */
+function promoteAnchor(
+	anchor: PptxTableCell,
+	cell: PptxTableCell,
+	merge: Pick<PptxTableCell, 'gridSpan' | 'rowSpan' | 'hMerge' | 'vMerge'>,
+): PptxTableCell {
+	const hasContent = Boolean(anchor.text || anchor.textRuns?.length || anchor.textSegments?.length);
+	if (!hasContent) {
+		return { ...cell, style: cell.style || anchor.style, ...merge };
+	}
+	const { textRuns: _runs, textSegments: _segments, ...rest } = cell;
+	return {
+		...rest,
+		text: anchor.text,
+		style: anchor.style || cell.style,
+		...(anchor.textRuns ? { textRuns: anchor.textRuns } : {}),
+		...(anchor.textSegments ? { textSegments: anchor.textSegments } : {}),
+		...(anchor.extraAttributes ? { extraAttributes: anchor.extraAttributes } : {}),
+		...merge,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Insert row
 // ---------------------------------------------------------------------------
@@ -57,25 +106,23 @@ export function insertTableRow(
 	const insertIdx = position === 'above' ? rowIdx : rowIdx + 1;
 	const colCount = tableData.columnWidths.length;
 
-	// Build new cells, handling merges that span across the insertion point.
-	const newCells: PptxTableCell[] = [];
-	for (let c = 0; c < colCount; c++) {
-		let insideMerge = false;
-		for (let r = 0; r < insertIdx; r++) {
-			const cell = tableData.rows[r]?.cells[c];
-			if (!cell) {
-				continue;
-			}
-			const rs = Math.max(1, cell.rowSpan ?? 1);
-			if (rs > 1 && r + rs > insertIdx && !cell.vMerge && !cell.hMerge) {
-				insideMerge = true;
-				break;
-			}
+	// Build new cells. A merge that spans the insertion point covers the new
+	// row over its whole width: a vertical continuation under the anchor, and
+	// a continuation in both directions under the rest of its columns.
+	const newCells: PptxTableCell[] = Array.from({ length: colCount }, createDefaultCell);
+	for (const anchor of mergeAnchors(tableData)) {
+		if (anchor.rowSpan < 2 || anchor.row >= insertIdx || anchor.row + anchor.rowSpan <= insertIdx) {
+			continue;
 		}
-		if (insideMerge) {
-			newCells.push({ text: '', vMerge: true });
-		} else {
-			newCells.push(createDefaultCell());
+		for (let c = anchor.col; c < Math.min(colCount, anchor.col + anchor.gridSpan); c++) {
+			// A producer that repeats the span on continuation cells gets it repeated.
+			const span = tableData.rows[insertIdx]?.cells[c]?.gridSpan;
+			newCells[c] = {
+				text: '',
+				vMerge: true,
+				...(c > anchor.col ? { hMerge: true } : {}),
+				...(c === anchor.col && span !== undefined && span > 1 ? { gridSpan: span } : {}),
+			};
 		}
 	}
 
@@ -87,7 +134,8 @@ export function insertTableRow(
 		let needsUpdate = false;
 		const updatedCells = row.cells.map((cell) => {
 			const rs = Math.max(1, cell.rowSpan ?? 1);
-			if (rs > 1 && ri + rs > insertIdx && !cell.vMerge && !cell.hMerge) {
+			// The anchor, and the cells of its row that repeat its row span.
+			if (rs > 1 && ri + rs > insertIdx && !cell.vMerge) {
 				needsUpdate = true;
 				return { ...cell, rowSpan: rs + 1 };
 			}
@@ -152,27 +200,31 @@ export function deleteTableRow(tableData: PptxTableData, rowIdx: number): PptxTa
 					break;
 				}
 			}
-		} else {
+		} else if (!cell.hMerge) {
 			const rs = Math.max(1, cell.rowSpan ?? 1);
 			if (rs > 1) {
-				// Anchor of a vertical merge — move anchor to next row.
+				// Anchor of a vertical merge: the next row takes it over, across
+				// the whole width of the merge.
 				const nextRowIdx = rowIdx + 1;
+				const gs = Math.max(1, cell.gridSpan ?? 1);
+				const newRs = rs - 1 > 1 ? rs - 1 : undefined;
 				if (nextRowIdx < adjustedRows.length) {
 					adjustedRows[nextRowIdx] = {
 						...adjustedRows[nextRowIdx],
 						cells: adjustedRows[nextRowIdx].cells.map((cc, ci) => {
-							if (ci !== c) {
-								return cc;
+							if (ci === c) {
+								return promoteAnchor(cell, cc, {
+									rowSpan: newRs,
+									vMerge: undefined,
+									gridSpan: cell.gridSpan,
+								});
 							}
-							const newRs = rs - 1;
-							return {
-								...cc,
-								text: cell.text || cc.text,
-								style: cc.style || cell.style,
-								rowSpan: newRs > 1 ? newRs : undefined,
-								vMerge: undefined,
-								gridSpan: cell.gridSpan,
-							};
+							if (ci > c && ci < c + gs) {
+								// Now in the anchor's row: a horizontal continuation only.
+								const repeats = Math.max(1, removedRow.cells[ci]?.rowSpan ?? 1) > 1;
+								return { ...cc, vMerge: undefined, rowSpan: repeats ? newRs : undefined };
+							}
+							return cc;
 						}),
 					};
 				}
@@ -221,23 +273,39 @@ export function insertTableColumn(
 	newWidths.splice(insertIdx, 0, halfWidth);
 	const normalizedWidths = normalizeWidths(newWidths);
 
-	// Insert cells in each row, handling horizontal merges.
-	const newRows = tableData.rows.map((row) => {
-		let insideMerge = false;
-		for (let c = 0; c < insertIdx && c < row.cells.length; c++) {
-			const cell = row.cells[c];
-			if (!cell) {
-				continue;
-			}
-			const gs = Math.max(1, cell.gridSpan ?? 1);
-			if (gs > 1 && c + gs > insertIdx && !cell.hMerge) {
-				insideMerge = true;
-				break;
-			}
-		}
+	// Insert cells in each row. A merge that spans the insertion point covers
+	// the new column over its whole height: a horizontal continuation in the
+	// anchor's row, and a continuation in both directions in the rows below.
+	const anchors = mergeAnchors(tableData);
+	const newRows = tableData.rows.map((row, ri) => {
+		const anchor = anchors.find(
+			(a) =>
+				a.gridSpan > 1 &&
+				a.col < insertIdx &&
+				a.col + a.gridSpan > insertIdx &&
+				ri >= a.row &&
+				ri < a.row + a.rowSpan,
+		);
+		// A row whose own cell spans the insertion point without a known anchor.
+		const insideMerge = row.cells.some((cell, c) => {
+			const gs = Math.max(1, cell?.gridSpan ?? 1);
+			return c < insertIdx && gs > 1 && c + gs > insertIdx && !cell.hMerge;
+		});
 
 		const newCells = [...row.cells];
-		const newCell: PptxTableCell = insideMerge ? { text: '', hMerge: true } : createDefaultCell();
+		let newCell: PptxTableCell = createDefaultCell();
+		if (anchor) {
+			// A producer that repeats the span on continuation cells gets it repeated.
+			const span = row.cells[insertIdx]?.rowSpan;
+			newCell = {
+				text: '',
+				hMerge: true,
+				...(ri > anchor.row ? { vMerge: true } : {}),
+				...(ri === anchor.row && span !== undefined && span > 1 ? { rowSpan: span } : {}),
+			};
+		} else if (insideMerge) {
+			newCell = { text: '', hMerge: true };
+		}
 		newCells.splice(insertIdx, 0, newCell);
 		return { ...row, cells: newCells };
 	});
@@ -250,7 +318,8 @@ export function insertTableColumn(
 				return cell;
 			}
 			const gs = Math.max(1, cell.gridSpan ?? 1);
-			if (gs > 1 && ci + gs > insertIdx && !cell.hMerge && !cell.vMerge) {
+			// The anchor, and the cells of its column that repeat its column span.
+			if (gs > 1 && ci + gs > insertIdx && !cell.hMerge) {
 				needsUpdate = true;
 				return { ...cell, gridSpan: gs + 1 };
 			}
@@ -282,9 +351,22 @@ export function deleteTableColumn(tableData: PptxTableData, colIdx: number): Ppt
 	}
 
 	// Adjust merge spans and remove the column from each row.
-	const newRows = tableData.rows.map((row) => {
+	const anchors = mergeAnchors(tableData);
+	const newRows = tableData.rows.map((row, ri) => {
 		const adjustedCells = [...row.cells];
 		const cell = adjustedCells[colIdx];
+		// A row under a deleted anchor: its next cell starts the row of the merge.
+		const above = anchors.find(
+			(a) => a.col === colIdx && a.gridSpan > 1 && ri > a.row && ri < a.row + a.rowSpan,
+		);
+		if (above && colIdx + 1 < adjustedCells.length) {
+			const repeats = Math.max(1, cell?.gridSpan ?? 1) > 1;
+			adjustedCells[colIdx + 1] = {
+				...adjustedCells[colIdx + 1],
+				hMerge: undefined,
+				gridSpan: repeats && above.gridSpan - 1 > 1 ? above.gridSpan - 1 : undefined,
+			};
+		}
 
 		if (cell) {
 			if (cell.hMerge) {
@@ -305,21 +387,17 @@ export function deleteTableColumn(tableData: PptxTableData, colIdx: number): Ppt
 						break;
 					}
 				}
-			} else {
+			} else if (!cell.vMerge) {
 				const gs = Math.max(1, cell.gridSpan ?? 1);
 				if (gs > 1) {
 					// Anchor of a horizontal merge — move anchor to next column.
 					const nextColIdx = colIdx + 1;
 					if (nextColIdx < adjustedCells.length) {
-						const nextCell = adjustedCells[nextColIdx];
-						adjustedCells[nextColIdx] = {
-							...nextCell,
-							text: cell.text || nextCell.text,
-							style: nextCell.style || cell.style,
+						adjustedCells[nextColIdx] = promoteAnchor(cell, adjustedCells[nextColIdx], {
 							gridSpan: gs - 1 > 1 ? gs - 1 : undefined,
 							hMerge: undefined,
 							rowSpan: cell.rowSpan,
-						};
+						});
 					}
 				}
 			}
