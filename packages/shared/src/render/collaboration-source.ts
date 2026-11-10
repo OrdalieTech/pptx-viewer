@@ -111,6 +111,11 @@ export function resolveSourceAsset(assets: YMapLike, value: string): string {
 }
 
 export function mapSourceAssets(value: unknown, assets: YMapLike, encode: boolean): unknown {
+	// Decoding without a registered source maps every string to itself, and
+	// the value is parsed JSON: the copy would equal its input.
+	if (!encode && !sources.has(assets)) {
+		return value;
+	}
 	if (typeof value === 'string') {
 		return encode
 			? (sourceAssetReference(assets, value) ?? value)

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { Doc } from 'yjs';
 
 import {
+	mapSourceAssets,
 	registerCollaborationSource,
 	sourceAssetReference,
 	resolveSourceAsset,
@@ -49,6 +50,32 @@ describe('source background identity', () => {
 		} finally {
 			first.destroy();
 			next.destroy();
+		}
+	});
+});
+
+describe('mapSourceAssets', () => {
+	it('decodes parsed JSON as it is without a source, and resolves references with one', () => {
+		const doc = new Doc();
+		try {
+			const assets = doc.getMap('pptx:assets');
+			const ref = `pptx-source:${'b'.repeat(64)}`;
+			const json = JSON.stringify({ fill: { image: ref }, list: [ref, 'plain', 3, null], 2: true });
+			expect(mapSourceAssets(JSON.parse(json), assets, false)).toStrictEqual(JSON.parse(json));
+			expect(JSON.stringify(mapSourceAssets(JSON.parse(json), assets, false))).toBe(json);
+
+			registerCollaborationSource(doc, [
+				{ id: 'ppt/slides/slide1.xml', elements: [], backgroundImage: 'blob:image' } as PptxSlide,
+			]);
+			const known = sourceAssetReference(assets, 'blob:image')!;
+			expect(
+				mapSourceAssets({ fill: { image: known }, list: [known, ref] }, assets, false),
+			).toStrictEqual({ fill: { image: 'blob:image' }, list: ['blob:image', ref] });
+			expect(mapSourceAssets({ list: ['blob:image', 'plain'] }, assets, true)).toStrictEqual({
+				list: [known, 'plain'],
+			});
+		} finally {
+			doc.destroy();
 		}
 	});
 });

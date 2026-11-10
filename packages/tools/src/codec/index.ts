@@ -26,6 +26,10 @@ export {
 	writeTableData,
 	reconcileTableData,
 	readTableData,
+	insertTableRow,
+	deleteTableRow,
+	insertTableColumn,
+	deleteTableColumn,
 } from 'pptx-viewer-shared/collaboration';
 export type {
 	YDocLike,

@@ -131,3 +131,102 @@ describe('deleteTableColumn', () => {
 		expect(result.rows[0].cells[0].gridSpan).toBe(2);
 	});
 });
+
+/** A 3x3 table whose top-left 2x2 block is one merge; `repeat` writes the spans on the continuation cells as PowerPoint does. */
+function makeMerged(repeat = false): PptxTableData {
+	const table = makeTable(3, 3);
+	table.rows.forEach((row, r) => row.cells.forEach((cell, c) => (cell.text = `r${r}c${c}`)));
+	table.rows[0].cells[0] = {
+		text: 'anchor',
+		gridSpan: 2,
+		rowSpan: 2,
+		style: { bold: true },
+		textRuns: [{ text: 'anchor', bold: true }],
+		textSegments: [{ text: 'anchor', style: { bold: true } }],
+	};
+	table.rows[0].cells[1] = { text: '', hMerge: true, ...(repeat ? { rowSpan: 2 } : {}) };
+	table.rows[1].cells[0] = {
+		text: '',
+		vMerge: true,
+		...(repeat ? { gridSpan: 2 } : {}),
+		textRuns: [],
+		textSegments: [],
+	};
+	table.rows[1].cells[1] = { text: '', hMerge: true, vMerge: true };
+	return table;
+}
+const merges = (table: PptxTableData): string[] =>
+	table.rows.map((row) =>
+		row.cells
+			.map(
+				(cell) =>
+					`${cell.gridSpan ?? 1}x${cell.rowSpan ?? 1}${cell.hMerge ? 'h' : ''}${cell.vMerge ? 'v' : ''}`,
+			)
+			.join(' '),
+	);
+
+describe('rectangular merges', () => {
+	it.each([false, true])(
+		'a row inserted inside covers every column of the merge (spans repeated: %s)',
+		(repeat) => {
+			expect(merges(insertTableRow(makeMerged(repeat), 0, 'below'))).toStrictEqual(
+				repeat
+					? ['2x3 1x3h 1x1', '2x1v 1x1hv 1x1', '2x1v 1x1hv 1x1', '1x1 1x1 1x1']
+					: ['2x3 1x1h 1x1', '1x1v 1x1hv 1x1', '1x1v 1x1hv 1x1', '1x1 1x1 1x1'],
+			);
+		},
+	);
+
+	it.each([false, true])(
+		'a column inserted inside covers every row of the merge (spans repeated: %s)',
+		(repeat) => {
+			expect(merges(insertTableColumn(makeMerged(repeat), 0, 'right'))).toStrictEqual(
+				repeat
+					? ['3x2 1x2h 1x2h 1x1', '3x1v 1x1hv 1x1hv 1x1', '1x1 1x1 1x1 1x1']
+					: ['3x2 1x1h 1x1h 1x1', '1x1v 1x1hv 1x1hv 1x1', '1x1 1x1 1x1 1x1'],
+			);
+		},
+	);
+
+	it('a row or column inserted beside the merge stays independent', () => {
+		expect(merges(insertTableRow(makeMerged(), 1, 'below'))[2]).toBe('1x1 1x1 1x1');
+		expect(
+			merges(insertTableColumn(makeMerged(), 1, 'right')).map((row) => row.split(' ')[2]),
+		).toStrictEqual(['1x1', '1x1', '1x1']);
+	});
+
+	it.each([false, true])(
+		'deleting the anchor row promotes the next row with the rich content (spans repeated: %s)',
+		(repeat) => {
+			const result = deleteTableRow(makeMerged(repeat), 0);
+			expect(merges(result)).toStrictEqual(['2x1 1x1h 1x1', '1x1 1x1 1x1']);
+			expect(result.rows[0].cells[0]).toMatchObject({
+				text: 'anchor',
+				style: { bold: true },
+				textRuns: [{ text: 'anchor', bold: true }],
+				textSegments: [{ text: 'anchor', style: { bold: true } }],
+			});
+		},
+	);
+
+	it.each([false, true])(
+		'deleting the anchor column promotes the next column with the rich content (spans repeated: %s)',
+		(repeat) => {
+			const result = deleteTableColumn(makeMerged(repeat), 0);
+			expect(merges(result)).toStrictEqual(['1x2 1x1', '1x1v 1x1', '1x1 1x1']);
+			expect(result.rows[0].cells[0]).toMatchObject({
+				text: 'anchor',
+				style: { bold: true },
+				textRuns: [{ text: 'anchor', bold: true }],
+				textSegments: [{ text: 'anchor', style: { bold: true } }],
+			});
+		},
+	);
+
+	it('an empty anchor leaves the promoted cell its own text', () => {
+		const table = makeMerged();
+		table.rows[0].cells[0] = { text: '', gridSpan: 2, rowSpan: 2 };
+		table.rows[1].cells[0] = { text: 'kept', vMerge: true };
+		expect(deleteTableRow(table, 0).rows[0].cells[0]).toMatchObject({ text: 'kept', gridSpan: 2 });
+	});
+});
